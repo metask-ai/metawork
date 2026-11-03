@@ -2,7 +2,6 @@ import type {
   ModelMetadata,
   ModelRef,
   ModelsView,
-  NewTaskAdmissionView,
   NewTaskModelSelectionIntent,
 } from "../bridge/contracts.ts";
 import type { Brand } from "../components/ui/BrandIcon.tsx";
@@ -44,11 +43,9 @@ function catalogModelVendor(modelId: string): Brand {
 
 export function newTaskModelSelectionState(
   models: ModelsView,
-  admission: NewTaskAdmissionView,
   requested: ModelRef | null,
 ): NewTaskModelSelectionState {
-  const selected =
-    requested ?? admission.activeModelRef ?? models.defaultSelection;
+  const selected = requested ?? models.defaultSelection;
   const options = [...models.providers, ...models.customProviders].flatMap(
     (provider) =>
       readyModelOptions(models, provider.id).map((option) => ({
@@ -72,17 +69,14 @@ export function newTaskModelSelectionState(
             option.modelRef.modelId === selected?.modelId,
         )
       : undefined);
-  const valid = requested
-    ? requestedOption != null
-    : admission.available && selectedOption != null;
-  const intent =
-    requestedOption && requested
-      ? {
-          targetModelRef: requested,
-          expectedSourceGeneration: requestedOption.sourceGeneration,
-          expectedCatalogGeneration: requestedOption.catalogGeneration,
-        }
-      : null;
+  const valid = selectedOption != null;
+  const intent = selectedOption
+    ? {
+        targetModelRef: selectedOption.modelRef,
+        expectedSourceGeneration: selectedOption.sourceGeneration,
+        expectedCatalogGeneration: selectedOption.catalogGeneration,
+      }
+    : null;
   return {
     editable: options.length !== 0,
     valid,
@@ -112,7 +106,12 @@ export function readyModelOptions(
   models: ModelsView,
   sourceId: string | null,
 ): NewTaskModelOption[] {
-  if (models.availability !== "ready" || sourceId === null) return [];
+  if (
+    models.availability !== "ready" ||
+    models.persistenceHealth !== "ready" ||
+    sourceId === null
+  )
+    return [];
   const authority = resolveAuthority(models, sourceId);
   if (!authority) return [];
   return authority.options.map((option) => {

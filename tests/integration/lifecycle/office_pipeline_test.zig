@@ -95,14 +95,7 @@ fn configureProvider(control: *control_api.Runtime, endpoint: []const u8) !void 
     };
     candidate.deinit();
     try std.testing.expect(control.completeCustomModelTest(command, true).accepted);
-    const view = control.modelsView();
-    const ready = view.custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = id, .model_id = model },
-        .expected_selection_revision = view.selection_revision,
-        .expected_source_generation = ready.source_generation,
-        .expected_catalog_generation = ready.catalog_generation,
-    }).accepted);
+    try std.testing.expect(control.custom_providers.rememberPreference(.{ .source_id = id, .model_id = model }).accepted);
 }
 
 fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8) !void {
@@ -222,7 +215,7 @@ fn qualify(mode: []const u8) !void {
     try control.startCustomProviders(root, vault.capability());
     defer control.stopCustomProviders();
     try configureProvider(&control, provider.endpoint);
-    const task_id = try control.createTask(.{ .workspace_root = root, .trust = .explicitly_trusted, .approval_mode = .manual });
+    const task_id = try control.createTask(.{ .workspace_root = root, .trust = .explicitly_trusted, .approval_mode = .manual }, try control_api.TestSupport.fixtureModelSelection(&control));
     const repetitions: usize = if (std.mem.eql(u8, mode, "multi-run")) 2 else 1;
     for (0..repetitions) |_| {
         const id = try f.runPreparedTask(&control, task_id, .{ .text = "Run the synthetic Office pipeline operation." });
@@ -373,7 +366,7 @@ test "Skill resource context reads a managed import through tool and typed input
             if (available.availability == .ready or available.availability == .degraded) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.SkillCatalogTimeout;
-        const task_id = try control.createTask(.{ .workspace_root = work, .trust = .explicitly_trusted, .approval_mode = .full_access });
+        const task_id = try control.createTask(.{ .workspace_root = work, .trust = .explicitly_trusted, .approval_mode = .full_access }, try control_api.TestSupport.fixtureModelSelection(&control));
         const task = control.task_runtime.find(task_id).?;
         const workspace_id = task.durable.workspace_id;
         for (0..5000) |_| {

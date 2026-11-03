@@ -169,7 +169,6 @@ pub const Definition = struct {
 pub const Binding = struct {
     model_ref: models_contract.ModelRef,
     source_generation: u64,
-    selection_revision: u64,
     protocol: Protocol,
 };
 
@@ -177,7 +176,6 @@ const OwnedBinding = struct {
     source_id: []u8,
     model_id: []u8,
     source_generation: u64,
-    selection_revision: u64,
     protocol: Protocol,
 };
 
@@ -209,7 +207,6 @@ pub const Item = struct {
                 .model_id = self.binding.model_id,
             },
             .source_generation = self.binding.source_generation,
-            .selection_revision = self.binding.selection_revision,
             .protocol = self.binding.protocol,
         };
     }
@@ -708,7 +705,6 @@ pub const Store = struct {
             .source_id = source_id,
             .model_id = try self.copy(binding.model_ref.model_id),
             .source_generation = binding.source_generation,
-            .selection_revision = binding.selection_revision,
             .protocol = binding.protocol,
         };
     }
@@ -820,7 +816,7 @@ fn validDefinition(definition: Definition) bool {
         binding.model_ref.model_id.len == 0 or
         binding.model_ref.model_id.len > models_contract.Limits.model_id_bytes or
         !std.unicode.utf8ValidateSlice(binding.model_ref.model_id) or
-        binding.source_generation == 0 or binding.selection_revision == 0)
+        binding.source_generation == 0)
         return false;
     if (definition.input.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.input)) return false;
@@ -891,7 +887,6 @@ test "store updates optimistically and a one-time occurrence completes" {
         .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
-            .selection_revision = 11,
             .protocol = .openai_chat_completions,
         },
         .permission_profile = .approval_required,
@@ -923,7 +918,6 @@ test "updating a paused schedule preserves its paused state" {
         .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
-            .selection_revision = 11,
             .protocol = .openai_chat_completions,
         },
         .permission_profile = .approval_required,

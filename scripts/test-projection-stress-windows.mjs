@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -235,16 +236,15 @@ try {
     "authorized Workspace",
   );
   for (let index = 0; index < configuredConcurrency; index++) {
-    const admission = (await read()).newTaskAdmission;
+    const modelSnapshot = await read();
     const created = await invoke("metawork.tasks.create", {
       workspace: {
         kind: "manual",
         workspaceId: workspace.id,
         expectedWorkspaceEpoch: workspace.epoch,
       },
-      expectedExecutionGeneration: admission.activeGeneration,
-      expectedSelectionRevision: admission.activeSelectionRevision,
-      modelSelection: null,
+
+      modelSelection: fixtureModelSelection(modelSnapshot),
       expectedSkillCatalogRevision: null,
       expectedSkillSelectionRevision: null,
       approvalMode: "manual",
@@ -485,7 +485,8 @@ try {
     stopMs,
     final,
     browser,
-    stagedExecution: current.newTaskAdmission.activeGeneration,
+    stagedSourceGeneration:
+      fixtureModelSelection(current).expectedSourceGeneration,
   };
   await writeFile(
     join(evidenceDir, "projection-stress.json"),

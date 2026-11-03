@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -162,7 +163,7 @@ export async function runMcpLifecycleVertical({
     // The model selection is unchanged throughout this fixture. Reuse its
     // captured CAS input so creation at the held refresh boundary is a single
     // Bridge mutation, as it is for an already-rendered New Task form.
-    const admission = (await snapshot()).newTaskAdmission;
+    const modelSnapshot = await snapshot();
     const create = async () => {
       const result = await invoke("metawork.tasks.create", {
         workspace: {
@@ -170,9 +171,8 @@ export async function runMcpLifecycleVertical({
           workspaceId: workspace.id,
           expectedWorkspaceEpoch: workspace.epoch,
         },
-        expectedExecutionGeneration: admission.activeGeneration,
-        expectedSelectionRevision: admission.activeSelectionRevision,
-        modelSelection: null,
+
+        modelSelection: fixtureModelSelection(modelSnapshot),
         expectedSkillCatalogRevision: null,
         expectedSkillSelectionRevision: null,
         approvalMode: "manual",

@@ -112,7 +112,6 @@ function signedOut() {
   Object.assign(snapshot.models, {
     availability: "needs_authentication",
     defaultSelection: null,
-    metaskSelection: null,
     customProviders: [],
   });
   Object.assign(snapshot.models.providers[0], {
@@ -122,15 +121,7 @@ function signedOut() {
     sourceGeneration: "0",
     catalogGeneration: "0",
   });
-  Object.assign(snapshot.newTaskAdmission, {
-    available: false,
-    state: "unavailable",
-    reason: "credential_unavailable",
-    activeModelRef: null,
-    activeProtocol: null,
-    activeGeneration: "0",
-    activeSelectionRevision: "0",
-  });
+  Object.assign(snapshot.newTaskAdmission, { available: true, reason: "none" });
   return snapshot;
 }
 
@@ -173,15 +164,7 @@ function customModels() {
     },
   ];
   state.models.defaultSelection = { sourceId: "custom-1", modelId: model.id };
-  Object.assign(state.newTaskAdmission, {
-    available: true,
-    reason: "none",
-    state: "ready",
-    activeGeneration: "1",
-    activeSelectionRevision: state.models.selectionRevision,
-    activeModelRef: state.models.defaultSelection,
-    activeProtocol: "openai_chat_completions",
-  });
+  Object.assign(state.newTaskAdmission, { available: true, reason: "none" });
   return state;
 }
 
@@ -242,7 +225,7 @@ async function renderApp(
       calls.input++;
       throw new Error("Unexpected send");
     },
-    selectModelsDefault: async () => {
+    selectTaskModel: async () => {
       calls.select++;
       throw new Error("Unexpected selection");
     },
@@ -365,7 +348,6 @@ test("a retained Metask choice explains authorization before generic admission f
   state.models.defaultSelection = structuredClone(
     fixture.models.defaultSelection,
   );
-  state.newTaskAdmission.reason = "invalid_candidate";
   assert.deepEqual(classify(state), { reason: "sign_in", action: "login" });
   state.account.state = "checking";
   assert.deepEqual(classify(state), { reason: "checking", action: null });
@@ -378,13 +360,12 @@ test("a retained Metask choice explains authorization before generic admission f
   state.account.state = "authenticated";
   state.models.providers[0].catalogState = "ready";
   assert.deepEqual(classify(state), {
-    reason: "execution_unavailable",
+    reason: "model_unavailable",
     action: "models",
   });
   const custom = customModels();
-  custom.newTaskAdmission.reason = "invalid_candidate";
   assert.deepEqual(classify(custom), {
-    reason: "execution_unavailable",
+    reason: "model_unavailable",
     action: "models",
   });
 });
@@ -396,8 +377,6 @@ test("logout with retained official selection offers login after remount and pre
   const app = await renderApp(ctx, state, { locale: "zh-CN" });
   const next = signedOut();
   next.models.defaultSelection = selected;
-  next.models.metaskSelection = selected;
-  next.newTaskAdmission.reason = "invalid_candidate";
   state.account = next.account;
   state.models = next.models;
   state.newTaskAdmission = next.newTaskAdmission;
@@ -459,7 +438,7 @@ test("Host preparation, failures and default selection are not first-use setup",
   });
   state.models.providers[0].errorCode = "no_models";
   assert.deepEqual(classify(state), { reason: "no_models", action: "refresh" });
-  state.newTaskAdmission.state = "replacing";
+  state.newTaskAdmission.reason = "shutting_down";
   assert.deepEqual(classify(state), { reason: "preparing", action: null });
   state.models.persistenceHealth = "recovery_required";
   assert.deepEqual(classify(state), {
@@ -467,13 +446,7 @@ test("Host preparation, failures and default selection are not first-use setup",
     action: "models",
   });
   state.models.persistenceHealth = "ready";
-  state.newTaskAdmission.state = "unavailable";
-  state.newTaskAdmission.reason = "schedule_persistence_failed";
-  assert.deepEqual(classify(state), {
-    reason: "schedule_failed",
-    action: "schedules",
-  });
-  state.newTaskAdmission.reason = "credential_unavailable";
+  state.newTaskAdmission.reason = "none";
   state.account.state = "signed_out";
   assert.deepEqual(classify(state, { hasReadyModels: true }), {
     reason: "choose",
@@ -746,8 +719,6 @@ test("signed-out users with a ready custom model can send without seeing setup",
 test("an available model is selected in the task input rather than model management", async (ctx) => {
   const state = customModels();
   state.models.defaultSelection = null;
-  state.newTaskAdmission.available = false;
-  state.newTaskAdmission.activeModelRef = null;
   const app = await renderApp(ctx, state);
   const user = userEvent.setup({ document: dom.window.document });
   const textarea = document.querySelector(".composer-bar textarea");
@@ -893,13 +864,7 @@ test("a ready alternative does not immediately close manually opened setup", asy
   state.models.defaultSelection = structuredClone(
     fixture.models.defaultSelection,
   );
-  Object.assign(state.newTaskAdmission, {
-    available: false,
-    state: "unavailable",
-    reason: "credential_unavailable",
-    activeModelRef: null,
-    activeProtocol: null,
-  });
+  Object.assign(state.newTaskAdmission, { available: true, reason: "none" });
   const app = await renderApp(ctx, state);
   const user = userEvent.setup({ document: dom.window.document });
   await user.click(screen.getByRole("button", { name: "Other options" }));
@@ -935,37 +900,19 @@ test("a saved service with no tested model goes directly to Models", () => {
   });
 });
 
-test("non-model admission failures keep their own explanation and recovery owner", () => {
+test("generic workspace admission does not masquerade as a model failure", () => {
   const state = signedOut();
-  state.newTaskAdmission.reason = "schedule_persistence_failed";
-  assert.deepEqual(classify(state), {
-    reason: "schedule_failed",
-    action: "schedules",
-  });
-  assert.deepEqual(classify(state, { schedulesAvailable: false }), {
-    reason: "schedule_failed",
-    action: null,
-  });
-  state.newTaskAdmission.reason = "schedule_persistence_outcome_unknown";
-  assert.deepEqual(classify(state), {
-    reason: "schedule_unknown",
-    action: "schedules",
-  });
-  state.newTaskAdmission.reason = "schedule_persistence_unavailable";
-  assert.deepEqual(classify(state), {
-    reason: "schedule_unavailable",
-    action: "schedules",
-  });
-  state.newTaskAdmission.reason = "resource_exhausted";
-  assert.deepEqual(classify(state), {
-    reason: "resources_unavailable",
-    action: null,
-  });
+  state.newTaskAdmission = {
+    available: false,
+    reason: "workspace_unavailable",
+  };
+  assert.deepEqual(classify(state), { reason: "required", action: "start" });
+  state.newTaskAdmission.reason = "shutting_down";
+  assert.deepEqual(classify(state), { reason: "preparing", action: null });
 });
 
 test("schedule persistence recovery opens its existing page without starting model setup", async (ctx) => {
   const state = signedOut();
-  state.newTaskAdmission.reason = "schedule_persistence_failed";
   state.capabilities.scheduledTaskPersistenceHealth = "write_failed";
   state.capabilities.scheduledTaskRecoveryAvailable = true;
   const app = await renderApp(ctx, state);
@@ -973,9 +920,7 @@ test("schedule persistence recovery opens its existing page without starting mod
   assert.ok(
     !screen.queryByRole("dialog", { name: "Get started with MetaWork" }),
   );
-  await user.click(
-    screen.getByRole("button", { name: "View scheduled tasks" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Scheduled tasks" }));
   await screen.findByRole("heading", { name: "Scheduled tasks" });
   assert.ok(screen.getByRole("button", { name: "Start with a clean store" }));
   assert.equal(app.calls.login, 0);

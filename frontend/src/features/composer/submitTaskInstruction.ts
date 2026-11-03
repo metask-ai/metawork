@@ -50,6 +50,13 @@ export class TaskSubmissionSession {
     this.taskId = options.taskId;
   }
 
+  /** Call after create_rejected; capacity rejection may leave creation in flight. */
+  get canReleaseAfterCreationRejection(): boolean {
+    return (
+      this.taskId === null && this.creation === null && this.pending.size === 0
+    );
+  }
+
   private identity(): Promise<TaskCreateResult> {
     if (!this.creation) {
       try {

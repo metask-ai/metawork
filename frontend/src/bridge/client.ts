@@ -786,27 +786,6 @@ export class BridgeClient {
       await this.invoke(commands.modelsResetStore, { expectedRevision }),
     );
   }
-  async configureMetaskSelection(input: {
-    sourceId: string;
-    modelId: string;
-    expectedMetaskSelectionRevision: string;
-    expectedCatalogGeneration: string;
-  }) {
-    return decodeExecutionCommandResult(
-      await this.invoke(commands.configureMetaskSelection, input),
-    );
-  }
-  async selectModelsDefault(input: {
-    sourceId: string;
-    modelId: string;
-    expectedSelectionRevision: string;
-    expectedSourceGeneration: string;
-    expectedCatalogGeneration: string;
-  }) {
-    return decodeExecutionCommandResult(
-      await this.invoke(commands.selectModelsDefault, input),
-    );
-  }
   async createCustomProvider(input: {
     displayName: string;
     protocol: Protocol;
@@ -944,9 +923,7 @@ export class BridgeClient {
   }
   async createTask(
     workspace: TaskWorkspaceIntent,
-    expectedExecutionGeneration: string,
-    expectedSelectionRevision: string,
-    modelSelection: NewTaskModelSelectionIntent | null,
+    modelSelection: NewTaskModelSelectionIntent,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     approvalMode: ApprovalMode,
@@ -954,8 +931,6 @@ export class BridgeClient {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
         workspace,
-        expectedExecutionGeneration,
-        expectedSelectionRevision,
         modelSelection,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,

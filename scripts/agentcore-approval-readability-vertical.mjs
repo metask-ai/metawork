@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -151,16 +152,15 @@ export async function runApprovalReadabilityVertical({
   );
   await webview.send("Page.bringToFront");
   await webview.send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  const admission = (await snapshot()).newTaskAdmission;
+  const modelSnapshot = await snapshot();
   const created = await invoke("metawork.tasks.create", {
     workspace: {
       kind: "manual",
       workspaceId,
       expectedWorkspaceEpoch: workspaceEpoch,
     },
-    expectedExecutionGeneration: admission.activeGeneration,
-    expectedSelectionRevision: admission.activeSelectionRevision,
-    modelSelection: null,
+
+    modelSelection: fixtureModelSelection(modelSnapshot),
     expectedSkillCatalogRevision: null,
     expectedSkillSelectionRevision: null,
     approvalMode: "auto_review",

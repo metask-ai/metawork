@@ -8568,7 +8568,7 @@ test("bootstrap retry retains the root failure screen until fresh data and ping 
 });
 
 for (const outcome of ["committed", "timeout"]) {
-  test(`in-flight ${outcome} stop cannot claim a successful refresh after the read budget exhausts`, async (ctx) => {
+  test(`in-flight ${outcome} stop keeps connection failure until explicit sync recovery`, async (ctx) => {
     const f = await renderAppFixture(ctx, 1440, {
       elapsedMs: "10000",
       phase: "running",
@@ -8616,6 +8616,7 @@ for (const outcome of ["committed", "timeout"]) {
           ),
     );
     assert.equal(reads, 5);
+    assert.ok(document.querySelector(".commandbar-alert"));
     ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) =>
       productStateFixture(f.snapshot, scope),
     );
@@ -8633,6 +8634,8 @@ for (const outcome of ["committed", "timeout"]) {
       notice.textContent,
       /succeeded|checked the current Host state/,
     );
+    assert.equal(f.snapshot.tasks[0].runs[0].phase, "running");
+    assert.equal(screen.queryByText("Work stopped"), null);
     assert.equal(calls, 1);
   });
 }

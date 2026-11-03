@@ -777,8 +777,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (command === "metawork.models.configureMetaskSelection")
-        return { accepted: true, errorCode: "none", attemptId: null };
       if (command === "metawork.tasks.create")
         return {
           accepted: true,
@@ -830,12 +828,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     }),
   });
 
-  await client.configureMetaskSelection({
-    sourceId: "metask",
-    modelId: "model-3",
-    expectedMetaskSelectionRevision: "17",
-    expectedCatalogGeneration: "19",
-  });
   assert.deepEqual(
     await client.createTask(
       {
@@ -843,8 +835,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
         workspaceId: "7",
         expectedWorkspaceEpoch: "29",
       },
-      "23",
-      "27",
       {
         targetModelRef: { sourceId: "metask", modelId: "model-4" },
         expectedSourceGeneration: "31",
@@ -920,15 +910,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
   });
   assert.deepEqual(calls, [
     {
-      command: "metawork.models.configureMetaskSelection",
-      payload: {
-        sourceId: "metask",
-        modelId: "model-3",
-        expectedMetaskSelectionRevision: "17",
-        expectedCatalogGeneration: "19",
-      },
-    },
-    {
       command: "metawork.tasks.create",
       payload: {
         workspace: {
@@ -936,8 +917,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           workspaceId: "7",
           expectedWorkspaceEpoch: "29",
         },
-        expectedExecutionGeneration: "23",
-        expectedSelectionRevision: "27",
         modelSelection: {
           targetModelRef: { sourceId: "metask", modelId: "model-4" },
           expectedSourceGeneration: "31",
@@ -1001,7 +980,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
   ]);
 });
 
-test("Models recovery and global default commands preserve their exact revision payloads", async () => {
+test("Models recovery keeps exact CAS while retired default setters have no client API", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
@@ -1009,38 +988,19 @@ test("Models recovery and global default commands preserve their exact revision 
       return { accepted: true, errorCode: "none", attemptId: null };
     }),
   });
-
   assert.deepEqual(await client.resetModelsStore("41"), {
     accepted: true,
     errorCode: "none",
     attemptId: null,
   });
-  assert.deepEqual(
-    await client.selectModelsDefault({
-      sourceId: "metask",
-      modelId: "model-1",
-      expectedSelectionRevision: "43",
-      expectedSourceGeneration: "47",
-      expectedCatalogGeneration: "53",
-    }),
-    { accepted: true, errorCode: "none", attemptId: null },
-  );
   assert.deepEqual(calls, [
     {
       command: "metawork.models.resetStore",
       payload: { expectedRevision: "41" },
     },
-    {
-      command: "metawork.models.selectDefault",
-      payload: {
-        sourceId: "metask",
-        modelId: "model-1",
-        expectedSelectionRevision: "43",
-        expectedSourceGeneration: "47",
-        expectedCatalogGeneration: "53",
-      },
-    },
   ]);
+  assert.equal(client.selectModelsDefault, undefined);
+  assert.equal(client.configureMetaskSelection, undefined);
 });
 
 test("Run wire preserves expanded UTF-8 text with JSON escapes", async () => {

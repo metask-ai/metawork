@@ -1,4 +1,12 @@
 export const enUS = {
+  "model_setup.preference_not_saved":
+    "Your model preference could not be saved. Confirmed task choices are unchanged.",
+  "mutation.reason.schedule_persistence_unavailable":
+    "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
+  "mutation.reason.schedule_persistence_failed":
+    "Schedule storage could not be updated. Open Scheduled tasks to recover it before trying again.",
+  "mutation.reason.schedule_persistence_outcome_unknown":
+    "The schedule update could not be confirmed. Open Scheduled tasks to recover it before trying again.",
   "feedback.details": "Technical details",
   "feedback.dismiss": "Dismiss this notice",
   "feedback.open": "View feedback ({count})",

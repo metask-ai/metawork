@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 
 import type {
   PermissionProfile,
-  ScheduledTaskBinding,
   ScheduledTaskMutation,
   ScheduledTaskView,
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
+import {
+  modelOptionId,
+  readyModelOptions,
+} from "../../app/new-task-model-selection.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import { Button } from "../../components/ui/button.tsx";
@@ -19,6 +22,8 @@ import { persistenceRecoveryErrorMessageId } from "../../i18n/persistence-recove
 import { BridgeCommandTimeoutError } from "../../bridge/client.ts";
 
 type Draft = {
+  modelId: string;
+  modelChanged: boolean;
   title: string;
   text: string;
   permissionProfile: PermissionProfile;
@@ -76,6 +81,8 @@ function nextLocalOccurrence(hour: number, minute: number, weekday?: number) {
 
 function defaultDraft(permissionProfile: PermissionProfile): Draft {
   return {
+    modelId: "",
+    modelChanged: true,
     title: "",
     text: "",
     permissionProfile,
@@ -103,6 +110,8 @@ function draftFromTask(task: ScheduledTaskView): Draft {
         : "minutes";
   const divisor = unit === "days" ? 86_400 : unit === "hours" ? 3600 : 60;
   return {
+    modelId: modelOptionId(task.binding.modelRef),
+    modelChanged: false,
     title: task.title,
     text: task.input.text,
     permissionProfile: task.permissionProfile,
@@ -113,61 +122,11 @@ function draftFromTask(task: ScheduledTaskView): Draft {
   };
 }
 
-function sameModelRef(
-  left: { sourceId: string; modelId: string } | null,
-  right: { sourceId: string; modelId: string } | null,
-) {
-  return (
-    left !== null &&
-    right !== null &&
-    left.sourceId === right.sourceId &&
-    left.modelId === right.modelId
-  );
-}
-
-function currentBinding(
-  snapshot: WorkbenchSnapshot,
-): ScheduledTaskBinding | null {
-  const selection = snapshot.models.defaultSelection;
-  const admission = snapshot.newTaskAdmission;
-  if (
-    !admission.available ||
-    !sameModelRef(selection, admission.activeModelRef) ||
-    admission.activeProtocol === null ||
-    snapshot.models.selectionRevision === "0" ||
-    snapshot.models.selectionRevision !== admission.activeSelectionRevision
-  )
-    return null;
-  const provider = [
+function modelOptions(snapshot: WorkbenchSnapshot) {
+  return [
     ...snapshot.models.providers,
     ...snapshot.models.customProviders,
-  ].find((candidate) => candidate.id === selection!.sourceId);
-  const model = provider?.models.find(
-    (candidate) => candidate.id === selection!.modelId,
-  );
-  if (!provider || provider.sourceGeneration === "0" || !model) return null;
-  if ("catalogState" in provider) {
-    if (
-      provider.catalogState !== "ready" ||
-      !sameModelRef(snapshot.models.metaskSelection, selection)
-    )
-      return null;
-  } else if (
-    !provider.enabled ||
-    provider.state !== "ready" ||
-    provider.credentialStatus !== "ready" ||
-    !provider.models.some(
-      (candidate) => candidate.id === selection!.modelId && candidate.ready,
-    ) ||
-    provider.protocol !== admission.activeProtocol
-  )
-    return null;
-  return {
-    modelRef: selection!,
-    sourceGeneration: provider.sourceGeneration,
-    selectionRevision: snapshot.models.selectionRevision,
-    protocol: admission.activeProtocol,
-  };
+  ].flatMap((provider) => readyModelOptions(snapshot.models, provider.id));
 }
 
 function toMutation(
@@ -196,11 +155,20 @@ function toMutation(
       !Number.isSafeInteger(every * unitSeconds))
   )
     return null;
-  const binding = currentBinding(snapshot);
-  if (!binding) return null;
+  const option = modelOptions(snapshot).find(
+    (candidate) => candidate.selectionId === draft.modelId,
+  );
+  if (draft.modelChanged && !option) return null;
   return {
     title: draft.title.trim(),
-    binding,
+    modelSelection:
+      draft.modelChanged && option
+        ? {
+            targetModelRef: option.modelRef,
+            expectedSourceGeneration: option.sourceGeneration,
+            expectedCatalogGeneration: option.catalogGeneration,
+          }
+        : null,
     permissionProfile: draft.permissionProfile,
     input: { kind: "text", text: draft.text.trim() },
     recurrence:
@@ -291,7 +259,7 @@ export function ScheduledTasksPage({
   const expiredOnce =
     draft.recurrenceKind === "once" &&
     new Date(draft.start).getTime() <= Date.now();
-  const binding = currentBinding(snapshot);
+  const availableModels = modelOptions(snapshot);
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
     if (!normalizedQuery) return true;
@@ -365,6 +333,9 @@ export function ScheduledTasksPage({
     setSelectedId(null);
     setDraft({
       ...defaultDraft(snapshot.permissions.defaultProfile),
+      modelId: snapshot.models.defaultSelection
+        ? modelOptionId(snapshot.models.defaultSelection)
+        : "",
       ...seed,
     });
     setError(null);
@@ -878,21 +849,49 @@ export function ScheduledTasksPage({
                   {t(`scheduled.reason.${selected.failureReason}`)}
                 </p>
               )}
-              {selected &&
-                binding &&
-                (selected.health === "needs_attention" ||
-                  !sameModelRef(selected.binding.modelRef, binding.modelRef) ||
-                  selected.binding.sourceGeneration !==
-                    binding.sourceGeneration ||
-                  selected.binding.selectionRevision !==
-                    binding.selectionRevision ||
-                  selected.binding.protocol !== binding.protocol) && (
-                  <p className="scheduled-reconfirm" role="status">
-                    {t("scheduled.reconfirm", {
-                      model: binding.modelRef.modelId,
-                    })}
-                  </p>
-                )}
+              <label className="scheduled-editor-name">
+                <span>{t("account.model")}</span>
+                <ScheduledSelect
+                  value={draft.modelId}
+                  ariaLabel={t("account.model")}
+                  options={[
+                    { value: "", label: t("account.choose_model") },
+                    ...(!draft.modelChanged &&
+                    selected &&
+                    !availableModels.some(
+                      (option) => option.selectionId === draft.modelId,
+                    )
+                      ? [
+                          {
+                            value: draft.modelId,
+                            label: selected.binding.modelRef.modelId,
+                          },
+                        ]
+                      : []),
+                    ...availableModels.map((option) => ({
+                      value: option.selectionId,
+                      label: option.displayName,
+                    })),
+                  ]}
+                  onValueChange={(modelId) =>
+                    setDraft((value) => ({
+                      ...value,
+                      modelId,
+                      modelChanged: true,
+                    }))
+                  }
+                />
+              </label>
+              {selected && draft.modelChanged && (
+                <p className="scheduled-reconfirm" role="status">
+                  {t("scheduled.reconfirm", {
+                    model:
+                      availableModels.find(
+                        (option) => option.selectionId === draft.modelId,
+                      )?.displayName || t("account.choose_model"),
+                  })}
+                </p>
+              )}
 
               <section
                 className="scheduled-editor-section"

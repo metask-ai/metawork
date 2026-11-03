@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -154,16 +155,15 @@ export async function runAttachmentCapacityVertical({
           status: "rejected",
           reason: "staging_capacity",
         });
-        const admission = (await snapshot()).newTaskAdmission;
+        const modelSnapshot = await snapshot();
         const task = await invoke("metawork.tasks.create", {
           workspace: {
             kind: "manual",
             workspaceId,
             expectedWorkspaceEpoch: workspaceEpoch,
           },
-          expectedExecutionGeneration: admission.activeGeneration,
-          expectedSelectionRevision: admission.activeSelectionRevision,
-          modelSelection: null,
+
+          modelSelection: fixtureModelSelection(modelSnapshot),
           expectedSkillCatalogRevision: catalog.revision,
           expectedSkillSelectionRevision: catalog.selectionRevision,
           approvalMode: "manual",
