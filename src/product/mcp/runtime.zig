@@ -741,7 +741,6 @@ pub const Runtime = struct {
             self.state.activation = activation;
             self.state.activation_failed = activation_failed;
         }
-        preparation.recovery_diagnostic = self.state.preparation.recovery_diagnostic;
         self.state.preparation.deinit();
         self.state.preparation = preparation.take();
         management.installRuntimeManifest(manifest);
@@ -2484,7 +2483,7 @@ test "Product MCP apply keeps stale ownership and settles late success without r
         });
         var harness = TestHarness{};
         var runtime = Runtime.init(allocator, harness.ports(), .{
-            .preparation = .{ .allocator = allocator, .state = .empty, .recovery_diagnostic = .quarantined_credentials_retained },
+            .preparation = .{ .allocator = allocator, .state = .empty },
             .activation = null,
             .activation_failed = false,
             .management = management,
@@ -2511,7 +2510,6 @@ test "Product MCP apply keeps stale ownership and settles late success without r
         preparation_owned = false;
         manifest_owned = false;
         try std.testing.expectEqual(@as(?u64, 1), runtime.state.preparation.generation());
-        try std.testing.expectEqual(configuration.RecoveryDiagnostic.quarantined_credentials_retained, runtime.state.preparation.recovery_diagnostic);
         try std.testing.expectEqual(configuration.RuntimeAlignment.current, runtime.state.management.?.inspect().runtime_alignment);
         try std.testing.expectEqual(McpConfigurationApplyState.idle, runtime.state.configuration_apply_state);
         try std.testing.expectEqual(if (shutdown) McpAdmissionBlockReason.shutting_down else .activation_unavailable, runtime.state.admission.blocked);
