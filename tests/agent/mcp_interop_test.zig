@@ -1775,6 +1775,12 @@ fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !v
     try std.testing.expect(std.mem.indexOf(u8, trace, "PINNED_RESTORE_SKILL") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "revoked-from-agentcore") != null);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
+    if (std.mem.eql(u8, framing, "ping")) {
+        const pings = std.mem.count(u8, trace, "\"direction\":\"ping\"");
+        try std.testing.expect(pings != 0);
+        try std.testing.expectEqual(pings, std.mem.count(u8, trace, "\"direction\":\"pong\""));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace, "\"direction\":\"error\""));
+    }
 }
 
 test "expired MCP authority is typed and the same model succeeds after refresh" {
@@ -2861,4 +2867,8 @@ test "canonical MCP STDIO routes notifications and replies ping before resuming"
 
 test "canonical MCP SSE interleaving preserves tool envelope permission counts and RPC counts" {
     try expectSelectedHttpToolResult("text", "interleaved");
+}
+
+test "canonical MCP SSE waits for pong before original tool response with exact permission and RPC counts" {
+    try expectSelectedHttpToolResult("text", "ping");
 }

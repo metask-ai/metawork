@@ -36,6 +36,14 @@ pub const FeedOutcome = struct {
     flow: SinkFlow,
 };
 
+pub const ResponseControl = enum { stopped, reply_completed };
+pub const ContinuationPost = struct {
+    headers: []const Header,
+    body: []const u8,
+    response_sink: ResponseSink,
+};
+pub const ResponseAction = union(enum) { stop, continue_reading, post: ContinuationPost };
+
 /// Callback-scoped check capability. The effect retains all credential
 /// ownership; Backend only lends the completed envelope back for inspection.
 pub const ResponseInspector = struct {
@@ -55,6 +63,9 @@ pub const ResponseSink = struct {
     feed_fn: *const fn (*anyopaque, []const u8) FeedOutcome,
     finish_fn: *const fn (*anyopaque) SinkFlow,
     inspect_fn: *const fn (*anyopaque, ResponseInspector) bool,
+    /// Invoked only after a byte-pump callback has returned. A reply is a
+    /// separate POST; reply_completed authorizes resuming the retained stream.
+    control_fn: *const fn (*anyopaque, ResponseControl) ResponseAction,
 };
 
 pub const Request = struct {
@@ -234,6 +245,16 @@ fn performRequest(
         connection.backend.config.max_session_token_bytes,
     ) catch return poisonExchange(connection, .fatal);
     defer collector.deinit();
+    // A pong accepts only a bounded, empty notification response. It borrows no
+    // second full response buffer and lives until the effect has quiesced.
+    var pong_collector: ResponseCollector = .{
+        .allocator = allocator,
+        .kind = .notification,
+        .max_session_token_bytes = connection.backend.config.max_session_token_bytes,
+        .output = &.{},
+    };
+    defer pong_collector.deinit();
+    collector.pong_collector = &pong_collector;
     collector.request_bytes = bytes;
     collector.budget = &budget;
     const port = performEffect(
@@ -350,6 +371,8 @@ fn performEffect(
         count += 1;
     }
     const sink = collector.sink();
+    collector.request_headers = headers[0..count];
+    collector.request_session = connection.session_token;
     const endpoint = connection.backend.config.endpoint;
     return endpoint.perform_fn(endpoint.context, .{
         .method = if (collector.kind == .close) .delete else .post,
@@ -389,6 +412,11 @@ const ResponseCollector = struct {
     expected_id: ?envelope.Id = null,
     budget: ?*envelope.Budget = null,
     response_matched: bool = false,
+    continuation: union(enum) { idle, ping: envelope.Id, replying } = .idle,
+    pong_collector: ?*ResponseCollector = null,
+    request_headers: []const Header = &.{},
+    request_session: []const u8 = &.{},
+    pong_headers: [4]Header = undefined,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -423,6 +451,7 @@ const ResponseCollector = struct {
             .feed_fn = feed,
             .finish_fn = finish,
             .inspect_fn = inspect,
+            .control_fn = control,
         };
     }
 
@@ -488,7 +517,7 @@ const ResponseCollector = struct {
 
     fn feed(raw: *anyopaque, bytes: []const u8) FeedOutcome {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
-        if (self.failure != null or self.complete)
+        if (self.failure != null or self.complete or self.continuation != .idle)
             return .{ .consumed = 0, .flow = .stop };
         switch (self.kind) {
             .notification => {
@@ -572,10 +601,17 @@ const ResponseCollector = struct {
                                     self.output_len = 0;
                                     continue;
                                 },
-                                // This endpoint has no capability to resume an
-                                // HTTP response stream after a separate pong POST.
-                                .ping => {
-                                    _ = self.fail(.fatal);
+                                .ping => |id| {
+                                    const budget = self.budget.?;
+                                    if (budget.remainingMs() == null) {
+                                        _ = self.fail(.timeout);
+                                        return .{ .consumed = index + 1, .flow = .stop };
+                                    }
+                                    if (!budget.discard(self.output_len)) {
+                                        _ = self.fail(.fatal);
+                                        return .{ .consumed = index + 1, .flow = .stop };
+                                    }
+                                    self.continuation = .{ .ping = id };
                                     return .{ .consumed = index + 1, .flow = .stop };
                                 },
                             }
@@ -611,10 +647,87 @@ const ResponseCollector = struct {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
         // Existing failures and incomplete messages are never delivered by
         // performRequest. Preserve their original transport classification.
-        if (self.failure != null or !self.complete or self.kind != .request) return true;
+        if (self.failure != null or (!self.complete and self.continuation == .idle) or self.kind != .request) return true;
         if (inspector.check_fn(inspector.context, self.output[0..self.output_len])) return true;
         _ = self.fail(.fatal);
         return false;
+    }
+
+    fn control(raw: *anyopaque, event: ResponseControl) ResponseAction {
+        const self: *ResponseCollector = @ptrCast(@alignCast(raw));
+        if (self.failure != null or self.complete) return .stop;
+        if (self.budget) |budget| if (budget.remainingMs() == null) {
+            _ = self.fail(.timeout);
+            return .stop;
+        };
+        const pong = self.pong_collector orelse return .stop;
+        switch (event) {
+            .stopped => {
+                if (self.continuation != .ping) return .stop;
+                const session = if (self.session_token) |value| value else self.request_session;
+                if (self.request_session.len != 0 and !std.mem.eql(u8, self.request_session, session)) {
+                    _ = self.fail(.fatal);
+                    return .stop;
+                }
+                var count: usize = 0;
+                var saw_session = false;
+                for (self.request_headers) |header_value| {
+                    if (count == self.pong_headers.len) {
+                        _ = self.fail(.fatal);
+                        return .stop;
+                    }
+                    self.pong_headers[count] = header_value;
+                    if (std.ascii.eqlIgnoreCase(header_value.name, HeaderName.session_id)) {
+                        self.pong_headers[count].value = session;
+                        saw_session = true;
+                    }
+                    count += 1;
+                }
+                if (!saw_session and session.len != 0) {
+                    if (count == self.pong_headers.len) {
+                        _ = self.fail(.fatal);
+                        return .stop;
+                    }
+                    self.pong_headers[count] = .{ .name = HeaderName.session_id, .value = session };
+                    count += 1;
+                }
+                // Keep one owned buffer. Move the raw id before replacing the
+                // ping envelope, including when id precedes jsonrpc/method.
+                const id = self.continuation.ping.raw;
+                const prefix = "{\"jsonrpc\":\"2.0\",\"id\":";
+                const suffix = ",\"result\":{}}";
+                const length = std.math.add(usize, id.len, prefix.len + suffix.len) catch {
+                    _ = self.fail(.fatal);
+                    return .stop;
+                };
+                if (length > self.output.len) {
+                    _ = self.fail(.fatal);
+                    return .stop;
+                }
+                const destination = self.output[prefix.len..][0..id.len];
+                if (@intFromPtr(destination.ptr) > @intFromPtr(id.ptr)) std.mem.copyBackwards(u8, destination, id) else std.mem.copyForwards(u8, destination, id);
+                @memcpy(self.output[0..prefix.len], prefix);
+                @memcpy(self.output[prefix.len + id.len ..][0..suffix.len], suffix);
+                self.output_len = length;
+                self.continuation = .replying;
+                return .{ .post = .{ .headers = self.pong_headers[0..count], .body = self.output[0..length], .response_sink = pong.sink() } };
+            },
+            .reply_completed => {
+                const session = if (self.session_token) |value| value else self.request_session;
+                if (self.continuation != .replying or pong.failure != null or !pong.complete or
+                    (pong.sessionToken().len != 0 and !std.mem.eql(u8, pong.sessionToken(), session)))
+                {
+                    _ = self.fail(pong.failure orelse .fatal);
+                    return .stop;
+                }
+                if (pong.session_token) |token| secureFree(pong.allocator, token);
+                pong.* = .{ .allocator = pong.allocator, .kind = .notification, .max_session_token_bytes = pong.max_session_token_bytes, .output = &.{} };
+                self.sse.?.resetMessage();
+                self.output_len = 0;
+                self.continuation = .idle;
+                return .continue_reading;
+            },
+        }
     }
 
     fn fail(self: *ResponseCollector, failure: PortFailure) SinkFlow {
@@ -1038,6 +1151,13 @@ const FakeEndpoint = struct {
     saw_notification: bool = false,
     deletes: usize = 0,
     headers_valid: bool = true,
+    pongs: usize = 0,
+    pong_status: u16 = 202,
+    pong_body: ?[]const u8 = null,
+    pong_session: ?[]const u8 = null,
+    expected_pong: ?[]const u8 = null,
+    pong_valid: bool = true,
+    pong_delay_ms: u64 = 0,
 
     fn capability(self: *FakeEndpoint) AuthorizedEndpoint {
         return .{
@@ -1090,8 +1210,39 @@ const FakeEndpoint = struct {
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
             else
                 request_value.body;
-            const fed = sink.feed_fn(sink.context, body);
-            if (fed.flow == .stop) return .completed;
+            var offset: usize = 0;
+            while (offset < body.len) {
+                if (request_value.cancellation.isCancelled()) return .{ .failure = .cancelled };
+                const fed = sink.feed_fn(sink.context, body[offset..]);
+                if (fed.consumed > body.len - offset or (fed.consumed == 0 and fed.flow == .continue_reading)) return .{ .failure = .fatal };
+                offset += fed.consumed;
+                if (fed.flow == .stop) switch (sink.control_fn(sink.context, .stopped)) {
+                    .stop => return .completed,
+                    .continue_reading => return .{ .failure = .fatal },
+                    .post => |post| {
+                        self.pongs += 1;
+                        if (self.expected_pong) |expected| self.pong_valid = self.pong_valid and std.mem.eql(u8, expected, post.body);
+                        const session = if (self.session_token.len != 0) self.session_token else headerValue(request_value.headers, HeaderName.session_id) orelse "";
+                        self.pong_valid = self.pong_valid and std.mem.eql(u8, headerValue(post.headers, HeaderName.session_id) orelse "", session) and
+                            std.mem.eql(u8, headerValue(post.headers, HeaderName.protocol_version) orelse "", headerValue(request_value.headers, HeaderName.protocol_version) orelse "") and
+                            std.mem.eql(u8, headerValue(post.headers, HeaderName.content_type) orelse "", "application/json");
+                        if (self.pong_delay_ms != 0) std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(self.pong_delay_ms)), .awake) catch return .{ .failure = .cancelled };
+                        const reply = post.response_sink;
+                        if (reply.begin_fn(reply.context, self.pong_status) == .continue_reading) {
+                            if (self.pong_session) |value| _ = reply.header_fn(reply.context, HeaderName.session_id, value);
+                            if (reply.end_headers_fn(reply.context) == .continue_reading) {
+                                if (self.pong_body) |value| _ = reply.feed_fn(reply.context, value);
+                                _ = reply.finish_fn(reply.context);
+                            }
+                        }
+                        switch (sink.control_fn(sink.context, .reply_completed)) {
+                            .continue_reading => continue,
+                            .stop => return .completed,
+                            .post => return .{ .failure = .fatal },
+                        }
+                    },
+                };
+            }
         }
         _ = sink.finish_fn(sink.context);
         return .completed;
@@ -1430,7 +1581,104 @@ test "HTTP SSE accepts more than 128 notifications without replaying POST" {
     try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
 }
 
-test "HTTP SSE rejects response mismatch byte exhaustion and unsupported ping without replaying POST" {
+test "HTTP SSE replies outside the pump and resumes the same buffered stream for every era" {
+    const result = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":42}}";
+    const Case = struct { ping: []const u8, pong: []const u8 };
+    for ([_]connector.Era{ .modern_2026_07_28, .compat_2025_11_25, .compat_2025_06_18 }) |era| {
+        for ([_]Case{
+            .{ .ping = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":-9}", .pong = "{\"jsonrpc\":\"2.0\",\"id\":-9,\"result\":{}}" },
+            .{ .ping = "{\"id\":\"pong\\u002did\",\"method\":\"ping\",\"jsonrpc\":\"2.0\"}", .pong = "{\"jsonrpc\":\"2.0\",\"id\":\"pong\\u002did\",\"result\":{}}" },
+        }) |case| {
+            const stream = try std.fmt.allocPrint(std.testing.allocator, "data: {s}\r\n\r\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}}\n\ndata: {s}\n\ndata: {s}\n\n", .{ case.ping, case.ping, result });
+            defer std.testing.allocator.free(stream);
+            var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = stream, .session_token = "stream-session", .expected_session_token = "stream-session", .expected_protocol_version = protocolVersion(era), .expected_pong = case.pong };
+            var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability() });
+            defer backend.deinit() catch unreachable;
+            const transport = backend.transport();
+            const connection = transport.open_fn(transport.context, .actual, era, 1000).connection;
+            defer transport.close_fn(connection);
+            const outcome = transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{});
+            try std.testing.expect(outcome == .response);
+            defer std.testing.allocator.free(outcome.response.body);
+            try std.testing.expectEqualStrings(result, outcome.response.body);
+            try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+            try std.testing.expectEqual(@as(usize, 2), endpoint.pongs);
+            try std.testing.expect(endpoint.pong_valid and endpoint.headers_valid);
+        }
+    }
+}
+
+test "HTTP pong rejection body and session mismatch cannot release the original response" {
+    const Case = struct { status: u16 = 202, body: ?[]const u8 = null, session: ?[]const u8 = null, failure: connector.Failure = .fatal };
+    for ([_]Case{ .{ .status = 500, .failure = .server }, .{ .body = "unexpected" }, .{ .session = "different-session" } }) |case| {
+        var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n", .session_token = "stream-session", .expected_session_token = "stream-session", .pong_status = case.status, .pong_body = case.body, .pong_session = case.session };
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability() });
+        defer backend.deinit() catch unreachable;
+        const transport = backend.transport();
+        const connection = transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000).connection;
+        defer transport.close_fn(connection);
+        const outcome = transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{});
+        try std.testing.expectEqual(case.failure, outcome.failure);
+        try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+        try std.testing.expectEqual(@as(usize, 1), endpoint.pongs);
+    }
+}
+
+test "HTTP pong continuation retains the cumulative bytes and original deadline" {
+    for ([_]bool{ false, true }) |deadline| {
+        var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n" ** 2 ++ "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n", .pong_delay_ms = if (deadline) 60 else 0 };
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_response_bytes = if (deadline) 4096 else 64 });
+        defer backend.deinit() catch unreachable;
+        const transport = backend.transport();
+        const connection = transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000).connection;
+        defer transport.close_fn(connection);
+        const outcome = transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", if (deadline) 30 else 1000, .{});
+        try std.testing.expectEqual(if (deadline) connector.Failure.timeout else .fatal, outcome.failure);
+        try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+        try std.testing.expectEqual(@as(usize, 1), endpoint.pongs);
+    }
+}
+
+test "HTTP cannot reply into a changed session on an existing connection" {
+    var endpoint: FakeEndpoint = .{ .session_token = "original-session", .expected_session_token = "original-session" };
+    var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability() });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000).connection;
+    defer transport.close_fn(connection);
+    const rpc = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}";
+    const first = transport.request_fn(connection, std.testing.allocator, rpc, 1000, .{});
+    try std.testing.expect(first == .response);
+    defer std.testing.allocator.free(first.response.body);
+    endpoint.content_type = "text/event-stream";
+    endpoint.session_token = "replacement-session";
+    endpoint.response_body = "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+    const second = transport.request_fn(connection, std.testing.allocator, rpc, 1000, .{});
+    try std.testing.expectEqual(connector.Failure.fatal, second.failure);
+    try std.testing.expectEqual(@as(usize, 2), endpoint.calls);
+    try std.testing.expectEqual(@as(usize, 0), endpoint.pongs);
+}
+
+test "HTTP many pongs fit one bounded response reservation without per-pong buffers" {
+    const result = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+    var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n" ** 129 ++ "data: " ++ result ++ "\n\n" };
+    var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_response_bytes = 16 * 1024 });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000).connection;
+    defer transport.close_fn(connection);
+    var reservation: [16 * 1024 + 64]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&reservation);
+    const outcome = transport.request_fn(connection, fixed.allocator(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{});
+    try std.testing.expect(outcome == .response);
+    defer fixed.allocator().free(outcome.response.body);
+    try std.testing.expectEqualStrings(result, outcome.response.body);
+    try std.testing.expectEqual(@as(usize, 129), endpoint.pongs);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+    try std.testing.expectEqual(@as(usize, 16 * 1024 + result.len), fixed.end_index);
+}
+
+test "HTTP SSE rejects response mismatch byte exhaustion and missing terminal envelope without replaying POST" {
     const notification = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n";
     const flood = notification ** 129 ++ "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
     for ([_][]const u8{ flood, "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n", "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n" }) |body| {

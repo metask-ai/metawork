@@ -413,7 +413,7 @@ const HttpAuthSlot = struct {
     fn recordRuntimeAuthFailure(
         self: *HttpAuthSlot,
         auth_lease: *const HttpAuthLease,
-        challenge_scopes: []const []const u8,
+        challenge_scopes: ?[]const []const u8,
     ) void {
         self.mutex.lockUncancelable(self.io);
         const epoch = auth_lease.snapshot.consent_epoch;
@@ -421,15 +421,15 @@ const HttpAuthSlot = struct {
         if (self.pending_failure) |*pending| {
             if (pending.consent_epoch != epoch) {
                 pending.deinit();
-                var scopes_complete = true;
-                const scopes = ownRuntimeScopes(
+                var scopes_complete = challenge_scopes != null;
+                const scopes = if (challenge_scopes) |values| ownRuntimeScopes(
                     self.allocator,
                     &.{},
-                    challenge_scopes,
+                    values,
                 ) catch scopes: {
                     scopes_complete = false;
                     break :scopes null;
-                };
+                } else null;
                 pending.* = .{
                     .consent_epoch = epoch,
                     .token_revision = revision,
@@ -438,7 +438,11 @@ const HttpAuthSlot = struct {
                 };
             } else {
                 pending.token_revision = @max(pending.token_revision, revision);
-                if (pending.scopes_complete and challenge_scopes.len != 0) {
+                if (challenge_scopes == null) {
+                    if (pending.scopes) |*scopes| scopes.deinit();
+                    pending.scopes = null;
+                    pending.scopes_complete = false;
+                } else if (pending.scopes_complete and challenge_scopes.?.len != 0) {
                     const existing = if (pending.scopes) |*scopes|
                         scopes.values
                     else
@@ -446,7 +450,7 @@ const HttpAuthSlot = struct {
                     if (ownRuntimeScopes(
                         self.allocator,
                         existing,
-                        challenge_scopes,
+                        challenge_scopes.?,
                     )) |replacement| {
                         if (pending.scopes) |*scopes| scopes.deinit();
                         pending.scopes = replacement;
@@ -458,15 +462,15 @@ const HttpAuthSlot = struct {
                 }
             }
         } else {
-            var scopes_complete = true;
-            const scopes = ownRuntimeScopes(
+            var scopes_complete = challenge_scopes != null;
+            const scopes = if (challenge_scopes) |values| ownRuntimeScopes(
                 self.allocator,
                 &.{},
-                challenge_scopes,
+                values,
             ) catch scopes: {
                 scopes_complete = false;
                 break :scopes null;
-            };
+            } else null;
             self.pending_failure = .{
                 .consent_epoch = epoch,
                 .token_revision = revision,
@@ -1569,11 +1573,12 @@ const HttpContext = struct {
         request: agent.McpHttpRequest,
         sink: *const agent.McpHttpResponseSink,
     ) FetchFailure!void {
+        const deadline: std.Io.Clock.Timestamp = .fromNow(self.io, .{ .raw = .fromMilliseconds(request.timeout_ms), .clock = .awake });
         var events: [3]Event = undefined;
         var select = std.Io.Select(Event).init(self.io, &events);
         select_start.start(&select, .{
             .{ .response, fetchOne, .{ self, request, sink } },
-            .{ .timeout, waitTimeout, .{ self.io, request.timeout_ms } },
+            .{ .timeout, waitDeadline, .{ self.io, deadline } },
             .{ .cancelled, waitCancellation, .{ self.io, request.cancellation } },
         }) catch return error.Network;
         const first = select.await() catch {
@@ -1595,7 +1600,6 @@ const HttpContext = struct {
     ) FetchFailure!void {
         var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
         defer client.deinit();
-        const uri = std.Uri.parse(self.url) catch return error.InvalidResponse;
         var authorization_lease = if (self.authorization) |authorization|
             authorization.lease()
         else
@@ -1605,7 +1609,6 @@ const HttpContext = struct {
             .context = self,
             .lease = if (authorization_lease) |*lease| lease else null,
         };
-        if (!Inspection.check(&inspection, request_value.body)) return error.InvalidResponse;
         const bearer = if (authorization_lease) |*lease| bearer: {
             const value = self.allocator.alloc(u8, "Bearer ".len + lease.token().len) catch
                 return error.Network;
@@ -1618,6 +1621,28 @@ const HttpContext = struct {
             self.allocator.free(value);
         };
         var headers: [max_custom_headers + 8]std.http.Header = undefined;
+        var request = try self.beginRequest(&client, request_value, bearer, &headers, &inspection);
+        defer request.deinit();
+        var response = request.receiveHead(&.{}) catch return error.Network;
+        if (response.head.content_encoding != .identity) return error.InvalidResponse;
+        const status: u16 = @intFromEnum(response.head.status);
+        self.observeAuthorizationFailure(&response, status, &inspection);
+        const exchange: Exchange = .{ .client = &client, .request = request_value, .bearer = bearer, .inspection = &inspection };
+        try self.deliverResponse(&response, status, sink, &inspection, &exchange);
+        if (!sink.inspect_fn(sink.context, .{ .context = &inspection, .check_fn = Inspection.check }))
+            return error.InvalidResponse;
+    }
+
+    const Exchange = struct {
+        client: *std.http.Client,
+        request: agent.McpHttpRequest,
+        bearer: ?[]const u8,
+        inspection: *Inspection,
+    };
+
+    fn beginRequest(self: *HttpContext, client: *std.http.Client, request_value: agent.McpHttpRequest, bearer: ?[]const u8, headers: *[max_custom_headers + 8]std.http.Header, inspection: *Inspection) FetchFailure!std.http.Client.Request {
+        if (!Inspection.check(inspection, request_value.body)) return error.InvalidResponse;
+        const uri = std.Uri.parse(self.url) catch return error.InvalidResponse;
         var count: usize = 0;
         for (request_value.headers) |header| {
             if (count == headers.len) return error.InvalidResponse;
@@ -1644,7 +1669,7 @@ const HttpContext = struct {
             },
             .extra_headers = headers[0..count],
         }) catch return error.Network;
-        defer request.deinit();
+        errdefer request.deinit();
         if (request_value.method == .post) {
             request.transfer_encoding = .{ .content_length = request_value.body.len };
             var request_body = request.sendBodyUnflushed(&.{}) catch return error.Network;
@@ -1652,9 +1677,10 @@ const HttpContext = struct {
             request_body.end() catch return error.Network;
             request.connection.?.flush() catch return error.Network;
         } else request.sendBodiless() catch return error.Network;
-        var response = request.receiveHead(&.{}) catch return error.Network;
-        if (response.head.content_encoding != .identity) return error.InvalidResponse;
-        const status: u16 = @intFromEnum(response.head.status);
+        return request;
+    }
+
+    fn observeAuthorizationFailure(self: *HttpContext, response: *std.http.Client.Response, status: u16, inspection: *Inspection) void {
         var authenticate_storage: [mcp_oauth.Limits.header_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &authenticate_storage);
         var authenticate_writer = std.Io.Writer.fixed(&authenticate_storage);
@@ -1679,7 +1705,7 @@ const HttpContext = struct {
             }
         }
         if (status == 401 or status == 403) {
-            if (self.authorization) |authorization| if (authorization_lease) |*lease| {
+            if (self.authorization) |authorization| if (inspection.lease) |lease| {
                 var challenge = if (!authenticate_invalid and
                     authenticate_writer.buffered().len != 0)
                     mcp_oauth.parseRuntimeBearerChallenge(
@@ -1689,20 +1715,42 @@ const HttpContext = struct {
                 else
                     null;
                 defer if (challenge) |*value| value.deinit();
-                if (challenge) |*value|
-                    authorization.recordRuntimeAuthFailure(lease, value.scopes);
+                if (challenge) |*value| {
+                    var scopes_safe = true;
+                    for (value.scopes) |scope| if (!Inspection.check(inspection, scope)) {
+                        scopes_safe = false;
+                        break;
+                    };
+                    authorization.recordRuntimeAuthFailure(lease, if (scopes_safe) value.scopes else null);
+                }
             };
         }
-        try self.deliverResponse(&response, status, sink);
-        if (!sink.inspect_fn(sink.context, .{ .context = &inspection, .check_fn = Inspection.check }))
-            return error.InvalidResponse;
+    }
+
+    fn sendContinuation(self: *HttpContext, exchange: *const Exchange, post: agent.McpHttpContinuationPost) FetchFailure!void {
+        if (exchange.request.cancellation.isCancelled()) return error.Cancelled;
+        var request_value = exchange.request;
+        request_value.method = .post;
+        request_value.headers = post.headers;
+        request_value.body = post.body;
+        var headers: [max_custom_headers + 8]std.http.Header = undefined;
+        var request = try self.beginRequest(exchange.client, request_value, exchange.bearer, &headers, exchange.inspection);
+        defer request.deinit();
+        var response = request.receiveHead(&.{}) catch return error.Network;
+        if (response.head.content_encoding != .identity) return error.InvalidResponse;
+        const status: u16 = @intFromEnum(response.head.status);
+        self.observeAuthorizationFailure(&response, status, exchange.inspection);
+        try self.deliverResponse(&response, status, &post.response_sink, exchange.inspection, null);
+        if (!post.response_sink.inspect_fn(post.response_sink.context, .{ .context = exchange.inspection, .check_fn = Inspection.check })) return error.InvalidResponse;
     }
 
     fn deliverResponse(
-        _: *HttpContext,
+        self: *HttpContext,
         response: *std.http.Client.Response,
         status: u16,
         sink: *const agent.McpHttpResponseSink,
+        inspection: *Inspection,
+        exchange: ?*const Exchange,
     ) FetchFailure!void {
         if (sink.begin_fn(sink.context, status) == .stop) {
             // Request callbacks preserve a complete 401/403 response for
@@ -1713,11 +1761,10 @@ const HttpContext = struct {
             return;
         }
         var iterator = response.head.iterateHeaders();
-        while (iterator.next()) |header| if (sink.header_fn(
-            sink.context,
-            header.name,
-            header.value,
-        ) == .stop) return;
+        while (iterator.next()) |header| {
+            if (!Inspection.check(inspection, header.value)) return error.InvalidResponse;
+            if (sink.header_fn(sink.context, header.name, header.value) == .stop) return;
+        }
         if (sink.end_headers_fn(sink.context) == .stop) return;
         var transfer_buffer: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &transfer_buffer);
@@ -1733,16 +1780,28 @@ const HttpContext = struct {
             const fed = sink.feed_fn(sink.context, chunk);
             if (fed.consumed > chunk.len) return error.InvalidResponse;
             reader.toss(fed.consumed);
-            if (fed.flow == .stop) return;
+            if (fed.flow == .stop) {
+                const active = exchange orelse return;
+                if (!sink.inspect_fn(sink.context, .{ .context = inspection, .check_fn = Inspection.check })) return error.InvalidResponse;
+                switch (sink.control_fn(sink.context, .stopped)) {
+                    .stop => return,
+                    .continue_reading => return error.InvalidResponse,
+                    .post => |post| {
+                        try self.sendContinuation(active, post);
+                        switch (sink.control_fn(sink.context, .reply_completed)) {
+                            .continue_reading => continue,
+                            .stop => return,
+                            .post => return error.InvalidResponse,
+                        }
+                    },
+                }
+            }
             if (fed.consumed != chunk.len) return error.InvalidResponse;
         }
     }
 
-    fn waitTimeout(io: std.Io, timeout_ms: u32) void {
-        std.Io.Timeout.sleep(.{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
-            .clock = .awake,
-        } }, io) catch {};
+    fn waitDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) void {
+        std.Io.Timeout.sleep(.{ .deadline = deadline }, io) catch {};
     }
 
     fn waitCancellation(io: std.Io, cancellation: agent.McpCancellation) void {
@@ -2439,6 +2498,187 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 200), response.http_status);
     try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1}", response.body);
+}
+
+test "MCP HTTP ping keeps the original stream lease session deadline and cancellation" {
+    const Scenario = enum { buffered, waiting, auth, scope_echo, ping_echo_old, ping_echo_new, cancel_pong, timeout_stream, wrong_session };
+    const Peer = struct {
+        io: std.Io,
+        listener: *std.Io.net.Server,
+        authorizations: *HttpAuthorizations,
+        scenario: Scenario,
+        cancelled: std.atomic.Value(bool) = .init(false),
+        tool_posts: usize = 0,
+        pongs: usize = 0,
+        deletes: usize = 0,
+        failure: ?anyerror = null,
+        const rpc = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}";
+        const pong = "{\"jsonrpc\":\"2.0\",\"id\":\"server-ping\",\"result\":{}}";
+        const result = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":42}}";
+        fn isCancelled(raw: ?*const anyopaque) bool {
+            return (@as(*const @This(), @ptrCast(@alignCast(raw.?)))).cancelled.load(.acquire);
+        }
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                if (err != error.Canceled) self.failure = err;
+            };
+        }
+        fn headers(request: *std.http.Server.Request, token: []const u8, session: []const u8) !void {
+            var iterator = request.iterateHeaders();
+            var auth_ok = false;
+            var era_ok = false;
+            var observed_session: []const u8 = "";
+            while (iterator.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) auth_ok = std.mem.eql(u8, token, header.value);
+                if (std.ascii.eqlIgnoreCase(header.name, "MCP-Protocol-Version")) era_ok = std.mem.eql(u8, "2026-07-28", header.value);
+                if (std.ascii.eqlIgnoreCase(header.name, "Mcp-Session-Id")) observed_session = header.value;
+            }
+            if (!auth_ok or !era_ok or !std.mem.eql(u8, session, observed_session)) return error.UnexpectedHeaders;
+        }
+        fn body(request: *std.http.Server.Request, storage: []u8) ![]const u8 {
+            if (request.head.method != .POST or request.head.content_length == null or request.head.content_length.? >= storage.len) return error.UnexpectedRequest;
+            var transfer: [64]u8 = undefined;
+            const reader = request.readerExpectNone(&transfer);
+            const count = try reader.readSliceShort(storage);
+            return storage[0..count];
+        }
+        fn serve(self: *@This()) !void {
+            var original = try self.listener.accept(self.io);
+            defer original.close(self.io);
+            var original_read: [4096]u8 = undefined;
+            var original_write: [4096]u8 = undefined;
+            var original_reader = original.reader(self.io, &original_read);
+            var original_writer = original.writer(self.io, &original_write);
+            var server: std.http.Server = .init(&original_reader.interface, &original_writer.interface);
+            var request = try server.receiveHead();
+            try headers(&request, "Bearer access-one", "");
+            var request_storage: [512]u8 = undefined;
+            if (!std.mem.eql(u8, try body(&request, &request_storage), rpc)) return error.UnexpectedRequest;
+            self.tool_posts += 1;
+            if (try self.authorizations.rotate("server", 1, 1, .{ .access_token = "access-two", .refresh_token = "refresh-two" }) != .replaced) return error.UnexpectedRotation;
+            var stream_buffer: [1024]u8 = undefined;
+            var response = try request.respondStreaming(&stream_buffer, .{ .respond_options = .{ .keep_alive = true, .extra_headers = &.{ .{ .name = "Content-Type", .value = "text/event-stream" }, .{ .name = "Mcp-Session-Id", .value = "stream-session" } } } });
+            const ping_id = switch (self.scenario) {
+                .ping_echo_old => "access-one",
+                .ping_echo_new => "access-two",
+                else => "server-ping",
+            };
+            try response.writer.print("data: {{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":\"{s}\"}}\r\n\r\n", .{ping_id});
+            if (self.scenario == .buffered) {
+                try response.writer.writeAll("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n");
+                try response.writer.print("data: {s}\n\n", .{result});
+            }
+            try response.writer.flush();
+            try response.flush();
+            var reply_stream = try self.listener.accept(self.io);
+            defer reply_stream.close(self.io);
+            var reply_read: [4096]u8 = undefined;
+            var reply_write: [4096]u8 = undefined;
+            var reply_reader = reply_stream.reader(self.io, &reply_read);
+            var reply_writer = reply_stream.writer(self.io, &reply_write);
+            var reply_server: std.http.Server = .init(&reply_reader.interface, &reply_writer.interface);
+            var reply = try reply_server.receiveHead();
+            try headers(&reply, "Bearer access-one", "stream-session");
+            var reply_storage: [512]u8 = undefined;
+            const reply_body = try body(&reply, &reply_storage);
+            if (std.mem.eql(u8, reply_body, rpc)) self.tool_posts += 1 else self.pongs += 1;
+            if (!std.mem.eql(u8, reply_body, pong)) return error.UnexpectedPong;
+            if (self.scenario == .cancel_pong) {
+                self.cancelled.store(true, .release);
+                try std.Io.sleep(self.io, .fromSeconds(60), .awake);
+                return error.ExpectedCancellation;
+            }
+            if (self.scenario == .auth or self.scenario == .scope_echo) {
+                try reply.respond("{\"error\":\"denied\"}", .{ .status = .unauthorized, .keep_alive = false, .extra_headers = &.{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "WWW-Authenticate", .value = if (self.scenario == .scope_echo) "Bearer scope=\"access-two\"" else "Bearer scope=\"files.read\"" } } });
+            } else {
+                try reply.respond("", .{ .status = .accepted, .keep_alive = false, .extra_headers = if (self.scenario == .wrong_session) &.{.{ .name = "Mcp-Session-Id", .value = "wrong-session" }} else &.{} });
+            }
+            if (self.scenario == .timeout_stream) {
+                try std.Io.sleep(self.io, .fromSeconds(60), .awake);
+                return error.ExpectedTimeout;
+            }
+            if (self.scenario == .waiting) {
+                try response.writer.print("data: {s}\n\n", .{result});
+                try response.writer.flush();
+                try response.flush();
+            }
+            _ = original_reader.interface.discardRemaining() catch {};
+            if (self.scenario != .buffered and self.scenario != .waiting) return;
+            var close_stream = try self.listener.accept(self.io);
+            defer close_stream.close(self.io);
+            var close_read: [4096]u8 = undefined;
+            var close_write: [4096]u8 = undefined;
+            var close_reader = close_stream.reader(self.io, &close_read);
+            var close_writer = close_stream.writer(self.io, &close_write);
+            var close_server: std.http.Server = .init(&close_reader.interface, &close_writer.interface);
+            var close = try close_server.receiveHead();
+            if (close.head.method != .DELETE) return error.UnexpectedRequest;
+            try headers(&close, "Bearer access-two", "stream-session");
+            self.deletes += 1;
+            try close.respond("", .{ .keep_alive = false });
+        }
+    };
+    for (std.enums.values(Scenario)) |scenario| {
+        const allocator = std.testing.allocator;
+        var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        const io = threaded.io();
+        const slot = try HttpAuthSlot.create(allocator, io, "server", 1, 1, .{ .access_token = "access-one", .refresh_token = "refresh-one", .client_secret = "client-secret" });
+        defer slot.release();
+        const slots = try allocator.alloc(*HttpAuthSlot, 1);
+        slots[0] = slot;
+        slot.retain();
+        var authorizations: HttpAuthorizations = .{ .allocator = allocator, .slots = slots };
+        defer authorizations.deinit();
+        var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .kernel_backlog = 2 });
+        defer listener.deinit(io);
+        const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/mcp", .{listener.socket.address.getPort()});
+        defer allocator.free(url);
+        var context: HttpContext = .{ .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .authorization = slot, .backend = undefined };
+        defer context.arena.deinit();
+        context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = allocator, .endpoint = context.endpoint(), .max_response_bytes = 4096 });
+        defer context.backend.deinit() catch unreachable;
+        const transport = context.backend.transport();
+        const connection = transport.open_fn(transport.context, .actual, .modern_2026_07_28, 5000).connection;
+        var open = true;
+        defer if (open) transport.close_fn(connection);
+        var peer: Peer = .{ .io = io, .listener = &listener, .authorizations = &authorizations, .scenario = scenario };
+        var task = try std.Io.concurrent(io, Peer.run, .{&peer});
+        var running = true;
+        defer if (running) task.cancel(io);
+        const outcome = transport.request_fn(connection, allocator, Peer.rpc, if (scenario == .timeout_stream) 200 else 5000, .{ .context = &peer, .is_cancelled_fn = Peer.isCancelled });
+        transport.close_fn(connection);
+        open = false;
+        task.cancel(io);
+        running = false;
+        try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+        try std.testing.expectEqual(@as(usize, 1), peer.tool_posts);
+        try std.testing.expectEqual(@as(usize, if (scenario == .ping_echo_old or scenario == .ping_echo_new) 0 else 1), peer.pongs);
+        const success = scenario == .buffered or scenario == .waiting;
+        try std.testing.expectEqual(@as(usize, if (success) 1 else 0), peer.deletes);
+        if (success) {
+            try std.testing.expect(outcome == .response);
+            defer allocator.free(outcome.response.body);
+            try std.testing.expectEqualStrings(Peer.result, outcome.response.body);
+        } else {
+            const failure: agent.McpTransportFailure = switch (scenario) {
+                .auth, .scope_echo => .auth,
+                .cancel_pong => .cancelled,
+                .timeout_stream => .timeout,
+                else => .fatal,
+            };
+            try std.testing.expectEqual(failure, outcome.failure);
+        }
+        try std.testing.expect(slot.current.next == null);
+        var facts = try authorizations.snapshotRuntimeAuthFailures();
+        defer facts.deinit();
+        if (scenario == .auth or scenario == .scope_echo) {
+            try std.testing.expectEqual(@as(usize, 1), facts.values.len);
+            try std.testing.expectEqual(@as(u64, 1), facts.values[0].token_revision);
+            try std.testing.expectEqual(scenario == .auth, facts.values[0].challenge_scopes_complete);
+            if (scenario == .auth) try std.testing.expectEqualStrings("files.read", facts.values[0].challenge_scopes[0]) else try std.testing.expectEqual(@as(usize, 0), facts.values[0].challenge_scopes.len);
+        } else try std.testing.expectEqual(@as(usize, 0), facts.values.len);
+    }
 }
 
 pub const testing = if (builtin.is_test) struct {
