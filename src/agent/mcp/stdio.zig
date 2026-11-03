@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const connector = @import("agent_mcp_connector");
+const envelope = @import("agent_mcp_envelope");
 
 pub const PortFailure = enum { timeout, child_exit, cancelled, indeterminate, fatal };
 pub const SinkFlow = enum { continue_reading, stop };
@@ -133,27 +134,49 @@ pub const Backend = struct {
         defer connection.mutex.unlock(config.io);
         if (connection.poisoned or timeout_ms == 0) return .{ .failure = .fatal };
         if (cancellation.isCancelled()) return .{ .failure = .cancelled };
+        var budget = envelope.Budget.init(config.io, timeout_ms, config.max_frame_bytes);
         var collector = ResponseCollector.init(allocator, config.max_frame_bytes) catch
             return poisonExchange(connection, .fatal);
         defer collector.deinit();
         const sink = collector.sink();
         const fragments = [_][]const u8{ bytes, "\n" };
         const endpoint = config.endpoint;
-        switch (endpoint.exchange_fn(
-            endpoint.context,
-            connection.effect_connection,
-            .{ .fragments = &fragments, .timeout_ms = timeout_ms, .cancellation = cancellation },
-            &sink,
-        )) {
-            .failure => |failure| return poisonExchange(connection, failure),
-            .completed => {},
+        const expected = envelope.requestId(bytes) catch return poisonExchange(connection, .fatal);
+        var outgoing: []const []const u8 = &fragments;
+        while (true) {
+            if (cancellation.isCancelled()) return poisonExchange(connection, .cancelled);
+            const remaining = budget.remainingMs() orelse return poisonExchange(connection, .timeout);
+            switch (endpoint.exchange_fn(endpoint.context, connection.effect_connection, .{ .fragments = outgoing, .timeout_ms = remaining, .cancellation = cancellation }, &sink)) {
+                .failure => |failure| return poisonExchange(connection, failure),
+                .completed => {},
+            }
+            if (collector.failure) |failure| return poisonExchange(connection, failure);
+            if (!collector.complete or collector.output_len == 0) return poisonExchange(connection, .fatal);
+            const body = collector.output[0..collector.output_len];
+            const message = envelope.classify(body, expected) catch return poisonExchange(connection, .fatal);
+            if (cancellation.isCancelled()) return poisonExchange(connection, .cancelled);
+            if (budget.remainingMs() == null) return poisonExchange(connection, .timeout);
+            switch (message) {
+                .response => {
+                    const response = allocator.dupe(u8, body) catch return poisonExchange(connection, .fatal);
+                    return .{ .response = .{ .http_status = 0, .body = response } };
+                },
+                .notification, .ping => {
+                    if (!budget.discard(body.len)) return poisonExchange(connection, .fatal);
+                    if (message == .ping) {
+                        // The byte pump has stopped. Reply outside its Select,
+                        // then resume the retained reader without resending RPC.
+                        const pong = [_][]const u8{ "{\"jsonrpc\":\"2.0\",\"id\":", message.ping.raw, ",\"result\":{}}\n" };
+                        const pong_remaining = budget.remainingMs() orelse return poisonExchange(connection, .timeout);
+                        if (endpoint.notify_fn(endpoint.context, connection.effect_connection, .{ .fragments = &pong, .timeout_ms = pong_remaining, .cancellation = cancellation })) |failure|
+                            return poisonExchange(connection, failure);
+                    }
+                    collector.output_len = 0;
+                    collector.complete = false;
+                    outgoing = &.{};
+                },
+            }
         }
-        if (collector.failure) |failure| return poisonExchange(connection, failure);
-        if (!collector.complete or collector.output_len == 0)
-            return poisonExchange(connection, .fatal);
-        const response = allocator.dupe(u8, collector.output[0..collector.output_len]) catch
-            return poisonExchange(connection, .fatal);
-        return .{ .response = .{ .http_status = 0, .body = response } };
     }
 
     fn notify(
@@ -278,7 +301,15 @@ fn releaseCounter(counter: *std.atomic.Value(usize)) void {
 const FakeEndpoint = struct {
     valid: bool = true,
     perform_failure: ?PortFailure = null,
-    response: []const u8 = "opaque-response\ntrailing",
+    response: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\ntrailing",
+    offset: usize = 0,
+    requests: usize = 0,
+    pongs: usize = 0,
+    in_exchange: bool = false,
+    expected_pong_id: ?[]const u8 = null,
+    delay_ms: u64 = 0,
+    cancel_after_exchange: bool = false,
+    cancelled: bool = false,
     closes: usize = 0,
     notifications: usize = 0,
     framing_valid: bool = true,
@@ -310,16 +341,30 @@ const FakeEndpoint = struct {
         sink: *const ResponseSink,
     ) PerformOutcome {
         const self: *FakeEndpoint = @ptrCast(@alignCast(raw));
-        self.checkFraming(write);
+        std.debug.assert(!self.in_exchange);
+        self.in_exchange = true;
+        defer self.in_exchange = false;
+        if (write.fragments.len != 0) {
+            self.checkFraming(write);
+            self.requests += 1;
+        }
         if (self.perform_failure) |failure| return .{ .failure = failure };
-        const fed = sink.feed_fn(sink.context, self.response);
+        if (self.delay_ms != 0) std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(self.delay_ms)), .awake) catch return .{ .failure = .fatal };
+        const fed = sink.feed_fn(sink.context, self.response[self.offset..]);
+        self.offset += fed.consumed;
+        if (self.cancel_after_exchange) self.cancelled = true;
         if (fed.flow == .continue_reading) _ = sink.finish_fn(sink.context);
         return .completed;
     }
 
     fn notify(raw: *anyopaque, _: *anyopaque, write: Write) ?PortFailure {
         const self: *FakeEndpoint = @ptrCast(@alignCast(raw));
-        self.checkFraming(write);
+        std.debug.assert(!self.in_exchange);
+        if (write.fragments.len == 3) {
+            self.pongs += 1;
+            self.framing_valid = self.framing_valid and std.mem.eql(u8, write.fragments[2], ",\"result\":{}}\n");
+            if (self.expected_pong_id) |id| self.framing_valid = self.framing_valid and std.mem.eql(u8, write.fragments[1], id);
+        } else self.checkFraming(write);
         self.notifications += 1;
         return self.perform_failure;
     }
@@ -333,6 +378,11 @@ const FakeEndpoint = struct {
         self.framing_valid = self.framing_valid and
             write.fragments.len == 2 and
             std.mem.eql(u8, write.fragments[1], "\n");
+    }
+
+    fn isCancelled(raw: ?*const anyopaque) bool {
+        const self: *const FakeEndpoint = @ptrCast(@alignCast(raw.?));
+        return self.cancelled;
     }
 };
 
@@ -398,7 +448,7 @@ test "stdio owns newline framing and consumes exactly one response" {
     const response = switch (transport.request_fn(
         connection,
         std.testing.allocator,
-        "opaque-request",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
         1000,
         .{},
     )) {
@@ -407,13 +457,64 @@ test "stdio owns newline framing and consumes exactly one response" {
     };
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 0), response.http_status);
-    try std.testing.expectEqualStrings("opaque-response", response.body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", response.body);
     try std.testing.expectEqual(
         @as(?connector.Failure, null),
         transport.notify_fn(connection, "opaque-notify", 1000, .{}),
     );
     try std.testing.expect(endpoint.framing_valid);
     try std.testing.expectEqual(@as(usize, 1), endpoint.notifications);
+}
+
+test "stdio stops before pong and resumes buffered notifications without replaying request" {
+    var endpoint: FakeEndpoint = .{ .expected_pong_id = "\"server-id\"", .response = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":\"server-id\"}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"complete\":true}}\ntrailing" };
+    var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_frame_bytes = 1024 });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = try openTestConnection(transport);
+    defer transport.close_fn(connection);
+    const response = switch (transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{})) {
+        .response => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"complete\":true}}", response.body);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.requests);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.pongs);
+    try std.testing.expect(endpoint.framing_valid);
+    try std.testing.expectEqualStrings("trailing", endpoint.response[endpoint.offset..]);
+}
+
+test "stdio rejects mismatched responses unsupported server requests and notification flood" {
+    const notification = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n";
+    const flood = notification ** 129 ++ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+    for ([_][]const u8{ flood, "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n", "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"sampling/createMessage\"}\n" }) |body| {
+        var endpoint: FakeEndpoint = .{ .response = body };
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_frame_bytes = 16 * 1024 });
+        defer backend.deinit() catch unreachable;
+        const transport = backend.transport();
+        const connection = try openTestConnection(transport);
+        defer transport.close_fn(connection);
+        const outcome = transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", 1000, .{});
+        try std.testing.expect(outcome == .failure);
+        try std.testing.expectEqual(@as(usize, 1), endpoint.requests);
+        try std.testing.expectEqual(@as(?connector.Failure, .fatal), transport.notify_fn(connection, "notification", 1000, .{}));
+    }
+}
+
+test "stdio cancellation before pong and elapsed deadline never restart an exchange" {
+    for ([_]bool{ true, false }) |cancel| {
+        var endpoint: FakeEndpoint = .{ .response = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":9}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n", .cancel_after_exchange = cancel, .delay_ms = if (cancel) 0 else 30 };
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_frame_bytes = 1024 });
+        defer backend.deinit() catch unreachable;
+        const transport = backend.transport();
+        const connection = try openTestConnection(transport);
+        defer transport.close_fn(connection);
+        const outcome = transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", if (cancel) 1000 else 10, .{ .context = &endpoint, .is_cancelled_fn = FakeEndpoint.isCancelled });
+        try std.testing.expectEqual(if (cancel) connector.Failure.cancelled else connector.Failure.timeout, outcome.failure);
+        try std.testing.expect(endpoint.requests <= 1);
+        try std.testing.expectEqual(@as(usize, 0), endpoint.pongs);
+    }
 }
 
 test "stdio protocol failure poisons the connection" {
@@ -431,7 +532,7 @@ test "stdio protocol failure poisons the connection" {
     switch (transport.request_fn(
         connection,
         std.testing.allocator,
-        "request",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
         1000,
         .{},
     )) {

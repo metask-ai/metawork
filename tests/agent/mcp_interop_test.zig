@@ -395,6 +395,7 @@ fn initializeRequestOffset(trace: []const u8, protocol_version: []const u8) ?usi
 fn runCatalogInterop(
     negotiation: agent.McpNegotiationPolicy,
     protocol_version: []const u8,
+    framing: []const u8,
 ) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -413,6 +414,8 @@ fn runCatalogInterop(
         protocol_version,
         "--trace",
         trace_path,
+        "--framing",
+        framing,
     };
     var fixture = try Fixture.init();
     try fixture.bind(&arguments);
@@ -487,15 +490,15 @@ fn runCatalogInterop(
 }
 
 test "canonical AgentCore negotiates the 2026-07-28 stdio fixture" {
-    try runCatalogInterop(.modern_only, "2026-07-28");
+    try runCatalogInterop(.modern_only, "2026-07-28", "json");
 }
 
 test "canonical AgentCore negotiates 2025-11-25 and accepts draft-07 tools" {
-    try runCatalogInterop(.compat_only, "2025-11-25");
+    try runCatalogInterop(.compat_only, "2025-11-25", "json");
 }
 
 test "canonical AgentCore reopens the exact 2025-06-18 stdio era" {
-    try runCatalogInterop(.automatic, "2025-06-18");
+    try runCatalogInterop(.automatic, "2025-06-18", "json");
 }
 
 test "canonical AgentCore negotiates 2026 Streamable HTTP JSON framing" {
@@ -567,11 +570,11 @@ test "canonical AgentCore AUTO downgrades a bare HTTP 400 probe" {
 }
 
 test "canonical AgentCore executes a selected Streamable HTTP tool" {
-    try expectSelectedHttpToolResult("text");
+    try expectSelectedHttpToolResult("text", "json");
 }
 
 test "canonical AgentCore preserves MCP image payload as opaque tool-result text" {
-    try expectSelectedHttpToolResult("image");
+    try expectSelectedHttpToolResult("image", "json");
 }
 
 test "canonical MCP allow once asks again for identical calls across Runs" {
@@ -1451,7 +1454,7 @@ fn runWithPermission(runtime: *agent.Runtime, session: *agent.Session, run_id: u
     return .{ .terminal = work.result.?, .answers = answers };
 }
 
-fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
+fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -1462,7 +1465,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         "{s}/execution-trace.jsonl",
         .{root_storage[0..root_len]},
     );
-    var fixture = try HttpFixture.startWithResult("2026-07-28", "json", trace_path, 60_000, result_kind);
+    var fixture = try HttpFixture.startWithResult("2026-07-28", framing, trace_path, 60_000, result_kind);
     defer fixture.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
     defer preparation.deinit();
@@ -2850,4 +2853,12 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try std.testing.expect(std.mem.indexOf(u8, trace_target, "PINNED_PRODUCT_SKILL") != null);
     try std.testing.expectEqual(@as(usize, if (manual) 2 else 4), std.mem.count(u8, trace_source, "\"method\":\"tools/call\""));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace_target, "\"method\":\"tools/call\""));
+}
+
+test "canonical MCP STDIO routes notifications and replies ping before resuming" {
+    try runCatalogInterop(.modern_only, "2026-07-28", "interleaved");
+}
+
+test "canonical MCP SSE interleaving preserves tool envelope permission counts and RPC counts" {
+    try expectSelectedHttpToolResult("text", "interleaved");
 }

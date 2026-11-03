@@ -197,6 +197,8 @@ pub fn build(b: *std.Build) void {
     addMcpConnectorTests(b, test_modules, bundle.link_libc);
     addMcpStdioTests(b, test_modules, bundle.link_libc);
     addMcpHttpTests(b, test_modules, bundle.link_libc);
+    const envelope_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-agent-mcp-envelope", .root_module = test_modules.agent_mcp_envelope }));
+    b.step("test-mcp-envelope", "Run bounded MCP routing tests").dependOn(&envelope_tests.step);
     addMcpRuntimeTests(b, test_modules, bundle.link_libc);
     addMcpCatalogTests(b, test_modules, bundle.link_libc);
     addMcpConfigurationTests(b, test_modules, bundle.link_libc);
@@ -254,6 +256,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-provider-probe", .root_module = test_modules.agent_provider_probe },
         .{ .name = "metawork-agent-mcp-catalog", .root_module = test_modules.agent_mcp_catalog },
         .{ .name = "metawork-agent-mcp-http", .root_module = test_modules.agent_mcp_http },
+        .{ .name = "metawork-agent-mcp-envelope", .root_module = test_modules.agent_mcp_envelope },
         .{ .name = "metawork-agent-mcp-runtime", .root_module = test_modules.agent_mcp_runtime },
         .{ .name = "metawork-agent-mcp-stdio", .root_module = test_modules.agent_mcp_stdio },
         .{ .name = "metawork-agent-checkpoint-restore", .root_module = test_modules.agent_checkpoint_restore },
@@ -786,6 +789,7 @@ const WiredModules = struct {
     agent_mcp_connector: *std.Build.Module,
     agent_mcp_catalog: *std.Build.Module,
     agent_mcp_http_protocol: *std.Build.Module,
+    agent_mcp_envelope: *std.Build.Module,
     agent_mcp_http: *std.Build.Module,
     agent_mcp_runtime: *std.Build.Module,
     agent_mcp_stdio: *std.Build.Module,
@@ -1365,12 +1369,18 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const agent_mcp_envelope = b.createModule(.{
+        .root_source_file = b.path("src/agent/mcp/envelope.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const agent_mcp_http = b.createModule(.{
         .root_source_file = b.path("src/agent/mcp/http.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_mcp_http.addImport("agent_mcp_connector", agent_mcp_connector);
+    agent_mcp_http.addImport("agent_mcp_envelope", agent_mcp_envelope);
     agent_mcp_http.addImport("agent_mcp_http_protocol", agent_mcp_http_protocol);
     const agent_mcp_runtime = b.createModule(.{
         .root_source_file = b.path("src/agent/mcp/runtime.zig"),
@@ -1392,6 +1402,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     agent_mcp_stdio.addImport("agent_mcp_connector", agent_mcp_connector);
+    agent_mcp_stdio.addImport("agent_mcp_envelope", agent_mcp_envelope);
     const agent_checkpoint = b.createModule(.{
         .root_source_file = b.path("src/agent/checkpoint.zig"),
         .target = target,
@@ -2452,6 +2463,7 @@ fn wireAgentCore(
         .agent_mcp_connector = agent_mcp_connector,
         .agent_mcp_catalog = agent_mcp_catalog,
         .agent_mcp_http_protocol = agent_mcp_http_protocol,
+        .agent_mcp_envelope = agent_mcp_envelope,
         .agent_mcp_http = agent_mcp_http,
         .agent_mcp_runtime = agent_mcp_runtime,
         .agent_mcp_stdio = agent_mcp_stdio,
