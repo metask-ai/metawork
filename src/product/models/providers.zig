@@ -1019,6 +1019,52 @@ pub fn isRetiredCanonical(allocator: std.mem.Allocator, bytes: []const u8) bool 
     return schema == .integer and (schema.integer == 1 or schema.integer == 2);
 }
 
+/// Retired metadata contributes cleanup obligations only. No provider, model,
+/// preference or source authority is installed in the replacement registry.
+pub fn collectRetiredCredentialDeletions(registry: *Registry, bytes: []const u8) !void {
+    if (bytes.len == 0 or bytes.len > max_store_bytes) return error.InvalidData;
+    const parsed = try std.json.parseFromSlice(std.json.Value, registry.allocator, bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidData;
+    const schema = parsed.value.object.get("schema") orelse return error.InvalidData;
+    if (schema != .integer or (schema.integer != 1 and schema.integer != 2)) return error.InvalidData;
+    const pending = parsed.value.object.get("pending_credential_deletions") orelse return error.InvalidData;
+    const providers = parsed.value.object.get("custom_providers") orelse return error.InvalidData;
+    if (pending != .array or providers != .array) return error.InvalidData;
+    for (pending.array.items) |id| try reserveRetiredCredentialDeletion(registry, id);
+    for (providers.array.items) |provider| {
+        if (provider != .object) return error.InvalidData;
+        try reserveRetiredCredentialDeletion(registry, provider.object.get("id") orelse return error.InvalidData);
+    }
+}
+
+fn reserveRetiredCredentialDeletion(registry: *Registry, value: std.json.Value) !void {
+    if (value != .string or value.string.len == 0 or value.string.len > contract.Limits.instance_id_bytes or
+        !std.unicode.utf8ValidateSlice(value.string)) return error.InvalidData;
+    for (value.string) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidData;
+    for (registry.credentialDeletions()) |existing| if (std.mem.eql(u8, existing, value.string)) return;
+    try registry.reserveCredentialDeletion(value.string);
+}
+
+test "retired cleanup validates and deduplicates only credential slot identities" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try collectRetiredCredentialDeletions(&registry, "{\"schema\":2,\"pending_credential_deletions\":[\"pending\",\"pending\"],\"custom_providers\":[{\"id\":\"pending\"},{\"id\":\"provider\",\"model\":\"must-not-restore\"}]}");
+    try std.testing.expectEqual(@as(usize, 2), registry.credentialDeletions().len);
+    try std.testing.expectEqual(@as(usize, 0), registry.views().len);
+    try std.testing.expect(registry.defaultSelection() == null);
+    for ([_][]const u8{
+        "{\"schema\":3,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
+        "{\"schema\":2,\"pending_credential_deletions\":[],\"custom_providers\":[{\"id\":\"\"}]}",
+        "{\"schema\":2,\"pending_credential_deletions\":[\"bad\\nid\"],\"custom_providers\":[]}",
+        "{\"schema\":2,\"pending_credential_deletions\":[],\"custom_providers\":[{\"id\":7}]}",
+    }) |bytes| {
+        var invalid = Registry.init(std.testing.allocator);
+        defer invalid.deinit();
+        try std.testing.expectError(error.InvalidData, collectRetiredCredentialDeletions(&invalid, bytes));
+    }
+}
+
 test "canonical decode preserves allocation exhaustion" {
     var storage: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&storage);

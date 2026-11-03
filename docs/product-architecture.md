@@ -127,6 +127,8 @@ Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 
 
 `models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。生图不形成用户选择、独立 revision 或持久化 intent。
 
+Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
+
 
 生图默认模型与正式服务 target 的机器定义由 [Models 值合同](../src/product/models/contract.zig)唯一拥有。每次 Run preparation 优先采用当前目录中具备明确生图资格的默认模型；默认模型缺失或不合格时，按该次目录返回顺序采用第一个具备生图资格的成员。没有合格成员时返回不可用，不从对话默认、名称、输出 metadata 或旧持久选择推断模型。此回退仅在请求发送前解析配置，不构成发送失败后的自动重试或模型切换。
 

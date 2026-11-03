@@ -720,14 +720,9 @@ pub const Runtime = struct {
             var restored = registry_impl.decode(self.allocator, bytes) catch |err| {
                 if (err == error.OutOfMemory) return .rejected(.local_resource_exhausted);
                 if (registry_impl.isRetiredCanonical(self.allocator, bytes)) {
-                    store.quarantine(bytes) catch return .rejected(.persistence_unavailable);
-                    self.store_healthy = true;
-                    self.initializeEmptyStore();
-                    if (!self.store_healthy) return .rejected(.persistence_unavailable);
-                    self.clearMetaskRuntime(.needs_authentication, .none);
-                    return .acceptedResult();
+                    return self.installEmptyRecovery(store, bytes);
                 }
-                return self.installEmptyRecovery(store);
+                return self.installEmptyRecovery(store, null);
             };
             defer restored.deinit();
             if (restored.reconcileInterruptedTests()) {
@@ -743,16 +738,24 @@ pub const Runtime = struct {
             self.drainCredentialCleanup();
             return .acceptedResult();
         }
-        return self.installEmptyRecovery(store);
+        return self.installEmptyRecovery(store, null);
     }
 
     fn installEmptyRecovery(
         self: *Runtime,
         store: *registry_impl.FileStore,
+        retired_bytes: ?[]const u8,
     ) contract.CommandResult {
         var candidate = self.registry.resetCandidate() catch |err|
             return .rejected(mapRegistryError(err));
         defer candidate.deinit();
+        if (retired_bytes) |bytes| {
+            registry_impl.collectRetiredCredentialDeletions(&candidate, bytes) catch |err|
+                return .rejected(if (err == error.OutOfMemory) .local_resource_exhausted else .persistence_unavailable);
+            for (candidate.credentialDeletions()) |slot|
+                if (!ports.validCredentialSlot(slot)) return .rejected(.persistence_unavailable);
+            store.quarantine(bytes) catch return .rejected(.persistence_unavailable);
+        }
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
@@ -1076,11 +1079,8 @@ pub const Runtime = struct {
         defer self.allocator.free(bytes);
         var restored = registry_impl.decode(self.allocator, bytes) catch {
             if (registry_impl.isRetiredCanonical(self.allocator, bytes)) {
-                self.store.?.quarantine(bytes) catch {
+                if (!self.installEmptyRecovery(&self.store.?, bytes).accepted)
                     self.store_healthy = false;
-                    return;
-                };
-                self.initializeEmptyStore();
                 return;
             }
             self.store_healthy = false;
@@ -2245,6 +2245,78 @@ test "retired Models canonical is quarantined exactly before continuing with an 
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "retired Models credentials remain durably queued until deletion succeeds" {
+    const retired = "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[\"custom-provider-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"custom_providers\":[{\"id\":\"custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}";
+    for ([_]bool{ false, true }) |explicit_reset| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(root);
+        var vault: CleanupTestVault = .{ .fail_id = "custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+        {
+            if (!explicit_reset) try writeTestFile(&tmp.dir, registry_impl.store_file_name, retired);
+            var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+            try runtime.start(root, vault.port());
+            defer {
+                runtime.stop();
+                runtime.deinit();
+            }
+            if (explicit_reset) {
+                try tmp.dir.deleteFile(std.testing.io, registry_impl.store_file_name);
+                try writeTestFile(&tmp.dir, registry_impl.store_file_name, retired);
+                runtime.store_healthy = false;
+                try std.testing.expect(runtime.resetStore().accepted);
+            }
+            try std.testing.expect(runtime.store_healthy);
+            try std.testing.expectEqual(@as(usize, 2), vault.call_count);
+            try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
+            try std.testing.expect(runtime.view().default_selection == null);
+            const saved = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
+            defer std.testing.allocator.free(saved);
+            var decoded = try registry_impl.decode(std.testing.allocator, saved);
+            defer decoded.deinit();
+            try std.testing.expectEqual(@as(usize, 1), decoded.credentialDeletions().len);
+            try std.testing.expectEqualStrings("custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", decoded.credentialDeletions()[0]);
+        }
+        vault.fail_id = "";
+        var restarted = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try restarted.start(root, vault.port());
+        defer {
+            restarted.stop();
+            restarted.deinit();
+        }
+        try std.testing.expectEqual(@as(usize, 3), vault.call_count);
+        try std.testing.expectEqual(@as(usize, 0), restarted.registry.credentialDeletions().len);
+        try std.testing.expectEqual(@as(usize, 0), restarted.views().len);
+    }
+}
+
+test "retired Models with unverified cleanup identities preserves the original canonical" {
+    for ([_][]const u8{
+        "{\"schema\":2,\"pending_credential_deletions\":[],\"custom_providers\":[{\"id\":\"invalid-slot\"}]}",
+        "{\"schema\":2,\"custom_providers\":[]}",
+    }) |retired| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(root);
+        try writeTestFile(&tmp.dir, registry_impl.store_file_name, retired);
+        var vault: CleanupTestVault = .{ .fail_id = "" };
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(root, vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+        try std.testing.expect(!runtime.store_healthy);
+        try std.testing.expect(!runtime.resetStore().accepted);
+        try std.testing.expectEqual(@as(usize, 0), vault.call_count);
+        const saved = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
+        defer std.testing.allocator.free(saved);
+        try std.testing.expectEqualStrings(retired, saved);
+    }
 }
 
 test "Models bootstrap rejects damaged canonical shapes" {
