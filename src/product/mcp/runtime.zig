@@ -2000,6 +2000,35 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
         // Tokens now require real configuration apply; absence cannot pretend loaded.
         try std.testing.expectEqual(.restart_required, runtime.state.management.?.inspect().runtime_alignment);
+        const auth_ref = try std.testing.allocator.dupe(u8, current.servers[0].auth.oauth.?.grant.?.access_token_ref);
+        defer std.testing.allocator.free(auth_ref);
+        const revision = current.servers[0].auth.oauth.?.grant.?.token_revision;
+        const deletion_count = effects.deleted;
+        try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(current.generation, .{ .server_id = "oauth", .display_name = "Renamed", .negotiation = "compat_only", .timeout_ms = 2000, .url = "https://mcp.example.test/mcp", .client = if (std.mem.eql(u8, initial_status, "client_registration_required")) .dynamic_registration else .{ .pre_registered = .{ .client_id = "client" } } }));
+        const edited = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+        try std.testing.expectEqualStrings(auth_ref, edited.grant.?.access_token_ref);
+        try std.testing.expectEqual(revision, edited.grant.?.token_revision);
+        try std.testing.expectEqual(deletion_count, effects.deleted);
+        if (std.mem.eql(u8, initial_status, "client_registration_required")) try std.testing.expect(edited.registration.client_secret_ref != null);
+        const edited_generation = runtime.state.management.?.desiredRegistry().?.generation;
+        const replacement: configuration.UpdateOauthHttpConnectionInput = .{
+            .server_id = "oauth",
+            .display_name = "Replacement",
+            .negotiation = "automatic",
+            .timeout_ms = 2000,
+            .url = "https://other.example.test/mcp",
+            .client = .{ .pre_registered = .{ .client_id = "other-client" } },
+        };
+        effects.registry_effect = .failed;
+        try std.testing.expectEqual(.rejected, try runtime.updateOauthHttpConnection(edited_generation, replacement));
+        try std.testing.expectEqualStrings(auth_ref, runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.grant.?.access_token_ref);
+        try std.testing.expectEqual(deletion_count, effects.deleted);
+        effects.registry_effect = .committed;
+        try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(edited_generation, replacement));
+        const replaced = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+        try std.testing.expect(replaced.grant == null and replaced.consent == null and replaced.registration.client_secret_ref == null);
+        try std.testing.expectEqualStrings("consent_required", replaced.status);
+        try std.testing.expect(effects.deleted >= deletion_count + 2);
     }
 }
 

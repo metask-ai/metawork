@@ -1074,7 +1074,19 @@ pub const ManagementPort = struct {
             .kind = "streamable_http",
             .url = input.url,
         };
-        replacement.auth = oauthAuth(input.client);
+        // Editing presentation or transport policy does not revoke an unchanged
+        // OAuth destination/registration plan (including an issued DCR client).
+        const existing = base.servers[index];
+        const preserve_authorization = optionalTextEqual(existing.transport.url, input.url) and
+            oauthClientPlanMatches(existing.auth, input.client);
+        replacement.auth = if (preserve_authorization) existing.auth else oauthAuth(input.client);
+        var consent_fingerprint: [64]u8 = undefined;
+        if (preserve_authorization) {
+            if (replacement.auth.oauth.?.consent) |consent| {
+                consent_fingerprint = oauthConsentFingerprint(replacement, consent).?;
+                replacement.auth.oauth.?.consent.?.fingerprint = &consent_fingerprint;
+            }
+        }
         return self.prepareConnectionReplacement(
             expected_generation,
             base,
@@ -2563,6 +2575,17 @@ fn oauthDoesNotRequireLoading(server: ServerWire) bool {
     if (!std.mem.eql(u8, server.auth.kind, "oauth")) return false;
     const oauth = server.auth.oauth orelse return false;
     return !std.mem.eql(u8, oauth.status, "ready");
+}
+
+fn oauthClientPlanMatches(auth: AuthWire, plan: OauthClientPlan) bool {
+    if (!std.mem.eql(u8, auth.kind, "oauth")) return false;
+    const registration = (auth.oauth orelse return false).registration;
+    return switch (plan) {
+        .dynamic_registration => std.mem.eql(u8, registration.kind, "dynamic_registration"),
+        .pre_registered => |client| std.mem.eql(u8, registration.kind, "pre_registered") and
+            optionalTextEqual(registration.client_id, client.client_id) and
+            optionalTextEqual(registration.token_endpoint_auth_method, client.token_endpoint_auth_method),
+    };
 }
 
 fn findManifestEntry(
