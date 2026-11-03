@@ -3135,7 +3135,7 @@ export default function App() {
     const generation = bridgeGenerationRef.current;
     const diagnosticSecurityEpoch = snapshot.securityEpoch;
     const controller = stopFeedbackController.current;
-    if (controller.requesting(scope, taskId ?? null)) return;
+    if (controller.pending(scope, taskId ? activeTask : null)) return;
     const session = submissionSessions.current.get(`${generation}:${scope}`);
     if (!taskId && !session) return;
     if (taskId && cancelPendingTasks.current.has(taskId)) return;
@@ -4091,6 +4091,10 @@ export default function App() {
       ? entry.scope === composerDraftScope
       : entry.taskId === activeTask?.id,
   );
+  const stopRequestPending = stopFeedbackController.current.pending(
+    composerDraftScope,
+    newTaskDraftActive ? null : activeTask,
+  );
   const workspaceSelectionFeedback =
     statuses.entries[`workspace:selection:${composerDraftScope}`];
   const taskOperationFeedback = Object.values(statuses.entries).filter(
@@ -4138,13 +4142,14 @@ export default function App() {
         )}
       {currentStopFeedback &&
         !(
-          currentStopFeedback.phase === "requesting" &&
+          stopRequestPending &&
           currentStopFeedback.runId === activeTask?.currentRunId &&
           activeTask?.currentRunPhase
         ) && (
           <p className="projection-note task-stop-feedback" role="status">
             {t(
-              currentStopFeedback.phase === "requesting"
+              currentStopFeedback.phase === "requesting" ||
+                currentStopFeedback.phase === "awaiting"
                 ? "run.activity.requesting_stop"
                 : currentStopFeedback.phase === "failed"
                   ? "run.stop_failed"
@@ -4345,7 +4350,7 @@ export default function App() {
         }
         stopDisabled={
           bridgeUnavailable ||
-          currentStopFeedback?.phase === "requesting" ||
+          stopRequestPending ||
           Boolean(activeTask && activeTask.id in cancelPending) ||
           Boolean(
             activeTask?.currentRunPhase === "stopping" &&
@@ -5304,8 +5309,8 @@ export default function App() {
                 snapshotReceivedAt={workbench.snapshotReceivedAt}
                 synchronized={!bridgeUnavailable}
                 requestingStop={Boolean(
-                  currentStopFeedback?.phase === "requesting" &&
-                  currentStopFeedback.runId === activeTask?.currentRunId,
+                  stopRequestPending &&
+                  currentStopFeedback?.runId === activeTask?.currentRunId,
                 )}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}

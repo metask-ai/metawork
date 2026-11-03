@@ -23,6 +23,8 @@ const task = (runs, currentRunId = runs.at(-1)?.id) => ({
   currentRunPhase: "running",
   runs,
   compacts: [],
+  activeOperation: null,
+  inputSubmissions: [],
 });
 
 test("retiring a connection clears its stop latch before a new operation", () => {
@@ -73,9 +75,9 @@ test("stopping and every terminal retire uncertainty without claiming stop succe
 test("first submission handoff binds only a pre-stop submission, never a later Run", () => {
   const f = setup();
   const token = f.controller.begin("draft:1", null, ["before-stop"]);
-  assert.equal(f.controller.requesting("draft:1", null), true);
+  assert.equal(f.controller.pending("draft:1", null), true);
   f.controller.target(token, "t1");
-  assert.equal(f.controller.requesting("task:t1", "t1"), true);
+  assert.equal(f.controller.pending("task:t1", task([])), true);
   f.controller.settle(token, "unknown");
   f.controller.observe({
     tasks: [task([run("r2", "completed", "after-stop")])],
@@ -141,7 +143,7 @@ test("an exact scoped Run manifest settles stop uncertainty even when its body i
   }
 });
 
-test("security cleaning preserves stop identity and its original feedback token", () => {
+test("security cleaning preserves stop identity and awaiting admission for its exact target", () => {
   const f = setup();
   const source = task([run("r1")]);
   const token = f.controller.begin("task:t1", source, []);
@@ -149,7 +151,10 @@ test("security cleaning preserves stop identity and its original feedback token"
   f.controller.clearDiagnostics();
   assert.equal(f.entries()[0], token);
   assert.equal(token.diagnostic, undefined);
+  assert.equal(f.controller.pending("task:t1", source), true);
+  assert.equal(f.controller.pending("task:t1", task([run("r2")], "r2")), false);
   f.controller.settle(token, "unknown");
+  assert.equal(f.controller.pending("task:t1", source), false);
   f.controller.reset();
   f.controller.settle(token, "failed", "late diagnostic");
   assert.deepEqual(f.entries(), []);

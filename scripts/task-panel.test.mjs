@@ -6651,7 +6651,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
 });
 
-test("security refresh retains the in-flight stop until its original command replies", async (ctx) => {
+test("security refresh retains the in-flight stop and its accepted awaiting state", async (ctx) => {
   const f = await renderAppFixture(ctx, 1440, {
     phase: "running",
     terminal: null,
@@ -6674,6 +6674,13 @@ test("security refresh retains the in-flight stop until its original command rep
   fireEvent.click(stop);
   assert.equal(stops.length, 1);
   await act(async () => stops[0]());
+  await screen.findByText("Requesting stop…");
+  assert.ok(screen.queryByText("Stop result not yet confirmed") === null);
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.equal(stops.length, 1);
 });
 
@@ -8617,9 +8624,13 @@ for (const outcome of ["committed", "timeout"]) {
     await waitFor(() =>
       assert.ok(document.querySelector(".commandbar-alert") === null),
     );
-    assert.ok(screen.getByText("Stop result not yet confirmed"));
+    const notice = screen.getByText(
+      outcome === "committed"
+        ? "Requesting stop…"
+        : "Stop result not yet confirmed",
+    );
     assert.doesNotMatch(
-      document.querySelector(".task-stop-feedback").textContent,
+      notice.textContent,
       /succeeded|checked the current Host state/,
     );
     assert.equal(calls, 1);

@@ -43,11 +43,20 @@ export class TaskStopFeedbackController {
     return token;
   }
 
-  requesting(scope: string, taskId: string | null) {
+  pending(scope: string, task: TaskView | null) {
     return this.entries.some(
       (entry) =>
-        entry.phase === "requesting" &&
-        (taskId ? entry.taskId === taskId : entry.scope === scope),
+        (entry.phase === "requesting" || entry.phase === "awaiting") &&
+        (task ? entry.taskId === task.id : entry.scope === scope) &&
+        (entry.phase === "requesting" ||
+          !task ||
+          (!entry.runId &&
+            !entry.compactId &&
+            !task.currentRunPhase &&
+            task.activeOperation === null) ||
+          (entry.runId !== null && entry.runId === task.currentRunId) ||
+          (task.activeOperation?.kind === "compact" &&
+            entry.compactId === task.activeOperation.id)),
     );
   }
 
@@ -122,6 +131,7 @@ export class TaskStopFeedbackController {
     this.entries = [];
     this.changed();
   }
+
   clearDiagnostics() {
     let changed = false;
     for (const entry of this.entries) {
