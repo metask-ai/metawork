@@ -99,7 +99,7 @@ const { ApprovalModeMenu } = await vite.ssrLoadModule(
 const { SelectionMenu } = await vite.ssrLoadModule(
   "/src/components/ui/SelectionMenu.tsx",
 );
-const { useNewTaskDrafts } = await vite.ssrLoadModule(
+const { useNewTaskDrafts, useTaskDrafts } = await vite.ssrLoadModule(
   "/src/features/composer/useTaskDrafts.ts",
 );
 const { ComposerFooter } = await vite.ssrLoadModule(
@@ -1702,13 +1702,18 @@ function renderComposer(overrides = {}) {
   let latestDraft = initialDraft;
   let setScopeFromTest;
   function ComposerHarness() {
-    const [draft, setDraft] = useState(initialDraft);
+    const [localDraft, setDraft] = useState(initialDraft);
+    const owner = overrides.taskDraftId
+      ? useTaskDrafts(overrides.taskDraftId)
+      : null;
+    const draft = owner?.draft ?? localDraft;
     const [scope, setScope] = useState(overrides.draftScope ?? "task:3");
     setScopeFromTest = setScope;
     setDraftFromTest = setDraft;
     function commitDraft(value) {
       latestDraft = value;
-      setDraft(value);
+      if (owner) owner.commitDraft(overrides.taskDraftId, value);
+      else setDraft(value);
       externalOnDraftChange?.(value);
       return true;
     }
@@ -1767,7 +1772,8 @@ function renderComposer(overrides = {}) {
       draftScope: scope,
       inputHistory: overrides.inputHistory && {
         load: overrides.inputHistory.load,
-        currentDraft: () => latestDraft,
+        currentDraft: () =>
+          owner ? owner.currentDraft(overrides.taskDraftId) : latestDraft,
         commitDraft,
       },
       onDraftChange: commitDraft,
@@ -1834,6 +1840,19 @@ test("Composer history requires a completely empty text draft", async () => {
     { kind: "text", text: "\n" },
     { kind: "text", text: "", attachmentsReloadRequired: true },
     { kind: "multimodal", text: "", attachments: [] },
+    {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "image",
+          format: "png",
+          displayName: "preserve.png",
+          sizeBytes: "1536",
+        },
+      ],
+    },
   ]) {
     let reads = 0;
     const composer = renderComposer({
@@ -1857,6 +1876,19 @@ test("Composer history exits on editing and external draft commits before React 
   for (const external of [
     { kind: "text", text: "Reference\nB" },
     { kind: "multimodal", text: "B", attachments: [] },
+    {
+      kind: "multimodal",
+      text: "B",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "image",
+          format: "png",
+          displayName: "preserve.png",
+          sizeBytes: "1536",
+        },
+      ],
+    },
     { kind: "text", text: "B", attachmentsReloadRequired: true },
     { kind: "text", text: "B" },
   ]) {
@@ -1884,6 +1916,73 @@ test("Composer history exits on editing and external draft commits before React 
   fireEvent.change(composer.textarea, { target: { value: "B edited" } });
   assert.equal(fireEvent.keyDown(composer.textarea, { key: "ArrowUp" }), true);
   assert.equal(composer.textarea.value, "B edited");
+});
+
+test("Composer keeps Slash navigation ahead of history and resumes after dismissing its menu", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+    inputHistory: { load: async () => ["A", "/new"] },
+  });
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  await waitFor(() => assert.equal(composer.textarea.value, "/new"));
+  assert.equal(composer.textarea.getAttribute("aria-expanded"), "true");
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  fireEvent.keyDown(composer.textarea, { key: "ArrowDown" });
+  assert.equal(composer.textarea.value, "/new");
+  assert.equal(composer.submissions(), 0);
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  assert.equal(composer.textarea.value, "A");
+});
+
+test("Composer retains history while moving the caret, selecting or copying text", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    inputHistory: { load: async () => ["A", "B"] },
+  });
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  await waitFor(() => assert.equal(composer.textarea.value, "B"));
+  composer.textarea.setSelectionRange(0, 1);
+  fireEvent.select(composer.textarea);
+  fireEvent.copy(composer.textarea);
+  fireEvent.keyDown(composer.textarea, { key: "ArrowLeft" });
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  assert.equal(composer.textarea.value, "A");
+});
+
+test("Composer ignores a history response after unmount", async () => {
+  let resolve;
+  let writes = 0;
+  renderComposer({
+    draft: { kind: "text", text: "" },
+    inputHistory: {
+      load: () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    },
+    onDraftChange() {
+      writes++;
+    },
+  });
+  fireEvent.keyDown(screen.getByRole("combobox", { name: "" }), {
+    key: "ArrowUp",
+  });
+  const writesBeforeUnmount = writes;
+  cleanup();
+  await act(async () => resolve(["stale"]));
+  assert.equal(writes, writesBeforeUnmount);
+});
+
+test("Composer can start history from an uncached empty Task draft", async () => {
+  const composer = renderComposer({
+    taskDraftId: "uncached-history-draft",
+    inputHistory: { load: async () => ["previous input"] },
+  });
+  assert.equal(composer.textarea.value, "");
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  await waitFor(() => assert.equal(composer.textarea.value, "previous input"));
 });
 
 test("Composer protects modified arrows, IME, scope changes and pending history reads", async () => {

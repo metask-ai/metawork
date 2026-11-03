@@ -520,6 +520,9 @@ export function ComposerFooter({
     if (!browse) {
       if (!current || direction !== -1 || !canEnterInputHistory(current))
         return false;
+      // An uncached draft is decoded afresh on each owner read. Pin this empty
+      // object through the normal write path before awaiting history.
+      if (!inputHistory.commitDraft(current)) return false;
       const request = {
         scope: draftScope,
         draft: current,
