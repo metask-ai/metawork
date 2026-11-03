@@ -154,26 +154,47 @@ pub const CredentialStore = struct {
 
 pub const BuildError = std.mem.Allocator.Error || error{InvalidConfig};
 
+pub const HttpTokenUpdate = struct {
+    access_token: []const u8,
+    refresh_token: ?[]const u8 = null,
+};
+
+const HttpAuthSecrets = struct {
+    access_token: []const u8,
+    refresh_token: ?[]const u8 = null,
+    client_secret: ?[]const u8 = null,
+};
+
 const HttpAuthSnapshot = struct {
     allocator: std.mem.Allocator,
     references: std.atomic.Value(usize) = .init(1),
     consent_epoch: u64,
     token_revision: u64,
     access_token: []u8,
+    refresh_token: ?[]u8,
+    client_secret: ?[]u8,
+    next: ?*HttpAuthSnapshot = null,
 
     fn create(
         allocator: std.mem.Allocator,
         consent_epoch: u64,
         token_revision: u64,
-        access_token: []const u8,
+        secrets: HttpAuthSecrets,
     ) std.mem.Allocator.Error!*HttpAuthSnapshot {
         const self = try allocator.create(HttpAuthSnapshot);
         errdefer allocator.destroy(self);
+        const access = try allocator.dupe(u8, secrets.access_token);
+        errdefer secureFree(allocator, access);
+        const refresh = if (secrets.refresh_token) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (refresh) |value| secureFree(allocator, value);
+        const client = if (secrets.client_secret) |value| try allocator.dupe(u8, value) else null;
         self.* = .{
             .allocator = allocator,
             .consent_epoch = consent_epoch,
             .token_revision = token_revision,
-            .access_token = try allocator.dupe(u8, access_token),
+            .access_token = access,
+            .refresh_token = refresh,
+            .client_secret = client,
         };
         return self;
     }
@@ -189,9 +210,18 @@ const HttpAuthSnapshot = struct {
         if (previous != 1) return;
         std.crypto.secureZero(u8, self.access_token);
         self.allocator.free(self.access_token);
+        if (self.refresh_token) |secret| secureFree(self.allocator, secret);
+        if (self.client_secret) |secret| secureFree(self.allocator, secret);
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
+    }
+
+    fn acceptsResponse(self: *const HttpAuthSnapshot, bytes: []const u8) bool {
+        if (std.mem.indexOf(u8, bytes, self.access_token) != null) return false;
+        if (self.refresh_token) |secret| if (std.mem.indexOf(u8, bytes, secret) != null) return false;
+        if (self.client_secret) |secret| if (std.mem.indexOf(u8, bytes, secret) != null) return false;
+        return true;
     }
 };
 
@@ -304,22 +334,18 @@ const HttpAuthSlot = struct {
         server_id: []const u8,
         consent_epoch: u64,
         token_revision: u64,
-        access_token: []const u8,
+        secrets: HttpAuthSecrets,
     ) std.mem.Allocator.Error!*HttpAuthSlot {
         const self = try allocator.create(HttpAuthSlot);
         errdefer allocator.destroy(self);
         const owned_id = try allocator.dupe(u8, server_id);
         errdefer allocator.free(owned_id);
+        const snapshot = try HttpAuthSnapshot.create(allocator, consent_epoch, token_revision, secrets);
         self.* = .{
             .allocator = allocator,
             .io = io,
             .server_id = owned_id,
-            .current = try HttpAuthSnapshot.create(
-                allocator,
-                consent_epoch,
-                token_revision,
-                access_token,
-            ),
+            .current = snapshot,
         };
         return self;
     }
@@ -334,6 +360,7 @@ const HttpAuthSlot = struct {
         std.debug.assert(previous != 0);
         if (previous != 1) return;
         if (self.pending_failure) |*failure| failure.deinit();
+        std.debug.assert(self.current.next == null);
         self.current.release();
         self.allocator.free(self.server_id);
         const allocator = self.allocator;
@@ -345,7 +372,33 @@ const HttpAuthSlot = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.current.retain();
-        return .{ .snapshot = self.current };
+        self.retain();
+        return .{ .slot = self, .snapshot = self.current };
+    }
+
+    fn acceptsResponse(self: *HttpAuthSlot, bytes: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var snapshot: ?*HttpAuthSnapshot = self.current;
+        while (snapshot) |value| : (snapshot = value.next)
+            if (!value.acceptsResponse(bytes)) return false;
+        return true;
+    }
+
+    /// Each registered snapshot has one list reference; retired snapshots
+    /// survive only while actual request/inspection leases still use them.
+    fn pruneSnapshotLocked(self: *HttpAuthSlot, snapshot: *HttpAuthSnapshot) void {
+        if (snapshot == self.current or snapshot.references.load(.acquire) != 1) return;
+        var link: *?*HttpAuthSnapshot = &self.current.next;
+        while (link.*) |value| {
+            if (value == snapshot) {
+                link.* = value.next;
+                value.release();
+                return;
+            }
+            link = &value.next;
+        }
+        unreachable;
     }
 
     fn setFailureNotifier(
@@ -507,10 +560,11 @@ const HttpAuthSlot = struct {
         std.debug.assert(current.token_revision == expected_token_revision);
         std.debug.assert(replacement.consent_epoch == expected_consent_epoch);
         std.debug.assert(replacement.token_revision == expected_token_revision + 1);
+        replacement.next = current;
         self.current = replacement;
         self.rotation_reserved = false;
+        self.pruneSnapshotLocked(current);
         self.mutex.unlock(self.io);
-        current.release();
     }
 
     fn cancelReservedRotation(self: *HttpAuthSlot) void {
@@ -522,6 +576,7 @@ const HttpAuthSlot = struct {
 };
 
 const HttpAuthLease = struct {
+    slot: *HttpAuthSlot,
     snapshot: *HttpAuthSnapshot,
 
     fn token(self: *const HttpAuthLease) []const u8 {
@@ -529,7 +584,12 @@ const HttpAuthLease = struct {
     }
 
     fn deinit(self: *HttpAuthLease) void {
+        const slot = self.slot;
+        slot.mutex.lockUncancelable(slot.io);
         self.snapshot.release();
+        slot.pruneSnapshotLocked(self.snapshot);
+        slot.mutex.unlock(slot.io);
+        slot.release();
         self.* = undefined;
     }
 };
@@ -643,13 +703,13 @@ pub const HttpAuthorizations = struct {
         server_id: []const u8,
         expected_consent_epoch: u64,
         expected_token_revision: u64,
-        access_token: []const u8,
+        update: HttpTokenUpdate,
     ) std.mem.Allocator.Error!HttpAuthRotationOutcome {
         var pending = switch (try self.prepareRotationDetailed(
             server_id,
             expected_consent_epoch,
             expected_token_revision,
-            access_token,
+            update,
         )) {
             .prepared => |prepared| prepared,
             .server_not_loaded => return .server_not_loaded,
@@ -666,13 +726,13 @@ pub const HttpAuthorizations = struct {
         server_id: []const u8,
         expected_consent_epoch: u64,
         expected_token_revision: u64,
-        access_token: []const u8,
+        update: HttpTokenUpdate,
     ) std.mem.Allocator.Error!?PendingHttpAuthRotation {
         return switch (try self.prepareRotationDetailed(
             server_id,
             expected_consent_epoch,
             expected_token_revision,
-            access_token,
+            update,
         )) {
             .prepared => |prepared| prepared,
             .server_not_loaded,
@@ -687,9 +747,9 @@ pub const HttpAuthorizations = struct {
         server_id: []const u8,
         expected_consent_epoch: u64,
         expected_token_revision: u64,
-        access_token: []const u8,
+        update: HttpTokenUpdate,
     ) std.mem.Allocator.Error!HttpAuthRotationPreparation {
-        if (!mcp_configuration.validHttpHeaderCredential(access_token) or
+        if (!mcp_configuration.validHttpHeaderCredential(update.access_token) or
             expected_token_revision == std.math.maxInt(u64))
             return .token_revision_mismatch;
         const slot = for (self.slots) |candidate| {
@@ -698,11 +758,17 @@ pub const HttpAuthorizations = struct {
         slot.retain();
         var slot_owned = true;
         defer if (slot_owned) slot.release();
+        var previous = slot.lease();
+        defer previous.deinit();
         const replacement = try HttpAuthSnapshot.create(
             self.allocator,
             expected_consent_epoch,
             expected_token_revision + 1,
-            access_token,
+            .{
+                .access_token = update.access_token,
+                .refresh_token = update.refresh_token orelse previous.snapshot.refresh_token,
+                .client_secret = previous.snapshot.client_secret,
+            },
         );
         var replacement_owned = true;
         defer if (replacement_owned) replacement.release();
@@ -911,15 +977,7 @@ fn serverSecrets(
     server: mcp_configuration.ServerWire,
     preparation: *const mcp_configuration.Preparation,
 ) BuildError![]const []const u8 {
-    const oauth_extra: usize = if (server.auth.oauth) |oauth|
-        @as(usize, @intFromBool(oauth.registration.client_secret_ref != null)) +
-            @as(usize, @intFromBool(oauth.grant != null)) +
-            @as(usize, @intFromBool(oauth.grant != null and
-                oauth.grant.?.refresh_token_ref != null))
-    else
-        0;
-    const count = server.transport.environment.len +
-        server.transport.headers.len + oauth_extra;
+    const count = server.transport.environment.len + server.transport.headers.len;
     const values = try allocator.alloc([]const u8, count);
     var write: usize = 0;
     for (server.transport.environment) |entry| {
@@ -938,34 +996,6 @@ fn serverSecrets(
         if (!containsSecret(values[0..write], secret)) {
             values[write] = secret;
             write += 1;
-        }
-    }
-    if (server.auth.oauth) |oauth| {
-        if (oauth.registration.client_secret_ref) |locator| {
-            const secret = resolvedCredential(preparation, locator) orelse
-                return error.InvalidConfig;
-            if (!containsSecret(values[0..write], secret)) {
-                values[write] = secret;
-                write += 1;
-            }
-        }
-        if (oauth.grant) |grant| {
-            const access_token = resolvedCredential(
-                preparation,
-                grant.access_token_ref,
-            ) orelse return error.InvalidConfig;
-            if (!containsSecret(values[0..write], access_token)) {
-                values[write] = access_token;
-                write += 1;
-            }
-            if (grant.refresh_token_ref) |locator| {
-                const refresh_token = resolvedCredential(preparation, locator) orelse
-                    return error.InvalidConfig;
-                if (!containsSecret(values[0..write], refresh_token)) {
-                    values[write] = refresh_token;
-                    write += 1;
-                }
-            }
         }
     }
     return values[0..write];
@@ -1469,6 +1499,19 @@ const HttpContext = struct {
     authorization: ?*HttpAuthSlot = null,
     backend: agent.McpHttpBackend,
 
+    const Inspection = struct {
+        context: *HttpContext,
+        lease: ?*const HttpAuthLease,
+
+        fn check(raw: *anyopaque, bytes: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            for (self.context.secret_values) |secret|
+                if (std.mem.indexOf(u8, bytes, secret) != null) return false;
+            if (self.lease) |used| return used.slot.acceptsResponse(bytes);
+            return true;
+        }
+    };
+
     fn destroy(raw: *anyopaque) void {
         const backend: *agent.McpHttpBackend = @ptrCast(@alignCast(raw));
         const self: *HttpContext = @fieldParentPtr("backend", backend);
@@ -1558,6 +1601,11 @@ const HttpContext = struct {
         else
             null;
         defer if (authorization_lease) |*lease| lease.deinit();
+        var inspection: Inspection = .{
+            .context = self,
+            .lease = if (authorization_lease) |*lease| lease else null,
+        };
+        if (!Inspection.check(&inspection, request_value.body)) return error.InvalidResponse;
         const bearer = if (authorization_lease) |*lease| bearer: {
             const value = self.allocator.alloc(u8, "Bearer ".len + lease.token().len) catch
                 return error.Network;
@@ -1645,6 +1693,17 @@ const HttpContext = struct {
                     authorization.recordRuntimeAuthFailure(lease, value.scopes);
             };
         }
+        try self.deliverResponse(&response, status, sink);
+        if (!sink.inspect_fn(sink.context, .{ .context = &inspection, .check_fn = Inspection.check }))
+            return error.InvalidResponse;
+    }
+
+    fn deliverResponse(
+        _: *HttpContext,
+        response: *std.http.Client.Response,
+        status: u16,
+        sink: *const agent.McpHttpResponseSink,
+    ) FetchFailure!void {
         if (sink.begin_fn(sink.context, status) == .stop) {
             // Request callbacks preserve a complete 401/403 response for
             // AgentCore. Notifications have no response descriptor, so keep
@@ -1653,7 +1712,7 @@ const HttpContext = struct {
             if (status == 401 or status == 403) return error.Auth;
             return;
         }
-        iterator = response.head.iterateHeaders();
+        var iterator = response.head.iterateHeaders();
         while (iterator.next()) |header| if (sink.header_fn(
             sink.context,
             header.name,
@@ -1751,7 +1810,17 @@ fn createHttpOwner(
             server.id,
             grant.consent_epoch,
             grant.token_revision,
-            access_token,
+            .{
+                .access_token = access_token,
+                .refresh_token = if (grant.refresh_token_ref) |locator|
+                    resolvedCredential(preparation, locator) orelse return error.InvalidConfig
+                else
+                    null,
+                .client_secret = if (oauth.registration.client_secret_ref) |locator|
+                    resolvedCredential(preparation, locator) orelse return error.InvalidConfig
+                else
+                    null,
+            },
         );
     }
     context.backend = agent.McpHttpBackend.init(.{
@@ -1767,6 +1836,11 @@ fn secureEnvironmentDeinit(environment: *std.process.Environ.Map) void {
     for (environment.values()) |value|
         std.crypto.secureZero(u8, @constCast(value));
     environment.deinit();
+}
+
+fn secureFree(allocator: std.mem.Allocator, bytes: []u8) void {
+    std.crypto.secureZero(u8, bytes);
+    allocator.free(bytes);
 }
 
 test "STDIO receives only the required host process baseline" {
@@ -1819,6 +1893,44 @@ test "STDIO receives only the required host process baseline" {
     }
 }
 
+test "OAuth response inspection covers live revisions and retires the last old lease" {
+    const slot = try HttpAuthSlot.create(std.testing.allocator, std.testing.io, "server", 1, 1, .{ .access_token = "access-one", .refresh_token = "refresh-one", .client_secret = "client-secret" });
+    defer slot.release();
+    const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
+    slots[0] = slot;
+    slot.retain();
+    var authorizations: HttpAuthorizations = .{ .allocator = std.testing.allocator, .slots = slots };
+    defer authorizations.deinit();
+    var first = slot.lease();
+    defer first.deinit();
+    try std.testing.expectEqual(HttpAuthRotationOutcome.replaced, try authorizations.rotate("server", 1, 1, .{ .access_token = "access-two", .refresh_token = "refresh-two" }));
+    var second = slot.lease();
+    var second_owned = true;
+    defer if (second_owned) second.deinit();
+    try std.testing.expectEqual(HttpAuthRotationOutcome.replaced, try authorizations.rotate("server", 1, 2, .{ .access_token = "access-three", .refresh_token = "refresh-three" }));
+    for ([_][]const u8{ "access-one", "access-two", "access-three", "refresh-one", "refresh-two", "refresh-three", "client-secret" }) |secret|
+        try std.testing.expect(!slot.acceptsResponse(secret));
+    second.deinit();
+    second_owned = false;
+    try std.testing.expect(slot.acceptsResponse("access-two"));
+    try std.testing.expect(slot.acceptsResponse("refresh-two"));
+    try std.testing.expect(!slot.acceptsResponse("access-one"));
+    try std.testing.expect(slot.acceptsResponse("ordinary result"));
+}
+
+test "OAuth snapshot secret copies clean up every partial allocation" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const slot = try HttpAuthSlot.create(allocator, std.testing.io, "server", 1, 1, .{ .access_token = "access", .refresh_token = "refresh", .client_secret = "client" });
+            defer slot.release();
+            var lease = slot.lease();
+            defer lease.deinit();
+            try std.testing.expectEqualStrings("access", lease.token());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
     const slot = try HttpAuthSlot.create(
         std.testing.allocator,
@@ -1826,7 +1938,7 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
         "oauth-server",
         4,
         7,
-        "old-access-token",
+        .{ .access_token = "old-access-token" },
     );
     defer slot.release();
     const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
@@ -1844,7 +1956,7 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
         "oauth-server",
         4,
         7,
-        "new-access-token",
+        .{ .access_token = "new-access-token" },
     )).?;
     defer pending.deinit();
     pending.commit();
@@ -1854,11 +1966,11 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
     try std.testing.expectEqualStrings("new-access-token", next.token());
     try std.testing.expectEqual(
         HttpAuthRotationOutcome.consent_epoch_mismatch,
-        try authorizations.rotate("oauth-server", 5, 8, "wrong-epoch"),
+        try authorizations.rotate("oauth-server", 5, 8, .{ .access_token = "wrong-epoch" }),
     );
     try std.testing.expectEqual(
         HttpAuthRotationOutcome.token_revision_mismatch,
-        try authorizations.rotate("oauth-server", 4, 7, "stale-revision"),
+        try authorizations.rotate("oauth-server", 4, 7, .{ .access_token = "stale-revision" }),
     );
 }
 
@@ -1869,7 +1981,7 @@ test "OAuth HTTP authorization reservation is exclusive and abandonment is retry
         "oauth-server",
         4,
         7,
-        "old-access-token",
+        .{ .access_token = "old-access-token" },
     );
     defer slot.release();
     const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
@@ -1885,13 +1997,13 @@ test "OAuth HTTP authorization reservation is exclusive and abandonment is retry
         "oauth-server",
         4,
         7,
-        "first-token",
+        .{ .access_token = "first-token" },
     )).?;
     try std.testing.expect((try authorizations.prepareRotation(
         "oauth-server",
         4,
         7,
-        "second-token",
+        .{ .access_token = "second-token" },
     )) == null);
     first.deinit();
 
@@ -1899,7 +2011,7 @@ test "OAuth HTTP authorization reservation is exclusive and abandonment is retry
         "oauth-server",
         4,
         7,
-        "retry-token",
+        .{ .access_token = "retry-token" },
     )).?;
     defer retry.deinit();
     retry.commit();
@@ -1923,7 +2035,7 @@ test "OAuth HTTP authorization publishes the exact rejected snapshot fact" {
         "oauth-server",
         4,
         7,
-        "old-access-token",
+        .{ .access_token = "old-access-token" },
     );
     defer slot.release();
     const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
@@ -1944,7 +2056,7 @@ test "OAuth HTTP authorization publishes the exact rejected snapshot fact" {
     defer rejected.deinit();
     try std.testing.expectEqual(
         HttpAuthRotationOutcome.replaced,
-        try authorizations.rotate("oauth-server", 4, 7, "new-access-token"),
+        try authorizations.rotate("oauth-server", 4, 7, .{ .access_token = "new-access-token" }),
     );
     slot.recordRuntimeAuthFailure(&rejected, &.{ "files.write", "files.read" });
     try std.testing.expectEqual(@as(usize, 1), wake.calls);
@@ -1975,7 +2087,7 @@ test "OAuth HTTP authorization exact acknowledgement retains a newer failure" {
         "oauth-server",
         4,
         7,
-        "access-token",
+        .{ .access_token = "access-token" },
     );
     defer slot.release();
     const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
@@ -2096,6 +2208,112 @@ test "MCP platform closes stdio after a normal child exit" {
     connection_open = false;
 }
 
+test "MCP HTTP rejects rotated credential echoes before returning JSON or SSE to Core" {
+    const TestServer = struct {
+        listener: *std.Io.net.Server,
+        authorizations: *HttpAuthorizations,
+        echoed: []const u8,
+        sse: bool,
+        requests: usize = 0,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn serve(self: *@This()) !void {
+            const io = std.testing.io;
+            var stream = try self.listener.accept(io);
+            defer stream.close(io);
+            var read_buffer: [4096]u8 = undefined;
+            var write_buffer: [4096]u8 = undefined;
+            var reader = stream.reader(io, &read_buffer);
+            var writer = stream.writer(io, &write_buffer);
+            var http: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = try http.receiveHead();
+            var headers = request.iterateHeaders();
+            var authorized = false;
+            while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                authorized = std.mem.eql(u8, header.value, "Bearer access-one");
+            };
+            if (!authorized) return error.UnexpectedAuthorization;
+            self.requests += 1;
+            if (try self.authorizations.rotate("server", 1, 1, .{ .access_token = "access-two", .refresh_token = "refresh-two" }) != .replaced)
+                return error.UnexpectedRotation;
+            var body: [512]u8 = undefined;
+            const json = try std.fmt.bufPrint(&body, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{s}\"}}", .{self.echoed});
+            var frame: [600]u8 = undefined;
+            const payload = if (self.sse) try std.fmt.bufPrint(&frame, "data: {s}\n\n", .{json}) else json;
+            try request.respond(payload, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = if (self.sse) "text/event-stream" else "application/json" }} });
+        }
+    };
+    for ([_]bool{ false, true }) |sse| {
+        for ([_][]const u8{ "access-one", "access-two", "refresh-one", "refresh-two", "client-secret", "static-secret", "ordinary" }) |echoed| {
+            const allocator = std.testing.allocator;
+            const io = std.testing.io;
+            const slot = try HttpAuthSlot.create(allocator, io, "server", 1, 1, .{ .access_token = "access-one", .refresh_token = "refresh-one", .client_secret = "client-secret" });
+            defer slot.release();
+            const slots = try allocator.alloc(*HttpAuthSlot, 1);
+            slots[0] = slot;
+            slot.retain();
+            var authorizations: HttpAuthorizations = .{ .allocator = allocator, .slots = slots };
+            defer authorizations.deinit();
+            var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .kernel_backlog = 1 });
+            defer listener.deinit(io);
+            const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/mcp", .{listener.socket.address.getPort()});
+            defer allocator.free(url);
+            const secret = try allocator.dupe(u8, "static-secret");
+            defer secureFree(allocator, secret);
+            var secrets = [_][]u8{secret};
+            var context: HttpContext = .{ .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &secrets, .authorization = slot, .backend = undefined };
+            defer context.arena.deinit();
+            context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = allocator, .endpoint = context.endpoint() });
+            defer context.backend.deinit() catch unreachable;
+            const transport = context.backend.transport();
+            if (std.mem.eql(u8, echoed, "ordinary")) {
+                for ([_][]const u8{ "access-one", "refresh-one", "client-secret", "static-secret" }) |secret_value| {
+                    const denied = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 100)) {
+                        .connection => |value| value,
+                        else => return error.TestUnexpectedResult,
+                    };
+                    defer transport.close_fn(denied);
+                    var body: [256]u8 = undefined;
+                    const request = try std.fmt.bufPrint(&body, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":\"{s}\"}}", .{secret_value});
+                    // No server is accepting yet: a missing outbound guard
+                    // would enter the network path and time out instead.
+                    switch (transport.request_fn(denied, allocator, request, 100, .{})) {
+                        .failure => |failure| try std.testing.expectEqual(@as(agent.McpTransportFailure, .fatal), failure),
+                        .response => |response| {
+                            allocator.free(response.body);
+                            return error.TestUnexpectedResult;
+                        },
+                    }
+                }
+            }
+            const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 5000)) {
+                .connection => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            defer transport.close_fn(connection);
+            var server: TestServer = .{ .listener = &listener, .authorizations = &authorizations, .echoed = echoed, .sse = sse };
+            const thread = try std.Thread.spawn(.{}, TestServer.run, .{&server});
+            const outcome = transport.request_fn(connection, allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 5000, .{});
+            thread.join();
+            try std.testing.expectEqual(@as(?anyerror, null), server.failure);
+            try std.testing.expectEqual(@as(usize, 1), server.requests);
+            if (outcome == .response) {
+                defer allocator.free(outcome.response.body);
+                try std.testing.expectEqualStrings("ordinary", echoed);
+            } else {
+                try std.testing.expect(!std.mem.eql(u8, echoed, "ordinary"));
+                try std.testing.expectEqual(@as(agent.McpTransportFailure, .fatal), outcome.failure);
+            }
+        }
+    }
+}
+
 test "MCP platform returns a loopback SSE response before the stream closes" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
@@ -2173,7 +2391,7 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
         "remote",
         1,
         1,
-        "runtime-access-token",
+        .{ .access_token = "runtime-access-token" },
     );
     defer authorization.release();
     var context: HttpContext = .{
@@ -2670,7 +2888,7 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
         "remote",
         3,
         8,
-        "runtime-access-token",
+        .{ .access_token = "runtime-access-token" },
     );
     defer authorization.release();
     var context: HttpContext = .{

@@ -242,6 +242,8 @@ pub const Coordinator = struct {
     }
 
     pub fn reconcileTimer(self: *Coordinator) void {
+        if (self.stopping) return;
+        _ = self.drainRuntimeAuthFailures();
         self.armEarliest();
     }
 
@@ -392,7 +394,10 @@ pub const Coordinator = struct {
             job.binding.server_id,
             job.binding.consent_epoch,
             job.binding.token_revision,
-            tokens.access_token.view(),
+            .{
+                .access_token = tokens.access_token.view(),
+                .refresh_token = if (tokens.refresh_token) |*secret| secret.view() else null,
+            },
         )) orelse {
             self.recover(job.binding.operation_id);
             return;
@@ -624,10 +629,11 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     }, .{ .preparation = preparation.take(), .activation = null, .activation_failed = false, .management = management, .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } }, .host_capabilities = .{}, .committed = true });
     defer runtime.deinit();
     fixture.runtime = &runtime;
-    // These capabilities must never be touched: Product rejects before an
-    // external effect, because this fixture has no live activation.
+    // Product rejects credential effects before launch without activation.
+    // Reconciliation still observes the real, empty authorization mapping.
     var credential_store: mcp_platform.CredentialStore = undefined;
-    var authorizations: mcp_platform.HttpAuthorizations = undefined;
+    var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = allocator };
+    defer authorizations.deinit();
     var coordinator = Coordinator.init(allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credential_store, &authorizations, .{ .context = &fixture, .now_unix_ms_fn = Fixture.now, .arm_fn = Fixture.arm, .cancel_fn = Fixture.cancelTimer, .notify_fn = Fixture.notify });
     coordinator.reconcileTimer();
     try std.testing.expectEqual(@as(?u64, 32_500), fixture.armed);

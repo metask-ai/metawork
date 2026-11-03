@@ -140,6 +140,7 @@ pub const McpAuthorizedEndpoint = mcp_http.AuthorizedEndpoint;
 pub const McpHttpRequest = mcp_http.Request;
 pub const McpHttpHeader = mcp_http.Header;
 pub const McpHttpResponseSink = mcp_http.ResponseSink;
+pub const McpHttpResponseInspector = mcp_http.ResponseInspector;
 pub const McpHttpSinkFlow = mcp_http.SinkFlow;
 pub const McpHttpFeedOutcome = mcp_http.FeedOutcome;
 pub const McpHttpPerformOutcome = mcp_http.PerformOutcome;

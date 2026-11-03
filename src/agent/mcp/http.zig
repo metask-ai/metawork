@@ -36,6 +36,13 @@ pub const FeedOutcome = struct {
     flow: SinkFlow,
 };
 
+/// Callback-scoped check capability. The effect retains all credential
+/// ownership; Backend only lends the completed envelope back for inspection.
+pub const ResponseInspector = struct {
+    context: *anyopaque,
+    check_fn: *const fn (*anyopaque, []const u8) bool,
+};
+
 /// Callback-scoped response consumer owned by Backend. Endpoint
 /// implementations may invoke it only during `perform_fn`. Header and byte
 /// slices are borrowed for the duration of each callback. `feed_fn` reports
@@ -47,6 +54,7 @@ pub const ResponseSink = struct {
     end_headers_fn: *const fn (*anyopaque) SinkFlow,
     feed_fn: *const fn (*anyopaque, []const u8) FeedOutcome,
     finish_fn: *const fn (*anyopaque) SinkFlow,
+    inspect_fn: *const fn (*anyopaque, ResponseInspector) bool,
 };
 
 pub const Request = struct {
@@ -414,6 +422,7 @@ const ResponseCollector = struct {
             .end_headers_fn = endHeaders,
             .feed_fn = feed,
             .finish_fn = finish,
+            .inspect_fn = inspect,
         };
     }
 
@@ -596,6 +605,16 @@ const ResponseCollector = struct {
         }
         self.complete = true;
         return .stop;
+    }
+
+    fn inspect(raw: *anyopaque, inspector: ResponseInspector) bool {
+        const self: *ResponseCollector = @ptrCast(@alignCast(raw));
+        // Existing failures and incomplete messages are never delivered by
+        // performRequest. Preserve their original transport classification.
+        if (self.failure != null or !self.complete or self.kind != .request) return true;
+        if (inspector.check_fn(inspector.context, self.output[0..self.output_len])) return true;
+        _ = self.fail(.fatal);
+        return false;
     }
 
     fn fail(self: *ResponseCollector, failure: PortFailure) SinkFlow {
@@ -1366,6 +1385,29 @@ test "HTTP SSE skips notifications in one POST and returns the complete matching
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":42}}", response.body);
     try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+}
+
+test "HTTP inspection sees the complete envelope across SSE chunks" {
+    const Probe = struct {
+        fn check(raw: *anyopaque, bytes: []const u8) bool {
+            const called: *bool = @ptrCast(@alignCast(raw));
+            called.* = true;
+            return std.mem.indexOf(u8, bytes, "credential-leak") == null;
+        }
+    };
+    var collector = try ResponseCollector.init(std.testing.allocator, .request, 1024, 128);
+    defer collector.deinit();
+    collector.request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}";
+    const sink = collector.sink();
+    _ = sink.begin_fn(sink.context, 200);
+    _ = sink.header_fn(sink.context, "Content-Type", "text/event-stream");
+    _ = sink.end_headers_fn(sink.context);
+    try std.testing.expect(sink.feed_fn(sink.context, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"credential-").flow == .continue_reading);
+    try std.testing.expect(sink.feed_fn(sink.context, "leak\"}\n\n").flow == .stop);
+    var called = false;
+    try std.testing.expect(!sink.inspect_fn(sink.context, .{ .context = &called, .check_fn = Probe.check }));
+    try std.testing.expect(called);
+    try std.testing.expectEqual(@as(?PortFailure, .fatal), collector.failure);
 }
 
 test "HTTP SSE accepts more than 128 notifications without replaying POST" {

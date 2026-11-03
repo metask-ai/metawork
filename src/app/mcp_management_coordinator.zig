@@ -854,6 +854,13 @@ pub const Coordinator = struct {
             &preparation,
             self.host_environment,
         ) catch return .unavailable;
+        // Bind before Core can open any candidate connection. A rejection
+        // observed during apply remains pending until these slots are handed
+        // over and the OAuth coordinator reconciles the new active mapping.
+        runtime_build.authorizations.setRuntimeAuthFailureNotifier(.{
+            .context = self.host.context,
+            .notify_fn = self.host.notify_fn,
+        });
         var build_owned = true;
         defer if (build_owned) runtime_build.deinit();
         preparation.releaseCredentials();
