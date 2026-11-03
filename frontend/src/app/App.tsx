@@ -39,6 +39,7 @@ import {
   attentionStatus,
   beginFeedback,
   createFeedbackState,
+  clearSecurityFeedback,
   dismissFeedback,
   observeFeedback,
   quietStatus,
@@ -489,9 +490,9 @@ export default function App() {
   const pendingTaskDraftRetention = useRef(new Set<string>());
   const taskPendingScopes = useRef(new PendingScopes());
   const cancelPendingTasks = useRef(new PendingScopes());
-  const accountBusyRef = useRef(false);
+  const accountBusyRef = useRef<object | null>(null);
   const executionBusyRef = useRef(false);
-  const accountCancelBusyRef = useRef(false);
+  const accountCancelBusyRef = useRef<object | null>(null);
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
   const connectionRetryRef = useRef<{
@@ -676,12 +677,24 @@ export default function App() {
   function settleOperationFeedback(
     token: FeedbackToken,
     status: ShellStatus | null,
+    diagnosticSecurityEpoch?: string,
   ) {
     updateFeedbackState((current) =>
       settleFeedback(
         current,
         token,
-        status ? { ...status, local: true } : null,
+        status
+          ? {
+              ...status,
+              local: true,
+              diagnostic:
+                diagnosticSecurityEpoch &&
+                diagnosticSecurityEpoch ===
+                  latestSnapshotRef.current?.securityEpoch
+                  ? status.diagnostic
+                  : undefined,
+            }
+          : null,
         Boolean(status && localFeedbackApplicable(token.key, status.audience)),
       ),
     );
@@ -769,19 +782,8 @@ export default function App() {
     );
     cancelPendingTasks.current.clear();
     setCancelPending({});
-    accountFeedbackRequest.current = {
-      serial: accountFeedbackRequest.current.serial + 1,
-      awaitingSync: false,
-      unknown: null,
-      observed: false,
-      attemptId: null,
-      lastObservation: null,
-    };
+    resetAccountFeedback();
     updateFeedbackState(resetFeedback);
-    accountBusyRef.current = false;
-    accountCancelBusyRef.current = false;
-    setAccountBusy(false);
-    setAccountCancelBusy(false);
     executionBusyRef.current = false;
     setExecutionBusy(false);
     sourceMutationPending.current = false;
@@ -790,15 +792,36 @@ export default function App() {
     skillRefreshPending.current.clear();
     setSkillRefreshRequests({});
   }
+  function resetAccountFeedback() {
+    accountFeedbackRequest.current = {
+      serial: accountFeedbackRequest.current.serial + 1,
+      awaitingSync: false,
+      unknown: null,
+      observed: false,
+      attemptId: null,
+      lastObservation: null,
+    };
+    accountBusyRef.current = null;
+    accountCancelBusyRef.current = null;
+    setAccountBusy(false);
+    setAccountCancelBusy(false);
+  }
+  function invalidateFeedbackSecurity() {
+    resetAccountFeedback();
+    stopFeedbackController.current.clearDiagnostics();
+    updateFeedbackState(clearSecurityFeedback);
+  }
   const snapshot = workbench.snapshot;
+  const snapshotLoaded = workbench.snapshotReceivedAt !== null;
   useEffect(() => {
     stopFeedbackController.current.observe(snapshot);
   }, [snapshot]);
   const deleteTarget =
     snapshot.taskIndex.find((task) => task.id === deleteTargetId) ?? null;
   useEffect(() => {
-    if (deleteTargetId && !deleteTarget) setDeleteTargetId(null);
-  }, [deleteTargetId, deleteTarget]);
+    if (snapshotLoaded && deleteTargetId && !deleteTarget)
+      setDeleteTargetId(null);
+  }, [snapshotLoaded, deleteTargetId, deleteTarget]);
   const noticeTask = snapshot.taskIndex.find(
     (task) => task.id === archiveNotice?.taskId,
   );
@@ -1349,6 +1372,7 @@ export default function App() {
           !key.endsWith(`:${composerDraftScope}`);
         const audience = entry?.audience;
         const removedTask =
+          snapshotLoaded &&
           entry?.local &&
           audience?.scope === "task" &&
           !snapshot.taskIndex.some((task) => task.id === audience.taskId);
@@ -1359,7 +1383,7 @@ export default function App() {
       }
       return changed ? { ...current, entries } : current;
     });
-  }, [composerDraftScope, snapshot.taskIndex]);
+  }, [composerDraftScope, snapshot.taskIndex, snapshotLoaded]);
   feedbackContext.current = {
     taskId: newTaskDraftActive ? null : (activeTask?.id ?? null),
     scope: composerDraftScope,
@@ -1494,15 +1518,16 @@ export default function App() {
   useEffect(() => {
     if (
       renameEditor &&
-      (!renameTarget ||
-        renameTarget.archived ||
-        renameTarget.historyReadOnly ||
-        renameTarget.deletionStatus === "deleting" ||
-        settingsOpen ||
-        route !== "workbench")
+      (settingsOpen ||
+        route !== "workbench" ||
+        (snapshotLoaded &&
+          (!renameTarget ||
+            renameTarget.archived ||
+            renameTarget.historyReadOnly ||
+            renameTarget.deletionStatus === "deleting")))
     )
       setRenameEditor(null);
-  }, [renameEditor, renameTarget, settingsOpen, route]);
+  }, [renameEditor, renameTarget, settingsOpen, route, snapshotLoaded]);
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
     return current
@@ -1980,7 +2005,7 @@ export default function App() {
       },
       onSecurityInvalidated: (securityEpoch, generation) => {
         if (cancelled) return;
-        resetFeedbackContext();
+        invalidateFeedbackSecurity();
         latestSnapshotRef.current = null;
         setHistoryRequests({});
         taskReadingMemory.reading.clear();
@@ -1988,8 +2013,6 @@ export default function App() {
         taskReadingMemory.toolDisclosure.clear();
         filePreviewTabs.clear();
         clearFileChanges();
-        approvalRequestsRef.current.reset(generation);
-        setApprovalRequests({});
         dispatchWorkbench({
           type: "security.invalidated",
           securityEpoch,
@@ -2226,8 +2249,8 @@ export default function App() {
     });
     return true;
   }
-  function endTaskPendingOperation(scope: string, epoch: number) {
-    if (epoch !== feedbackRef.current.epoch) return;
+  function endTaskPendingOperation(scope: string, generation: string) {
+    if (generation !== bridgeGenerationRef.current) return;
     taskPendingScopes.current.end(scope);
     setTaskPending((current) => {
       if (!(scope in current)) return current;
@@ -2295,11 +2318,12 @@ export default function App() {
       (cancelling ? accountCancelBusyRef.current : accountBusyRef.current)
     )
       return false;
+    const pending = {};
     if (cancelling) {
-      accountCancelBusyRef.current = true;
+      accountCancelBusyRef.current = pending;
       setAccountCancelBusy(true);
     } else {
-      accountBusyRef.current = true;
+      accountBusyRef.current = pending;
       setAccountBusy(true);
     }
     const request = ++accountFeedbackRequest.current.serial;
@@ -2384,12 +2408,15 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
       return false;
     } finally {
-      if (epoch === feedbackRef.current.epoch) {
+      if (
+        (cancelling ? accountCancelBusyRef.current : accountBusyRef.current) ===
+        pending
+      ) {
         if (cancelling) {
-          accountCancelBusyRef.current = false;
+          accountCancelBusyRef.current = null;
           setAccountCancelBusy(false);
         } else {
-          accountBusyRef.current = false;
+          accountBusyRef.current = null;
           setAccountBusy(false);
         }
       }
@@ -2397,7 +2424,8 @@ export default function App() {
   }
   async function openAccountRecharge() {
     if (bridgeUnavailable || accountBusyRef.current) return;
-    accountBusyRef.current = true;
+    const pending = {};
+    accountBusyRef.current = pending;
     setAccountBusy(true);
     const started = beginFeedback(
       feedbackRef.current,
@@ -2423,8 +2451,8 @@ export default function App() {
     } catch {
       finish(true);
     } finally {
-      if (started.token.epoch === feedbackRef.current.epoch) {
-        accountBusyRef.current = false;
+      if (accountBusyRef.current === pending) {
+        accountBusyRef.current = null;
         setAccountBusy(false);
       }
     }
@@ -2438,17 +2466,18 @@ export default function App() {
     if (bridgeUnavailable || executionBusyRef.current) return false;
     executionBusyRef.current = true;
     setExecutionBusy(true);
-    const epoch = feedbackRef.current.epoch;
+    const generation = bridgeGenerationRef.current;
     try {
       const result = await invoke();
-      if (epoch !== feedbackRef.current.epoch) return false;
+      if (generation !== bridgeGenerationRef.current) return false;
       await refreshCommittedView();
-      return epoch === feedbackRef.current.epoch && result.accepted;
+      return generation === bridgeGenerationRef.current && result.accepted;
     } catch {
-      if (epoch === feedbackRef.current.epoch) await refreshCommittedView();
+      if (generation === bridgeGenerationRef.current)
+        await refreshCommittedView();
       return false;
     } finally {
-      if (epoch === feedbackRef.current.epoch) {
+      if (generation === bridgeGenerationRef.current) {
         executionBusyRef.current = false;
         setExecutionBusy(false);
       }
@@ -2559,6 +2588,7 @@ export default function App() {
       (option) => option.selectionId === selectionId,
     );
     if (!task || !option || bridgeUnavailable) return;
+    const generation = bridgeGenerationRef.current;
     const scope = `task:${task.id}`;
     if (!beginTaskPendingOperation(scope, "model")) return;
     const feedbackToken = beginOperationFeedback(`task-model:${task.id}`, {
@@ -2601,9 +2631,10 @@ export default function App() {
             values: { operation: t("operation.execution") },
           },
         ),
+        snapshot.securityEpoch,
       );
     } finally {
-      endTaskPendingOperation(scope, feedbackToken.epoch);
+      endTaskPendingOperation(scope, generation);
     }
   }
   async function cancelAccountOperation() {
@@ -2672,6 +2703,7 @@ export default function App() {
             diagnostic: errorText(error),
           },
         ),
+        snapshot.securityEpoch,
       );
       window.requestAnimationFrame(() => composer.current?.focus());
       return null;
@@ -2776,7 +2808,6 @@ export default function App() {
     if (!input) return;
     const scope = composerDraftScope;
     const generation = bridgeGenerationRef.current;
-    const feedbackEpoch = feedbackRef.current.epoch;
     const operationId = newComposerOperationId();
     const draftId = newTaskDraftId;
     const taskId = !newTaskDraftActive ? (activeTask?.id ?? null) : null;
@@ -2786,9 +2817,7 @@ export default function App() {
     if (!session) {
       session = new TaskSubmissionSession({
         taskId,
-        current: () =>
-          bridgeGenerationRef.current === generation &&
-          feedbackRef.current.epoch === feedbackEpoch,
+        current: () => bridgeGenerationRef.current === generation,
         send: (id, target, value) => client.sendInput(id, target, value),
         stop: (target) => client.stopTask(target),
         create: () =>
@@ -2877,11 +2906,7 @@ export default function App() {
         );
       },
     );
-    if (
-      bridgeGenerationRef.current !== generation ||
-      feedbackRef.current.epoch !== feedbackEpoch
-    )
-      return;
+    if (bridgeGenerationRef.current !== generation) return;
     const state =
       result.kind === "accepted"
         ? "accepted"
@@ -3108,7 +3133,7 @@ export default function App() {
     const taskId = !newTaskDraftActive ? activeTask?.id : undefined;
     const scope = composerDraftScope;
     const generation = bridgeGenerationRef.current;
-    const feedbackEpoch = feedbackRef.current.epoch;
+    const diagnosticSecurityEpoch = snapshot.securityEpoch;
     const controller = stopFeedbackController.current;
     if (controller.requesting(scope, taskId ?? null)) return;
     const session = submissionSessions.current.get(`${generation}:${scope}`);
@@ -3131,9 +3156,7 @@ export default function App() {
         )
         .map((entry) => entry.operationId),
     );
-    const current = () =>
-      bridgeGenerationRef.current === generation &&
-      feedbackRef.current.epoch === feedbackEpoch;
+    const current = () => bridgeGenerationRef.current === generation;
     const target = (id: string) => {
       if (current()) controller.target(token, id);
     };
@@ -3147,7 +3170,9 @@ export default function App() {
         controller.settle(
           token,
           error instanceof BridgeCommandTimeoutError ? "unknown" : "failed",
-          errorText(error),
+          diagnosticSecurityEpoch === latestSnapshotRef.current?.securityEpoch
+            ? errorText(error)
+            : undefined,
         );
         await refreshSnapshot().catch(() => undefined);
         return;
@@ -3173,6 +3198,7 @@ export default function App() {
     )
       return;
     const taskId = activeTask.id;
+    const generation = bridgeGenerationRef.current;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "compact")) return;
     const feedbackToken = beginOperationFeedback(`compact:${taskId}`, {
@@ -3205,6 +3231,7 @@ export default function App() {
                 diagnostic: errorText(error),
               },
             ),
+            snapshot.securityEpoch,
           );
           await refreshCommittedView();
           return;
@@ -3217,13 +3244,14 @@ export default function App() {
             { scope: "task", taskId },
             { diagnostic: errorText(error) },
           ),
+          snapshot.securityEpoch,
         );
         return;
       }
       settleOperationFeedback(feedbackToken, null);
       await refreshCommittedView();
     } finally {
-      endTaskPendingOperation(scope, feedbackToken.epoch);
+      endTaskPendingOperation(scope, generation);
     }
   }
   function composerDraftFromRunInput(
@@ -3259,7 +3287,7 @@ export default function App() {
   }
   async function refreshComposerSkillCatalog() {
     if (bridgeUnavailable || !composerWorkspace || !composerWorkspaceId) return;
-    const key = `${feedbackRef.current.epoch}:${composerWorkspaceId}:${composerWorkspace.epoch}`;
+    const key = `${bridgeGenerationRef.current}:${composerWorkspaceId}:${composerWorkspace.epoch}`;
     if (composerCatalogRefreshPending.current.has(key)) return;
     composerCatalogRefreshPending.current.add(key);
     const audience: StatusAudience = {
@@ -3291,13 +3319,14 @@ export default function App() {
         attentionStatus("slash.catalog_refresh_failed", audience, {
           diagnostic: errorText(error),
         }),
+        snapshot.securityEpoch,
       );
     } finally {
       composerCatalogRefreshPending.current.delete(key);
     }
   }
   async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {
-    const epoch = feedbackRef.current.epoch;
+    const generation = bridgeGenerationRef.current;
     const key = skillRefreshKey(target);
     if (skillRefreshPending.current.has(key) || bridgeUnavailable) return;
     skillRefreshPending.current.add(key);
@@ -3320,7 +3349,7 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
       failure = t("skills.catalog_refresh_failed");
     } finally {
-      if (epoch === feedbackRef.current.epoch) {
+      if (generation === bridgeGenerationRef.current) {
         skillRefreshPending.current.delete(key);
         setSkillRefreshRequests((requests) => ({
           ...requests,
@@ -3339,21 +3368,21 @@ export default function App() {
     sourceMutationPending.current = true;
     setSourceMutationBusy(true);
     setSourceMutationError(null);
-    const epoch = feedbackRef.current.epoch;
+    const generation = bridgeGenerationRef.current;
     try {
       const result = await mutation();
-      if (epoch !== feedbackRef.current.epoch) return;
+      if (generation !== bridgeGenerationRef.current) return;
       if (!result.applied)
         setSourceMutationError(t(`skills.sources.failure.${result.reason}`));
       // Failed commands can also change health and recovery capabilities.
       await refreshCommittedView();
     } catch {
-      if (epoch !== feedbackRef.current.epoch) return;
+      if (generation !== bridgeGenerationRef.current) return;
       await refreshSnapshot().catch(() => undefined);
-      if (epoch === feedbackRef.current.epoch)
+      if (generation === bridgeGenerationRef.current)
         setSourceMutationError(t("skills.sources.uncertain"));
     } finally {
-      if (epoch === feedbackRef.current.epoch) {
+      if (generation === bridgeGenerationRef.current) {
         sourceMutationPending.current = false;
         setSourceMutationBusy(false);
       }
@@ -3493,7 +3522,7 @@ export default function App() {
     const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "rename")) return;
-    const feedbackEpoch = feedbackRef.current.epoch;
+    const generation = bridgeGenerationRef.current;
     try {
       try {
         await client.renameTask(taskId, editor.draft.trim());
@@ -3523,7 +3552,7 @@ export default function App() {
       setRenameEditor((current) => (current === editor ? null : current));
       await refreshCommittedView();
     } finally {
-      endTaskPendingOperation(scope, feedbackEpoch);
+      endTaskPendingOperation(scope, generation);
     }
   }
   function publishArchiveResult(taskId: string, archived: boolean) {
@@ -3554,13 +3583,14 @@ export default function App() {
     )
       return;
     const taskId = task.id;
+    const generation = bridgeGenerationRef.current;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "archive")) return;
     const feedbackToken = beginOperationFeedback(`task-archive:${taskId}`, {
       scope: "task",
       taskId,
     });
-    const current = () => feedbackToken.epoch === feedbackRef.current.epoch;
+    const current = () => generation === bridgeGenerationRef.current;
     setTaskArchiveErrors((current) => ({ ...current, [taskId]: "" }));
     try {
       try {
@@ -3594,6 +3624,7 @@ export default function App() {
               { scope: "task", taskId },
               { diagnostic: errorText(error) },
             ),
+            snapshot.securityEpoch,
           );
           return;
         }
@@ -3616,6 +3647,7 @@ export default function App() {
             { scope: "task", taskId },
             { diagnostic: errorText(error) },
           ),
+          snapshot.securityEpoch,
         );
         return;
       }
@@ -3624,7 +3656,7 @@ export default function App() {
       publishArchiveResult(taskId, archived);
       settleOperationFeedback(feedbackToken, null);
     } finally {
-      endTaskPendingOperation(scope, feedbackToken.epoch);
+      endTaskPendingOperation(scope, generation);
     }
   }
   async function removeWorkspace(
@@ -3683,7 +3715,6 @@ export default function App() {
     const generation = bridgeGenerationRef.current;
     const current = () =>
       generation === bridgeGenerationRef.current &&
-      feedbackToken.epoch === feedbackRef.current.epoch &&
       dialogRevision === deleteDialogRevision.current;
     setDeleteError(null);
     try {
@@ -3699,6 +3730,7 @@ export default function App() {
               { scope: "task", taskId },
               { diagnostic: errorText(error) },
             ),
+            snapshot.securityEpoch,
           );
           return;
         }
@@ -3711,6 +3743,7 @@ export default function App() {
             { scope: "task", taskId },
             { diagnostic: errorText(error) },
           ),
+          snapshot.securityEpoch,
         );
         return;
       }
@@ -3718,7 +3751,7 @@ export default function App() {
       settleOperationFeedback(feedbackToken, null);
       await refreshCommittedView();
     } finally {
-      endTaskPendingOperation(scope, feedbackToken.epoch);
+      endTaskPendingOperation(scope, generation);
     }
   }
   function selectSearchResult(result: SearchResult) {

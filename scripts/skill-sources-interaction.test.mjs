@@ -296,21 +296,20 @@ test("committed source settings with a failed read report only the connection pr
   assert.equal(writes.length, 1);
 });
 
-test("a source reply from before a security reset cannot overwrite or release a newer request", async (ctx) => {
+test("security refresh retains the source write latch and its failure", async (ctx) => {
   const { snapshot, writes, refreshes } = await fixture(ctx);
   fireEvent.click(screen.getAllByRole("checkbox")[0]);
   snapshot.securityEpoch = "2";
   snapshot.revision = "60";
   fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
   await act(async () => refreshes[0].resolve({ accepted: true, reason: null }));
-  await waitFor(() =>
-    assert.notEqual(
-      screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
-      "true",
-    ),
+  await waitFor(() => assert.ok(screen.getAllByRole("checkbox").length > 1));
+  assert.equal(
+    screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
+    "true",
   );
   fireEvent.click(screen.getAllByRole("checkbox")[1]);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 1);
   await act(async () =>
     writes[0].resolve({
       applied: false,
@@ -318,16 +317,14 @@ test("a source reply from before a security reset cannot overwrite or release a 
       reason: "write_failed",
     }),
   );
-  assert.ok(
-    document.querySelector(".skill-source-controls .skill-enablement-error") ===
-      null,
+  await waitFor(() =>
+    assert.ok(
+      document.querySelector(".skill-source-controls .skill-enablement-error"),
+    ),
   );
-  assert.equal(
+  assert.notEqual(
     screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
     "true",
-  );
-  await act(async () =>
-    writes[1].resolve({ applied: true, revision: "2", reason: null }),
   );
 });
 

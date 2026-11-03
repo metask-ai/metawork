@@ -140,3 +140,17 @@ test("an exact scoped Run manifest settles stop uncertainty even when its body i
     assert.deepEqual(f.entries(), [], phase);
   }
 });
+
+test("security cleaning preserves stop identity and its original feedback token", () => {
+  const f = setup();
+  const source = task([run("r1")]);
+  const token = f.controller.begin("task:t1", source, []);
+  f.controller.settle(token, "awaiting", "old diagnostic");
+  f.controller.clearDiagnostics();
+  assert.equal(f.entries()[0], token);
+  assert.equal(token.diagnostic, undefined);
+  f.controller.settle(token, "unknown");
+  f.controller.reset();
+  f.controller.settle(token, "failed", "late diagnostic");
+  assert.deepEqual(f.entries(), []);
+});

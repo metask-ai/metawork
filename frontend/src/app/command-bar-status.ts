@@ -40,6 +40,18 @@ export function createFeedbackState(epoch = 0): ShellStatusState {
 export function resetFeedback(state: ShellStatusState): ShellStatusState {
   return createFeedbackState(state.epoch + 1);
 }
+
+/** Projection invalidation clears diagnostics, not in-flight operation tokens. */
+export function clearSecurityFeedback(
+  state: ShellStatusState,
+): ShellStatusState {
+  const entries: Record<string, FeedbackEntry> = {};
+  for (const [key, entry] of Object.entries(state.entries)) {
+    if (entry && entry.audience.scope !== "account")
+      entries[key] = { ...entry, diagnostic: undefined };
+  }
+  return { ...state, entries, announcement: null };
+}
 export type ShellRoute = "workbench" | "skills" | "mcp" | "scheduled-tasks";
 
 type StatusDetails = Pick<ShellStatus, "values" | "diagnostic" | "sourceId">;

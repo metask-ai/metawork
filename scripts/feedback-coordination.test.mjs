@@ -4,6 +4,7 @@ import {
   attentionStatus,
   beginFeedback,
   createFeedbackState,
+  clearSecurityFeedback,
   dismissFeedback,
   feedbackTokenCurrent,
   observeFeedback,
@@ -212,4 +213,33 @@ test("Task results are retained locally without a path into the global collectio
     ["account"],
   );
   assert.equal(state.entries["stop:t2"].audience.taskId, "t2");
+});
+
+test("security cleaning preserves non-Account tokens, cycles and dismissal but clears all diagnostic copies", () => {
+  let state = observeFeedback(createFeedbackState(), "account", "result", {
+    ...account,
+    diagnostic: "old account diagnostic",
+  });
+  const started = beginFeedback(state, "compact:t1", {
+    ...attentionStatus("run.compact_failed", { scope: "task", taskId: "t1" }),
+    diagnostic: "old diagnostic",
+  });
+  state = settleFeedback(started.state, started.token, {
+    ...attentionStatus("run.compact_failed", { scope: "task", taskId: "t1" }),
+    diagnostic: "old diagnostic",
+  });
+  state = dismissFeedback(state, started.token.key, started.token.cycle);
+  state = clearSecurityFeedback(state);
+  assert.equal(state.epoch, started.token.epoch);
+  assert.equal(feedbackTokenCurrent(state, started.token), true);
+  assert.equal(state.entries["compact:t1"].dismissed, true);
+  assert.equal(state.entries["compact:t1"].diagnostic, undefined);
+  assert.equal(state.entries.account, undefined);
+  assert.equal(state.announcement, null);
+  state = settleFeedback(
+    state,
+    started.token,
+    attentionStatus("feedback.unconfirmed", { scope: "task", taskId: "t1" }),
+  );
+  assert.equal(state.entries["compact:t1"].id, "feedback.unconfirmed");
 });

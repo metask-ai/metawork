@@ -122,4 +122,14 @@ export class TaskStopFeedbackController {
     this.entries = [];
     this.changed();
   }
+  clearDiagnostics() {
+    let changed = false;
+    for (const entry of this.entries) {
+      if (entry.diagnostic !== undefined) {
+        delete entry.diagnostic;
+        changed = true;
+      }
+    }
+    if (changed) this.changed();
+  }
 }

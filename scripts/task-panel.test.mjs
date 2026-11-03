@@ -6651,7 +6651,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
 });
 
-test("old stop replies cannot unlock a newer stop after a security reset", async (ctx) => {
+test("security refresh retains the in-flight stop until its original command replies", async (ctx) => {
   const f = await renderAppFixture(ctx, 1440, {
     phase: "running",
     terminal: null,
@@ -6666,24 +6666,15 @@ test("old stop replies cannot unlock a newer stop after a security reset", async
   );
   await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
-  assert.equal(stops.length, 1);
   f.snapshot.securityEpoch = "2";
   f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
   await act(async () => f.publish());
-  await waitFor(() =>
-    assert.equal(
-      screen.getByRole("button", { name: "Stop task" }).disabled,
-      false,
-    ),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
-  assert.equal(stops.length, 2);
+  const stop = await screen.findByRole("button", { name: "Stop task" });
+  assert.equal(stop.disabled, true);
+  fireEvent.click(stop);
+  assert.equal(stops.length, 1);
   await act(async () => stops[0]());
-  assert.equal(
-    screen.getByRole("button", { name: "Stop task" }).disabled,
-    true,
-  );
-  await act(async () => stops[1]());
+  assert.equal(stops.length, 1);
 });
 
 test("App stop uncertainty survives successful reads and a new Run until its target is observed", async (ctx) => {

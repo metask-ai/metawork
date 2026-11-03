@@ -584,3 +584,37 @@ test("security reset clears disclosure and dismissal; late accepted command cann
     false,
   );
 });
+
+test("an old Account reply after security reset cannot release a newer Account busy slot", async (ctx) => {
+  const app = await setup(ctx);
+  await app.openAccount();
+  const replies = [];
+  app.controls.invoke = () => new Promise((resolve) => replies.push(resolve));
+  fireEvent.click(screen.getByRole("button", { name: "Sign in with Metask" }));
+  app.snapshot.securityEpoch = "2";
+  await app.publish();
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Sign in with Metask" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Sign in with Metask" }));
+  assert.equal(replies.length, 2);
+  await act(async () =>
+    replies[0]({ accepted: true, errorCode: "none", attemptId: "old" }),
+  );
+  assert.equal(
+    screen.getByRole("button", { name: "Sign in with Metask" }).disabled,
+    true,
+  );
+  await act(async () =>
+    replies[1]({ accepted: true, errorCode: "none", attemptId: "new" }),
+  );
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Sign in with Metask" }).disabled,
+      false,
+    ),
+  );
+});

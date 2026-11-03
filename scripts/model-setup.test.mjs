@@ -982,3 +982,53 @@ test("schedule persistence recovery opens its existing page without starting mod
   assert.equal(app.calls.select, 0);
   assert.equal(app.calls.create, 0);
 });
+
+test("an accepted model reset remains accepted when its own refresh advances security", async (ctx) => {
+  window.localStorage.setItem("metawork.model-setup-handled", "true");
+  const state = customModels();
+  state.models.persistenceHealth = "recovery_required";
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "resetModelsStore", async () => {
+    calls++;
+    state.securityEpoch = "2";
+    state.revision = String(BigInt(state.revision) + 1n);
+    return { accepted: true, errorCode: "none" };
+  });
+  await renderApp(ctx, state);
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "app.account_and_application_menu"),
+    }),
+  );
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Settings", exact: true }),
+  );
+  await user.click(screen.getByRole("link", { name: "Models", exact: true }));
+  await user.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "settings.models_reset_action"),
+      exact: true,
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "settings.models_reset_confirm"),
+      exact: true,
+    }),
+  );
+  await waitFor(() => assert.equal(calls, 1));
+  await waitFor(() => assert.ok(screen.queryByRole("alertdialog") === null));
+  assert.ok(
+    !document.body.textContent.includes(
+      translate("en-US", "settings.models_reset_failed"),
+    ),
+  );
+  assert.equal(
+    screen.getByRole("button", {
+      name: translate("en-US", "settings.models_reset_action"),
+      exact: true,
+    }).disabled,
+    false,
+  );
+});

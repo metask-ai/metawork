@@ -1456,3 +1456,30 @@ test("App names the Task blocking Session release and allows a later explicit cr
   assert.equal(fixture.inputs[0][2].text, "My deliberate retry");
   await fixture.settle();
 });
+
+test("security refresh during first creation preserves local Stop and later input ordering", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "cancel before identity" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  fixture.snapshot.securityEpoch = "2";
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  await screen.findByText("Stopped");
+  const textarea = document.querySelector(".composer-bar textarea");
+  fireEvent.change(textarea, { target: { value: "after security and stop" } });
+  fireEvent.keyDown(textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 1);
+  await fixture.created();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "after security and stop");
+  assert.equal(fixture.cancellations.length, 1);
+  await fixture.settle();
+});
