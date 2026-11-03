@@ -10,6 +10,78 @@ const connector = @import("agent_mcp_connector");
 pub const TransportKind = enum { stdio, streamable_http };
 pub const NegotiationPolicy = enum { automatic, modern_only, compat_only };
 
+/// Serialized under the Session Runtime mutex. A single phase is also the
+/// shutdown fence, so apply/refresh cannot disagree with an independent count.
+pub const OperationState = struct {
+    pub const Phase = enum { idle, refresh, apply };
+    phase: Phase = .idle,
+    current_generation: ?u64 = null,
+    previous_generation: ?u64 = null,
+
+    pub fn busy(self: OperationState) bool {
+        return self.phase != .idle;
+    }
+
+    pub fn begin(self: *OperationState, phase: Phase) bool {
+        std.debug.assert(phase != .idle);
+        if (self.busy()) return false;
+        self.phase = phase;
+        self.previous_generation = null;
+        if (phase == .apply) self.current_generation = null;
+        return true;
+    }
+
+    pub fn completeRefresh(self: *OperationState, generation: u64) void {
+        std.debug.assert(self.phase == .refresh);
+        self.previous_generation = self.current_generation;
+        self.current_generation = generation;
+        self.phase = .idle;
+    }
+
+    pub fn completeApply(self: *OperationState) void {
+        std.debug.assert(self.phase == .apply);
+        self.phase = .idle;
+    }
+
+    pub fn fail(self: *OperationState, keep_catalog: bool) void {
+        std.debug.assert(self.busy());
+        if (!keep_catalog) {
+            self.current_generation = null;
+            self.previous_generation = null;
+        }
+        self.phase = .idle;
+    }
+
+    pub fn accepts(self: OperationState, generation: u64) bool {
+        return self.current_generation == generation or self.previous_generation == generation;
+    }
+};
+
+test "MCP operation fence retains one refresh handoff and invalidates every apply epoch" {
+    var state = OperationState{};
+    try std.testing.expect(state.begin(.refresh));
+    try std.testing.expect(!state.begin(.apply));
+    state.completeRefresh(7);
+    try std.testing.expect(state.accepts(7));
+    try std.testing.expect(state.begin(.refresh));
+    try std.testing.expect(state.accepts(7));
+    state.completeRefresh(8);
+    try std.testing.expect(state.accepts(7) and state.accepts(8));
+    try std.testing.expect(state.begin(.refresh));
+    try std.testing.expect(!state.accepts(7));
+    state.fail(true);
+    try std.testing.expect(state.accepts(8) and !state.busy());
+    try std.testing.expect(state.begin(.apply));
+    try std.testing.expect(!state.accepts(8));
+    state.completeApply();
+    try std.testing.expect(!state.busy() and !state.accepts(8));
+    try std.testing.expect(state.begin(.refresh));
+    state.completeRefresh(9);
+    try std.testing.expect(state.begin(.refresh));
+    state.fail(false);
+    try std.testing.expect(!state.accepts(9));
+}
+
 pub const ServerInput = struct {
     /// Stable registry identity. Agent derives the opaque AgentCore
     /// binding identity; callers cannot supply a second authority identity.

@@ -91,12 +91,15 @@ pub const Job = struct {
             }
         else |_|
             .unavailable;
+        // Publication permits the consumer to reclaim the entire job.
+        const notifier = self.notifier;
         self.state.store(.completed, .release);
-        _ = self.notifier.notify();
+        _ = notifier.notify();
     }
 
     pub fn cancel(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
+        const notifier = self.notifier;
         const prior = self.state.cmpxchgStrong(
             .queued,
             .cancelled,
@@ -104,7 +107,7 @@ pub const Job = struct {
             .acquire,
         );
         std.debug.assert(prior == null);
-        _ = self.notifier.notify();
+        _ = notifier.notify();
     }
 };
 
@@ -177,6 +180,37 @@ test "Product MCP refresh job cancellation transfers queued ownership once" {
 
     try std.testing.expectEqual(State.cancelled, job.state.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), harness.notifications);
+}
+
+test "terminal refresh notification may reclaim the published job even when wake fails" {
+    const Consumer = struct {
+        job: ?*Job,
+        expected: State,
+        wake_succeeds: bool,
+        notifications: usize = 0,
+
+        fn notify(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const job = self.job.?;
+            std.debug.assert(job.state.load(.acquire) == self.expected);
+            self.job = null;
+            self.notifications += 1;
+            job.deinit();
+            return self.wake_succeeds;
+        }
+    };
+    for ([_]State{ .completed, .cancelled }) |terminal| {
+        for ([_]bool{ true, false }) |wake| {
+            var harness = TestHarness{};
+            var consumer: Consumer = .{ .job = try harness.job(), .expected = terminal, .wake_succeeds = wake };
+            const job = consumer.job.?;
+            job.notifier = .{ .context = &consumer, .notify_fn = Consumer.notify };
+            const executor_job = job.executorJob();
+            if (terminal == .completed) executor_job.execute_fn(job) else executor_job.cancel_fn(job);
+            try std.testing.expect(consumer.job == null);
+            try std.testing.expectEqual(@as(usize, 1), consumer.notifications);
+        }
+    }
 }
 
 test "Product MCP refresh job distinguishes pre-publication rejection from unknown failure" {

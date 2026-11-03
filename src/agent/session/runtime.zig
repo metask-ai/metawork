@@ -96,14 +96,8 @@ pub const Runtime = struct {
     last_shutdown_error: ?Error = null,
     active_catalog_calls: usize = 0,
     active_catalog_leases: usize = 0,
-    active_mcp_calls: usize = 0,
     active_restore_calls: usize = 0,
-    mcp_refresh_running: bool = false,
-    mcp_configuration_applying: bool = false,
-    mcp_catalog_generation: ?u64 = null,
-    // One completed refresh may be awaiting Product installation. Retain only
-    // that immediate predecessor, in the same configuration epoch.
-    mcp_previous_catalog_generation: ?u64 = null,
+    mcp_operation: mcp_runtime.OperationState = .{},
     mcp_registry_generation: ?u64,
     mcp_owner_id: u64,
     mcp_servers: mcp_runtime.Servers,
@@ -372,9 +366,10 @@ pub const Runtime = struct {
     }
 
     /// Applies one complete MCP server set to the shared AgentCore Runtime.
-    /// The input is consumed only when AgentCore reports `applied`. Removed or
-    /// replaced connector owners remain alive until Runtime destruction so
-    /// existing Sessions can safely retain their creation-time authority.
+    /// Errors before input.take leave it owned by the caller. Once taken,
+    /// every outcome consumes it: applied transfers the candidate to Runtime;
+    /// rejection/failure destroys it locally. Retired owners remain alive until
+    /// Core references and active connections quiesce, or Runtime destruction.
     pub fn applyMcpConfiguration(
         self: *Runtime,
         input: *root.McpRuntimeInput,
@@ -385,13 +380,11 @@ pub const Runtime = struct {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
         }
-        if (self.mcp_refresh_running) {
+        if (self.mcp_operation.busy()) {
             self.sessions_mutex.unlock(self.io);
             return error.McpRefreshInProgress;
         }
-        self.mcp_refresh_running = true;
-        self.mcp_configuration_applying = true;
-        self.active_mcp_calls += 1;
+        std.debug.assert(self.mcp_operation.begin(.apply));
         var reap_count: usize = 0;
         var retired_index: usize = 0;
         while (retired_index < self.retired_mcp_servers.items.len) {
@@ -430,8 +423,6 @@ pub const Runtime = struct {
         };
         const desired_revision = self.mcp_apply_revision + 1;
         const desired_generation = input.generation;
-        self.mcp_catalog_generation = null;
-        self.mcp_previous_catalog_generation = null;
         self.sessions_mutex.unlock(self.io);
 
         var replacement = input.take() catch {
@@ -483,8 +474,7 @@ pub const Runtime = struct {
         }
 
         self.sessions_mutex.lockUncancelable(self.io);
-        std.debug.assert(self.active_mcp_calls > 0);
-        std.debug.assert(self.mcp_refresh_running);
+        std.debug.assert(self.mcp_operation.busy());
         if (disposition == .applied) {
             const previous = self.mcp_servers;
             self.mcp_servers = replacement;
@@ -493,9 +483,7 @@ pub const Runtime = struct {
             self.mcp_registry_generation = desired_generation;
             self.mcp_apply_revision = desired_revision;
         }
-        self.active_mcp_calls -= 1;
-        self.mcp_refresh_running = false;
-        self.mcp_configuration_applying = false;
+        self.mcp_operation.completeApply();
         const reject = self.shutting_down.load(.acquire);
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
@@ -509,7 +497,7 @@ pub const Runtime = struct {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
         }
-        if (self.mcp_refresh_running) {
+        if (self.mcp_operation.busy()) {
             self.sessions_mutex.unlock(self.io);
             return error.McpRefreshInProgress;
         }
@@ -521,9 +509,7 @@ pub const Runtime = struct {
         // Transport refresh does not invalidate the published catalog. Retire
         // the previous handoff now; Product serializes and installs each job
         // before starting another. Core still validates the actual selectors.
-        self.mcp_previous_catalog_generation = null;
-        self.mcp_refresh_running = true;
-        self.active_mcp_calls += 1;
+        std.debug.assert(self.mcp_operation.begin(.refresh));
         self.sessions_mutex.unlock(self.io);
         return .{
             .raw_runtime = raw_runtime,
@@ -553,15 +539,9 @@ pub const Runtime = struct {
 
     fn completeMcpRefresh(self: *Runtime, generation: u64) Error!void {
         self.sessions_mutex.lockUncancelable(self.io);
-        std.debug.assert(self.active_mcp_calls > 0);
-        std.debug.assert(self.mcp_refresh_running);
-        self.active_mcp_calls -= 1;
-        self.mcp_refresh_running = false;
+        std.debug.assert(self.mcp_operation.busy());
         const reject = self.shutting_down.load(.acquire);
-        if (!reject) {
-            self.mcp_previous_catalog_generation = self.mcp_catalog_generation;
-            self.mcp_catalog_generation = generation;
-        }
+        if (!reject) self.mcp_operation.completeRefresh(generation) else self.mcp_operation.fail(false);
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
         if (reject) return error.RuntimeShuttingDown;
@@ -622,7 +602,7 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_configuration_applying) return error.McpRefreshInProgress;
+        if (self.mcp_operation.phase == .apply) return error.McpRefreshInProgress;
         if (!mcp_catalog.projectionBelongsTo(
             projection,
             self.mcp_owner_id,
@@ -649,7 +629,7 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_configuration_applying) return error.McpRefreshInProgress;
+        if (self.mcp_operation.phase == .apply) return error.McpRefreshInProgress;
         if (!self.acceptsMcpGeneration(activation.catalogGeneration()))
             return error.StaleMcpSelection;
         return mcp_catalog.createSelectionForActivation(
@@ -676,7 +656,7 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
+        if (self.mcp_operation.busy()) return error.McpRefreshInProgress;
 
         var found = false;
         for (self.sessions) |entry| if (entry == session) {
@@ -687,8 +667,8 @@ pub const Runtime = struct {
         if (selection) |value| {
             if (!mcp_catalog.belongsTo(value, self.mcp_owner_id))
                 return error.McpCatalogBindingMismatch;
-            if (self.mcp_catalog_generation == null or
-                mcp_catalog.selectionGeneration(value) != self.mcp_catalog_generation.?)
+            if (self.mcp_operation.current_generation == null or
+                mcp_catalog.selectionGeneration(value) != self.mcp_operation.current_generation.?)
                 return error.StaleMcpSelection;
         }
 
@@ -753,7 +733,7 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
-        if (self.mcp_configuration_applying) return error.McpRefreshInProgress;
+        if (self.mcp_operation.phase == .apply) return error.McpRefreshInProgress;
         if (!self.acceptsMcpGeneration(activation.catalogGeneration())) return error.StaleMcpSelection;
         return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers(), ceiling) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -763,17 +743,9 @@ pub const Runtime = struct {
 
     fn finishMcpCall(self: *Runtime, keep_catalog: bool) void {
         self.sessions_mutex.lockUncancelable(self.io);
-        std.debug.assert(self.active_mcp_calls > 0);
-        std.debug.assert(self.mcp_refresh_running);
-        self.active_mcp_calls -= 1;
-        self.mcp_refresh_running = false;
-        self.mcp_configuration_applying = false;
-        // This path has no validated publication result. Do not assume a
-        // failure left Core's catalog unchanged.
-        if (!keep_catalog) {
-            self.mcp_catalog_generation = null;
-            self.mcp_previous_catalog_generation = null;
-        }
+        std.debug.assert(self.mcp_operation.busy());
+        // Only a typed pre-publication rejection preserves the current catalog.
+        self.mcp_operation.fail(keep_catalog);
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
     }
@@ -794,7 +766,7 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire) or self.runtime == null) return .unavailable;
-        if (self.mcp_configuration_applying) return .mcp_busy;
+        if (self.mcp_operation.phase == .apply) return .mcp_busy;
         if (releasing_route_id) |route_id| {
             if (route_id == 0) return .unavailable;
             for (self.sessions) |entry| if (entry) |session|
@@ -809,8 +781,7 @@ pub const Runtime = struct {
     /// Caller holds sessions_mutex. Only the published generation and the
     /// single in-progress publication handoff belong to this config epoch.
     fn acceptsMcpGeneration(self: *const Runtime, generation: u64) bool {
-        return (self.mcp_catalog_generation != null and self.mcp_catalog_generation.? == generation) or
-            (self.mcp_previous_catalog_generation != null and self.mcp_previous_catalog_generation.? == generation);
+        return self.mcp_operation.accepts(generation);
     }
 
     /// Creates one Agent Session and returns its canonical routing identity in
@@ -870,7 +841,7 @@ pub const Runtime = struct {
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
         // Apply can change the configuration epoch. A pure catalog refresh
         // preserves the published authority; Core checks actual availability.
-        if (self.mcp_configuration_applying and options.mcp_selection != null)
+        if (self.mcp_operation.phase == .apply and options.mcp_selection != null)
             return error.McpRefreshInProgress;
         if (options.mcp_selection) |selection| {
             if (!mcp_catalog.belongsTo(selection, self.mcp_owner_id))
@@ -1127,7 +1098,7 @@ pub const Runtime = struct {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
         };
-        if (self.mcp_configuration_applying) {
+        if (self.mcp_operation.phase == .apply) {
             self.sessions_mutex.unlock(self.io);
             return error.McpRefreshInProgress;
         }
@@ -1363,7 +1334,7 @@ pub const Runtime = struct {
         self.shutdown_running = true;
         self.last_shutdown_error = null;
         self.shutting_down.store(true, .release);
-        while (self.active_catalog_calls != 0 or self.active_mcp_calls != 0 or
+        while (self.active_catalog_calls != 0 or self.mcp_operation.busy() or
             self.active_restore_calls != 0)
             self.shutdown_condition.waitUncancelable(
                 self.io,
@@ -1484,7 +1455,7 @@ pub const Runtime = struct {
         std.debug.assert(self.shutdown_complete);
         std.debug.assert(self.active_catalog_calls == 0);
         std.debug.assert(self.active_catalog_leases == 0);
-        std.debug.assert(self.active_mcp_calls == 0);
+        std.debug.assert(!self.mcp_operation.busy());
         std.debug.assert(self.active_restore_calls == 0);
         for (self.session_reservations) |reserved| std.debug.assert(!reserved);
         for (self.sessions) |entry| {

@@ -1070,13 +1070,12 @@ test "recovery capacity observation counts only an owned route scheduled for rel
     try std.testing.expect(runtime.restoreAdmission(route + 1) != .available);
     // Pure refresh preserves admission. Apply has a distinct busy result,
     // which must never be interpreted as Session capacity pressure.
-    runtime.mcp_refresh_running = true;
+    runtime.mcp_operation.phase = .refresh;
     try std.testing.expectEqual(.available, runtime.restoreAdmission(route));
-    runtime.mcp_configuration_applying = true;
+    runtime.mcp_operation.phase = .apply;
     try std.testing.expectEqual(.mcp_busy, runtime.restoreAdmission(route));
     try std.testing.expectEqual(.mcp_busy, runtime.restoreAdmission(null));
-    runtime.mcp_configuration_applying = false;
-    runtime.mcp_refresh_running = false;
+    runtime.mcp_operation.phase = .idle;
     try session.close(.session_close);
     try runtime.releaseClosedSession(session);
     try std.testing.expect(runtime.restoreAdmission(route) != .available);
@@ -1200,6 +1199,7 @@ fn restoreOptions(
 }
 
 const McpFixtureTransport = struct {
+    deinits: usize = 0,
     fn descriptor(self: *McpFixtureTransport) lifecycle.McpTransport {
         return .{ .context = self, .open_fn = open, .request_fn = request, .notify_fn = notify, .close_fn = close };
     }
@@ -1213,7 +1213,10 @@ const McpFixtureTransport = struct {
         return .fatal;
     }
     fn close(_: *anyopaque) void {}
-    fn deinit(_: *anyopaque) void {}
+    fn deinit(raw: *anyopaque) void {
+        const self: *McpFixtureTransport = @ptrCast(@alignCast(raw));
+        self.deinits += 1;
+    }
 };
 
 const CanonicalUnavailableMcpTransport = struct {
@@ -1393,6 +1396,8 @@ test "MCP empty Runtime accepts the initial declarative configuration apply" {
     );
     try std.testing.expectEqual(@as(usize, 1), fake_core.mcp_configuration_applies);
     try std.testing.expectEqual(@as(usize, 1), fake_core.last_mcp_apply_server_count);
+
+    try std.testing.expect(replacement.servers == null);
     const activation = switch (try runtime.activateMcp()) {
         .activated => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1456,6 +1461,8 @@ test "MCP Runtime declaratively applies a replacement configuration" {
     try std.testing.expectEqual(@as(usize, 1), fake_core.last_mcp_apply_server_count);
 
     var rejected_transport: McpFixtureTransport = .{};
+    try std.testing.expect(replacement.servers == null);
+    try std.testing.expectEqual(@as(usize, 0), second_transport.deinits);
     var rejected_owner = lifecycle.McpTransportOwner.init(
         rejected_transport.descriptor(),
         McpFixtureTransport.deinit,
@@ -1476,6 +1483,9 @@ test "MCP Runtime declaratively applies a replacement configuration" {
         lifecycle.McpConfigurationApplyOutcome.rejected,
         try runtime.applyMcpConfiguration(&rejected),
     );
+    try std.testing.expect(rejected.servers == null);
+    try std.testing.expectEqual(@as(usize, 1), rejected_transport.deinits);
+    try std.testing.expectEqual(@as(usize, 0), second_transport.deinits);
 }
 
 test "MCP refresh failure immediately invalidates the previous selection generation" {

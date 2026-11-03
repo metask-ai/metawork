@@ -348,10 +348,11 @@ pub fn nextOauthExpiry(
         const grant = oauth.grant orelse continue;
         if (grant.refresh_token_ref == null) continue;
         const expires_at = grant.expires_at_unix_ms orelse continue;
-        if (earliest == null or expires_at < earliest.?.expires_at_unix_ms)
+        const eligible_at = management.oauth_schedule.eligibleAt(server.id, expires_at);
+        if (earliest == null or eligible_at < earliest.?.expires_at_unix_ms)
             earliest = .{
                 .server_id = server.id,
-                .expires_at_unix_ms = expires_at,
+                .expires_at_unix_ms = eligible_at,
             };
     }
     return earliest;

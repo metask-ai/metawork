@@ -11471,11 +11471,9 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     const other_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     const other = control.task_runtime.find(other_id).?;
     const destroyed = fake_core.session_destroyed;
-    runtime.mcp_refresh_running = true;
-    runtime.mcp_configuration_applying = true;
+    runtime.mcp_operation.phase = .apply;
     defer {
-        runtime.mcp_configuration_applying = false;
-        runtime.mcp_refresh_running = false;
+        runtime.mcp_operation.phase = .idle;
     }
     try std.testing.expectError(error.RecoveryUnavailable, control.restoreTaskConversation(waiter_id, waiter.durable.binding_epoch));
     try std.testing.expect(other.runtime.hasAttachedSession());

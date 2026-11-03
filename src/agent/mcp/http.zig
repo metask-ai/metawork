@@ -5,6 +5,7 @@
 //! network resources, raw byte pumping, timeout, and cancellation.
 
 const std = @import("std");
+const envelope = @import("agent_mcp_envelope");
 const connector = @import("agent_mcp_connector");
 const protocol = @import("agent_mcp_http_protocol");
 
@@ -217,6 +218,7 @@ fn performRequest(
     timeout_ms: u32,
     cancellation: connector.Cancellation,
 ) connector.ExchangeOutcome {
+    var budget = envelope.Budget.init(connection.backend.config.io, timeout_ms, connection.backend.config.max_response_bytes);
     var collector = ResponseCollector.init(
         allocator,
         .request,
@@ -224,10 +226,12 @@ fn performRequest(
         connection.backend.config.max_session_token_bytes,
     ) catch return poisonExchange(connection, .fatal);
     defer collector.deinit();
+    collector.request_bytes = bytes;
+    collector.budget = &budget;
     const port = performEffect(
         connection,
         bytes,
-        timeout_ms,
+        budget.remainingMs() orelse return poisonExchange(connection, .timeout),
         cancellation,
         &collector,
     );
@@ -237,10 +241,19 @@ fn performRequest(
     }
     if (collector.failure) |failure|
         return poisonExchange(connection, failure);
+    if (cancellation.isCancelled()) return poisonExchange(connection, .cancelled);
+    if (budget.remainingMs() == null) return poisonExchange(connection, .timeout);
     if (!collector.complete or
         (!collector.error_status and
             !acceptSessionToken(connection, collector.sessionToken())))
         return poisonExchange(connection, .fatal);
+    if (!collector.error_status and collector.output_len != 0 and !collector.response_matched) {
+        const expected = envelope.requestId(bytes) catch return poisonExchange(connection, .fatal);
+        const message = envelope.classify(collector.output[0..collector.output_len], expected) catch return poisonExchange(connection, .fatal);
+        if (message != .response) return poisonExchange(connection, .fatal);
+    }
+    if (cancellation.isCancelled()) return poisonExchange(connection, .cancelled);
+    if (budget.remainingMs() == null) return poisonExchange(connection, .timeout);
     const body = if (collector.output_len == 0)
         @constCast(&[_]u8{})
     else
@@ -364,6 +377,10 @@ const ResponseCollector = struct {
     complete: bool = false,
     status: u16 = 0,
     error_status: bool = false,
+    request_bytes: ?[]const u8 = null,
+    expected_id: ?envelope.Id = null,
+    budget: ?*envelope.Budget = null,
+    response_matched: bool = false,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -421,7 +438,7 @@ const ResponseCollector = struct {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
         if (self.failure != null or self.complete) return .stop;
         if (std.ascii.eqlIgnoreCase(name, HeaderName.content_type)) {
-            if (self.kind != .request) return .continue_reading;
+            if (self.kind != .request or self.error_status) return .continue_reading;
             self.content_type_count += 1;
             if (self.content_type_count != 1)
                 return self.fail(.fatal);
@@ -448,6 +465,8 @@ const ResponseCollector = struct {
         if (self.kind != .request or self.error_status) return .continue_reading;
         const media_type = self.media_type orelse return .continue_reading;
         if (media_type == .event_stream) {
+            if (self.request_bytes) |request_bytes|
+                self.expected_id = envelope.requestId(request_bytes) catch return self.fail(.fatal);
             const max_wire_bytes = std.math.add(
                 usize,
                 self.output.len,
@@ -523,6 +542,35 @@ const ResponseCollector = struct {
                     };
                     if (outcome == .complete) {
                         self.output_len = decoder.output_len;
+                        if (self.expected_id) |expected| {
+                            const message = envelope.classify(self.output[0..self.output_len], expected) catch {
+                                _ = self.fail(.fatal);
+                                return .{ .consumed = index + 1, .flow = .stop };
+                            };
+                            switch (message) {
+                                .response => self.response_matched = true,
+                                .notification => {
+                                    const budget = self.budget.?;
+                                    if (budget.remainingMs() == null) {
+                                        _ = self.fail(.timeout);
+                                        return .{ .consumed = index + 1, .flow = .stop };
+                                    }
+                                    if (!budget.discard(self.output_len)) {
+                                        _ = self.fail(.fatal);
+                                        return .{ .consumed = index + 1, .flow = .stop };
+                                    }
+                                    decoder.resetMessage();
+                                    self.output_len = 0;
+                                    continue;
+                                },
+                                // This endpoint has no capability to resume an
+                                // HTTP response stream after a separate pong POST.
+                                .ping => {
+                                    _ = self.fail(.fatal);
+                                    return .{ .consumed = index + 1, .flow = .stop };
+                                },
+                            }
+                        }
                         self.complete = true;
                         return .{ .consumed = index + 1, .flow = .stop };
                     }
@@ -582,6 +630,13 @@ const SseDecoder = struct {
 
     fn init(output: []u8, max_wire_bytes: usize) SseDecoder {
         return .{ .output = output, .max_wire_bytes = max_wire_bytes };
+    }
+
+    fn resetMessage(self: *SseDecoder) void {
+        self.output_len = 0;
+        self.saw_data = false;
+        self.saw_data_bytes = false;
+        self.event_is_message = true;
     }
 
     fn feedByte(self: *SseDecoder, byte: u8) error{InvalidResponse}!FeedResult {
@@ -954,6 +1009,8 @@ const FakeEndpoint = struct {
     valid: bool = true,
     failure: ?PortFailure = null,
     status: u16 = 200,
+    content_type: []const u8 = "application/json",
+    response_body: ?[]const u8 = null,
     session_token: []const u8 = &.{},
     expected_protocol_version: ?[]const u8 = null,
     expected_session_token: []const u8 = &.{},
@@ -1001,7 +1058,7 @@ const FakeEndpoint = struct {
         if (!notification and sink.header_fn(
             sink.context,
             "Content-Type",
-            "application/json",
+            self.content_type,
         ) == .stop) return .completed;
         if (self.session_token.len != 0 and sink.header_fn(
             sink.context,
@@ -1010,7 +1067,11 @@ const FakeEndpoint = struct {
         ) == .stop) return .completed;
         if (sink.end_headers_fn(sink.context) == .stop) return .completed;
         if (!notification and !self.empty_body) {
-            const fed = sink.feed_fn(sink.context, request_value.body);
+            const body = self.response_body orelse if (self.status >= 200 and self.status < 300)
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
+            else
+                request_value.body;
+            const fed = sink.feed_fn(sink.context, body);
             if (fed.flow == .stop) return .completed;
         }
         _ = sink.finish_fn(sink.context);
@@ -1094,7 +1155,7 @@ test "HTTP endpoint capability is validated and connection count is bounded" {
     try std.testing.expectEqual(@as(usize, 0), endpoint.deletes);
 }
 
-test "HTTP owns protocol headers, opaque bytes, and session token" {
+test "HTTP owns protocol headers, complete envelope bytes, and session token" {
     var endpoint: FakeEndpoint = .{
         .session_token = "session-1",
         .expected_protocol_version = "2025-11-25",
@@ -1121,7 +1182,7 @@ test "HTTP owns protocol headers, opaque bytes, and session token" {
     const response = switch (transport.request_fn(
         connection,
         std.testing.allocator,
-        "opaque-request",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
         1000,
         .{},
     )) {
@@ -1130,7 +1191,7 @@ test "HTTP owns protocol headers, opaque bytes, and session token" {
     };
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 200), response.http_status);
-    try std.testing.expectEqualStrings("opaque-request", response.body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", response.body);
     try std.testing.expectEqual(
         @as(?connector.Failure, null),
         transport.notify_fn(connection, "opaque-notify", 1000, .{}),
@@ -1250,6 +1311,80 @@ test "HTTP complete protocol rejection preserves raw status and body" {
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 400), response.http_status);
     try std.testing.expectEqualStrings("legacy evidence", response.body);
+}
+
+test "HTTP error responses preserve status and body regardless of media type" {
+    for ([_]u16{ 400, 401, 403, 502 }) |status| {
+        for ([_][]const u8{ "text/html", "text/plain", "application/octet-stream" }) |media_type| {
+            var endpoint: FakeEndpoint = .{ .status = status, .content_type = media_type };
+            var backend = try Backend.init(.{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .endpoint = endpoint.capability(),
+            });
+            defer backend.deinit() catch unreachable;
+            const transport = backend.transport();
+            const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000)) {
+                .connection => |value| value,
+                .failure => return error.TestUnexpectedResult,
+            };
+            defer transport.close_fn(connection);
+            const response = switch (transport.request_fn(connection, std.testing.allocator, "error evidence", 1000, .{})) {
+                .response => |value| value,
+                .failure => return error.TestUnexpectedResult,
+            };
+            defer std.testing.allocator.free(response.body);
+            try std.testing.expectEqual(@as(u32, status), response.http_status);
+            try std.testing.expectEqualStrings("error evidence", response.body);
+        }
+    }
+}
+
+test "HTTP successful HTML remains an invalid response" {
+    var collector = try ResponseCollector.init(std.testing.allocator, .request, 128, 128);
+    defer collector.deinit();
+    const sink = collector.sink();
+    try std.testing.expectEqual(SinkFlow.continue_reading, sink.begin_fn(sink.context, 200));
+    try std.testing.expectEqual(SinkFlow.stop, sink.header_fn(sink.context, "Content-Type", "text/html"));
+    try std.testing.expectEqual(@as(?PortFailure, .fatal), collector.failure);
+}
+
+test "HTTP SSE skips notifications in one POST and returns the complete matching envelope" {
+    var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":42}}\n\n" };
+    var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability() });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000)) {
+        .connection => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer transport.close_fn(connection);
+    const response = switch (transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{})) {
+        .response => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":42}}", response.body);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+}
+
+test "HTTP SSE rejects response mismatch flood and unsupported ping without replaying POST" {
+    const notification = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n";
+    const flood = notification ** 129 ++ "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+    for ([_][]const u8{ flood, "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n", "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n" }) |body| {
+        var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = body };
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_response_bytes = 16 * 1024 });
+        defer backend.deinit() catch unreachable;
+        const transport = backend.transport();
+        const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000)) {
+            .connection => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer transport.close_fn(connection);
+        const outcome = transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{});
+        try std.testing.expect(outcome == .failure);
+        try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+    }
 }
 
 test "HTTP complete successful response may have an empty body" {

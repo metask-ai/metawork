@@ -24,6 +24,11 @@ function startStdio() {
     trace({ transport: "stdio", direction: "request", message });
     void handle(message, (response) => {
       if (response === null) return;
+      if (options.framing === "interleaved") {
+        process.stdout.write(
+          `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress" })}\n${JSON.stringify({ jsonrpc: "2.0", id: "fixture-ping", method: "ping" })}\n`,
+        );
+      }
       trace({ transport: "stdio", direction: "response", message: response });
       process.stdout.write(`${JSON.stringify(response)}\n`);
     });
@@ -334,10 +339,13 @@ function startHttp() {
             direction: "response",
             message: rpcResponse,
           });
-          if (options.framing === "sse") {
+          if (options.framing === "sse" || options.framing === "interleaved") {
             response.writeHead(200, { "content-type": "text/event-stream" });
             response.end(
               `id: fixture-empty-event\ndata:\n\n` +
+                (options.framing === "interleaved"
+                  ? `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress" })}\n\n`
+                  : "") +
                 `event: message\ndata: ${json}\n\n`,
             );
           } else {
@@ -430,6 +438,15 @@ function providerSse(events) {
 }
 
 async function handle(message, send) {
+  if (
+    message?.jsonrpc === "2.0" &&
+    message.id === "fixture-ping" &&
+    message.result &&
+    Object.keys(message.result).length === 0
+  ) {
+    send(null);
+    return;
+  }
   if (message?.jsonrpc !== "2.0" || typeof message.method !== "string")
     process.exit(72);
   if (message.method === "notifications/initialized") {
@@ -681,7 +698,7 @@ function parseOptions(args) {
     !["2026-07-28", "2025-11-25", "2025-06-18"].includes(protocolVersion) ||
     !["stdio", "http"].includes(transport) ||
     !["text", "image"].includes(resultKind) ||
-    !["json", "sse"].includes(framing) ||
+    !["json", "sse", "interleaved"].includes(framing) ||
     !Number.isSafeInteger(delayMs) ||
     delayMs < 0 ||
     delayMs > 10_000 ||

@@ -892,12 +892,14 @@ fn productMcpPorts(
     runtime: *lifecycle.Runtime,
     timer: McpRefreshTimer,
     notifier: ChangeNotifier,
+    clock: ScheduleTimer,
 ) mcp_ports.Ports {
     return .{
         .executor = mcpExecutorPort(executor),
         .catalog = mcpCatalogPort(runtime),
         .timer = mcpTimerPort(timer),
         .notifier = mcpNotifierPort(notifier),
+        .unix_clock = .{ .enabled = clock.enabled, .context = clock.context, .now_seconds_fn = clock.now_unix_seconds },
     };
 }
 
@@ -1771,6 +1773,7 @@ pub const Runtime = struct {
                     agent_runtime,
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
+                    configuration.schedule_timer,
                 ),
             );
             mcp_startup = null;
@@ -20121,6 +20124,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         productMcpPorts(
             control.executor,
             control.agent_runtime,
+            .{},
             .{},
             .{},
         ),

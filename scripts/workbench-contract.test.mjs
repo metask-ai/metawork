@@ -1716,6 +1716,25 @@ test("MCP management is capability-gated and identity checked", () => {
   );
 });
 
+test("Host untrusted MCP projections pass the strict snapshot decoder", () => {
+  const projections = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/mcp/testdata/untrusted-view.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  for (const projection of Object.values(projections)) {
+    const snapshot = clone(fixture);
+    snapshot.capabilities.mcpManagement = true;
+    snapshot.capabilities.mcpSecretMaxBytes = 4096;
+    snapshot.mcp = projection;
+    assert.deepEqual(decodeWorkbenchSnapshot(snapshot).mcp, projection);
+  }
+});
+
 test("MCP command results preserve persistence certainty and refresh admission", () => {
   assert.deepEqual(
     decodeMcpMutationResult({ outcome: "saved", desiredGeneration: "12" }),

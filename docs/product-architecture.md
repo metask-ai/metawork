@@ -290,6 +290,8 @@ Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事�
 - Runtime Manifest 表达正式 Agent Runtime 已接管的 descriptor，或无法接管的无 secret absence proof；
 - Admission Authority 表达新 Task 当前可以同步借用的已验证 Selection，或明确的 blocked reason。
 
+授权缺失的 absence proof 按连接是否真正需要加载对账：未具备加载条件时，consent、DCR 注册所得 client identity/secret locator 或 reauthorization 中间状态变化不能单独使正式 Runtime 失配；具备加载条件后仍须真实 apply 才能成为 loaded，不能将授权成功当作 Runtime 接管成功。static credential absence 仍绑定对应 credential 引用，不能借 OAuth 中间态规则放宽其校验。
+
 MCP mutation 必须从 canonical Desired 构造完整 candidate，先提交 registry，再由 Application coordinator 构造 Runtime input、调用 Agent declarative apply、取得正式 Activation，最后由 Product Control 原子安装 Manifest、Activation 与 Admission Authority。正式 apply 成功只影响之后创建的 Session；已有 Session 保持创建时已复制的 authority，不热替换或即时撤权。
 
 registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。Agent apply 拒绝、malformed report、resource limit 或 activation failure 形成 typed failure 并保持 fail-closed admission，不能把未接管的 descriptor 标记为 loaded。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。
@@ -303,6 +305,8 @@ MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorizatio
 纯目录主动刷新不撤销仍有效的已发布 Admission；创建及恢复可以在原来源、配置、授权 ceiling 和保守 deadline 内继续借用它，Core 的正式收缩或拒绝仍是强制结果。Selection 与创建时 authority fact 必须在同一准入观察中取得，不能因两次 freshness 读取跨过 deadline 而彼此矛盾。deadline 从 Agent 的官方 descriptor 观测派生，并扣除排队与 completion 交付耗时；不能从安装时间重置 TTL。到期及时收缩，不以正在刷新或重试频率限制延长有效期。只有明确的未发布拒绝可保留旧目录至原 deadline；未知失败不能据此保留。恢复准入中的 MCP 事务屏障与 Runtime 不可用不得走 Session 容量回收路径。
 
 Product MCP 的自动刷新共享单一作业并合并重复请求；极短 TTL 受最小网络间隔约束，持续失败有有界退避和暂停，普通 Task 输入不能重置预算或跳过退避。显式刷新或新配置可以恢复尝试；队列、timer/wake 与网络失败分别保留可诊断事实。查询只观察当前 freshness，不登记网络或恢复工作；正常推进由 Host timer、控制入口和 completion 承担。
+
+OAuth grant 的提前刷新时间在提交安装或启动恢复时固定；暂缺合法时间时，由后续显式生命周期观察补齐，查询保持纯读并暂用真实 expiry。Product 按 server、connection/consent 和 token revision 保留进程内有界退避，返回 `max(refresh_due, retry_not_before)` 最早的一台；marker 确认清除或目标刷新 begin 被拒后才推进相应重试状态，全局事务忙不归为单台服务器失败。旧 operation 不得影响新绑定；调度不得改写 grant 的真实 expiry。Product Control 只注入既有系统时钟的读能力，Application 继续拥有单个 OAuth timer 及其全局下限，不借用 Schedule 的 arm/cancel 或另建持久化调度状态。catalog refresh 等待 OAuth marker/apply/在途作业时由完成事件继续推进，不能以到期的 retry floor 形成毫秒轮询；独立的 freshness deadline 仍须及时失效准入。
 
 Product Control 为该共享刷新作业持有独立于 Run 池的有界控制执行容量，所有 Run worker 等待人工审批或 Run 队列已满时，目录刷新仍须推进；此容量不执行 Run，不改变 MCP apply/OAuth/refresh 的既有串行化边界。关闭先停止 MCP admission/timer 并取消尚未开始的刷新，join 在途刷新后才接纳或丢弃其 completion、释放对应 owner；Agent Runtime 和 transport 必须活到该 join 完成。
 

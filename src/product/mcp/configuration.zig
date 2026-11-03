@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const mcp_http_protocol = @import("agent_mcp_http_protocol");
+const grant_schedule = @import("grant_schedule.zig");
 
 pub const schema_version: u8 = 2;
 pub const transaction_schema_version: u8 = 1;
@@ -756,6 +757,7 @@ pub const ManagementPort = struct {
     locator_generator: FreshLocatorGenerator,
     identity_generator: FreshServerIdentityGenerator,
     coordinator: TransactionCoordinator,
+    oauth_schedule: OauthRefreshSchedule,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -776,6 +778,8 @@ pub const ManagementPort = struct {
             };
         }
         errdefer if (desired) |*registry| registry.deinit();
+        var oauth_schedule = try OauthRefreshSchedule.init(allocator, configuration.limits);
+        oauth_schedule.reconcile(if (desired) |registry| registry.value else null);
         return .{
             .allocator = allocator,
             .limits = configuration.limits,
@@ -789,10 +793,12 @@ pub const ManagementPort = struct {
             .locator_generator = configuration.locator_generator,
             .identity_generator = configuration.identity_generator,
             .coordinator = .{ .health = health },
+            .oauth_schedule = oauth_schedule,
         };
     }
 
     pub fn deinit(self: *ManagementPort) void {
+        self.oauth_schedule.deinit();
         if (self.runtime_manifest) |*manifest| manifest.deinit();
         if (self.desired) |*registry| registry.deinit();
         self.* = undefined;
@@ -1074,7 +1080,19 @@ pub const ManagementPort = struct {
             .kind = "streamable_http",
             .url = input.url,
         };
-        replacement.auth = oauthAuth(input.client);
+        // Editing presentation or transport policy does not revoke an unchanged
+        // OAuth destination/registration plan (including an issued DCR client).
+        const existing = base.servers[index];
+        const preserve_authorization = optionalTextEqual(existing.transport.url, input.url) and
+            oauthClientPlanMatches(existing.auth, input.client);
+        replacement.auth = if (preserve_authorization) existing.auth else oauthAuth(input.client);
+        var consent_fingerprint: [64]u8 = undefined;
+        if (preserve_authorization) {
+            if (replacement.auth.oauth.?.consent) |consent| {
+                consent_fingerprint = oauthConsentFingerprint(replacement, consent).?;
+                replacement.auth.oauth.?.consent.?.fingerprint = &consent_fingerprint;
+            }
+        }
         return self.prepareConnectionReplacement(
             expected_generation,
             base,
@@ -2101,8 +2119,91 @@ pub const ManagementPort = struct {
         self: *ManagementPort,
         replacement: std.json.Parsed(RegistryWire),
     ) void {
+        self.oauth_schedule.reconcile(replacement.value);
         if (self.desired) |*registry| registry.deinit();
         self.desired = replacement;
+    }
+};
+
+/// Process-only grant deadlines and retry state. Storage is bounded by registry
+/// limits and reserved before any durable mutation; installation cannot fail.
+pub const OauthRefreshSchedule = struct {
+    const Entry = struct {
+        id_len: usize = 0,
+        binding: [32]u8 = undefined,
+        timing: grant_schedule.Grant = .{ .expires_at = 0 },
+    };
+    allocator: std.mem.Allocator,
+    entries: []Entry,
+    ids: []u8,
+    id_capacity: usize,
+
+    pub fn init(allocator: std.mem.Allocator, limits: Limits) std.mem.Allocator.Error!OauthRefreshSchedule {
+        const entries = try allocator.alloc(Entry, limits.max_servers);
+        errdefer allocator.free(entries);
+        @memset(entries, .{});
+        const size = std.math.mul(usize, limits.max_servers, limits.max_identity_bytes) catch return error.OutOfMemory;
+        return .{ .allocator = allocator, .entries = entries, .ids = try allocator.alloc(u8, size), .id_capacity = limits.max_identity_bytes };
+    }
+    pub fn deinit(self: *OauthRefreshSchedule) void {
+        self.allocator.free(self.entries);
+        self.allocator.free(self.ids);
+        self.* = undefined;
+    }
+    fn id(self: *const OauthRefreshSchedule, index: usize) []const u8 {
+        return self.ids[index * self.id_capacity ..][0..self.entries[index].id_len];
+    }
+    pub fn indexOf(self: *const OauthRefreshSchedule, server_id: []const u8) ?usize {
+        for (self.entries, 0..) |entry, index| if (entry.id_len != 0 and std.mem.eql(u8, self.id(index), server_id)) return index;
+        return null;
+    }
+    fn binding(server: ServerWire) ?[32]u8 {
+        const oauth = server.auth.oauth orelse return null;
+        const consent = oauth.consent orelse return null;
+        const grant = oauth.grant orelse return null;
+        if (grant.refresh_token_ref == null or grant.expires_at_unix_ms == null) return null;
+        var hash = Sha256.init(.{});
+        hashField(&hash, &connectionFingerprint(server));
+        hashField(&hash, consent.fingerprint);
+        hashInteger(&hash, consent.epoch);
+        hashInteger(&hash, grant.token_revision);
+        hashInteger(&hash, grant.expires_at_unix_ms.?);
+        var digest: [32]u8 = undefined;
+        hash.final(&digest);
+        return digest;
+    }
+    pub fn reconcile(self: *OauthRefreshSchedule, registry: ?RegistryWire) void {
+        // Retire obsolete slots first so full-capacity replacement is no-fail.
+        for (self.entries, 0..) |*entry, index| {
+            if (entry.id_len == 0) continue;
+            const server = if (registry) |value| findServer(value.servers, self.id(index)) else null;
+            const next = if (server) |value| binding(value) else null;
+            if (next == null or !std.mem.eql(u8, &entry.binding, &next.?)) entry.* = .{};
+        }
+        const target = registry orelse return;
+        for (target.servers) |server| {
+            const next = binding(server) orelse continue;
+            if (self.indexOf(server.id) != null) continue;
+            const index = for (self.entries, 0..) |entry, index| {
+                if (entry.id_len == 0) break index;
+            } else unreachable;
+            std.debug.assert(server.id.len <= self.id_capacity);
+            @memcpy(self.ids[index * self.id_capacity ..][0..server.id.len], server.id);
+            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .timing = .{ .expires_at = server.auth.oauth.?.grant.?.expires_at_unix_ms.? } };
+        }
+    }
+    pub fn observeTime(self: *OauthRefreshSchedule, now_ms: ?u64) void {
+        for (self.entries) |*entry| {
+            if (entry.id_len != 0) entry.timing.observeTime(now_ms);
+        }
+    }
+    pub fn eligibleAt(self: *const OauthRefreshSchedule, server_id: []const u8, expiry: u64) u64 {
+        const index = self.indexOf(server_id) orelse return expiry;
+        return self.entries[index].timing.eligibleAt();
+    }
+    pub fn deferServer(self: *OauthRefreshSchedule, server_id: []const u8, now_ms: ?u64) void {
+        const index = self.indexOf(server_id) orelse return;
+        self.entries[index].timing.deferAttempt(now_ms);
     }
 };
 
@@ -2530,12 +2631,14 @@ fn entryCompatible(
             .needs_authentication => |fingerprint| if (target) |server|
                 !server.enabled or
                     serverProblem(server, limits) != null or
+                    oauthDoesNotRequireLoading(server) or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
             else
                 true,
             .reauth_required => |fingerprint| if (target) |server|
                 !server.enabled or
                     serverProblem(server, limits) != null or
+                    oauthDoesNotRequireLoading(server) or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
             else
                 true,
@@ -2555,6 +2658,23 @@ fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
     if (server.auth.oauth) |oauth|
         return std.mem.eql(u8, oauth.status, "ready");
     return true;
+}
+
+fn oauthDoesNotRequireLoading(server: ServerWire) bool {
+    if (!std.mem.eql(u8, server.auth.kind, "oauth")) return false;
+    const oauth = server.auth.oauth orelse return false;
+    return !std.mem.eql(u8, oauth.status, "ready");
+}
+
+fn oauthClientPlanMatches(auth: AuthWire, plan: OauthClientPlan) bool {
+    if (!std.mem.eql(u8, auth.kind, "oauth")) return false;
+    const registration = (auth.oauth orelse return false).registration;
+    return switch (plan) {
+        .dynamic_registration => std.mem.eql(u8, registration.kind, "dynamic_registration"),
+        .pre_registered => |client| std.mem.eql(u8, registration.kind, "pre_registered") and
+            optionalTextEqual(registration.client_id, client.client_id) and
+            optionalTextEqual(registration.token_endpoint_auth_method, client.token_endpoint_auth_method),
+    };
 }
 
 fn findManifestEntry(
@@ -4645,6 +4765,59 @@ const test_limits: Limits = .{
     .max_runtime_secrets_per_server = 128,
     .max_runtime_secret_bytes_per_server = 16 * 1024,
 };
+
+test "OAuth deadlines freeze per grant and bounded retry does not extend credentials" {
+    const server: ServerWire = .{
+        .id = "a",
+        .namespace = "a",
+        .display_name = "A",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/mcp" },
+        .connection_approval = null,
+        .tools = &.{},
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "ready",
+            .registration = .{ .kind = "pre_registered", .issuer = null, .client_id = "client", .token_endpoint_auth_method = "none", .client_credential_revision = 1, .client_secret_ref = null },
+            .consent = .{ .epoch = 1, .fingerprint = "consent", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .redirect_uri = "http://127.0.0.1/callback", .client_credential_revision = 1 },
+            .grant = .{ .consent_epoch = 1, .token_revision = 1, .access_token_ref = "a/access", .refresh_token_ref = "a/refresh", .expires_at_unix_ms = 101_000 },
+        } },
+    };
+    var second = server;
+    second.id = "b";
+    second.auth.oauth.?.grant.?.expires_at_unix_ms = 111_000;
+    var servers = [_]ServerWire{ server, second };
+    const registry: RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+    var schedule = try OauthRefreshSchedule.init(std.testing.allocator, test_limits);
+    defer schedule.deinit();
+    schedule.reconcile(registry);
+    schedule.observeTime(null);
+    try std.testing.expectEqual(@as(u64, 101_000), schedule.eligibleAt("a", 101_000));
+    schedule.observeTime(1000);
+    try std.testing.expectEqual(@as(u64, 76_000), schedule.eligibleAt("a", 101_000));
+    schedule.observeTime(70_000);
+    schedule.reconcile(registry);
+    try std.testing.expectEqual(@as(u64, 76_000), schedule.eligibleAt("a", 101_000));
+    schedule.deferServer("a", 80_000);
+    try std.testing.expect(schedule.eligibleAt("b", 111_000) < schedule.eligibleAt("a", 101_000));
+    for (0..20) |_| schedule.deferServer("a", 80_000);
+    try std.testing.expectEqual(@as(u64, 380_000), schedule.eligibleAt("a", 101_000));
+    try std.testing.expectEqual(@as(?u64, 101_000), servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
+    servers[0].auth.oauth.?.grant.?.token_revision += 1;
+    schedule.reconcile(registry);
+    schedule.observeTime(1000);
+    try std.testing.expectEqual(@as(u64, 76_000), schedule.eligibleAt("a", 101_000));
+    servers[0].auth.oauth.?.consent.?.epoch += 1;
+    schedule.reconcile(registry);
+    schedule.observeTime(100_996);
+    try std.testing.expectEqual(@as(u64, 100_999), schedule.eligibleAt("a", 101_000));
+    // Removing all grants also removes their retry state; max-size replacement
+    // and absent/invalid clocks need no allocations after installation.
+    schedule.reconcile(null);
+    schedule.observeTime(0);
+    try std.testing.expect(schedule.indexOf("a") == null);
+}
 
 fn approvedSchema2TestBytes(
     allocator: std.mem.Allocator,

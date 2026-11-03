@@ -179,11 +179,23 @@ pub const Runtime = struct {
         ports: ports_module.Ports,
         initial_state: state_module.McpProductState,
     ) Runtime {
-        return .{
+        var runtime: Runtime = .{
             .allocator = allocator,
             .ports = ports,
             .state = initial_state,
         };
+        runtime.observeOauthTime();
+        return runtime;
+    }
+
+    fn observeOauthTime(self: *Runtime) void {
+        if (self.state.management) |*management|
+            management.oauth_schedule.observeTime(self.ports.unix_clock.nowMs());
+    }
+
+    fn installCommittedDesired(self: *Runtime, admission: McpAdmissionAuthority) void {
+        self.observeOauthTime();
+        policy.installCommittedDesiredState(&self.state, &self.state.management.?, admission);
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -490,19 +502,23 @@ pub const Runtime = struct {
         return started;
     }
 
+    fn catalogBoundaryBusy(self: *const Runtime) bool {
+        if (self.refresh_job != null or self.state.configuration_apply_state == .applying) return true;
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        return registry.oauth_operation != null;
+    }
+
     fn startPendingRefresh(self: *Runtime) Error!bool {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const mcp = &self.state;
         if (!mcp.refresh_pending) return false;
-        if (self.refresh_job != null or
-            mcp.configuration_apply_state == .applying)
-            return false;
+        if (self.catalogBoundaryBusy()) return false;
         const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
         const inspection = management.inspect();
         if (inspection.health != .ready) return error.McpManagementUnavailable;
         const desired = management.desiredRegistry() orelse
             return error.McpManagementUnavailable;
-        if (desired.oauth_operation != null) return false;
         if (self.ports.timer.now()) |now_ms| if (mcp.refresh_not_before_ms) |not_before|
             if (now_ms < not_before) return false;
         const generation = mcp.refresh_request_generation;
@@ -951,7 +967,7 @@ pub const Runtime = struct {
                     outcome;
                 switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
-                        policy.installCommittedDesiredState(&self.state, management, candidate);
+                        self.installCommittedDesired(candidate);
                         self.state.connection_test = null;
                         candidate_owned = false;
                         self.markChanged();
@@ -1311,6 +1327,7 @@ pub const Runtime = struct {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
         };
+        defer preparation.deinit();
         return self.commitOauthOperationBegin(&preparation);
     }
 
@@ -1349,6 +1366,7 @@ pub const Runtime = struct {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
         };
+        defer preparation.deinit();
         const outcome = try self.commitOauthOperationBegin(&preparation);
         const handle = switch (outcome) {
             .started => |value| value,
@@ -1394,7 +1412,6 @@ pub const Runtime = struct {
         self: *Runtime,
         preparation: *configuration.PreparedOauthOperationState,
     ) Error!state_module.McpOauthOperationBeginOutcome {
-        defer preparation.deinit();
         var reduced = try self.admissionForTarget(preparation.target());
         var reduced_owned = true;
         defer if (reduced_owned) reduced.deinit();
@@ -1403,7 +1420,7 @@ pub const Runtime = struct {
         switch (try management.commitPreparedOauthOperationState(preparation)) {
             .saved => {
                 self.ports.timer.cancel();
-                policy.installCommittedDesiredState(&self.state, management, reduced);
+                self.installCommittedDesired(reduced);
                 reduced_owned = false;
                 self.markChanged();
                 const registry = management.desiredRegistry() orelse return .rejected;
@@ -1438,6 +1455,10 @@ pub const Runtime = struct {
         if (inspection.health != .ready or inspection.runtime_alignment != .current or
             self.state.activation_failed)
             return .rejected;
+        if (management.desiredRegistry().?.oauth_operation != null) return .rejected;
+        var started = false;
+        defer if (!started and management.inspect().health == .ready)
+            management.oauth_schedule.deferServer(server_id, self.ports.unix_clock.nowMs());
         const activation = self.state.activation orelse return .rejected;
         var runtime_loaded = false;
         for (activation.serverHealth()) |server| {
@@ -1455,31 +1476,18 @@ pub const Runtime = struct {
             .prepared => |prepared| prepared,
         };
         defer preparation.deinit();
-        var reduced = try self.admissionForTarget(preparation.target());
-        var reduced_owned = true;
-        defer if (reduced_owned) reduced.deinit();
-        if (reduced != .ready) return .rejected;
         var binding = try policy.buildOauthRefreshBinding(self.allocator, preparation.target());
         var binding_owned = true;
         defer if (binding_owned) binding.deinit();
-        switch (try management.commitPreparedOauthOperationState(&preparation)) {
-            .saved => {
-                self.ports.timer.cancel();
-                policy.installCommittedDesiredState(&self.state, management, reduced);
-                reduced_owned = false;
+        return switch (try self.commitOauthOperationBegin(&preparation)) {
+            .started => ready: {
                 binding_owned = false;
-                self.markChanged();
-                return .{ .started = binding };
+                started = true;
+                break :ready .{ .started = binding };
             },
-            .indeterminate => {
-                self.ports.timer.cancel();
-                policy.blockAdmission(&self.state, .persistence_outcome_unknown);
-                self.markChanged();
-                return .persistence_outcome_unknown;
-            },
-            .rejected => return .rejected,
-            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
-        }
+            .rejected => .rejected,
+            .persistence_outcome_unknown => .persistence_outcome_unknown,
+        };
     }
 
     pub fn completeOauthRefresh(
@@ -1508,7 +1516,7 @@ pub const Runtime = struct {
                 switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
                         runtime_commit.commit();
-                        policy.installCommittedDesiredState(&self.state, management, candidate);
+                        self.installCommittedDesired(candidate);
                         candidate_owned = false;
                         self.releaseBoundary();
                         self.markChanged();
@@ -1534,6 +1542,15 @@ pub const Runtime = struct {
     ) Error!configuration.ManagementOutcome {
         if (self.shutting_down or self.refresh_job != null) return .rejected;
         const management = if (self.state.management) |*value| value else return .rejected;
+        const operation = if (management.desiredRegistry()) |registry| registry.oauth_operation else null;
+        const failed_server = if (operation) |marker|
+            if (std.mem.eql(u8, marker.id, operation_id) and std.mem.eql(u8, marker.kind, "refresh"))
+                try self.allocator.dupe(u8, marker.server_id)
+            else
+                null
+        else
+            null;
+        defer if (failed_server) |server_id| self.allocator.free(server_id);
         var preparation = switch (try management.prepareClearOauthOperation(operation_id)) {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
@@ -1545,7 +1562,8 @@ pub const Runtime = struct {
         const outcome = try management.commitPreparedOauthOperationState(&preparation);
         switch (outcome) {
             .saved => {
-                policy.installCommittedDesiredState(&self.state, management, candidate);
+                self.installCommittedDesired(candidate);
+                if (failed_server) |server_id| management.oauth_schedule.deferServer(server_id, self.ports.unix_clock.nowMs());
                 candidate_owned = false;
                 self.releaseBoundary();
                 self.markChanged();
@@ -1634,6 +1652,7 @@ pub const Runtime = struct {
     }
 
     pub fn syncFreshness(self: *Runtime) bool {
+        self.observeOauthTime();
         const was_ready = self.state.admission == .ready;
         self.expireAdmission();
         if (!was_ready or self.state.admission == .ready) return false;
@@ -1695,6 +1714,13 @@ pub const Runtime = struct {
             };
             if (!started and self.state.refresh_pending) {
                 const now_ms = self.ports.timer.now() orelse return;
+                // Busy transactions and running jobs have explicit completion
+                // wakeups. Only time/capacity waits need a retry timer.
+                if (self.catalogBoundaryBusy()) {
+                    if (self.state.expiry_deadline_ms) |expiry| if (self.state.admissionFresh() and expiry > now_ms)
+                        self.armRefreshAt(expiry);
+                    return;
+                }
                 const retry = @max(self.state.refresh_not_before_ms orelse now_ms +| 1_000, now_ms +| 1);
                 self.armRefreshAt(if (self.state.expiry_deadline_ms) |expiry|
                     if (self.state.admissionFresh() and expiry > now_ms) @min(expiry, retry) else retry
@@ -1786,6 +1812,7 @@ const TestHarness = struct {
     failed_enqueues: usize = 0,
     armed_deadline_ms: ?u64 = null,
     now_ms: u64 = 100,
+    unix_seconds: ?u64 = 1,
     activation_outcome: agent.McpActivationOutcome = .empty,
     activations: usize = 0,
     arm_succeeds: bool = true,
@@ -1835,6 +1862,11 @@ const TestHarness = struct {
         return self.now_ms;
     }
 
+    fn unixNow(context: ?*anyopaque) ?u64 {
+        const self: *TestHarness = @ptrCast(@alignCast(context.?));
+        return self.unix_seconds;
+    }
+
     fn armAt(context: ?*anyopaque, deadline_ms: u64) bool {
         const self: *TestHarness = @ptrCast(@alignCast(context.?));
         self.armed_deadline_ms = deadline_ms;
@@ -1876,6 +1908,7 @@ const TestHarness = struct {
                 .context = self,
                 .notify_fn = notify,
             },
+            .unix_clock = .{ .enabled = true, .context = self, .now_seconds_fn = unixNow },
         };
     }
 
@@ -1885,6 +1918,185 @@ const TestHarness = struct {
         job.execute_fn(job.context);
     }
 };
+
+const OauthTestEffects = struct {
+    entropy: u8 = 0,
+    deleted: usize = 0,
+    registry_effect: configuration.PersistenceEffect = .committed,
+
+    fn fill(raw: ?*anyopaque, output: *[16]u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.entropy += 1;
+        @memset(output, self.entropy);
+        return true;
+    }
+    fn journal(_: ?*anyopaque, _: []const u8) configuration.PersistenceEffect {
+        return .committed;
+    }
+    fn registry(raw: ?*anyopaque, _: []const u8) configuration.PersistenceEffect {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        return self.registry_effect;
+    }
+    fn clear(_: ?*anyopaque) configuration.PersistenceEffect {
+        return .committed;
+    }
+    fn probe(_: ?*anyopaque, _: []const u8) configuration.CredentialPresence {
+        return .missing;
+    }
+    fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+        return true;
+    }
+    fn delete(raw: ?*anyopaque, _: []const u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.deleted += 1;
+        return true;
+    }
+
+    fn coldRuntime(self: *@This(), harness: *TestHarness, initial_status: []const u8) !Runtime {
+        const allocator = std.testing.allocator;
+        const dynamic = std.mem.eql(u8, initial_status, "client_registration_required");
+        var server: configuration.ServerWire = .{
+            .id = "oauth",
+            .namespace = "oauth",
+            .display_name = "OAuth",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/mcp" },
+            .auth = .{ .kind = "oauth", .oauth = .{
+                .status = initial_status,
+                .registration = .{ .kind = if (dynamic) "dynamic_registration" else "pre_registered", .issuer = null, .client_id = if (dynamic) null else "client", .token_endpoint_auth_method = if (dynamic) null else "none", .client_credential_revision = if (dynamic) 0 else 1, .client_secret_ref = null },
+                .consent = null,
+                .grant = null,
+            } },
+            .connection_approval = null,
+            .tools = &.{},
+        };
+        const approval = configuration.connectionFingerprint(server);
+        server.connection_approval = .{ .fingerprint = &approval };
+        var servers = [_]configuration.ServerWire{server};
+        const initial: configuration.RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+        var buffer: [8192]u8 = undefined;
+        var preparation = try configuration.prepare(allocator, try configuration.encode(&buffer, initial, test_limits), true, false, .{}, test_limits);
+        errdefer preparation.deinit();
+        var manifest = (try configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+        errdefer manifest.deinit();
+        const management = try configuration.ManagementPort.init(allocator, initial, .{
+            .persistence = .{ .context = self, .available = true, .commit_journal_fn = journal, .commit_registry_fn = registry, .clear_journal_fn = clear },
+            .credentials = .{ .context = self, .available = true, .probe_fn = probe, .create_fn = create, .delete_fn = delete },
+            .locator_generator = .{ .context = self, .available = true, .fill_fn = fill },
+            .identity_generator = .{ .context = self, .available = true, .fill_fn = fill },
+            .limits = test_limits,
+            .runtime_manifest = &manifest,
+        });
+        return Runtime.init(allocator, harness.ports(), .{
+            .preparation = preparation,
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+            .host_capabilities = .{ .oauth = true },
+            .committed = true,
+        });
+    }
+};
+
+test "cold absence supports consent DCR with a secret and reauthorization through token commit" {
+    for ([_][]const u8{ "consent_required", "client_registration_required", "reauth_required" }) |initial_status| {
+        var effects = OauthTestEffects{};
+        var harness = TestHarness{};
+        var runtime = try effects.coldRuntime(&harness, initial_status);
+        defer runtime.deinit();
+        try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+        var start = (try runtime.beginAuthorization(1, "oauth", "attempt")).?;
+        defer start.deinit();
+        try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_consent));
+        if (std.mem.eql(u8, initial_status, "client_registration_required")) {
+            const begun = try runtime.beginOauthDynamicRegistration(.{ .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" });
+            try std.testing.expect(begun == .started);
+            try std.testing.expect(runtime.advanceAuthorization("attempt", .registering));
+            var secret = "client-secret".*;
+            try std.testing.expectEqual(.saved, try runtime.completeOauthDynamicRegistration(.{ .operation_id = begun.started.id, .server_id = "oauth", .client_id = "issued-client", .token_endpoint_auth_method = "client_secret_basic", .client_secret = &secret }));
+            try std.testing.expect(runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.registration.client_secret_ref != null);
+        }
+        try std.testing.expect((try runtime.authorizeOauth(.{ .attempt_id = 1, .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" })) == .ready);
+        try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+        try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_browser));
+        const exchange = try runtime.beginOauthCodeExchange("oauth");
+        try std.testing.expect(exchange == .started);
+        try std.testing.expect(runtime.advanceAuthorization("attempt", .exchanging));
+        var access = "access-token".*;
+        var refresh = "refresh-token".*;
+        try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.started.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = &refresh, .expires_at_unix_ms = 90_000 }));
+        try std.testing.expect(runtime.finishAuthorization("attempt"));
+        const current = runtime.state.management.?.desiredRegistry().?;
+        try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
+        const deadline = runtime.nextOauthExpiry().?.expires_at_unix_ms;
+        try std.testing.expectEqual(@as(u64, 67_750), deadline);
+        harness.unix_seconds = 80;
+        try std.testing.expectEqual(deadline, runtime.nextOauthExpiry().?.expires_at_unix_ms);
+        try std.testing.expectEqual(@as(?u64, 90_000), current.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
+        harness.unix_seconds = 1;
+        // Tokens now require real configuration apply; absence cannot pretend loaded.
+        try std.testing.expectEqual(.restart_required, runtime.state.management.?.inspect().runtime_alignment);
+        const auth_ref = try std.testing.allocator.dupe(u8, current.servers[0].auth.oauth.?.grant.?.access_token_ref);
+        defer std.testing.allocator.free(auth_ref);
+        const revision = current.servers[0].auth.oauth.?.grant.?.token_revision;
+        const deletion_count = effects.deleted;
+        try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(current.generation, .{ .server_id = "oauth", .display_name = "Renamed", .negotiation = "compat_only", .timeout_ms = 2000, .url = "https://mcp.example.test/mcp", .client = if (std.mem.eql(u8, initial_status, "client_registration_required")) .dynamic_registration else .{ .pre_registered = .{ .client_id = "client" } } }));
+        const edited = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+        try std.testing.expectEqualStrings(auth_ref, edited.grant.?.access_token_ref);
+        try std.testing.expectEqual(revision, edited.grant.?.token_revision);
+        try std.testing.expectEqual(deletion_count, effects.deleted);
+        if (std.mem.eql(u8, initial_status, "client_registration_required")) try std.testing.expect(edited.registration.client_secret_ref != null);
+        const edited_generation = runtime.state.management.?.desiredRegistry().?.generation;
+        const replacement: configuration.UpdateOauthHttpConnectionInput = .{
+            .server_id = "oauth",
+            .display_name = "Replacement",
+            .negotiation = "automatic",
+            .timeout_ms = 2000,
+            .url = "https://other.example.test/mcp",
+            .client = .{ .pre_registered = .{ .client_id = "other-client" } },
+        };
+        effects.registry_effect = .failed;
+        try std.testing.expectEqual(.rejected, try runtime.updateOauthHttpConnection(edited_generation, replacement));
+        try std.testing.expectEqualStrings(auth_ref, runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.grant.?.access_token_ref);
+        try std.testing.expectEqual(deletion_count, effects.deleted);
+        effects.registry_effect = .committed;
+        try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(edited_generation, replacement));
+        const replaced = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+        try std.testing.expect(replaced.grant == null and replaced.consent == null and replaced.registration.client_secret_ref == null);
+        try std.testing.expectEqualStrings("consent_required", replaced.status);
+        try std.testing.expect(effects.deleted >= deletion_count + 2);
+    }
+}
+
+test "catalog refresh waits for OAuth marker without timer spin and resumes on release" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "client_registration_required");
+    defer runtime.deinit();
+    var start = (try runtime.beginAuthorization(1, "oauth", "attempt")).?;
+    defer start.deinit();
+    try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_consent));
+    const begin = try runtime.beginOauthDynamicRegistration(.{ .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" });
+    try std.testing.expect(begin == .started);
+    try std.testing.expect(!(try runtime.requestRefresh(false)));
+    // A previously elapsed retry floor must not turn the transaction wait into
+    // a one-millisecond loop. Spurious timer deliveries remain harmless.
+    runtime.state.refresh_not_before_ms = 1;
+    for (0..5) |_| {
+        harness.now_ms += 1;
+        _ = runtime.onRefreshTimer();
+        try std.testing.expect(harness.armed_deadline_ms == null);
+        try std.testing.expect(runtime.state.refresh_pending and harness.queued == null);
+    }
+    try std.testing.expectEqual(.saved, try runtime.recoverOauthOperation(begin.started.id));
+    try std.testing.expect(!runtime.state.refresh_pending and harness.queued != null);
+    harness.executeQueued();
+    try std.testing.expect(runtime.syncRefreshJob());
+    try std.testing.expectEqual(@as(usize, 1), harness.activations);
+}
 
 fn testEmptyRuntime(harness: *TestHarness) !Runtime {
     const allocator = std.testing.allocator;

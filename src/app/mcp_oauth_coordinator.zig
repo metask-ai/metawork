@@ -513,6 +513,157 @@ fn refreshDiscoveryCoveredByConsent(
     return true;
 }
 
+test "MCP unchanged coordinator respects Product per-server retry and its global floor" {
+    const agent = @import("metawork_agent");
+    const config = mcp_types.contract;
+    const Fixture = struct {
+        now_ms: u64 = 10_000,
+        armed: ?u64 = null,
+        runtime: ?*mcp_types.Runtime = null,
+        attempts: [2]u8 = undefined,
+        count: usize = 0,
+        fn now(raw: *anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.now_ms;
+        }
+        fn seconds(raw: ?*anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return self.now_ms / 1000;
+        }
+        fn arm(raw: *anyopaque, due: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.armed = due;
+            return true;
+        }
+        fn cancelTimer(_: *anyopaque) void {}
+        fn notify(_: *anyopaque) void {}
+        fn productNotify(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn next(raw: *anyopaque) ?mcp_types.McpOauthExpiry {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.runtime.?.nextOauthExpiry();
+        }
+        fn begin(raw: *anyopaque, id: []const u8) anyerror!mcp_types.McpOauthRefreshBeginOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.attempts[self.count] = id[0];
+            self.count += 1;
+            return self.runtime.?.beginOauthRefresh(id);
+        }
+        fn complete(_: *anyopaque, _: config.CompleteRefreshInput, _: mcp_types.McpOauthRuntimeCommit) anyerror!config.ManagementOutcome {
+            return error.UnexpectedCall;
+        }
+        fn reauth(_: *anyopaque, _: mcp_types.McpRuntimeAuthorizationFailure) anyerror!mcp_types.McpRuntimeAuthorizationFailureOutcome {
+            return error.UnexpectedCall;
+        }
+        fn clear(_: *anyopaque, _: []const u8) anyerror!config.ManagementOutcome {
+            return error.UnexpectedCall;
+        }
+        fn enqueue(_: *anyopaque, _: mcp_types.Job) error{ ExecutorShuttingDown, QueueFull }!void {
+            return error.QueueFull;
+        }
+        fn cancel(_: *anyopaque, _: *anyopaque) bool {
+            return false;
+        }
+        fn activate(_: *anyopaque) mcp_types.CatalogError!agent.McpActivationOutcome {
+            return .empty;
+        }
+        fn selection(_: *anyopaque, _: *const agent.McpActivation, _: []const agent.McpServerAllowlist) mcp_types.CatalogError!?*agent.McpSelection {
+            return null;
+        }
+        fn restore(_: *anyopaque, _: *const agent.McpRestoreSelection, _: *const agent.McpActivation, _: []const agent.McpActivationTool) mcp_types.CatalogError!*agent.McpSelection {
+            return error.InvalidMcpSelection;
+        }
+        fn noClock(_: ?*anyopaque) ?u64 {
+            return null;
+        }
+        fn noArm(_: ?*anyopaque, _: u64) bool {
+            return false;
+        }
+        fn noCancel(_: ?*anyopaque) void {}
+        fn resolve(_: ?*anyopaque, allocator: std.mem.Allocator, _: []const u8) config.CredentialResolution {
+            return .{ .value = allocator.dupe(u8, "fixture-token") catch return .out_of_memory };
+        }
+        fn persist(_: ?*anyopaque, _: []const u8) config.PersistenceEffect {
+            return .committed;
+        }
+        fn fill(_: ?*anyopaque, bytes: *[16]u8) bool {
+            @memset(bytes, 1);
+            return true;
+        }
+    };
+    var fixture = Fixture{};
+    const allocator = std.testing.allocator;
+    const limits: config.Limits = .{ .max_servers = 2, .max_tools_per_server = 1, .max_namespace_bytes = 128, .max_credential_locators = 8, .max_runtime_secrets_per_server = 4, .max_runtime_secret_bytes_per_server = 4096 };
+    var servers = [_]config.ServerWire{undefined} ** 2;
+    var approvals: [2][64]u8 = undefined;
+    var consents: [2][64]u8 = undefined;
+    for (&servers, 0..) |*server, index| {
+        server.* = .{ .id = if (index == 0) "a" else "b", .namespace = if (index == 0) "a" else "b", .display_name = "Fixture", .enabled = true, .negotiation = "automatic", .timeout_ms = 1000, .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/mcp" }, .connection_approval = null, .tools = &.{}, .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "ready",
+            .registration = .{ .kind = "pre_registered", .issuer = "https://issuer.example.test", .client_id = "client", .token_endpoint_auth_method = "none", .client_credential_revision = 1, .client_secret_ref = null },
+            .consent = .{ .epoch = 1, .fingerprint = "pending", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .redirect_uri = "http://127.0.0.1/callback", .client_credential_revision = 1 },
+            .grant = .{ .consent_epoch = 1, .token_revision = 1, .access_token_ref = if (index == 0) "a/access" else "b/access", .refresh_token_ref = if (index == 0) "a/refresh" else "b/refresh", .expires_at_unix_ms = if (index == 0) 40_000 else 41_000 },
+        } } };
+        approvals[index] = config.connectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &approvals[index] };
+        consents[index] = config.oauthConsentFingerprint(server.*, server.auth.oauth.?.consent.?).?;
+        server.auth.oauth.?.consent.?.fingerprint = &consents[index];
+    }
+    const desired: config.RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+    var buffer: [8192]u8 = undefined;
+    var preparation = try config.prepare(allocator, try config.encode(&buffer, desired, limits), true, false, .{ .available = true, .resolve_fn = Fixture.resolve }, limits);
+    var manifest = (try config.RuntimeManifest.candidate(allocator, &preparation)).?;
+    const management = try config.ManagementPort.init(allocator, desired, .{ .persistence = .{ .available = true, .commit_registry_fn = Fixture.persist }, .credentials = .{ .available = true }, .identity_generator = .{ .available = true, .fill_fn = Fixture.fill }, .limits = limits, .runtime_manifest = &manifest });
+    var runtime = mcp_types.testing.init(allocator, .{
+        .executor = .{ .context = &fixture, .enqueue_fn = Fixture.enqueue, .cancel_fn = Fixture.cancel },
+        .catalog = .{ .context = &fixture, .activate_fn = Fixture.activate, .create_admission_selection_fn = Fixture.selection, .prepare_restore_selection_fn = Fixture.restore },
+        .timer = .{ .enabled = false, .context = null, .now_fn = Fixture.noClock, .arm_at_fn = Fixture.noArm, .cancel_fn = Fixture.noCancel },
+        .notifier = .{ .context = null, .notify_fn = Fixture.productNotify },
+        .unix_clock = .{ .enabled = true, .context = &fixture, .now_seconds_fn = Fixture.seconds },
+    }, .{ .preparation = preparation.take(), .activation = null, .activation_failed = false, .management = management, .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } }, .host_capabilities = .{}, .committed = true });
+    defer runtime.deinit();
+    fixture.runtime = &runtime;
+    // These capabilities must never be touched: Product rejects before an
+    // external effect, because this fixture has no live activation.
+    var credential_store: mcp_platform.CredentialStore = undefined;
+    var authorizations: mcp_platform.HttpAuthorizations = undefined;
+    var coordinator = Coordinator.init(allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credential_store, &authorizations, .{ .context = &fixture, .now_unix_ms_fn = Fixture.now, .arm_fn = Fixture.arm, .cancel_fn = Fixture.cancelTimer, .notify_fn = Fixture.notify });
+    coordinator.reconcileTimer();
+    try std.testing.expectEqual(@as(?u64, 32_500), fixture.armed);
+    fixture.now_ms = 33_000;
+    _ = coordinator.onTimer();
+    try std.testing.expectEqual(@as(?u64, 63_000), fixture.armed);
+    fixture.now_ms = fixture.armed.?;
+    _ = coordinator.onTimer();
+    try std.testing.expectEqualStrings("ab", &fixture.attempts);
+    try std.testing.expect(coordinator.job == null);
+    try std.testing.expectEqual(@as(?u64, 40_000), mcp_types.testing.state(&runtime).management.?.desiredRegistry().?.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
+    const state = mcp_types.testing.state(&runtime);
+    const managed = &state.management.?;
+    const before = managed.oauth_schedule.eligibleAt("a", 40_000);
+    state.configuration_apply_state = .applying;
+    try std.testing.expect((try runtime.beginOauthRefresh("a")) == .rejected);
+    try std.testing.expectEqual(before, managed.oauth_schedule.eligibleAt("a", 40_000));
+    state.configuration_apply_state = .idle;
+    // Exercise the Product clear path used by discovery failure, without a
+    // real credential store or network. It must defer only the bound server.
+    var marker = switch (try managed.prepareBeginRefresh(1, .{ .server_id = "a" })) {
+        .prepared => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer marker.deinit();
+    try std.testing.expectEqual(.saved, try managed.commitPreparedOauthOperationState(&marker));
+    const old_id = try allocator.dupe(u8, managed.desiredRegistry().?.oauth_operation.?.id);
+    defer allocator.free(old_id);
+    fixture.now_ms = 100_000;
+    try std.testing.expectEqual(.saved, try runtime.clearOauthOperation(old_id));
+    const after_clear = managed.oauth_schedule.eligibleAt("a", 40_000);
+    try std.testing.expectEqual(@as(u64, 160_000), after_clear);
+    try std.testing.expectEqual(.rejected, try runtime.clearOauthOperation(old_id));
+    try std.testing.expectEqual(after_clear, managed.oauth_schedule.eligibleAt("a", 40_000));
+}
+
 test "MCP OAuth refresh reuses consent only for the same resource and covered scopes" {
     const binding: mcp_types.McpOauthRefreshBinding = .{
         .arena = undefined,
