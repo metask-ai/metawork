@@ -159,3 +159,134 @@ test("security cleaning preserves stop identity and awaiting admission for its e
   f.controller.settle(token, "failed", "late diagnostic");
   assert.deepEqual(f.entries(), []);
 });
+
+const waitingInput = (id, state = "waiting") => ({
+  submission: { operationId: id },
+  state,
+});
+const preparing = (restoreId = null, inputs = []) => ({
+  ...task([]),
+  currentRunId: "0",
+  currentRunPhase: null,
+  activeOperation: restoreId ? { kind: "restore", id: restoreId } : null,
+  inputSubmissions: inputs,
+});
+
+test("waiting-only stop settles from its original Host input outcomes, not later inputs or missing records", () => {
+  for (const outcome of ["cancelled", "failed", "interrupted"]) {
+    const f = setup();
+    const token = f.controller.begin(
+      "task:t1",
+      preparing(null, [
+        waitingInput("original"),
+        waitingInput("older-failure", "failed"),
+      ]),
+      [],
+    );
+    f.controller.settle(token, "awaiting");
+    assert.deepEqual(token.waitingSubmissionIds, ["original"]);
+    assert.deepEqual(token.submissionIds, ["original"]);
+    f.controller.observe({ tasks: [] });
+    f.controller.observe({
+      tasks: [preparing(null, [waitingInput("later", outcome)])],
+    });
+    assert.equal(f.entries().length, 1);
+    f.controller.observe({
+      tasks: [
+        preparing(null, [
+          waitingInput("original"),
+          waitingInput("later", outcome),
+        ]),
+      ],
+    });
+    assert.equal(
+      f.controller.pending(
+        "task:t1",
+        preparing(null, [waitingInput("original")]),
+      ),
+      true,
+    );
+    f.controller.observe({
+      tasks: [
+        preparing(null, [
+          waitingInput("original", outcome),
+          waitingInput("later"),
+        ]),
+      ],
+    });
+    assert.deepEqual(f.entries(), []);
+    f.controller.settle(token, "unknown");
+    assert.deepEqual(f.entries(), []);
+  }
+});
+
+test("restore stop waits for both the exact preparation to finish and all captured waiting inputs to settle", () => {
+  const f = setup();
+  const token = f.controller.begin(
+    "task:t1",
+    preparing("restore1", [waitingInput("a"), waitingInput("b")]),
+    [],
+  );
+  f.controller.settle(token, "awaiting");
+  assert.equal(token.restoreId, "restore1");
+  assert.equal(f.controller.pending("task:t1", preparing("restore1")), true);
+  f.controller.observe({
+    tasks: [
+      preparing("restore1", [
+        waitingInput("a", "cancelled"),
+        waitingInput("b", "cancelled"),
+      ]),
+    ],
+  });
+  assert.equal(f.entries().length, 1);
+  f.controller.observe({
+    tasks: [
+      preparing(null, [waitingInput("a", "cancelled"), waitingInput("b")]),
+    ],
+  });
+  assert.equal(f.entries().length, 1);
+  f.controller.observe({
+    tasks: [
+      preparing("restore2", [
+        waitingInput("a", "cancelled"),
+        waitingInput("b", "failed"),
+        waitingInput("later"),
+      ]),
+    ],
+  });
+  assert.deepEqual(f.entries(), []);
+});
+
+test("restore-only stop uses the original restore identity even without a Run or waiting input", () => {
+  const f = setup();
+  f.controller.begin("task:t1", preparing("restore1"), []);
+  f.controller.observe({ tasks: [] });
+  f.controller.observe({ tasks: [preparing("restore1")] });
+  assert.equal(f.entries().length, 1);
+  f.controller.observe({ tasks: [preparing("restore2")] });
+  assert.deepEqual(f.entries(), []);
+});
+
+test("a pre-stop Host waiting input may bind a Run, which still needs its own stopping or terminal fact", () => {
+  const f = setup();
+  const token = f.controller.begin(
+    "task:t1",
+    preparing("restore1", [waitingInput("original")]),
+    ["local-before"],
+  );
+  f.controller.settle(token, "unknown");
+  assert.deepEqual(token.submissionIds, ["local-before", "original"]);
+  f.controller.observe({
+    tasks: [task([run("later", "completed", "after-stop")])],
+  });
+  assert.equal(f.entries().length, 1);
+  f.controller.observe({
+    tasks: [task([run("bound", "running", "original")])],
+  });
+  assert.equal(token.runId, "bound");
+  assert.equal(f.entries().length, 1);
+  f.controller.observe({
+    tasks: [task([run("bound", "stopping", "original")])],
+  });
+  assert.deepEqual(f.entries(), []);
+});

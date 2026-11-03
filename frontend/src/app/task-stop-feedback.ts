@@ -5,6 +5,8 @@ export type TaskStopFeedback = {
   taskId: string | null;
   runId: string | null;
   compactId: string | null;
+  restoreId: string | null;
+  waitingSubmissionIds: readonly string[];
   submissionIds: readonly string[];
   phase: "requesting" | "awaiting" | "unknown" | "failed";
   diagnostic?: string;
@@ -24,6 +26,10 @@ export class TaskStopFeedbackController {
   }
 
   begin(scope: string, task: TaskView | null, submissionIds: string[]) {
+    const waitingSubmissionIds =
+      task?.inputSubmissions
+        .filter((input) => input.state === "waiting")
+        .map((input) => input.submission.operationId) ?? [];
     const token: TaskStopFeedback = {
       scope,
       taskId: task?.id ?? null,
@@ -32,7 +38,12 @@ export class TaskStopFeedbackController {
         task?.activeOperation?.kind === "compact"
           ? task.activeOperation.id
           : null,
-      submissionIds,
+      restoreId:
+        task?.activeOperation?.kind === "restore"
+          ? task.activeOperation.id
+          : null,
+      waitingSubmissionIds,
+      submissionIds: [...new Set([...submissionIds, ...waitingSubmissionIds])],
       phase: "requesting",
     };
     this.entries = this.entries.filter((entry) =>
@@ -56,7 +67,9 @@ export class TaskStopFeedbackController {
             task.activeOperation === null) ||
           (entry.runId !== null && entry.runId === task.currentRunId) ||
           (task.activeOperation?.kind === "compact" &&
-            entry.compactId === task.activeOperation.id)),
+            entry.compactId === task.activeOperation.id) ||
+          (task.activeOperation?.kind === "restore" &&
+            entry.restoreId === task.activeOperation.id)),
     );
   }
 
@@ -90,7 +103,7 @@ export class TaskStopFeedbackController {
         (candidate) => candidate.id === entry.taskId,
       );
       if (!task) return true;
-      // A newly created Task may only bind through a pre-stop submission.
+      // A Run may only bind through an input known before this stop request.
       if (!entry.runId) {
         const run = task.runs.find(
           (candidate) =>
@@ -113,11 +126,26 @@ export class TaskStopFeedbackController {
       const compact = task.compacts.find(
         (candidate) => candidate.operationId === entry.compactId,
       );
+      const preparationFinished =
+        !entry.runId &&
+        !entry.compactId &&
+        (entry.restoreId !== null || entry.waitingSubmissionIds.length > 0) &&
+        !(
+          task.activeOperation?.kind === "restore" &&
+          task.activeOperation.id === entry.restoreId
+        ) &&
+        entry.waitingSubmissionIds.every((id) =>
+          task.inputSubmissions.some(
+            (input) =>
+              input.submission.operationId === id && input.state !== "waiting",
+          ),
+        );
       if (
         (run && (run.phase === "stopping" || run.terminal !== null)) ||
         (compact &&
           compact.phase !== "queued" &&
-          compact.phase !== "compacting")
+          compact.phase !== "compacting") ||
+        preparationFinished
       ) {
         changed = true;
         return false;

@@ -9223,3 +9223,83 @@ test("Assistant image stays mounted before a pending interjection through later 
   );
   assert.equal(loads, 1);
 });
+
+for (const preparation of ["restore", "waiting-only"]) {
+  test(`App ${preparation} stop settles without a Run and leaves the next Run independent`, async (ctx) => {
+    const f = await renderAppFixture(ctx, 1440, {
+      phase: "completed",
+      terminal: terminal("completed"),
+      activity: null,
+    });
+    const target = f.snapshot.tasks[0];
+    const waiting = {
+      submission: {
+        operationId: "host-before-stop",
+        receivedAtUnixMs: null,
+        presentationOrder: null,
+        anchorRunId: target.runs[0].id,
+        afterOutputCount: 0,
+      },
+      input: { kind: "text", text: "queued before stop", redacted: false },
+      state: "waiting",
+      reason: null,
+    };
+    Object.assign(target, {
+      currentRunPhase: null,
+      activeOperation:
+        preparation === "restore" ? { kind: "restore", id: "81" } : null,
+      inputSubmissions: [waiting],
+      inputReady: false,
+    });
+    f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+    await act(async () => f.publish());
+    const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+    const stops = [];
+    ctx.mock.method(
+      BridgeClient.prototype,
+      "stopTask",
+      () => new Promise((resolve) => stops.push(resolve)),
+    );
+    await selectRecentTask(/First task/);
+    fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+    assert.equal(stops.length, 1);
+    await act(async () => stops[0]());
+    await screen.findByText("Requesting stop…");
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      true,
+    );
+    waiting.state = "cancelled";
+    waiting.reason = "continuation_cancelled";
+    f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+    await act(async () => f.publish());
+    if (preparation === "restore") {
+      assert.ok(screen.getByText("Requesting stop…"));
+      target.activeOperation = null;
+      f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+      await act(async () => f.publish());
+    }
+    await waitFor(() =>
+      assert.ok(screen.queryByText("Requesting stop…") === null),
+    );
+    const next = {
+      ...structuredClone(target.runs[0]),
+      id: "99",
+      phase: "running",
+      terminal: null,
+      activity: { kind: "waiting_model" },
+      contentVersion: "2",
+      submission: { ...waiting.submission, operationId: "after-stop" },
+    };
+    target.runs.push(next);
+    target.currentRunId = "99";
+    target.currentRunPhase = "running";
+    target.activeOperation = { kind: "run", id: "99" };
+    f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+    await act(async () => f.publish());
+    const nextStop = await screen.findByRole("button", { name: "Stop task" });
+    assert.ok(screen.queryByText("Requesting stop…") === null);
+    assert.equal(nextStop.disabled, false);
+    assert.equal(stops.length, 1);
+  });
+}
