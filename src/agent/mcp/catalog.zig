@@ -27,29 +27,6 @@ pub const Tool = struct {
 pub const Issue = struct {
     binding_identity: [32]u8,
     tool_name: ?[]const u8,
-    kind: IssueKind = .unknown,
-};
-
-/// Exact SDK machine kinds only. Raw details and unknown strings are never
-/// projected; a new upstream kind remains unknown until deliberately supported.
-pub const IssueKind = enum {
-    connection_timeout,
-    connection_network_error,
-    connection_auth_error,
-    connection_server_error,
-    connection_child_exit,
-    connection_cancelled,
-    connection_indeterminate,
-    connection_fatal,
-    server_resource_limit,
-    runtime_out_of_memory,
-    issues_truncated,
-    task_required_unsupported,
-    unknown,
-
-    fn fromSdk(value: []const u8) IssueKind {
-        return std.meta.stringToEnum(IssueKind, value) orelse .unknown;
-    }
 };
 
 /// Opaque linear owner for one reduced catalog projection. Public accessors
@@ -925,7 +902,6 @@ fn copyProjection(
             return error.CatalogBindingMismatch;
         target.* = .{
             .binding_identity = identity,
-            .kind = IssueKind.fromSdk(source.kind),
             .tool_name = if (source.tool_name) |name|
                 try arena.dupe(u8, name)
             else
@@ -1127,7 +1103,6 @@ test "projection drops fingerprints schema bindings and issue detail" {
     try std.testing.expectEqualStrings("github", projection.servers()[0].namespace);
     try std.testing.expectEqualStrings("search", projection.tools()[0].name);
     try std.testing.expectEqualStrings("search", projection.issues()[0].tool_name.?);
-    try std.testing.expectEqual(IssueKind.connection_network_error, projection.issues()[0].kind);
     try std.testing.expect(projectionBelongsTo(projection, owner_id));
     @constCast(projection.servers())[0].fresh = false;
     @constCast(projection.tools()[0].name)[0] = 'S';
@@ -1147,13 +1122,6 @@ test "projection drops fingerprints schema bindings and issue detail" {
     try std.testing.expectEqual(@as(u32, @sizeOf(wire.McpSelectionV1)), empty.struct_size);
     try std.testing.expectEqual(@as(u64, 0), empty.selector_count);
     try std.testing.expectEqual(@as(?[*]const wire.McpSelectorV1, null), empty.selectors);
-}
-
-test "catalog issue classification uses exact machine facts and leaves unknown kinds unknown" {
-    try std.testing.expectEqual(IssueKind.connection_auth_error, IssueKind.fromSdk("connection_auth_error"));
-    try std.testing.expectEqual(IssueKind.unknown, IssueKind.fromSdk("unavailable"));
-    try std.testing.expectEqual(IssueKind.unknown, IssueKind.fromSdk("Connection timed out"));
-    try std.testing.expectEqual(IssueKind.unknown, IssueKind.fromSdk("new_upstream_kind"));
 }
 
 test "selection rejects stale authority and duplicate selectors" {

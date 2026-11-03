@@ -1368,12 +1368,32 @@ test "HTTP SSE skips notifications in one POST and returns the complete matching
     try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
 }
 
-test "HTTP SSE rejects response mismatch flood and unsupported ping without replaying POST" {
+test "HTTP SSE accepts more than 128 notifications without replaying POST" {
+    const notification = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n";
+    var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = notification ** 129 ++ "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n" };
+    var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_response_bytes = 16 * 1024 });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000)) {
+        .connection => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer transport.close_fn(connection);
+    const response = switch (transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{})) {
+        .response => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", response.body);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
+}
+
+test "HTTP SSE rejects response mismatch byte exhaustion and unsupported ping without replaying POST" {
     const notification = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n";
     const flood = notification ** 129 ++ "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
     for ([_][]const u8{ flood, "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n", "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n" }) |body| {
         var endpoint: FakeEndpoint = .{ .content_type = "text/event-stream", .response_body = body };
-        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_response_bytes = 16 * 1024 });
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_response_bytes = 1024 });
         defer backend.deinit() catch unreachable;
         const transport = backend.transport();
         const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000)) {

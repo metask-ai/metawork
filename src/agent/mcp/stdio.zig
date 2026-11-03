@@ -485,12 +485,29 @@ test "stdio stops before pong and resumes buffered notifications without replayi
     try std.testing.expectEqualStrings("trailing", endpoint.response[endpoint.offset..]);
 }
 
-test "stdio rejects mismatched responses unsupported server requests and notification flood" {
+test "stdio accepts more than 128 notifications within the original byte budget" {
+    const notification = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n";
+    var endpoint: FakeEndpoint = .{ .response = notification ** 129 ++ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n" };
+    var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_frame_bytes = 16 * 1024 });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = try openTestConnection(transport);
+    defer transport.close_fn(connection);
+    const response = switch (transport.request_fn(connection, std.testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}", 1000, .{})) {
+        .response => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", response.body);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.requests);
+}
+
+test "stdio rejects mismatched responses unsupported server requests and notification byte exhaustion" {
     const notification = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n";
     const flood = notification ** 129 ++ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
     for ([_][]const u8{ flood, "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n", "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"sampling/createMessage\"}\n" }) |body| {
         var endpoint: FakeEndpoint = .{ .response = body };
-        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_frame_bytes = 16 * 1024 });
+        var backend = try Backend.init(.{ .io = std.testing.io, .allocator = std.testing.allocator, .endpoint = endpoint.capability(), .max_frame_bytes = 1024 });
         defer backend.deinit() catch unreachable;
         const transport = backend.transport();
         const connection = try openTestConnection(transport);

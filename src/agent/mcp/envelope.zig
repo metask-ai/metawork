@@ -138,7 +138,6 @@ fn skip(scanner: *std.json.Scanner) Error!void {
 pub const Budget = struct {
     io: std.Io,
     deadline_ns: i96,
-    discarded_messages: usize = 0,
     discarded_bytes: usize = 0,
     max_discarded_bytes: usize,
 
@@ -151,8 +150,7 @@ pub const Budget = struct {
         return @intCast(@min(std.math.maxInt(u32), @divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
     }
     pub fn discard(self: *Budget, bytes: usize) bool {
-        if (self.discarded_messages == 128 or bytes > self.max_discarded_bytes - self.discarded_bytes) return false;
-        self.discarded_messages += 1;
+        if (bytes == 0 or bytes > self.max_discarded_bytes - self.discarded_bytes) return false;
         self.discarded_bytes += bytes;
         return true;
     }
@@ -170,10 +168,11 @@ test "envelope routes exact ids and ping without decoding result semantics" {
     try std.testing.expect((try classify("{\"jsonrpc\":\"2.0\",\"id\":\"ping\",\"result\":{}}", string_id)) == .response);
 }
 
-test "notification count bytes and absolute deadline are bounded" {
-    var budget = Budget.init(std.testing.io, 1000, 128);
-    for (0..128) |_| try std.testing.expect(budget.discard(1));
+test "notifications share a cumulative byte budget and absolute deadline" {
+    var budget = Budget.init(std.testing.io, 1000, 1024);
+    for (0..1024) |_| try std.testing.expect(budget.discard(1));
     try std.testing.expect(!budget.discard(1));
+    try std.testing.expect(!budget.discard(0));
     var short = Budget.init(std.testing.io, 1000, 1);
     try std.testing.expect(!short.discard(2));
     const expired = Budget.init(std.testing.io, 0, 1);
