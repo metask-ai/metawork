@@ -1723,6 +1723,17 @@ pub const Runtime = struct {
             };
             if (!started and self.state.refresh_pending) {
                 const now_ms = self.ports.timer.now() orelse return;
+                // Busy transactions and running jobs have explicit completion
+                // wakeups. Only time/capacity waits need a retry timer.
+                const marker_active = if (self.state.management) |*management|
+                    if (management.desiredRegistry()) |registry| registry.oauth_operation != null else false
+                else
+                    false;
+                if (self.refresh_job != null or self.state.configuration_apply_state == .applying or marker_active) {
+                    if (self.state.expiry_deadline_ms) |expiry| if (self.state.admissionFresh() and expiry > now_ms)
+                        self.armRefreshAt(expiry);
+                    return;
+                }
                 const retry = @max(self.state.refresh_not_before_ms orelse now_ms +| 1_000, now_ms +| 1);
                 self.armRefreshAt(if (self.state.expiry_deadline_ms) |expiry|
                     if (self.state.admissionFresh() and expiry > now_ms) @min(expiry, retry) else retry
@@ -2071,6 +2082,33 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         try std.testing.expectEqualStrings("consent_required", replaced.status);
         try std.testing.expect(effects.deleted >= deletion_count + 2);
     }
+}
+
+test "catalog refresh waits for OAuth marker without timer spin and resumes on release" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "client_registration_required");
+    defer runtime.deinit();
+    var start = (try runtime.beginAuthorization(1, "oauth", "attempt")).?;
+    defer start.deinit();
+    try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_consent));
+    const begin = try runtime.beginOauthDynamicRegistration(.{ .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" });
+    try std.testing.expect(begin == .started);
+    try std.testing.expect(!(try runtime.requestRefresh(false)));
+    // A previously elapsed retry floor must not turn the transaction wait into
+    // a one-millisecond loop. Spurious timer deliveries remain harmless.
+    runtime.state.refresh_not_before_ms = 1;
+    for (0..5) |_| {
+        harness.now_ms += 1;
+        _ = runtime.onRefreshTimer();
+        try std.testing.expect(harness.armed_deadline_ms == null);
+        try std.testing.expect(runtime.state.refresh_pending and harness.queued == null);
+    }
+    try std.testing.expectEqual(.saved, try runtime.recoverOauthOperation(begin.started.id));
+    try std.testing.expect(!runtime.state.refresh_pending and harness.queued != null);
+    harness.executeQueued();
+    try std.testing.expect(runtime.syncRefreshJob());
+    try std.testing.expectEqual(@as(usize, 1), harness.activations);
 }
 
 fn testEmptyRuntime(harness: *TestHarness) !Runtime {
