@@ -496,7 +496,19 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
 
+### E-WIN-FEEDBACK-SECURITY-20261103
+
+Windows x64 的反馈安全代次修正验收见[工作树与 artifact 绑定证据](evidence/feedback-security-lifecycle-windows-20261103.json)。证据采集时，代码位于所记基线之上的未提交工作树；记录绑定该基线 revision、Renderer/测试 diff 摘要和源码、构建资源、日志及截图摘要。完整 Node 回归、正式检查、生产 Renderer/CSP 与隔离 automation Debug 构建通过；条件跳过项由机器证据列明。
+
+真实 Windows WebView2 使用生产 App 和样式、隔离 profile 与合成 BridgeClient 回执，验证在途停止跨安全代次继续有效、受理后仍显示进行中且同一目标无法重复发送；1440/390 px 明暗主题均无横向溢出。目标终态解除等待，新 Run 不继承旧等待；旧安全上下文的迟到诊断被丢弃，当前诊断可查且再次安全失效后清除。模型命令自身推进安全代次时不误报失败，操作正常释放自己的忙碌标记。首次提交停止、归档/来源修改、删除/改名重读与可信空索引、generation 更换及账号迟到回执隔离由真实 App 回归负责。
+
+没有 Run 或 Compact 的停止补充验收见[准备阶段停止证据](evidence/feedback-stop-targets-windows-20261103.json)。控制器与真实 App 回归覆盖原 restore、原 waiting 输入、输入转交 Run 和缺失记录的边界；WebView2 合成事实验证 restore 与仅等待输入的停止结束后移除等待提示，后续输入与新 Run 不继承旧等待，也不自动重发停止。此处只证明 Renderer 消费这些可信事实的行为，不证明真实 Host 的取消或 restore 执行链。
+
+范围仅限记录工作树的 Renderer 与 WebView 内容交互；不证明真实 Host 模型恢复、AgentCore 停止、Metask/OAuth/系统凭据轮换、系统键盘手势、安装分发或其他平台。安全失效的既有缓存与清洗边界继续生效，不通过保留旧投影维持操作状态。
+
 ### E-WIN-FEEDBACK-LIFECYCLE-20261102
+
+2026-11-03 纠正：本条安全代次相关回归把“安全失效应允许新操作进入”作为预期，前提错误，不能作为操作生命周期收口依据。原执行记录保留，修正验收见[反馈安全代次修正](#e-win-feedback-security-20261103)；其余视觉与诊断观测继续仅证明原记录版本。
 
 Windows x64 的统一反馈生命周期验收见[绑定源码与 artifact 的机器证据](evidence/feedback-lifecycle-windows-20261102.json)。完整 Node 回归、正式检查、生产 Renderer/CSP 与隔离 automation Debug 构建通过；条件跳过项、反例及修复前后的回归由证据列明。反馈迁移层与按范围覆盖路径已移除，来源之间独立；对应交互合同见[反馈协调与生命周期](ui-design.md#44-反馈协调与生命周期)。
 

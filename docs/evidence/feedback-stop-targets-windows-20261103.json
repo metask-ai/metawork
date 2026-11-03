@@ -1,0 +1,252 @@
+{
+  "date": "2026-11-03T02:10:52.837Z",
+  "platform": "win32",
+  "baseRevision": "8e16bf1139bcda30758f72f74d95532603ce79c9",
+  "workingTree": "uncommitted; no commit or push authorized",
+  "runtimeAndTestsDiffSha256": "28f14738ab7b6c018ec7eb703eb6f749bb0f364d9d946e79e64e633471a70de4",
+  "scope": "Production App and CSS in isolated real Windows WebView2 automation shell with synthetic BridgeClient data. Exercises restore/waiting-only Stop, original input cancellation, restore completion and later input/Run independence. Does not prove real Host cancellation, AgentCore restore, credentials, OS keyboard or other platforms.",
+  "binary": {
+    "path": ".zig-cache\\feedback-security-native\\bin\\metawork.exe",
+    "sha256": "05bf51883613c07dfd2b808a6e6a7ff9aff8bac481af5f402dd37f2d6e52bd03"
+  },
+  "sources": [
+    {
+      "path": "frontend/src/app/App.tsx",
+      "sha256": "c0b4fe27dedba9b4abb3ebc61d228aab7bbc5f5e3a6b57c83d2aa414836b4e6a"
+    },
+    {
+      "path": "frontend/src/app/task-stop-feedback.ts",
+      "sha256": "7947ca554003ecadc85bd6c4c8ed03e04a65cc3d373ecaa2399f75bc211a1617"
+    },
+    {
+      "path": "scripts/task-stop-feedback.test.mjs",
+      "sha256": "c75bac5608a002a69ecd60794cc5f82b8298ae04aef9bcaea597f3ee7dd7a199"
+    },
+    {
+      "path": "scripts/task-panel.test.mjs",
+      "sha256": "f3beeb526d4f7b58719aa96bdedbc12fc0280d1e1a521b33ec4677b4b492693f"
+    },
+    {
+      "path": "docs/ui-design.md",
+      "sha256": "fd94ee7c5ddc53a3ea6c450f639c33d48c211c3608f88ca1849024f389fd1cb3"
+    },
+    {
+      "path": ".zig-cache/feedback-security-fixture/entry.tsx",
+      "sha256": "e14fe5fee88199f476702637243fec60fa59c0cd76fc36b35fc17fc3c41ae279"
+    },
+    {
+      "path": ".zig-cache/feedback-security-fixture/projection.mjs",
+      "sha256": "753cde79f0a536abb45dbb34479e036ec5bea4e9f43eccd737c0cbcb74f7b109"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview.mjs",
+      "sha256": "07678be4764508659477befd625bd41a91ac6bfffa8f75ec64790750042abc99"
+    },
+    {
+      "path": ".zig-cache/feedback-security-build.mjs",
+      "sha256": "9d63d8cf17398aa4e2c0fce8642168cb22ff3360f10edcb33ce86466203b0b37"
+    }
+  ],
+  "frontend": [
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\index-BMEAU_lH.js",
+      "sha256": "771708d1dbcc8d2f80891d7b9e113354a13678834232d7aa51c31955f0e9cf2a"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\index-BP3muVof.css",
+      "sha256": "2fb4dfae36f99a27d2ba5d3468515b311bdef2f4632d5a41dc7191e4f83afb98"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\index-Bs3nHypt.js",
+      "sha256": "891a917fd49bb1e91b62fbb05b50b480a495e8963e76a2f1d6d3cebdac884a54"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\server.browser-BONPThwL.js",
+      "sha256": "ded44e0d9f315b0d1621c320f6ad4eeef487e6c06d0641138ac4ccec8d443244"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\server.browser-C9VWwOXI.js",
+      "sha256": "89dec3917290caf761fe4fee3dd4f346095410a7ab2c78d137044563a5ce0205"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\syntax-highlight-4rwca99h.js",
+      "sha256": "491f84814e629bf0adf062409aef89b2d158fbfe41754c98fed63cd92ab99a23"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\syntax-highlight-DSjGCFFH.js",
+      "sha256": "a6ac6ddbd038f572fcdfaa0c89760fd358d9472ab13387c163694258f09e0a79"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\index.html",
+      "sha256": "36ddcf9892ff514d9f25793c99460b72be8ecdcf629cd4da78f1f022b75fcd08"
+    }
+  ],
+  "observations": [
+    {
+      "kind": "restore",
+      "accepted": {
+        "text": true,
+        "disabled": true,
+        "calls": 1,
+        "overflow": false
+      },
+      "settled": {
+        "text": false,
+        "disabled": false,
+        "calls": 1,
+        "overflow": false
+      },
+      "next": {
+        "text": false,
+        "disabled": false,
+        "calls": 1,
+        "overflow": false
+      },
+      "originalWaitingInput": "cancelled",
+      "postStopInputDoesNotHoldOldRequest": true,
+      "originalRestoreFinished": true,
+      "stopCommands": 1
+    },
+    {
+      "kind": "waiting-only",
+      "accepted": {
+        "text": true,
+        "disabled": true,
+        "calls": 2,
+        "overflow": false
+      },
+      "settled": {
+        "text": false,
+        "disabled": false,
+        "calls": 2,
+        "overflow": false
+      },
+      "next": {
+        "text": false,
+        "disabled": false,
+        "calls": 2,
+        "overflow": false
+      },
+      "originalWaitingInput": "cancelled",
+      "postStopInputDoesNotHoldOldRequest": true,
+      "originalRestoreFinished": false,
+      "stopCommands": 2
+    }
+  ],
+  "errors": [],
+  "consoleErrors": [],
+  "validation": {
+    "node": {
+      "command": "node --input-type=module -e \"import {runNodeTests} from './scripts/run-tests.mjs'; await runNodeTests();\"",
+      "tests": 1153,
+      "passed": 1142,
+      "failed": 0,
+      "skipped": 11,
+      "conditionalSkips": [
+        "﹣ rejects payload and root symbolic links (76.0736ms) # Windows symlink creation requires Developer Mode or elevation",
+        "﹣ baseline probe records the frozen artifact (0.199ms) # SKIP",
+        "﹣ baseline probe rejects a larger pool (0.1362ms) # SKIP",
+        "﹣ cancelled development retains output while an owned descendant is still running (0.1716ms) # SKIP",
+        "﹣ failed development retains output while an owned descendant is still running (0.0916ms) # SKIP",
+        "﹣ cancelled development retains output while an owned detached descendant is still running (0.0692ms) # SKIP",
+        "﹣ failed development retains output while an owned detached descendant is still running (0.0699ms) # SKIP",
+        "﹣ macOS Icon Composer resources replace the Native SDK fallback before signing (0.1217ms) # SKIP",
+        "﹣ Office resource sources reject links (0.2804ms) # Creating symlinks requires Windows developer mode or elevation",
+        "﹣ packaged minimum macOS version replaces the SDK default and rejects drift (0.1412ms) # SKIP",
+        "﹣ cancellation finishes even when an owned child ignores SIGTERM (0.3913ms) # SKIP"
+      ]
+    },
+    "check": {
+      "command": "npm run check",
+      "exitCode": 0
+    },
+    "productionBuild": {
+      "command": "buildFrontend() from scripts/build.mjs",
+      "exitCode": 0,
+      "cspVerified": true
+    },
+    "nativeBuild": {
+      "command": "node .zig-cache/feedback-security-build.mjs",
+      "exitCode": 0,
+      "canonicalBundleVerified": true,
+      "cspVerified": true
+    },
+    "nativeBusinessTests": "Not run: no Host business, wire or persistence implementation changed."
+  },
+  "logs": [
+    {
+      "path": ".zig-cache/feedback-stop-targets-node-tests.log",
+      "sha256": "e2bdc27d6f0d66f2057061f1f518a8b7682cedac8ea906b06328a7e054de436f"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-check.log",
+      "sha256": "e552347d0c4c70880b7a990ebfcc74348ae66d292dee07279fd75a64713c915b"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-production-build.log",
+      "sha256": "fd61b3da56decdce89b2c4e38b7acef53f5cc2c9143c520a0d453a57bc0b4408"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-native-build.log",
+      "sha256": "b0c5a10d16b765326909731ae762b293af54e5079ee44dfb5b668d26b7f1ab92"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-before.log",
+      "sha256": "694d67b84a3f1f1a657da9ae5a347b64d1549c3dd621a23369ee93c8c291956b"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-app-before.log",
+      "sha256": "ca18f79d5161d6672c1b68251d4a6f7f46b9f798f7176a358cd4bb59e696bd41"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-targeted.log",
+      "sha256": "9da6068830ed0a6fed3620133a2f1cff41e69fcebb1eb1760ff498d7c513c0b3"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview.log",
+      "sha256": "e0b0d751debc34db7ad0de09dda86cb0642874f506bd9e06eeafcee24ff808ae"
+    }
+  ],
+  "screenshots": [
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview-evidence/restore-awaiting.png",
+      "sha256": "42e4a14e27d86381bd6ffbdc37a57a1b4b01feb8b8855ceb01193a8f0d0db389"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview-evidence/restore-later-run.png",
+      "sha256": "27cbed9e00b4fbd9d6d551f4af0770db0669368a9ec514114c4153445c325a36"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview-evidence/restore-settled-with-new-input.png",
+      "sha256": "7f5dc853a4b35c5f2816144c6ffcc50ac3473dbbfa22dcba61ab669eb2ac1170"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview-evidence/waiting-only-awaiting.png",
+      "sha256": "bc0b1a905ccd1853a9f21777e51145328f148410e943e3bc62054ad9ff8d3ad4"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview-evidence/waiting-only-later-run.png",
+      "sha256": "c32030d2baf821ef37f3c84c45489d675db2c90c266f5e226ff58fd9c7a516ae"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-webview-evidence/waiting-only-settled-with-new-input.png",
+      "sha256": "5c1531669b20f960e12db14eb5387816bff04928cc4e738c42c884d644316716"
+    }
+  ],
+  "regressions": {
+    "beforeFix": "Four controller cases and two App cases failed against the previous implementation. App synchronization at the later-Run assertion was then corrected; all six new cases pass with the implementation fix.",
+    "targeted": {
+      "tests": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    "covers": [
+      "Restore-only completion by original operation ID",
+      "Original restore plus original waiting inputs must both finish",
+      "Only original waiting input terminal records count; absent records remain unconfirmed",
+      "Original waiting input handoff binds its Run; unrelated Run cannot confirm it",
+      "Later inputs and a later restore do not hold the old request",
+      "Real App waiting-only and restore Stop: accepted state prevents duplicates, completion removes pending note, later Run can stop independently"
+    ]
+  }
+}

@@ -1,0 +1,265 @@
+{
+  "date": "2026-11-03T02:11:17.367Z",
+  "platform": "win32",
+  "baseRevision": "8e16bf1139bcda30758f72f74d95532603ce79c9",
+  "workingTree": "uncommitted changes; no commit or push authorized",
+  "runtimeAndTestsDiffSha256": "28f14738ab7b6c018ec7eb703eb6f749bb0f364d9d946e79e64e633471a70de4",
+  "scope": "Production App and CSS in isolated Windows WebView2 automation Debug shell, with synthetic BridgeClient replies and security notifications. Does not prove real Host model recovery, AgentCore stop, Metask/OAuth/credential rotation, OS keyboard gestures, distribution or other platforms.",
+  "binary": {
+    "path": ".zig-cache\\feedback-security-native\\bin\\metawork.exe",
+    "sha256": "05bf51883613c07dfd2b808a6e6a7ff9aff8bac481af5f402dd37f2d6e52bd03"
+  },
+  "sources": [
+    {
+      "path": "frontend/src/app/App.tsx",
+      "sha256": "c0b4fe27dedba9b4abb3ebc61d228aab7bbc5f5e3a6b57c83d2aa414836b4e6a"
+    },
+    {
+      "path": "frontend/src/app/command-bar-status.ts",
+      "sha256": "2b6f3f5cdd7eb594d1de07335cb76d1182a3f291d5616f37c7b1a559f8bb2e0b"
+    },
+    {
+      "path": "frontend/src/app/task-stop-feedback.ts",
+      "sha256": "7947ca554003ecadc85bd6c4c8ed03e04a65cc3d373ecaa2399f75bc211a1617"
+    },
+    {
+      "path": "docs/ui-design.md",
+      "sha256": "fd94ee7c5ddc53a3ea6c450f639c33d48c211c3608f88ca1849024f389fd1cb3"
+    },
+    {
+      "path": ".zig-cache/feedback-security-fixture/entry.tsx",
+      "sha256": "e14fe5fee88199f476702637243fec60fa59c0cd76fc36b35fc17fc3c41ae279"
+    },
+    {
+      "path": ".zig-cache/feedback-security-fixture/projection.mjs",
+      "sha256": "753cde79f0a536abb45dbb34479e036ec5bea4e9f43eccd737c0cbcb74f7b109"
+    },
+    {
+      "path": ".zig-cache/feedback-security-fixture/vite.config.mts",
+      "sha256": "35f2471430367b9e7a993ebf362cbb84b23772cee5ef4ac8e1958b2581159789"
+    },
+    {
+      "path": ".zig-cache/feedback-security-webview.mjs",
+      "sha256": "f01efc17bccf9f66c8eea7d6dd0168674d00c35fedc8e850f153f352de0555ed"
+    },
+    {
+      "path": ".zig-cache/feedback-security-build.mjs",
+      "sha256": "9d63d8cf17398aa4e2c0fce8642168cb22ff3360f10edcb33ce86466203b0b37"
+    }
+  ],
+  "frontend": [
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\index-BMEAU_lH.js",
+      "sha256": "771708d1dbcc8d2f80891d7b9e113354a13678834232d7aa51c31955f0e9cf2a"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\index-BP3muVof.css",
+      "sha256": "2fb4dfae36f99a27d2ba5d3468515b311bdef2f4632d5a41dc7191e4f83afb98"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\index-Bs3nHypt.js",
+      "sha256": "891a917fd49bb1e91b62fbb05b50b480a495e8963e76a2f1d6d3cebdac884a54"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\server.browser-BONPThwL.js",
+      "sha256": "ded44e0d9f315b0d1621c320f6ad4eeef487e6c06d0641138ac4ccec8d443244"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\server.browser-C9VWwOXI.js",
+      "sha256": "89dec3917290caf761fe4fee3dd4f346095410a7ab2c78d137044563a5ce0205"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\syntax-highlight-4rwca99h.js",
+      "sha256": "491f84814e629bf0adf062409aef89b2d158fbfe41754c98fed63cd92ab99a23"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\assets\\syntax-highlight-DSjGCFFH.js",
+      "sha256": "a6ac6ddbd038f572fcdfaa0c89760fd358d9472ab13387c163694258f09e0a79"
+    },
+    {
+      "path": ".zig-cache\\feedback-security-frontend\\index.html",
+      "sha256": "36ddcf9892ff514d9f25793c99460b72be8ecdcf629cd4da78f1f022b75fcd08"
+    }
+  ],
+  "observations": [
+    {
+      "inFlightAcrossSecurity": {
+        "disabled": true,
+        "pending": true,
+        "unknown": false,
+        "attempts": 1,
+        "overflow": false
+      }
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "accepted": {
+        "disabled": true,
+        "pending": true,
+        "unknown": false,
+        "attempts": 1,
+        "overflow": false
+      },
+      "disabledPointerDoesNotResend": true
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "accepted": {
+        "disabled": true,
+        "pending": true,
+        "unknown": false,
+        "attempts": 1,
+        "overflow": false
+      },
+      "disabledPointerDoesNotResend": true
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "accepted": {
+        "disabled": true,
+        "pending": true,
+        "unknown": false,
+        "attempts": 1,
+        "overflow": false
+      },
+      "disabledPointerDoesNotResend": true
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "accepted": {
+        "disabled": true,
+        "pending": true,
+        "unknown": false,
+        "attempts": 1,
+        "overflow": false
+      },
+      "disabledPointerDoesNotResend": true
+    },
+    {
+      "terminalRetiresAwaiting": true,
+      "newRunIndependent": true,
+      "lateOldDiagnosticDiscarded": true,
+      "currentDiagnosticReadable": true,
+      "nextSecurityScrubsCurrentDiagnostic": true,
+      "failureFactPreserved": true
+    },
+    {
+      "modelResetAdvancesOwnSecurity": true,
+      "acceptedResultPreserved": true,
+      "busyReleased": true,
+      "resetCommands": 1
+    }
+  ],
+  "errors": [],
+  "consoleErrors": [],
+  "validation": {
+    "node": {
+      "command": "node --input-type=module -e \"import {runNodeTests} from './scripts/run-tests.mjs'; await runNodeTests();\"",
+      "tests": 1153,
+      "passed": 1142,
+      "failed": 0,
+      "skipped": 11,
+      "conditionalSkips": [
+        "﹣ rejects payload and root symbolic links (76.0736ms) # Windows symlink creation requires Developer Mode or elevation",
+        "﹣ baseline probe records the frozen artifact (0.199ms) # SKIP",
+        "﹣ baseline probe rejects a larger pool (0.1362ms) # SKIP",
+        "﹣ cancelled development retains output while an owned descendant is still running (0.1716ms) # SKIP",
+        "﹣ failed development retains output while an owned descendant is still running (0.0916ms) # SKIP",
+        "﹣ cancelled development retains output while an owned detached descendant is still running (0.0692ms) # SKIP",
+        "﹣ failed development retains output while an owned detached descendant is still running (0.0699ms) # SKIP",
+        "﹣ macOS Icon Composer resources replace the Native SDK fallback before signing (0.1217ms) # SKIP",
+        "﹣ Office resource sources reject links (0.2804ms) # Creating symlinks requires Windows developer mode or elevation",
+        "﹣ packaged minimum macOS version replaces the SDK default and rejects drift (0.1412ms) # SKIP",
+        "﹣ cancellation finishes even when an owned child ignores SIGTERM (0.3913ms) # SKIP"
+      ]
+    },
+    "check": {
+      "command": "npm run check",
+      "exitCode": 0
+    },
+    "productionBuild": {
+      "command": "buildFrontend() from scripts/build.mjs",
+      "exitCode": 0,
+      "cspVerified": true
+    },
+    "nativeBuild": {
+      "command": "node .zig-cache/feedback-security-build.mjs",
+      "exitCode": 0,
+      "canonicalBundleVerified": true,
+      "cspVerified": true
+    },
+    "nativeBusinessTests": "Not run: no Host business, wire or persistence implementation changed."
+  },
+  "logs": [
+    {
+      "path": ".zig-cache/feedback-stop-targets-node-tests.log",
+      "sha256": "e2bdc27d6f0d66f2057061f1f518a8b7682cedac8ea906b06328a7e054de436f"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-check.log",
+      "sha256": "e552347d0c4c70880b7a990ebfcc74348ae66d292dee07279fd75a64713c915b"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-production-build.log",
+      "sha256": "fd61b3da56decdce89b2c4e38b7acef53f5cc2c9143c520a0d453a57bc0b4408"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-native-build.log",
+      "sha256": "b0c5a10d16b765326909731ae762b293af54e5079ee44dfb5b668d26b7f1ab92"
+    },
+    {
+      "path": ".zig-cache/feedback-fix-before.log",
+      "sha256": "22b480f6e743486e423d62ff8e568caa24c5dbcb51086f39bad7c0314fa85eea"
+    },
+    {
+      "path": ".zig-cache/feedback-fix-model-before.log",
+      "sha256": "449a6e0004625695d88cd8709d732cf2ed82716436c54c62eaadbdc9eaa89307"
+    },
+    {
+      "path": ".zig-cache/feedback-fix-context-tests.log",
+      "sha256": "262d84bde46fdac0ec977a41166fb078087d88bd531941a524430c122a2682f7"
+    },
+    {
+      "path": ".zig-cache/feedback-fix-generation-tests.log",
+      "sha256": "b50a4381415f6a60c1b9e58d10a64a1a455e5fef92f85c111e16a3bbe071a7dd"
+    },
+    {
+      "path": ".zig-cache/feedback-stop-targets-security-webview.log",
+      "sha256": "fe562c6cea94ee1cab9b365f199d7bf297f6a28d7c342f2465669c51a422162b"
+    }
+  ],
+  "screenshots": [
+    {
+      "path": ".zig-cache/feedback-security-webview-evidence/awaiting-1440-dark.png",
+      "sha256": "b4272f08c8017986248d6c4f0b88f45e1588b4615bb27f9e72bed92bd2fa1d8d"
+    },
+    {
+      "path": ".zig-cache/feedback-security-webview-evidence/awaiting-1440-light.png",
+      "sha256": "09ce0d93e56ba122567cd54377b68a4589bb05443cdb6c1a37980a175dca2774"
+    },
+    {
+      "path": ".zig-cache/feedback-security-webview-evidence/awaiting-390-dark.png",
+      "sha256": "41bcc9f468f35a3e82a26aa7ca945a8ca81dff690a9e9c09a2c976a3adcfd316"
+    },
+    {
+      "path": ".zig-cache/feedback-security-webview-evidence/awaiting-390-light.png",
+      "sha256": "95f08907af592b5f9ccc2330e6ab44ff68eb8cd9f568a754e77ad015d9cce028"
+    },
+    {
+      "path": ".zig-cache/feedback-security-webview-evidence/current-diagnostic.png",
+      "sha256": "9d013201c04c2559282e1e036995592e393cdf7fa5c65dd99c4cd80e316b8d70"
+    },
+    {
+      "path": ".zig-cache/feedback-security-webview-evidence/self-security-model-reset.png",
+      "sha256": "f9690fac939ed41d29ad7f7b215ef014290086e2e8e109c7bae4a761f84a3b40"
+    }
+  ],
+  "corrects": {
+    "record": "docs/evidence/feedback-lifecycle-windows-20261102.json",
+    "scope": "The earlier security-reset-must-admit-a-new-operation regression encoded an incorrect lifecycle assumption; it is not evidence that routine security changes should discard ongoing operations. Its recorded visual/diagnostic observations remain bounded to that source revision."
+  }
+}
