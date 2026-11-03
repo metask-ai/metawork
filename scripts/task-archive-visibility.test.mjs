@@ -110,7 +110,12 @@ function taskRows(id) {
 
 async function renderApp(
   ctx,
-  { archivedTask = {}, workspace = {}, emptyProject = false } = {},
+  {
+    archivedTask = {},
+    workspace = {},
+    emptyProject = false,
+    historyRuns = [],
+  } = {},
 ) {
   const snapshot = structuredClone(initialSnapshot);
   Object.assign(snapshot.workspaces[0], workspace);
@@ -121,7 +126,7 @@ async function renderApp(
     currentRunPhase: null,
     activeOperation: null,
     inputReady: true,
-    runs: [],
+    runs: historyRuns,
   });
   snapshot.tasks.push({
     ...structuredClone(task),
@@ -137,6 +142,7 @@ async function renderApp(
   let onRevision;
   let shortcut;
   const deletions = [];
+  const historyReads = [];
   for (const [name, fn] of Object.entries({
     available: () => true,
     onShortcut: (callback) => {
@@ -157,7 +163,10 @@ async function renderApp(
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
+    fetchSnapshot: async (scope) => {
+      if (scope.beforeRunId !== null) historyReads.push(scope.beforeRunId);
+      return productStateFixture(snapshot, scope);
+    },
     renameTask: async (taskId, title) => {
       const result = await new Promise((resolve) =>
         renames.push({ taskId, title, resolve }),
@@ -204,6 +213,7 @@ async function renderApp(
     requests,
     renames,
     deletions,
+    historyReads,
     async openRename(taskId = "3", select = true) {
       const row = taskRows(taskId)[0];
       if (select) await user.click(row);
@@ -261,6 +271,57 @@ async function renderApp(
     },
   };
 }
+
+test("Composer recalls only the current Task's saved text after remount and pages without moving the conversation reader", async (ctx) => {
+  const historyRuns = ["one", "two", "three", "four", "four", "six"].map(
+    (text, index) => ({
+      ...structuredClone(initialSnapshot.tasks[0].runs[0]),
+      id: String(index + 1),
+      phase: "completed",
+      terminal: {
+        outcome: "completed",
+        cause: null,
+        diagnosticDisposition: "absent",
+        modelError: null,
+      },
+      input: { kind: "text", text, redacted: false },
+      additionalInputs: [],
+    }),
+  );
+  for (let mount = 0; mount < 2; mount++) {
+    // Simulate cold Renderer startup with no saved draft or recall cache.
+    window.sessionStorage.clear();
+    const app = await renderApp(ctx, { historyRuns });
+    await app.user.click(taskRows("3")[0]);
+    const textarea = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    assert.equal(textarea.value, "");
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await waitFor(() => assert.equal(textarea.value, "six"));
+    assert.deepEqual(app.historyReads, ["3"]);
+    for (const expected of ["four", "three", "two", "one", "one"]) {
+      fireEvent.keyDown(textarea, { key: "ArrowUp" });
+      assert.equal(textarea.value, expected);
+    }
+    // The original four-Run window has not been expanded by recall reads.
+    assert.deepEqual(
+      [...document.querySelectorAll(".task-input-copy")].map(
+        (node) => node.textContent,
+      ),
+      ["three", "four", "four", "six"],
+    );
+    fireEvent.change(textarea, { target: { value: "one edited" } });
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    assert.equal(textarea.value, "one edited");
+    fireEvent.keyDown(window, { key: "n", metaKey: true });
+    await waitFor(() => assert.equal(textarea.value, ""));
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await act(async () => {});
+    assert.equal(textarea.value, "");
+    cleanup();
+  }
+});
 
 for (const activation of [
   "mouse click",

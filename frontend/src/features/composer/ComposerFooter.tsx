@@ -240,13 +240,19 @@ export function ComposerFooter({
   const [historyRead, setHistoryRead] = useState<"loading" | "failed" | null>(
     null,
   );
+  const historyAvailable = Boolean(inputHistory) && !composeDisabled;
   useEffect(() => {
     const browse = historyBrowse.current;
-    if (browse && (browse.scope !== draftScope || browse.draft !== draft)) {
+    if (
+      browse &&
+      (!historyAvailable ||
+        browse.scope !== draftScope ||
+        browse.draft !== draft)
+    ) {
       historyBrowse.current = null;
     }
     setHistoryRead(null);
-  }, [draft, draftScope]);
+  }, [draft, draftScope, historyAvailable]);
   useEffect(
     () => () => {
       historyBrowse.current = null;
