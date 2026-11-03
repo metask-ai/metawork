@@ -331,7 +331,9 @@ pub fn parseRuntimeBearerChallenge(
 ) (error{InvalidChallenge} || std.mem.Allocator.Error)!RuntimeBearerChallenge {
     const bearer = selectBearerChallenge(input) orelse
         return error.InvalidChallenge;
-    const challenge = try parseBearerChallenge(bearer);
+    var challenge_storage: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &challenge_storage);
+    const challenge = try parseBearerChallenge(bearer, &challenge_storage);
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const scopes = if (challenge.scope) |scope|
@@ -779,6 +781,8 @@ pub fn discoverResourceEffect(
     if (!validHttpsUrl(endpoint)) return error.InvalidEndpoint;
     var body_buffer: [Limits.metadata_body_bytes]u8 = undefined;
     var header_buffer: [Limits.header_bytes]u8 = undefined;
+    var challenge_storage: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &challenge_storage);
     var challenge: ?Challenge = null;
     const probe = transport.fetch(
         .{ .method = .get, .url = endpoint, .headers = &.{.{
@@ -795,7 +799,7 @@ pub fn discoverResourceEffect(
     };
     if (probe) |response| if (response.status == 401) {
         if (response.www_authenticate) |header|
-            challenge = parseBearerChallenge(header) catch
+            challenge = parseBearerChallenge(header, &challenge_storage) catch
                 return error.InvalidChallenge;
     };
 
@@ -1349,6 +1353,7 @@ pub fn registerDynamicClientEffect(
     const requested_method = server.dynamicRegistrationAuthMethod() orelse
         return error.UnsupportedAuthorizationServer;
     var request_storage: [Limits.request_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &request_storage);
     var writer = std.Io.Writer.fixed(&request_storage);
     const grant_types: []const []const u8 = if (server.refresh_token_supported)
         &.{ "authorization_code", "refresh_token" }
@@ -1363,7 +1368,9 @@ pub fn registerDynamicClientEffect(
         .application_type = "native",
     }, .{}, &writer) catch return error.InvalidAuthorizationRequest;
     var body_buffer: [Limits.registration_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &body_buffer);
     var header_buffer: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &header_buffer);
     const response = transport.fetch(.{
         .method = .post,
         .url = endpoint,
@@ -1400,9 +1407,16 @@ fn parseRegistrationResponse(
     requested_method: TokenEndpointAuthMethod,
     refresh_token_requested: bool,
 ) (Error || std.mem.Allocator.Error)!Registration {
+    if (body.len == 0 or body.len > Limits.registration_body_bytes)
+        return error.InvalidRegistrationResponse;
+    // JSON unescaping and array storage must not leave secret-bearing arena
+    // allocations behind. Only the validated owned result escapes this scope.
+    var scratch: [Limits.registration_body_bytes * 8]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
         RegistrationResponse,
-        allocator,
+        fixed.allocator(),
         body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
     ) catch return error.InvalidRegistrationResponse;
@@ -1608,9 +1622,14 @@ fn parseTokenResponse(
     body: []const u8,
     now_unix_ms: u64,
 ) (Error || std.mem.Allocator.Error)!TokenSet {
+    if (body.len == 0 or body.len > Limits.token_body_bytes)
+        return error.InvalidTokenResponse;
+    var scratch: [Limits.token_body_bytes * 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
         TokenResponse,
-        allocator,
+        fixed.allocator(),
         body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
     ) catch return error.InvalidTokenResponse;
@@ -1678,26 +1697,45 @@ fn registrationErrorProvesNoClient(body: []const u8) bool {
     }, parsed.value.@"error");
 }
 
-fn parseBearerChallenge(input: []const u8) error{InvalidChallenge}!Challenge {
-    if (input.len == 0 or input.len > Limits.header_bytes)
-        return error.InvalidChallenge;
-    var cursor = std.mem.trim(u8, input, " \t");
-    if (cursor.len < 6 or !std.ascii.eqlIgnoreCase(cursor[0..6], "Bearer"))
-        return error.InvalidChallenge;
+fn parseBearerChallenge(input: []const u8, storage: []u8) error{InvalidChallenge}!Challenge {
+    var cursor = selectBearerChallenge(input) orelse return error.InvalidChallenge;
     cursor = std.mem.trimStart(u8, cursor[6..], " \t");
+    var writer = std.Io.Writer.fixed(storage);
     var result: Challenge = .{};
     while (cursor.len != 0) {
-        const equals = std.mem.indexOfScalar(u8, cursor, '=') orelse
-            return error.InvalidChallenge;
-        const name = std.mem.trim(u8, cursor[0..equals], " \t");
-        cursor = cursor[equals + 1 ..];
-        if (cursor.len == 0 or cursor[0] != '"') return error.InvalidChallenge;
-        const relative_end = std.mem.indexOfScalar(u8, cursor[1..], '"') orelse
-            return error.InvalidChallenge;
-        const end = relative_end + 1;
-        const value = cursor[1..end];
-        if (std.mem.indexOfScalar(u8, value, '\\') != null)
-            return error.InvalidChallenge;
+        var name_end: usize = 0;
+        while (name_end < cursor.len and authTokenByte(cursor[name_end])) name_end += 1;
+        if (name_end == 0) return error.InvalidChallenge;
+        const name = cursor[0..name_end];
+        cursor = std.mem.trimStart(u8, cursor[name_end..], " \t");
+        if (cursor.len == 0 or cursor[0] != '=') return error.InvalidChallenge;
+        cursor = std.mem.trimStart(u8, cursor[1..], " \t");
+        if (cursor.len == 0) return error.InvalidChallenge;
+        const start = writer.buffered().len;
+        if (cursor[0] == '"') {
+            cursor = cursor[1..];
+            while (true) {
+                if (cursor.len == 0) return error.InvalidChallenge;
+                var byte = cursor[0];
+                cursor = cursor[1..];
+                if (byte == '"') break;
+                if (byte == '\\') {
+                    if (cursor.len == 0) return error.InvalidChallenge;
+                    byte = cursor[0];
+                    cursor = cursor[1..];
+                }
+                if ((byte < 0x20 and byte != '\t') or byte == 0x7f)
+                    return error.InvalidChallenge;
+                writer.writeByte(byte) catch return error.InvalidChallenge;
+            }
+        } else {
+            var end: usize = 0;
+            while (end < cursor.len and authTokenByte(cursor[end])) end += 1;
+            if (end == 0) return error.InvalidChallenge;
+            writer.writeAll(cursor[0..end]) catch return error.InvalidChallenge;
+            cursor = cursor[end..];
+        }
+        const value = writer.buffered()[start..];
         if (std.ascii.eqlIgnoreCase(name, "resource_metadata")) {
             if (result.resource_metadata != null) return error.InvalidChallenge;
             result.resource_metadata = value;
@@ -1705,10 +1743,11 @@ fn parseBearerChallenge(input: []const u8) error{InvalidChallenge}!Challenge {
             if (result.scope != null) return error.InvalidChallenge;
             result.scope = value;
         }
-        cursor = std.mem.trimStart(u8, cursor[end + 1 ..], " \t");
+        cursor = std.mem.trimStart(u8, cursor, " \t");
         if (cursor.len == 0) break;
         if (cursor[0] != ',') return error.InvalidChallenge;
         cursor = std.mem.trimStart(u8, cursor[1..], " \t");
+        if (cursor.len == 0) return error.InvalidChallenge;
     }
     return result;
 }
@@ -1727,47 +1766,67 @@ fn copyHeaderValue(
 /// field without confusing comma-separated Bearer auth-params with the start
 /// of the next scheme.
 fn selectBearerChallenge(value: []const u8) ?[]const u8 {
+    if (value.len == 0 or value.len > Limits.header_bytes or
+        std.mem.indexOfAny(u8, value, "\r\n") != null) return null;
     var search: usize = 0;
     while (search < value.len) {
         while (search < value.len and
             (value[search] == ' ' or value[search] == '\t' or value[search] == ','))
             search += 1;
         const start = search;
-        while (search < value.len and std.ascii.isAlphanumeric(value[search]))
+        while (search < value.len and authTokenByte(value[search]))
             search += 1;
         if (search == start) return null;
         const scheme = value[start..search];
-        if (std.ascii.eqlIgnoreCase(scheme, "Bearer")) {
-            var end = value.len;
-            var comma = search;
-            while (std.mem.indexOfScalarPos(u8, value, comma, ',')) |found| {
-                var candidate = found + 1;
+        if (search < value.len and value[search] != ' ' and value[search] != '\t' and value[search] != ',') return null;
+        var end = value.len;
+        var quoted = false;
+        var escaped = false;
+        while (search < value.len) : (search += 1) {
+            const byte = value[search];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (quoted and byte == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (byte == '"') {
+                quoted = !quoted;
+                continue;
+            }
+            if (byte == ',' and !quoted) {
+                var candidate = search + 1;
                 while (candidate < value.len and
                     (value[candidate] == ' ' or value[candidate] == '\t'))
                     candidate += 1;
                 var token_end = candidate;
-                while (token_end < value.len and
-                    std.ascii.isAlphanumeric(value[token_end]))
+                while (token_end < value.len and authTokenByte(value[token_end]))
                     token_end += 1;
                 var after_token = token_end;
                 while (after_token < value.len and
                     (value[after_token] == ' ' or value[after_token] == '\t'))
                     after_token += 1;
-                if (token_end > candidate and after_token > token_end and
-                    (after_token >= value.len or value[after_token] != '='))
+                if (token_end > candidate and
+                    (after_token == value.len or value[after_token] != '='))
                 {
-                    end = found;
+                    end = search;
                     break;
                 }
-                comma = found + 1;
             }
+        }
+        if (quoted or escaped) return null;
+        if (std.ascii.eqlIgnoreCase(scheme, "Bearer")) {
             return std.mem.trim(u8, value[start..end], " \t");
         }
-        const comma = std.mem.indexOfScalarPos(u8, value, search, ',') orelse
-            return null;
-        search = comma + 1;
+        search = if (end < value.len) end + 1 else value.len;
     }
     return null;
+}
+
+fn authTokenByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", byte) != null;
 }
 
 fn protectedResourceMetadataUrl(
@@ -2801,6 +2860,44 @@ test "MCP OAuth never treats malformed success as a replayable failure" {
             1000,
         ),
     );
+}
+
+test "MCP OAuth secret parsing owns unescaped results outside scrubbed scratch" {
+    var tokens = try parseTokenResponse(std.testing.allocator,
+        \\{"access_token":"a\u0062c","refresh_token":"r\u0065fresh","token_type":"Bearer","expires_in":10}
+    , 1000);
+    defer tokens.deinit();
+    var registration = try parseRegistrationResponse(std.testing.allocator,
+        \\{"client_id":"client","client_secret":"s\u0065cret","token_endpoint_auth_method":"client_secret_basic"}
+    , "http://127.0.0.1:8080/callback", .client_secret_basic, false);
+    defer registration.deinit();
+    try std.testing.expectEqualStrings("abc", tokens.access_token.view());
+    try std.testing.expectEqualStrings("refresh", tokens.refresh_token.?.view());
+    try std.testing.expectEqual(@as(?u64, 11000), tokens.expires_at_unix_ms);
+    try std.testing.expectEqualStrings("secret", registration.client_secret.?.view());
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, parseTokenResponse(failing.allocator(),
+        \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer"}
+    , 1000));
+    try std.testing.expectError(error.InvalidTokenResponse, parseTokenResponse(std.testing.allocator, "{}", 1000));
+}
+
+test "MCP OAuth Bearer grammar preserves quoted commas escapes and token parameters" {
+    var challenge = try parseRuntimeBearerChallenge(std.testing.allocator,
+        \\Basic realm="legacy, Bearer scope=wrong", Bearer realm="a,b\"c", error = insufficient_scope, scope = "files.read files.write", DPoP realm="future"
+    );
+    defer challenge.deinit();
+    try std.testing.expectEqual(@as(usize, 2), challenge.scopes.len);
+    try std.testing.expectEqualStrings("files.read", challenge.scopes[0]);
+    var token = try parseRuntimeBearerChallenge(std.testing.allocator, "Bearer scope=files.read");
+    defer token.deinit();
+    try std.testing.expectEqualStrings("files.read", token.scopes[0]);
+    for ([_][]const u8{
+        "Bearer scope=read, Scope=write",
+        "Bearer scope=\"read",
+        "Bearer scope=read\r\nInjected: yes",
+        "Bearer scope=read,",
+    }) |invalid| try std.testing.expectError(error.InvalidChallenge, parseRuntimeBearerChallenge(std.testing.allocator, invalid));
 }
 
 test "MCP OAuth selects Bearer from combined challenges" {

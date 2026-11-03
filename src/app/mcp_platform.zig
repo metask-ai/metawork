@@ -1586,6 +1586,7 @@ const HttpContext = struct {
         if (response.head.content_encoding != .identity) return error.InvalidResponse;
         const status: u16 = @intFromEnum(response.head.status);
         var authenticate_storage: [mcp_oauth.Limits.header_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &authenticate_storage);
         var authenticate_writer = std.Io.Writer.fixed(&authenticate_storage);
         var authenticate_invalid = false;
         var iterator = response.head.iterateHeaders();
@@ -1638,6 +1639,7 @@ const HttpContext = struct {
         ) == .stop) return;
         if (sink.end_headers_fn(sink.context) == .stop) return;
         var transfer_buffer: [4096]u8 = undefined;
+        defer std.crypto.secureZero(u8, &transfer_buffer);
         const reader = response.reader(&transfer_buffer);
         while (true) {
             const chunk = reader.peekGreedy(1) catch |err| switch (err) {
