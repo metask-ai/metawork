@@ -757,6 +757,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.delete_confirm_body":
     "任务及其对话、执行历史将被永久删除，工作目录中的文件会保留。如任务正在运行，将先停止运行。",
   "task.stop": "停止任务",
+  "task.stop_confirm": "再次按 Esc 停止",
   "compact.stop": "停止压缩",
   "compact.started": "已开始压缩上下文。",
   "compact.start_failed": "未能开始压缩上下文。",

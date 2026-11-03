@@ -326,7 +326,11 @@ export function ComposerFooter({
     null;
 
   const keyboard = useComposerKeyboard({
+    draftScope,
     sendEnabled,
+    stopAction,
+    stopDisabled,
+    onStop,
     slash: {
       open: Boolean(slashInput && !menuDismissed),
       canChoose: Boolean(activeCandidate?.enabled),
@@ -645,6 +649,10 @@ export function ComposerFooter({
       onCompositionStartCapture={keyboard.onCompositionStartCapture}
       onCompositionEndCapture={keyboard.onCompositionEndCapture}
       onBlurCapture={keyboard.onBlurCapture}
+      onKeyDownCapture={keyboard.onKeyDownCapture}
+      onKeyDown={keyboard.onKeyDown}
+      onPointerDownCapture={keyboard.onPointerDownCapture}
+      onChangeCapture={keyboard.onChangeCapture}
     >
       <div className="composer-shell" data-file-drag-active={fileDragActive}>
         {fileDragActive && (
@@ -1007,15 +1015,29 @@ export function ComposerFooter({
                   size="icon"
                   className="composer-stop"
                   aria-label={t(
-                    stopAction === "compact" ? "compact.stop" : "task.stop",
+                    keyboard.stopConfirming
+                      ? "task.stop_confirm"
+                      : stopAction === "compact"
+                        ? "compact.stop"
+                        : "task.stop",
                   )}
                   title={t(
-                    stopAction === "compact" ? "compact.stop" : "task.stop",
+                    keyboard.stopConfirming
+                      ? "task.stop_confirm"
+                      : stopAction === "compact"
+                        ? "compact.stop"
+                        : "task.stop",
                   )}
                   disabled={stopDisabled}
                   onClick={onStop}
                 >
-                  <Icon name="stop" />
+                  {keyboard.stopConfirming ? (
+                    <span className="composer-stop-confirm" aria-hidden="true">
+                      Esc
+                    </span>
+                  ) : (
+                    <Icon name="stop" />
+                  )}
                 </Button>
               ) : (
                 <Button

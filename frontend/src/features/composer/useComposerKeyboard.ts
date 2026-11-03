@@ -1,4 +1,7 @@
 import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CompositionEvent,
@@ -21,12 +24,19 @@ function submitKey(event: KeyboardEvent) {
 }
 
 export function useComposerKeyboard({
+  draftScope,
   sendEnabled,
+  stopAction,
+  stopDisabled,
   slash,
   onSubmit,
+  onStop,
   onNavigateHistory,
 }: {
+  draftScope: string;
   sendEnabled: boolean;
+  stopAction: "run" | "compact" | null;
+  stopDisabled: boolean;
   slash: {
     open: boolean;
     canChoose: boolean;
@@ -35,11 +45,42 @@ export function useComposerKeyboard({
     dismiss: () => void;
   };
   onSubmit: () => void;
+  onStop: () => void;
   onNavigateHistory: (direction: 1 | -1) => boolean;
 }) {
   // Composition belongs to the focused DOM editor, including New-task handoff.
   const compositionTarget = useRef<EventTarget | null>(null);
   const [composing, setComposing] = useState(false);
+  const confirmationRef = useRef<{ scope: string; deadline: number } | null>(
+    null,
+  );
+  const [confirmation, setConfirmation] =
+    useState<typeof confirmationRef.current>(null);
+  const confirmationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const canStop = stopAction !== null && !stopDisabled;
+
+  const clearConfirmation = useCallback(() => {
+    if (confirmationTimer.current !== null)
+      clearTimeout(confirmationTimer.current);
+    confirmationTimer.current = null;
+    confirmationRef.current = null;
+    setConfirmation(null);
+  }, []);
+
+  useLayoutEffect(clearConfirmation, [
+    draftScope,
+    stopAction,
+    stopDisabled,
+    clearConfirmation,
+  ]);
+  useEffect(() => {
+    window.addEventListener("blur", clearConfirmation);
+    return () => {
+      window.removeEventListener("blur", clearConfirmation);
+      if (confirmationTimer.current !== null)
+        clearTimeout(confirmationTimer.current);
+    };
+  }, [clearConfirmation]);
 
   function clearComposition() {
     compositionTarget.current = null;
@@ -100,11 +141,52 @@ export function useComposerKeyboard({
 
   return {
     composing,
+    stopConfirming: canStop && confirmation?.scope === draftScope,
+    onKeyDownCapture(event: KeyboardEvent<HTMLElement>) {
+      if (event.key !== "Escape" || !bareKey(event) || inputMethodKey(event))
+        clearConfirmation();
+    },
+    onKeyDown(event: KeyboardEvent<HTMLElement>) {
+      if (
+        event.defaultPrevented ||
+        inputMethodKey(event) ||
+        event.key !== "Escape" ||
+        !bareKey(event) ||
+        !canStop
+      )
+        return;
+      // Nested controls keep their own Escape semantics, including portals.
+      if (
+        (event.target as Element).closest(
+          '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]',
+        )
+      )
+        return;
+      event.preventDefault();
+      if (event.repeat) return;
+      const now = performance.now();
+      const pending = confirmationRef.current;
+      if (pending?.scope === draftScope && now < pending.deadline) {
+        clearConfirmation();
+        onStop();
+        return;
+      }
+      clearConfirmation();
+      const next = { scope: draftScope, deadline: now + 1000 };
+      confirmationRef.current = next;
+      setConfirmation(next);
+      confirmationTimer.current = setTimeout(() => {
+        if (confirmationRef.current === next) clearConfirmation();
+      }, 1000);
+    },
+    onPointerDownCapture: clearConfirmation,
+    onChangeCapture: clearConfirmation,
     onTextKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) =>
       handleInputKeyDown(event, "text"),
     onSkillKeyDown: (event: KeyboardEvent<HTMLInputElement>) =>
       handleInputKeyDown(event, "skill"),
     onCompositionStartCapture(event: CompositionEvent<HTMLElement>) {
+      clearConfirmation();
       compositionTarget.current = event.target;
       setComposing(true);
     },
@@ -113,6 +195,8 @@ export function useComposerKeyboard({
     },
     onBlurCapture(event: FocusEvent<HTMLElement>) {
       if (compositionTarget.current === event.target) clearComposition();
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+        clearConfirmation();
     },
   };
 }

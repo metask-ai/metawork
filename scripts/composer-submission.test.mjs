@@ -1326,6 +1326,43 @@ test("App sends to the current Run without preparation and shows Stop when its b
   assert.equal(fixture.inputs.length, 1);
 });
 
+test("App double Escape uses the existing Task stop path and preserves an unsent draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  fireEvent.change(fixture.textarea, { target: { value: "keep this unsent" } });
+  fixture.textarea.focus();
+  fireEvent.keyDown(fixture.textarea, { key: "Escape" });
+  assert.deepEqual(fixture.cancellations, []);
+  fireEvent.keyDown(fixture.textarea, { key: "Escape", repeat: true });
+  assert.deepEqual(fixture.cancellations, []);
+  fireEvent.keyDown(fixture.textarea, { key: "Escape" });
+  await waitFor(() =>
+    assert.deepEqual(fixture.cancellations, [[fixture.task.id]]),
+  );
+  fireEvent.keyDown(fixture.textarea, { key: "Escape" });
+  fireEvent.keyDown(fixture.textarea, { key: "Escape" });
+  assert.equal(fixture.cancellations.length, 1);
+  assert.equal(fixture.textarea.value, "keep this unsent");
+  assert.deepEqual(fixture.inputs, []);
+});
+
+test("App double Escape cancels delayed creation without consuming a later instruction", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "cancel before identity" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  fireEvent.keyDown(fixture.textarea, { key: "Escape" });
+  assert.equal(screen.queryByText("Stopped"), null);
+  fireEvent.keyDown(fixture.textarea, { key: "Escape" });
+  await screen.findByText("Stopped");
+  fireEvent.change(fixture.textarea, { target: { value: "later intent" } });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await fixture.created();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "later intent");
+  await fixture.settle();
+});
+
 test("App sends while the Run is not ready and keeps later drafts independent", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, {
     active: true,

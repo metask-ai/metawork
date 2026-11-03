@@ -862,6 +862,7 @@ export const enUS = {
   "task.delete_confirm_body":
     "This permanently deletes the task and its conversation and execution history. Files in the working folder will be kept. Any running operation will be stopped first.",
   "task.stop": "Stop task",
+  "task.stop_confirm": "Press Esc again to stop",
   "compact.stop": "Stop compacting",
   "compact.started": "Context compaction started.",
   "compact.start_failed": "Context compaction could not be started.",

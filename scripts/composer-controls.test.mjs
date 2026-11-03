@@ -1703,6 +1703,7 @@ function renderComposer(overrides = {}) {
   let setScopeFromTest;
   let setHistoryAvailableFromTest;
   let setSlashCommandsFromTest;
+  let setStopStateFromTest;
   function ComposerHarness() {
     const [localDraft, setDraft] = useState(initialDraft);
     const owner = overrides.taskDraftId
@@ -1713,6 +1714,11 @@ function renderComposer(overrides = {}) {
     const [historyAvailable, setHistoryAvailable] = useState(true);
     const [commands, setCommands] = useState(overrides.slashCommands ?? []);
     setSlashCommandsFromTest = setCommands;
+    const [stopState, setStopState] = useState({
+      action: overrides.stopAction ?? null,
+      disabled: overrides.stopDisabled ?? false,
+    });
+    setStopStateFromTest = setStopState;
     setHistoryAvailableFromTest = setHistoryAvailable;
     setScopeFromTest = setScope;
     setDraftFromTest = setDraft;
@@ -1775,6 +1781,8 @@ function renderComposer(overrides = {}) {
       onSelectWorkspace() {},
       ...overrides,
       slashCommands: commands,
+      stopAction: stopState.action,
+      stopDisabled: stopState.disabled,
       draft,
       draftScope: scope,
       inputHistory:
@@ -1818,6 +1826,9 @@ function renderComposer(overrides = {}) {
     },
     setSlashCommands(value) {
       setSlashCommandsFromTest(value);
+    },
+    setStopState(value) {
+      setStopStateFromTest(value);
     },
     currentDraft: () => latestDraft,
   };
@@ -2386,6 +2397,182 @@ test("Slash ignores the confirming IME key after compositionend", () => {
   assert.equal(composer.textarea.getAttribute("aria-expanded"), "true");
   fireEvent.keyDown(composer.textarea, { key: "Enter", keyCode: 13 });
   assert.deepEqual(chosen, ["new"]);
+});
+
+for (const kind of ["empty", "text", "skill"]) {
+  test(`Composer double Escape stops with ${kind} draft without submitting or replacing it`, () => {
+    let stops = 0;
+    const overrides = { stopAction: "run", onStop: () => stops++ };
+    const composer =
+      kind === "skill"
+        ? renderSkillComposer(overrides)
+        : renderComposer({
+            ...overrides,
+            draft: { kind: "text", text: kind === "empty" ? "" : "keep draft" },
+          });
+    const input = composer.input ?? composer.textarea;
+    const original = input.value;
+    input.focus();
+    fireEvent.keyDown(input, { key: "Escape" });
+    assert.equal(stops, 0);
+    if (kind === "empty")
+      assert.equal(
+        screen.getByRole("button", { name: "Press Esc again to stop" })
+          .textContent,
+        "Esc",
+      );
+    else {
+      assert.ok(screen.getByRole("button", { name: "Send" }));
+      assert.equal(
+        screen.queryByRole("button", { name: "Press Esc again to stop" }),
+        null,
+      );
+      assert.equal(screen.queryByText("Esc"), null);
+    }
+    fireEvent.keyDown(input, { key: "Escape", repeat: true });
+    assert.equal(stops, 0);
+    fireEvent.keyUp(input, { key: "Escape" });
+    fireEvent.keyDown(input, { key: "Escape" });
+    assert.equal(stops, 1);
+    assert.equal(input.value, original);
+    assert.equal(composer.submissions(), 0);
+  });
+}
+
+test("Composer Escape uses its deadline even before the timeout callback can run", (ctx) => {
+  let now = 100;
+  ctx.mock.method(performance, "now", () => now);
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+  });
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  now += 1001;
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  now += 999;
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 1);
+});
+
+test("Composer restores the Stop icon when confirmation times out", (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setTimeout"] });
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+  });
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(
+    screen.getByRole("button", { name: "Press Esc again to stop" }).textContent,
+    "Esc",
+  );
+  act(() => ctx.mock.timers.tick(1000));
+  assert.ok(
+    screen.getByRole("button", { name: "Stop task" }).querySelector("svg"),
+  );
+});
+
+test("Composer Escape confirmation resets on edits, other actions, scope and stop availability", () => {
+  for (const reset of [
+    (c) => fireEvent.change(c.textarea, { target: { value: "changed" } }),
+    (c) => fireEvent.keyDown(c.textarea, { key: "ArrowLeft" }),
+    (c) => fireEvent.pointerDown(c.textarea),
+    (c) => {
+      fireEvent.compositionStart(c.textarea);
+      fireEvent.compositionEnd(c.textarea);
+    },
+    () => fireEvent.blur(window),
+    (c) => act(() => c.setScope("task:another")),
+    (c) => {
+      act(() => c.setStopState({ action: "run", disabled: true }));
+      act(() => c.setStopState({ action: "run", disabled: false }));
+    },
+    (c) => {
+      act(() => c.setStopState({ action: null, disabled: false }));
+      act(() => c.setStopState({ action: "run", disabled: false }));
+    },
+  ]) {
+    let stops = 0;
+    const composer = renderComposer({
+      stopAction: "run",
+      onStop: () => stops++,
+    });
+    composer.textarea.focus();
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    reset(composer);
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    assert.equal(stops, 0);
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    assert.equal(stops, 1);
+    cleanup();
+  }
+});
+
+test("Composer Escape retains confirmation across internal focus and clears it on leaving", () => {
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+  });
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  const stop = screen.getByRole("button", { name: "Press Esc again to stop" });
+  act(() => stop.focus());
+  fireEvent.keyDown(stop, { key: "Escape" });
+  assert.equal(stops, 1);
+  const outside = document.createElement("button");
+  document.body.append(outside);
+  try {
+    act(() => composer.textarea.focus());
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    act(() => outside.focus());
+    act(() => composer.textarea.focus());
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    assert.equal(stops, 1);
+  } finally {
+    outside.remove();
+  }
+});
+
+test("Composer leaves IME Escape and modified Escape alone and gives Slash first refusal", () => {
+  let stops = 0;
+  const composer = renderComposer({
+    stopAction: "run",
+    onStop: () => stops++,
+    draft: { kind: "text", text: "/" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+  });
+  for (const props of [
+    { isComposing: true },
+    { keyCode: 229 },
+    { shiftKey: true },
+    { ctrlKey: true },
+    { altKey: true },
+    { metaKey: true },
+  ])
+    assert.equal(
+      fireEvent.keyDown(composer.textarea, { key: "Escape", ...props }),
+      true,
+    );
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(composer.textarea.getAttribute("aria-expanded"), "false");
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 1);
+});
+
+test("Composer buttons retain native Enter activation without a duplicate submit", async () => {
+  const composer = renderComposer();
+  const user = userEvent.setup({ document });
+  screen.getByRole("button", { name: "Send" }).focus();
+  await user.keyboard("{Enter}");
+  assert.equal(composer.submissions(), 1);
 });
 
 test("Composer recalculates its height when its rendered width changes", () => {
