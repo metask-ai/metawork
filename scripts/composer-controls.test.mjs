@@ -1701,6 +1701,7 @@ function renderComposer(overrides = {}) {
   const externalOnDraftChange = overrides.onDraftChange;
   let latestDraft = initialDraft;
   let setScopeFromTest;
+  let setHistoryAvailableFromTest;
   function ComposerHarness() {
     const [localDraft, setDraft] = useState(initialDraft);
     const owner = overrides.taskDraftId
@@ -1708,6 +1709,8 @@ function renderComposer(overrides = {}) {
       : null;
     const draft = owner?.draft ?? localDraft;
     const [scope, setScope] = useState(overrides.draftScope ?? "task:3");
+    const [historyAvailable, setHistoryAvailable] = useState(true);
+    setHistoryAvailableFromTest = setHistoryAvailable;
     setScopeFromTest = setScope;
     setDraftFromTest = setDraft;
     function commitDraft(value) {
@@ -1770,12 +1773,15 @@ function renderComposer(overrides = {}) {
       ...overrides,
       draft,
       draftScope: scope,
-      inputHistory: overrides.inputHistory && {
-        load: overrides.inputHistory.load,
-        currentDraft: () =>
-          owner ? owner.currentDraft(overrides.taskDraftId) : latestDraft,
-        commitDraft,
-      },
+      inputHistory:
+        overrides.inputHistory && historyAvailable
+          ? {
+              load: overrides.inputHistory.load,
+              currentDraft: () =>
+                owner ? owner.currentDraft(overrides.taskDraftId) : latestDraft,
+              commitDraft,
+            }
+          : undefined,
       onDraftChange: commitDraft,
     });
   }
@@ -1802,6 +1808,9 @@ function renderComposer(overrides = {}) {
     },
     setScope(value) {
       setScopeFromTest(value);
+    },
+    setHistoryAvailable(value) {
+      setHistoryAvailableFromTest(value);
     },
     currentDraft: () => latestDraft,
   };
@@ -1976,13 +1985,50 @@ test("Composer ignores a history response after unmount", async () => {
 });
 
 test("Composer can start history from an uncached empty Task draft", async () => {
+  let resolve;
   const composer = renderComposer({
     taskDraftId: "uncached-history-draft",
-    inputHistory: { load: async () => ["previous input"] },
+    inputHistory: {
+      load: () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    },
   });
   assert.equal(composer.textarea.value, "");
   fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  assert.ok(screen.getByText("Loading input history…"));
+  await act(async () => resolve(["previous input"]));
   await waitFor(() => assert.equal(composer.textarea.value, "previous input"));
+});
+
+test("Composer leaves history when its source becomes unavailable", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    inputHistory: { load: async () => ["A", "B"] },
+  });
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  await waitFor(() => assert.equal(composer.textarea.value, "B"));
+  act(() => composer.setHistoryAvailable(false));
+  act(() => composer.setHistoryAvailable(true));
+  fireEvent.keyDown(composer.textarea, { key: "ArrowDown" });
+  assert.equal(composer.textarea.value, "B");
+});
+
+test("Composer recall and clearing preserve the ordinary Send and Stop rules", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    inputHistory: { load: async () => ["previous"] },
+  });
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  await waitFor(() => assert.equal(composer.textarea.value, "previous"));
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  assert.ok(screen.getByRole("button", { name: "Send" }));
+  fireEvent.keyDown(composer.textarea, { key: "ArrowDown" });
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(composer.submissions(), 0);
 });
 
 test("Composer protects modified arrows, IME, scope changes and pending history reads", async () => {

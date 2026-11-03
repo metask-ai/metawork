@@ -172,6 +172,43 @@ test("input history excludes attachments, Skills, whitespace, redacted text and 
   assert.deepEqual(history, ["safe"]);
 });
 
+test("input history includes accepted running interjections and waiting messages in submission order", async () => {
+  const state = fixture(1);
+  state.tasks[0].runs[0].additionalInputs = [
+    {
+      operationId: "operation-3",
+      text: "third",
+      redacted: false,
+      submission: submission(3),
+      state: "unknown",
+    },
+    {
+      operationId: "operation-2",
+      text: "second",
+      redacted: false,
+      submission: submission(2),
+      state: "pending",
+    },
+  ];
+  state.tasks[0].inputSubmissions = [
+    {
+      submission: submission(4),
+      input: { kind: "text", text: "waiting", redacted: false },
+      state: "waiting",
+      reason: null,
+    },
+  ];
+  assert.deepEqual(
+    await loadTaskInputHistory(
+      productStateFixture(state, scope),
+      "3",
+      () => assert.fail("already loaded"),
+      () => true,
+    ),
+    ["input-1", "second", "third", "waiting"],
+  );
+});
+
 test("an empty Task has no input history and needs no paging", async () => {
   const state = fixture(0);
   assert.deepEqual(

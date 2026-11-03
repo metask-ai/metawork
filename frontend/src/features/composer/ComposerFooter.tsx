@@ -244,14 +244,14 @@ export function ComposerFooter({
   useEffect(() => {
     const browse = historyBrowse.current;
     if (
-      browse &&
-      (!historyAvailable ||
-        browse.scope !== draftScope ||
-        browse.draft !== draft)
+      !browse ||
+      !historyAvailable ||
+      browse.scope !== draftScope ||
+      browse.draft !== draft
     ) {
       historyBrowse.current = null;
+      setHistoryRead(null);
     }
-    setHistoryRead(null);
   }, [draft, draftScope, historyAvailable]);
   useEffect(
     () => () => {
