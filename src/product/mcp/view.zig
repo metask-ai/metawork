@@ -489,10 +489,13 @@ pub fn writeProjection(
     writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"configurationApply\":\"{s}\",\"authorizationOperation\":", .{
         @tagName(mcpAvailability(mcp)),
         @tagName(inspection.health),
-        if (!mcp.refresh_schedule_failed and (input.refresh_job_active or mcp.refresh_pending) and (mcp.refresh_visible or !mcp.admissionFresh())) "refreshing" else "idle",
-        @tagName(mcp.configuration_apply_state),
+        if (trusted and !mcp.refresh_schedule_failed and (input.refresh_job_active or mcp.refresh_pending) and (mcp.refresh_visible or !mcp.admissionFresh())) "refreshing" else "idle",
+        if (trusted) @tagName(mcp.configuration_apply_state) else "idle",
     }) catch return error.SnapshotTooLarge;
-    try writeMcpAuthorizationOperation(writer, mcp, registry);
+    if (trusted)
+        try writeMcpAuthorizationOperation(writer, mcp, registry)
+    else
+        writer.writeAll("{\"kind\":\"idle\"}") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"desiredGeneration\":") catch return error.SnapshotTooLarge;
     if (trusted) writer.print("\"{d}\"", .{inspection.desired_generation orelse 0}) catch
         return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -652,6 +655,52 @@ test "Product MCP View preserves the unavailable snapshot bytes" {
         },
     });
     try std.testing.expectEqualStrings(unavailable_projection, writer.buffered());
+}
+
+test "untrusted Desired hides live operation fields without losing recovery state" {
+    const Text = struct {
+        fn contains(_: *const anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const expected = try std.json.parseFromSlice(std.json.Value, allocator, @embedFile("testdata/untrusted-view.json"), .{});
+    defer expected.deinit();
+    var context: u8 = 0;
+    for ([_]mcp_configuration.StoreHealth{ .outcome_unknown, .recovery_required }) |health| {
+        const management = try mcp_configuration.ManagementPort.init(allocator, null, .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .initial_health = health,
+            .limits = .{ .max_servers = 1, .max_tools_per_server = 1, .max_namespace_bytes = 128, .max_credential_locators = 4, .max_runtime_secrets_per_server = 4, .max_runtime_secret_bytes_per_server = 4096 },
+        });
+        var state: mcp_state.McpProductState = .{
+            .preparation = .{ .allocator = allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = true,
+            .management = management,
+            .admission = .{ .blocked = .persistence_outcome_unknown },
+            .host_capabilities = .{},
+            .configuration_apply_state = .applying,
+            .refresh_pending = true,
+            .refresh_visible = true,
+            .authorization_operation = .{ .phase = .discovering, .server_id = try allocator.dupe(u8, "recovery-server"), .operation_id = try allocator.dupe(u8, "recovery-operation") },
+        };
+        defer state.deinit();
+        var buffer: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try writeProjection(&writer, .{ .state = &state, .refresh_job_active = true, .text = .{ .context = &context, .contains_sensitive_fn = Text.contains, .write_json_fn = Text.write } });
+        const key = if (health == .outcome_unknown) "outcome_unknown" else "missing_desired";
+        const bytes = try std.json.Stringify.valueAlloc(allocator, expected.value.object.get(key).?, .{});
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings(bytes, writer.buffered());
+        try std.testing.expect(state.refresh_pending);
+        try std.testing.expectEqual(.applying, state.configuration_apply_state);
+        try std.testing.expectEqualStrings("recovery-operation", state.authorization_operation.?.operation_id);
+    }
 }
 
 test "Product MCP View filters duplicate desired tools" {

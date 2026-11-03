@@ -1,0 +1,24 @@
+{
+  "outcome_unknown": {
+    "availability": "unavailable",
+    "managementHealth": "outcome_unknown",
+    "operation": "idle",
+    "configurationApply": "idle",
+    "authorizationOperation": { "kind": "idle" },
+    "desiredGeneration": null,
+    "runtimeAlignment": "unknown",
+    "redacted": false,
+    "servers": []
+  },
+  "missing_desired": {
+    "availability": "unavailable",
+    "managementHealth": "recovery_required",
+    "operation": "idle",
+    "configurationApply": "idle",
+    "authorizationOperation": { "kind": "idle" },
+    "desiredGeneration": null,
+    "runtimeAlignment": "unknown",
+    "redacted": false,
+    "servers": []
+  }
+}
