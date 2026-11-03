@@ -10,6 +10,11 @@ const agent = @import("metawork_agent");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
+const process_compat = @import("metawork_mcp_process_compat");
+
+// Shared by formal connections and disposable test Runtime connections.
+// Core-internal process creation cannot participate in this lock.
+var windows_spawn_mutex: std.Io.Mutex = .init;
 
 pub const credential_service = product_identity.mcpCredentialService();
 pub const max_credential_secret_bytes = native_sdk.platform.max_credential_secret_bytes;
@@ -1016,13 +1021,15 @@ const StdioContext = struct {
         stderr: std.Io.File,
         stdout_buffer: []u8,
         stdout_reader: std.Io.File.Reader,
-        stderr_thread: std.Thread,
+        stderr_task: std.Io.Future(void),
+        job: if (builtin.os.tag == .windows) process_compat.Job else void,
         dead: std.atomic.Value(bool) = .init(false),
 
         fn terminate(self: *Connection) void {
             if (self.dead.swap(true, .acq_rel)) return;
             if (builtin.os.tag == .windows) {
-                self.child.kill(self.context.io);
+                self.job.deinit();
+                if (self.child.id != null) self.child.kill(self.context.io);
                 return;
             }
             if (self.child.id) |pid| {
@@ -1033,7 +1040,7 @@ const StdioContext = struct {
 
         fn deinit(self: *Connection) void {
             self.terminate();
-            self.stderr_thread.join();
+            self.stderr_task.cancel(self.context.io);
             self.stdin.close(self.context.io);
             self.stdout.close(self.context.io);
             std.crypto.secureZero(u8, self.stdout_buffer);
@@ -1057,6 +1064,13 @@ const StdioContext = struct {
     const OpenError = error{ SpawnFailed, ResourceUnavailable };
 
     fn openConnection(self: *StdioContext) OpenError!*Connection {
+        var job = if (builtin.os.tag == .windows)
+            process_compat.Job.init() catch return error.ResourceUnavailable
+        else {};
+        errdefer if (builtin.os.tag == .windows) job.deinit();
+        // std closes temporary child-side handles before spawn returns.
+        // The lock must not extend to activation, I/O, or process waiting.
+        if (builtin.os.tag == .windows) windows_spawn_mutex.lockUncancelable(self.io);
         var child = std.process.spawn(self.io, .{
             .argv = self.argv,
             .cwd = self.cwd,
@@ -1066,8 +1080,15 @@ const StdioContext = struct {
             .stderr = .pipe,
             .pgid = if (builtin.os.tag == .windows) null else 0,
             .create_no_window = true,
-        }) catch return error.SpawnFailed;
+            .start_suspended = builtin.os.tag == .windows,
+        }) catch {
+            if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(self.io);
+            return error.SpawnFailed;
+        };
+        if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(self.io);
         errdefer child.kill(self.io);
+        if (builtin.os.tag == .windows)
+            job.attachAndResume(&child) catch return error.ResourceUnavailable;
         const stdin = child.stdin.?;
         const stdout = child.stdout.?;
         const stderr = child.stderr.?;
@@ -1094,10 +1115,11 @@ const StdioContext = struct {
             .stderr = stderr,
             .stdout_buffer = stdout_buffer,
             .stdout_reader = stdout.readerStreaming(self.io, stdout_buffer),
-            .stderr_thread = undefined,
+            .stderr_task = undefined,
+            .job = job,
         };
-        connection.stderr_thread = std.Thread.spawn(
-            .{},
+        connection.stderr_task = std.Io.concurrent(
+            self.io,
             drainStderr,
             .{connection},
         ) catch return error.ResourceUnavailable;
@@ -2245,6 +2267,165 @@ test "MCP real process exchange and notify progress without async capacity" {
     try std.testing.expect(StdioContext.exchange(&context, connection, write, &sink) == .completed);
     try std.testing.expectEqual(@as(?agent.McpStdioPortFailure, null), StdioContext.notify(&context, connection, write));
     try std.testing.expect(!connection.dead.load(.acquire));
+}
+
+test "MCP concurrent connections close independently" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", ProcessFixture.echo };
+    var context = try ProcessFixture.context(io, &argv);
+    defer context.arena.deinit();
+    defer context.environment.deinit();
+    var first = try std.Io.concurrent(io, StdioContext.openConnection, .{&context});
+    var second = std.Io.concurrent(io, StdioContext.openConnection, .{&context}) catch |err| {
+        if (first.cancel(io)) |conn| conn.deinit() else |_| {}
+        return err;
+    };
+    defer if (second.cancel(io)) |conn| conn.deinit() else |_| {};
+    const one = try first.await(io);
+    one.deinit();
+    const two = try second.await(io);
+    var sink: agent.McpStdioResponseSink = .{ .context = &context, .feed_fn = ProcessFixture.feed, .finish_fn = ProcessFixture.finish };
+    try std.testing.expect(StdioContext.exchange(&context, two, .{ .fragments = &.{"{}\n"}, .timeout_ms = 5000, .cancellation = .{} }, &sink) == .completed);
+}
+
+test "MCP failed stderr task creation releases process resources" {
+    const Probe = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) std.Io.ConcurrentError!*std.Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var vtable = threaded.io().vtable.*;
+    vtable.concurrent = Probe.concurrent;
+    const io: std.Io = .{ .userdata = threaded.io().userdata, .vtable = &vtable };
+    const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", ProcessFixture.echo };
+    var context = try ProcessFixture.context(io, &argv);
+    defer context.arena.deinit();
+    defer context.environment.deinit();
+    try std.testing.expectError(error.ResourceUnavailable, context.openConnection());
+}
+
+test "MCP Windows close terminates descendants after their launcher exits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Probe = struct {
+        extern "kernel32" fn OpenProcess(u32, i32, u32) callconv(.winapi) ?std.os.windows.HANDLE;
+        bytes: [32]u8 = undefined,
+        len: usize = 0,
+
+        fn feed(raw: *anyopaque, bytes: []const u8) agent.McpStdioFeedOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const newline = std.mem.indexOfScalar(u8, bytes, '\n');
+            const count = if (newline) |index| index + 1 else bytes.len;
+            if (count > self.bytes.len - self.len) return .{ .consumed = 0, .flow = .stop };
+            @memcpy(self.bytes[self.len..][0..count], bytes[0..count]);
+            self.len += count;
+            return .{ .consumed = count, .flow = if (newline != null) .stop else .continue_reading };
+        }
+    };
+    const script =
+        \\const {spawn} = require('node:child_process');
+        \\const child = spawn(process.execPath, ['-e', "setInterval(()=>{},1000)"], {stdio:['ignore','inherit','inherit']});
+        \\process.stdout.write(String(child.pid) + String.fromCharCode(10));
+        \\child.unref();
+    ;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", script };
+    var context = try ProcessFixture.context(io, &argv);
+    defer context.arena.deinit();
+    defer context.environment.deinit();
+    const connection = try context.openConnection();
+    var connection_open = true;
+    defer if (connection_open) connection.deinit();
+    var probe: Probe = .{};
+    var sink: agent.McpStdioResponseSink = .{ .context = &probe, .feed_fn = Probe.feed, .finish_fn = ProcessFixture.finish };
+    try std.testing.expect(StdioContext.exchange(&context, connection, .{ .fragments = &.{}, .timeout_ms = 5000, .cancellation = .{} }, &sink) == .completed);
+    const pid = try std.fmt.parseInt(u32, std.mem.trim(u8, probe.bytes[0..probe.len], "\r\n"), 10);
+    const process = Probe.OpenProcess(0x00100001, 0, pid) orelse return error.TestUnexpectedResult;
+    defer std.os.windows.CloseHandle(process);
+    defer _ = std.os.windows.ntdll.NtTerminateProcess(process, @enumFromInt(1));
+    const zero: std.os.windows.LARGE_INTEGER = 0;
+    try std.testing.expectEqual(std.os.windows.NTSTATUS.TIMEOUT, std.os.windows.ntdll.NtWaitForSingleObject(process, .FALSE, &zero));
+    // Waiting only for the launcher is bounded: the unreferenced child cannot
+    // keep it alive. The Job must retain responsibility for that descendant.
+    _ = try connection.child.wait(io);
+    connection.deinit();
+    connection_open = false;
+    const timeout: std.os.windows.LARGE_INTEGER = -5 * 10_000_000;
+    try std.testing.expectEqual(std.os.windows.NTSTATUS.WAIT_0, std.os.windows.ntdll.NtWaitForSingleObject(process, .FALSE, &timeout));
+}
+
+test "MCP Windows close cancels stderr while an unrelated process holds its writer" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", ProcessFixture.echo };
+    var context = try ProcessFixture.context(io, &argv);
+    defer context.arena.deinit();
+    defer context.environment.deinit();
+    const connection = try context.openConnection();
+    var connection_open = true;
+    defer if (connection_open) connection.deinit();
+
+    // Force the escaped-writer condition, independently of spawn scheduling.
+    // The holder is deliberately outside the MCP Job and our spawn lock.
+    const pipe = try threaded.windowsCreatePipe(.{
+        .server = .{ .attributes = .{ .INHERIT = false }, .mode = .{ .IO = .ASYNCHRONOUS } },
+        .client = .{ .attributes = .{ .INHERIT = true }, .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },
+        .inbound = true,
+    });
+    var read_open = true;
+    var write_open = true;
+    defer if (read_open) std.os.windows.CloseHandle(pipe[0]);
+    defer if (write_open) std.os.windows.CloseHandle(pipe[1]);
+    var holder = try std.process.spawn(io, .{
+        .argv = &.{ argv[0], "-e", "process.stdin.resume();" },
+        .environ_map = &context.environment,
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .create_no_window = true,
+    });
+    defer holder.kill(io);
+    std.os.windows.CloseHandle(pipe[1]);
+    write_open = false;
+    connection.stderr_task.cancel(io);
+    connection.stderr = .{ .handle = pipe[0], .flags = .{ .nonblocking = true } };
+    read_open = false;
+    connection.stderr_task = std.Io.concurrent(io, StdioContext.drainStderr, .{connection}) catch |err| {
+        connection.stderr.close(io);
+        return err;
+    };
+
+    const Closing = struct {
+        fn run(conn: *StdioContext.Connection, done: *std.Io.Event) void {
+            const task_io = conn.context.io;
+            conn.deinit();
+            done.set(task_io);
+        }
+    };
+    var done: std.Io.Event = .unset;
+    const closer = try std.Thread.spawn(.{}, Closing.run, .{ connection, &done });
+    connection_open = false;
+    const completed = completed: {
+        done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {
+            // Unblock an EOF-dependent regression so the test fails rather
+            // than hanging the complete Native graph.
+            holder.stdin.?.close(io);
+            holder.stdin = null;
+            break :completed false;
+        };
+        break :completed true;
+    };
+    closer.join();
+    try std.testing.expect(completed);
+    const zero: std.os.windows.LARGE_INTEGER = 0;
+    try std.testing.expectEqual(std.os.windows.NTSTATUS.TIMEOUT, std.os.windows.ntdll.NtWaitForSingleObject(holder.id.?, .FALSE, &zero));
 }
 
 test "MCP real process cancellation and deadline terminate blocked exchange" {

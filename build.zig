@@ -2328,6 +2328,12 @@ fn wireAgentCore(
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
     mcp_platform.addImport("app_select_start", app_select_start);
+    const mcp_process_compat = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/mcp_process.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    mcp_platform.addImport("metawork_mcp_process_compat", mcp_process_compat);
     const mcp_platform_test_options = b.addOptions();
     mcp_platform_test_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for MCP process fixtures"));
     mcp_platform.addOptions("mcp_platform_test_options", mcp_platform_test_options);
