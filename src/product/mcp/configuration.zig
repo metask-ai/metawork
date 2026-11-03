@@ -50,6 +50,7 @@ pub const Error = error{
     TransactionCorrupt,
     TransactionEncodeFailed,
     TransactionGenerationMismatch,
+    TransactionRegistryMismatch,
     CredentialCleanupFailed,
 };
 
@@ -3227,7 +3228,10 @@ pub fn registrySourceSchemaVersion(
         allocator,
         input,
         .{ .ignore_unknown_fields = true },
-    ) catch return error.RegistryCorrupt;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.RegistryCorrupt,
+    };
     defer probe.deinit();
     return probe.value.schema_version;
 }
@@ -3242,7 +3246,10 @@ fn decodeCurrent(
         allocator,
         input,
         .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
-    ) catch return error.RegistryCorrupt;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.RegistryCorrupt,
+    };
     errdefer parsed.deinit();
     validateRegistryIdentity(&parsed.value, limits) catch
         return error.RegistryCorrupt;
@@ -3259,7 +3266,10 @@ fn migrateLegacyRegistry(
         allocator,
         input,
         .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
-    ) catch return error.RegistryCorrupt;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.RegistryCorrupt,
+    };
     defer legacy.deinit();
     if (legacy.value.schema_version != 1) return error.RegistryCorrupt;
 
@@ -3356,7 +3366,10 @@ pub fn decodeTransaction(
         allocator,
         input,
         .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
-    ) catch return error.TransactionCorrupt;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.TransactionCorrupt,
+    };
     errdefer parsed.deinit();
     validateTransaction(&parsed.value, limits) catch
         return error.TransactionCorrupt;
@@ -3897,10 +3910,30 @@ fn optionalTextEqual(left: ?[]const u8, right: ?[]const u8) bool {
     return std.mem.eql(u8, left.?, right.?);
 }
 
-/// Recovery is decided from the durable registry generation, not from a
-/// separately mutable phase flag. At the old generation candidate credentials
-/// are orphaned; at the target generation retired credentials are obsolete.
-pub fn recoverCredentialTransaction(
+/// Prove the entire association before deleting anything. Generation selects
+/// the phase; current references must also match both locator sets.
+fn validateTransactionRegistry(transaction: TransactionWire, registry: ?RegistryWire) Error!void {
+    const generation = if (registry) |value| value.generation else 0;
+    const at_base = generation == transaction.base_generation;
+    if (!at_base and generation != transaction.target_generation)
+        return error.TransactionGenerationMismatch;
+    for (transaction.candidate_locators) |locator| {
+        var referenced = false;
+        if (registry) |value| for (value.servers) |server| {
+            referenced = referenced or serverReferencesCredential(server, locator);
+        };
+        if (referenced == at_base) return error.TransactionRegistryMismatch;
+    }
+    for (transaction.retired_locators) |locator| {
+        var referenced = false;
+        if (registry) |value| for (value.servers) |server| {
+            referenced = referenced or serverReferencesCredential(server, locator);
+        };
+        if (referenced != at_base) return error.TransactionRegistryMismatch;
+    }
+}
+
+fn recoverCredentialTransaction(
     transaction: TransactionWire,
     current_registry_generation: u64,
     cleanup: CredentialCleanup,
@@ -4616,7 +4649,7 @@ pub const FileStore = struct {
     pub fn recoverPendingCredentialTransaction(
         self: *FileStore,
         allocator: std.mem.Allocator,
-        current_registry_generation: u64,
+        current_registry: ?RegistryWire,
         cleanup: CredentialCleanup,
         limits: Limits,
     ) (FileStoreError || Error)!bool {
@@ -4624,9 +4657,10 @@ pub const FileStore = struct {
         defer allocator.free(bytes);
         var transaction = try decodeTransaction(allocator, bytes, limits);
         defer transaction.deinit();
+        try validateTransactionRegistry(transaction.value, current_registry);
         try recoverCredentialTransaction(
             transaction.value,
-            current_registry_generation,
+            if (current_registry) |value| value.generation else 0,
             cleanup,
         );
         try self.clearTransaction();
@@ -5105,14 +5139,14 @@ test "file store recovery cleans and closes a pending credential transaction" {
     var cleanup: Cleanup = .{};
     try std.testing.expect(try store.recoverPendingCredentialTransaction(
         std.testing.allocator,
-        4,
+        .{ .schema_version = schema_version, .generation = 4, .oauth_operation = null, .servers = &.{} },
         .{ .context = &cleanup, .available = true, .delete_fn = Cleanup.remove },
         test_limits,
     ));
     try std.testing.expectEqual(@as(usize, 1), cleanup.count);
     try std.testing.expect(!(try store.recoverPendingCredentialTransaction(
         std.testing.allocator,
-        4,
+        .{ .schema_version = schema_version, .generation = 4, .oauth_operation = null, .servers = &.{} },
         .{ .context = &cleanup, .available = true, .delete_fn = Cleanup.remove },
         test_limits,
     )));
@@ -5138,6 +5172,55 @@ test "credential transaction rejects aliases across candidate and retired sets" 
             limits,
         ),
     );
+}
+
+test "registry and transaction decoding preserve resource failure instead of diagnosing corruption" {
+    const Probe = struct {
+        fn registry(allocator: std.mem.Allocator, bytes: []const u8) !void {
+            var parsed = try decode(allocator, bytes, test_limits);
+            defer parsed.deinit();
+        }
+        fn transaction(allocator: std.mem.Allocator) !void {
+            var parsed = try decodeTransaction(allocator, "{\"schema_version\":1,\"base_generation\":0,\"target_generation\":1,\"candidate_locators\":[\"candidate/a\"],\"retired_locators\":[]}", test_limits);
+            defer parsed.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.registry, .{"{\"schema_version\":1,\"generation\":1,\"servers\":[]}"});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.registry, .{"{\"schema_version\":2,\"generation\":1,\"oauth_operation\":null,\"servers\":[]}"});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.transaction, .{});
+}
+
+test "journal cleanup checks current references before any credential deletion" {
+    const Cleanup = struct {
+        count: usize = 0,
+        fn remove(raw: ?*anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.count += 1;
+            return true;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{ .read = true, .truncate = false });
+    defer lock.close(std.testing.io);
+    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    const journal = "{\"schema_version\":1,\"base_generation\":4,\"target_generation\":5,\"candidate_locators\":[\"candidate/a\"],\"retired_locators\":[\"retired/a\"]}";
+    for ([_]u64{ 4, 5 }) |generation| {
+        try store.commitTransaction(journal);
+        var slots = [_]SecretSlotWire{.{ .name = "X-Token", .credential_ref = if (generation == 4) "candidate/a" else "retired/a" }};
+        var servers = [_]ServerWire{.{ .id = "server", .namespace = "server", .display_name = "Server", .enabled = true, .negotiation = "automatic", .timeout_ms = 1000, .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/mcp", .headers = &slots }, .auth = .{ .kind = "none", .oauth = null }, .connection_approval = null, .tools = &.{} }};
+        const registry: RegistryWire = .{ .schema_version = schema_version, .generation = generation, .oauth_operation = null, .servers = &servers };
+        var cleanup: Cleanup = .{};
+        const capability: CredentialCleanup = .{ .context = &cleanup, .available = true, .delete_fn = Cleanup.remove };
+        try std.testing.expectError(error.TransactionRegistryMismatch, store.recoverPendingCredentialTransaction(std.testing.allocator, registry, capability, test_limits));
+        try std.testing.expectEqual(@as(usize, 0), cleanup.count);
+        const retained = (try store.loadTransactionAlloc(std.testing.allocator)).?;
+        defer std.testing.allocator.free(retained);
+        try std.testing.expectEqualStrings(journal, retained);
+        slots[0].credential_ref = if (generation == 4) "retired/a" else "candidate/a";
+        try std.testing.expect(try store.recoverPendingCredentialTransaction(std.testing.allocator, registry, capability, test_limits));
+        try std.testing.expectEqual(@as(usize, 1), cleanup.count);
+    }
 }
 
 test "mutation plan rotates a fresh locator without retiring a shared reference" {

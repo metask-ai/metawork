@@ -76,7 +76,7 @@ pub fn prepare(
     defer if (restored_bytes) |bytes| std.heap.c_allocator.free(bytes);
     var registry_corrupt = false;
     var source_schema_version: ?u8 = null;
-    const generation: u64 = if (restored_bytes) |bytes| generation: {
+    var restored_registry: ?std.json.Parsed(mcp_configuration.RegistryWire) = if (restored_bytes) |bytes| registry: {
         source_schema_version = mcp_configuration.registrySourceSchemaVersion(
             std.heap.c_allocator,
             bytes,
@@ -84,10 +84,10 @@ pub fn prepare(
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 registry_corrupt = true;
-                break :generation 0;
+                break :registry null;
             },
         };
-        var decoded = mcp_configuration.decode(
+        const decoded = mcp_configuration.decode(
             std.heap.c_allocator,
             bytes,
             configuration_limits,
@@ -95,12 +95,12 @@ pub fn prepare(
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 registry_corrupt = true;
-                break :generation 0;
+                break :registry null;
             },
         };
-        defer decoded.deinit();
-        break :generation decoded.value.generation;
-    } else 0;
+        break :registry decoded;
+    } else null;
+    defer if (restored_registry) |*registry| registry.deinit();
     const credential_store = if (credential_store_optional) |value| value else return error.RuntimeUnavailable;
     var recovery_failed = registry_corrupt;
     var management_health: mcp_configuration.StoreHealth =
@@ -108,7 +108,7 @@ pub fn prepare(
     if (!registry_corrupt) {
         _ = configuration_store.recoverPendingCredentialTransaction(
             std.heap.c_allocator,
-            generation,
+            if (restored_registry) |registry| registry.value else null,
             credential_store.cleanup(),
             configuration_limits,
         ) catch |err| switch (err) {
