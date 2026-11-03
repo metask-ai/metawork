@@ -179,11 +179,23 @@ pub const Runtime = struct {
         ports: ports_module.Ports,
         initial_state: state_module.McpProductState,
     ) Runtime {
-        return .{
+        var runtime: Runtime = .{
             .allocator = allocator,
             .ports = ports,
             .state = initial_state,
         };
+        runtime.observeOauthTime();
+        return runtime;
+    }
+
+    fn observeOauthTime(self: *Runtime) void {
+        if (self.state.management) |*management|
+            management.oauth_schedule.observeTime(self.ports.unix_clock.nowMs());
+    }
+
+    fn installCommittedDesired(self: *Runtime, admission: McpAdmissionAuthority) void {
+        self.observeOauthTime();
+        policy.installCommittedDesiredState(&self.state, &self.state.management.?, admission);
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -951,7 +963,7 @@ pub const Runtime = struct {
                     outcome;
                 switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
-                        policy.installCommittedDesiredState(&self.state, management, candidate);
+                        self.installCommittedDesired(candidate);
                         self.state.connection_test = null;
                         candidate_owned = false;
                         self.markChanged();
@@ -1403,7 +1415,7 @@ pub const Runtime = struct {
         switch (try management.commitPreparedOauthOperationState(preparation)) {
             .saved => {
                 self.ports.timer.cancel();
-                policy.installCommittedDesiredState(&self.state, management, reduced);
+                self.installCommittedDesired(reduced);
                 reduced_owned = false;
                 self.markChanged();
                 const registry = management.desiredRegistry() orelse return .rejected;
@@ -1438,6 +1450,10 @@ pub const Runtime = struct {
         if (inspection.health != .ready or inspection.runtime_alignment != .current or
             self.state.activation_failed)
             return .rejected;
+        if (management.desiredRegistry().?.oauth_operation != null) return .rejected;
+        var started = false;
+        defer if (!started and management.inspect().health == .ready)
+            management.oauth_schedule.deferServer(server_id, self.ports.unix_clock.nowMs());
         const activation = self.state.activation orelse return .rejected;
         var runtime_loaded = false;
         for (activation.serverHealth()) |server| {
@@ -1465,9 +1481,10 @@ pub const Runtime = struct {
         switch (try management.commitPreparedOauthOperationState(&preparation)) {
             .saved => {
                 self.ports.timer.cancel();
-                policy.installCommittedDesiredState(&self.state, management, reduced);
+                self.installCommittedDesired(reduced);
                 reduced_owned = false;
                 binding_owned = false;
+                started = true;
                 self.markChanged();
                 return .{ .started = binding };
             },
@@ -1508,7 +1525,7 @@ pub const Runtime = struct {
                 switch (reported_outcome) {
                     .saved, .saved_recovery_required => {
                         runtime_commit.commit();
-                        policy.installCommittedDesiredState(&self.state, management, candidate);
+                        self.installCommittedDesired(candidate);
                         candidate_owned = false;
                         self.releaseBoundary();
                         self.markChanged();
@@ -1534,6 +1551,15 @@ pub const Runtime = struct {
     ) Error!configuration.ManagementOutcome {
         if (self.shutting_down or self.refresh_job != null) return .rejected;
         const management = if (self.state.management) |*value| value else return .rejected;
+        const operation = if (management.desiredRegistry()) |registry| registry.oauth_operation else null;
+        const failed_server = if (operation) |marker|
+            if (std.mem.eql(u8, marker.id, operation_id) and std.mem.eql(u8, marker.kind, "refresh"))
+                try self.allocator.dupe(u8, marker.server_id)
+            else
+                null
+        else
+            null;
+        defer if (failed_server) |server_id| self.allocator.free(server_id);
         var preparation = switch (try management.prepareClearOauthOperation(operation_id)) {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
@@ -1545,7 +1571,8 @@ pub const Runtime = struct {
         const outcome = try management.commitPreparedOauthOperationState(&preparation);
         switch (outcome) {
             .saved => {
-                policy.installCommittedDesiredState(&self.state, management, candidate);
+                self.installCommittedDesired(candidate);
+                if (failed_server) |server_id| management.oauth_schedule.deferServer(server_id, self.ports.unix_clock.nowMs());
                 candidate_owned = false;
                 self.releaseBoundary();
                 self.markChanged();
@@ -1634,6 +1661,7 @@ pub const Runtime = struct {
     }
 
     pub fn syncFreshness(self: *Runtime) bool {
+        self.observeOauthTime();
         const was_ready = self.state.admission == .ready;
         self.expireAdmission();
         if (!was_ready or self.state.admission == .ready) return false;
@@ -1786,6 +1814,7 @@ const TestHarness = struct {
     failed_enqueues: usize = 0,
     armed_deadline_ms: ?u64 = null,
     now_ms: u64 = 100,
+    unix_seconds: ?u64 = 1,
     activation_outcome: agent.McpActivationOutcome = .empty,
     activations: usize = 0,
     arm_succeeds: bool = true,
@@ -1835,6 +1864,11 @@ const TestHarness = struct {
         return self.now_ms;
     }
 
+    fn unixNow(context: ?*anyopaque) ?u64 {
+        const self: *TestHarness = @ptrCast(@alignCast(context.?));
+        return self.unix_seconds;
+    }
+
     fn armAt(context: ?*anyopaque, deadline_ms: u64) bool {
         const self: *TestHarness = @ptrCast(@alignCast(context.?));
         self.armed_deadline_ms = deadline_ms;
@@ -1876,6 +1910,7 @@ const TestHarness = struct {
                 .context = self,
                 .notify_fn = notify,
             },
+            .unix_clock = .{ .enabled = true, .context = self, .now_seconds_fn = unixNow },
         };
     }
 
@@ -1998,6 +2033,12 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         try std.testing.expect(runtime.finishAuthorization("attempt"));
         const current = runtime.state.management.?.desiredRegistry().?;
         try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
+        const deadline = runtime.nextOauthExpiry().?.expires_at_unix_ms;
+        try std.testing.expectEqual(@as(u64, 67_750), deadline);
+        harness.unix_seconds = 80;
+        try std.testing.expectEqual(deadline, runtime.nextOauthExpiry().?.expires_at_unix_ms);
+        try std.testing.expectEqual(@as(?u64, 90_000), current.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
+        harness.unix_seconds = 1;
         // Tokens now require real configuration apply; absence cannot pretend loaded.
         try std.testing.expectEqual(.restart_required, runtime.state.management.?.inspect().runtime_alignment);
         const auth_ref = try std.testing.allocator.dupe(u8, current.servers[0].auth.oauth.?.grant.?.access_token_ref);

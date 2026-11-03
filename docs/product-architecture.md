@@ -306,6 +306,8 @@ MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorizatio
 
 Product MCP 的自动刷新共享单一作业并合并重复请求；极短 TTL 受最小网络间隔约束，持续失败有有界退避和暂停，普通 Task 输入不能重置预算或跳过退避。显式刷新或新配置可以恢复尝试；队列、timer/wake 与网络失败分别保留可诊断事实。查询只观察当前 freshness，不登记网络或恢复工作；正常推进由 Host timer、控制入口和 completion 承担。
 
+OAuth grant 的提前刷新时间在提交安装或启动恢复时固定；暂缺合法时间时，由后续显式生命周期观察补齐，查询保持纯读并暂用真实 expiry。Product 按 server、connection/consent 和 token revision 保留进程内有界退避，返回 `max(refresh_due, retry_not_before)` 最早的一台；marker 确认清除或目标刷新 begin 被拒后才推进相应重试状态，全局事务忙不归为单台服务器失败。旧 operation 不得影响新绑定；调度不得改写 grant 的真实 expiry。Product Control 只注入既有系统时钟的读能力，Application 继续拥有单个 OAuth timer 及其全局下限，不借用 Schedule 的 arm/cancel 或另建持久化调度状态。catalog refresh 等待 OAuth marker/apply/在途作业时由完成事件继续推进，不能以到期的 retry floor 形成毫秒轮询；独立的 freshness deadline 仍须及时失效准入。
+
 Product Control 为该共享刷新作业持有独立于 Run 池的有界控制执行容量，所有 Run worker 等待人工审批或 Run 队列已满时，目录刷新仍须推进；此容量不执行 Run，不改变 MCP apply/OAuth/refresh 的既有串行化边界。关闭先停止 MCP admission/timer 并取消尚未开始的刷新，join 在途刷新后才接纳或丢弃其 completion、释放对应 owner；Agent Runtime 和 transport 必须活到该 join 完成。
 
 ### 2.6 文件 attachment staging
