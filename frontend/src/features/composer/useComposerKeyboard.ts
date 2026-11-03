@@ -193,6 +193,14 @@ export function useComposerKeyboard({
     onCompositionEndCapture(event: CompositionEvent<HTMLElement>) {
       if (compositionTarget.current === event.target) clearComposition();
     },
+    onFocusCapture(event: FocusEvent<HTMLElement>) {
+      // Removing an editor need not emit blur or compositionend.
+      if (
+        compositionTarget.current !== null &&
+        compositionTarget.current !== event.target
+      )
+        clearComposition();
+    },
     onBlurCapture(event: FocusEvent<HTMLElement>) {
       if (compositionTarget.current === event.target) clearComposition();
       if (!event.currentTarget.contains(event.relatedTarget as Node | null))

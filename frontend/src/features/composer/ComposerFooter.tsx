@@ -648,6 +648,7 @@ export function ComposerFooter({
       className="composer-bar"
       onCompositionStartCapture={keyboard.onCompositionStartCapture}
       onCompositionEndCapture={keyboard.onCompositionEndCapture}
+      onFocusCapture={keyboard.onFocusCapture}
       onBlurCapture={keyboard.onBlurCapture}
       onKeyDownCapture={keyboard.onKeyDownCapture}
       onKeyDown={keyboard.onKeyDown}

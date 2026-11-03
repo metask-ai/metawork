@@ -2609,6 +2609,61 @@ test("Composer leaves IME Escape and modified Escape alone and gives Slash first
   assert.equal(stops, 1);
 });
 
+test("Composer menu Escape closes only the menu before stopping can be armed", async () => {
+  let stops = 0;
+  renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+    modelEditable: true,
+    modelLabel: "Alpha",
+    selectedModelId: "alpha",
+    modelOptions: [
+      { selectionId: "alpha", displayName: "Alpha" },
+      { selectionId: "beta", displayName: "Beta" },
+    ],
+    shell: composerShell({ attentionNotice: null }),
+  });
+  const user = userEvent.setup({ document });
+  const trigger = screen.getByRole("combobox", { name: "Model" });
+  await user.click(trigger);
+  await screen.findByRole("listbox");
+  await user.keyboard("{Escape}");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(document.activeElement, trigger);
+  assert.equal(stops, 0);
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  await user.keyboard("{Escape}");
+  assert.equal(stops, 0);
+  await user.keyboard("{Escape}");
+  assert.equal(stops, 1);
+});
+
+for (const action of ["submit", "feedback"]) {
+  test(`a replacement editor clears stale IME state before ${action}`, async () => {
+    const composer = renderSkillComposer({ shell: composerShell() });
+    composer.input.focus();
+    fireEvent.compositionStart(composer.input);
+    // Draft owner replaces the editor without a native blur/compositionend.
+    act(() => composer.setDraft({ kind: "text", text: "next draft" }));
+    assert.equal(composer.input.isConnected, false);
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    const input = screen.getByRole("combobox", { name: "" });
+    assert.equal(document.activeElement === input, true);
+    if (action === "submit") {
+      fireEvent.keyDown(input, { key: "Enter" });
+      assert.equal(composer.submissions(), 1);
+    } else {
+      const details = document.querySelector(".commandbar-alert");
+      fireEvent.click(details.querySelector("summary"));
+      input.focus();
+      fireEvent.keyDown(input, { key: "Escape" });
+      assert.equal(details.open, false);
+      assert.equal(composer.submissions(), 0);
+    }
+  });
+}
+
 test("Composer buttons retain native Enter activation without a duplicate submit", async () => {
   const composer = renderComposer();
   const user = userEvent.setup({ document });

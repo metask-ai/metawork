@@ -353,6 +353,10 @@ export function AppShell({
         if (compositionTarget.current === event.target)
           compositionTarget.current = null;
       }}
+      onFocusCapture={(event) => {
+        if (compositionTarget.current !== event.target)
+          compositionTarget.current = null;
+      }}
       onBlurCapture={(event) => {
         if (compositionTarget.current === event.target)
           compositionTarget.current = null;
