@@ -12,6 +12,12 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
 });
 if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
+dom.window.matchMedia = (media) => ({
+  media,
+  matches: false,
+  addEventListener() {},
+  removeEventListener() {},
+});
 
 Object.assign(globalThis, {
   window: dom.window,
@@ -105,6 +111,7 @@ const { useNewTaskDrafts, useTaskDrafts } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
 const { ModelSetupNotice } = await vite.ssrLoadModule(
   "/src/features/models/ModelSetup.tsx",
 );
@@ -1702,6 +1709,8 @@ function renderComposer(overrides = {}) {
   let latestDraft = initialDraft;
   let setScopeFromTest;
   let setHistoryAvailableFromTest;
+  let setSlashCommandsFromTest;
+  let setStopStateFromTest;
   function ComposerHarness() {
     const [localDraft, setDraft] = useState(initialDraft);
     const owner = overrides.taskDraftId
@@ -1710,6 +1719,13 @@ function renderComposer(overrides = {}) {
     const draft = owner?.draft ?? localDraft;
     const [scope, setScope] = useState(overrides.draftScope ?? "task:3");
     const [historyAvailable, setHistoryAvailable] = useState(true);
+    const [commands, setCommands] = useState(overrides.slashCommands ?? []);
+    setSlashCommandsFromTest = setCommands;
+    const [stopState, setStopState] = useState({
+      action: overrides.stopAction ?? null,
+      disabled: overrides.stopDisabled ?? false,
+    });
+    setStopStateFromTest = setStopState;
     setHistoryAvailableFromTest = setHistoryAvailable;
     setScopeFromTest = setScope;
     setDraftFromTest = setDraft;
@@ -1720,7 +1736,7 @@ function renderComposer(overrides = {}) {
       externalOnDraftChange?.(value);
       return true;
     }
-    return createElement(ComposerFooter, {
+    const footer = createElement(ComposerFooter, {
       textareaRef,
       archived: false,
       closing: false,
@@ -1771,6 +1787,9 @@ function renderComposer(overrides = {}) {
       onConfirmAccess() {},
       onSelectWorkspace() {},
       ...overrides,
+      slashCommands: commands,
+      stopAction: stopState.action,
+      stopDisabled: stopState.disabled,
       draft,
       draftScope: scope,
       inputHistory:
@@ -1784,6 +1803,9 @@ function renderComposer(overrides = {}) {
           : undefined,
       onDraftChange: commitDraft,
     });
+    return overrides.shell
+      ? createElement(AppShell, overrides.shell, footer)
+      : footer;
   }
   render(
     createElement(
@@ -1811,6 +1833,12 @@ function renderComposer(overrides = {}) {
     },
     setHistoryAvailable(value) {
       setHistoryAvailableFromTest(value);
+    },
+    setSlashCommands(value) {
+      setSlashCommandsFromTest(value);
+    },
+    setStopState(value) {
+      setStopStateFromTest(value);
     },
     currentDraft: () => latestDraft,
   };
@@ -2175,6 +2203,577 @@ test("Composer Enter handling does not submit an active IME composition", () => 
     isComposing: false,
   });
   assert.equal(composer.submissions(), 1);
+});
+
+function renderSkillComposer(overrides = {}) {
+  const skill = {
+    skillId: "builtin.review",
+    skillPolicyKey: "review",
+    invocationName: "review",
+    displayName: "Review",
+    description: "Review a target",
+    argumentNames: ["target"],
+    maxValues: 1,
+    enabled: true,
+  };
+  const composer = renderComposer({
+    draft: {
+      kind: "skill",
+      ...skill,
+      catalogRevision: "4",
+      selectionRevision: "1",
+      argumentValues: ["就是这个情况"],
+    },
+    skillCatalog: {
+      availability: "ready",
+      redacted: false,
+      revision: "4",
+      selectionRevision: "1",
+      skills: [skill],
+      issues: [],
+    },
+    ...overrides,
+  });
+  return {
+    ...composer,
+    input: screen.getByRole("textbox", { name: "target" }),
+  };
+}
+
+for (const kind of ["text", "skill"]) {
+  test(`Composer ${kind} keeps IME confirmation native before and after composition events`, () => {
+    const composer =
+      kind === "skill" ? renderSkillComposer() : renderComposer();
+    const input = composer.input ?? composer.textarea;
+    const original = input.value;
+    const confirmingEnter = () => {
+      assert.equal(
+        fireEvent.keyDown(input, {
+          key: "Enter",
+          keyCode: 229,
+          isComposing: false,
+        }),
+        true,
+      );
+      assert.equal(composer.submissions(), 0);
+    };
+    confirmingEnter();
+    fireEvent.compositionStart(input);
+    assert.equal(
+      fireEvent.keyDown(input, { key: "Enter", isComposing: false }),
+      true,
+    );
+    assert.equal(composer.submissions(), 0);
+    fireEvent.compositionEnd(input, { data: original });
+    confirmingEnter();
+    assert.equal(input.value, original);
+    fireEvent.keyUp(input, { key: "Enter", keyCode: 13 });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+    assert.equal(composer.submissions(), 1);
+  });
+
+  test(`Composer ${kind} submits only bare or platform-primary Enter`, () => {
+    const saved = Object.getOwnPropertyDescriptor(navigator, "platform");
+    try {
+      for (const [platform, primary, other] of [
+        ["MacIntel", "metaKey", "ctrlKey"],
+        ["Win32", "ctrlKey", "metaKey"],
+      ]) {
+        Object.defineProperty(navigator, "platform", {
+          configurable: true,
+          value: platform,
+        });
+        const composer =
+          kind === "skill" ? renderSkillComposer() : renderComposer();
+        const input = composer.input ?? composer.textarea;
+        for (const keys of [
+          { shiftKey: true },
+          { altKey: true },
+          { [other]: true },
+          { [primary]: true, shiftKey: true },
+          { [primary]: true, altKey: true },
+          { metaKey: true, ctrlKey: true },
+        ])
+          fireEvent.keyDown(input, { key: "Enter", ...keys });
+        assert.equal(composer.submissions(), 0);
+        fireEvent.keyDown(input, { key: "Enter", [primary]: true });
+        fireEvent.keyDown(input, { key: "Enter" });
+        assert.equal(composer.submissions(), 2);
+        cleanup();
+      }
+    } finally {
+      if (saved) Object.defineProperty(navigator, "platform", saved);
+      else delete navigator.platform;
+    }
+  });
+}
+
+test("Slash preserves multiline editing, modified arrows and reverse focus navigation", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+    onSlashCommand: () => assert.fail("editing must not select a command"),
+  });
+  const before = document.createElement("button");
+  before.textContent = "Before composer";
+  document.body.prepend(before);
+  const user = userEvent.setup({ document });
+  try {
+    composer.textarea.focus();
+    for (const modifier of ["shiftKey", "metaKey", "ctrlKey", "altKey"])
+      assert.equal(
+        fireEvent.keyDown(composer.textarea, {
+          key: "ArrowUp",
+          [modifier]: true,
+        }),
+        true,
+      );
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+    assert.equal(composer.textarea.value, "\n/");
+    await user.tab({ shift: true });
+    assert.equal(document.activeElement, before);
+    assert.equal(composer.textarea.getAttribute("aria-expanded"), "false");
+  } finally {
+    before.remove();
+  }
+});
+
+test("Slash Tab leaves an unknown or disabled candidate instead of trapping focus", async () => {
+  const user = userEvent.setup({ document });
+  for (const slashCommands of [
+    [],
+    [{ name: "new", enabled: false, disabledReason: "already_new_task" }],
+  ]) {
+    const composer = renderComposer({
+      draft: { kind: "text", text: "/" },
+      slashCommands,
+    });
+    const after = document.createElement("button");
+    after.textContent = "After composer";
+    document.body.append(after);
+    try {
+      composer.textarea.focus();
+      fireEvent.keyDown(composer.textarea, { key: "Enter" });
+      assert.equal(composer.submissions(), 0);
+      await user.tab();
+      assert.equal(document.activeElement, after);
+    } finally {
+      after.remove();
+      cleanup();
+    }
+  }
+});
+
+test("Slash Tab releases focus when its highlighted command becomes disabled", async () => {
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+    onSlashCommand: () => assert.fail("disabled command must not run"),
+  });
+  assert.match(composer.textarea.getAttribute("aria-activedescendant"), /new/);
+  act(() =>
+    composer.setSlashCommands([
+      { name: "new", enabled: false, disabledReason: "already_new_task" },
+    ]),
+  );
+  const after = document.createElement("button");
+  after.textContent = "After composer";
+  document.body.append(after);
+  try {
+    composer.textarea.focus();
+    await userEvent.setup({ document }).tab();
+    assert.equal(document.activeElement, after);
+    assert.equal(composer.submissions(), 0);
+  } finally {
+    after.remove();
+  }
+});
+
+test("Slash ignores the confirming IME key after compositionend", () => {
+  const chosen = [];
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+    onSlashCommand: (name) => chosen.push(name),
+  });
+  fireEvent.compositionStart(composer.textarea);
+  fireEvent.compositionEnd(composer.textarea);
+  for (const key of ["ArrowUp", "ArrowDown", "Escape", "Tab", "Enter"])
+    assert.equal(
+      fireEvent.keyDown(composer.textarea, { key, keyCode: 229 }),
+      true,
+    );
+  assert.deepEqual(chosen, []);
+  assert.equal(composer.textarea.getAttribute("aria-expanded"), "true");
+  fireEvent.keyDown(composer.textarea, { key: "Enter", keyCode: 13 });
+  assert.deepEqual(chosen, ["new"]);
+});
+
+for (const kind of ["empty", "text", "skill"]) {
+  test(`Composer double Escape stops with ${kind} draft without submitting or replacing it`, () => {
+    let stops = 0;
+    const overrides = { stopAction: "run", onStop: () => stops++ };
+    const composer =
+      kind === "skill"
+        ? renderSkillComposer(overrides)
+        : renderComposer({
+            ...overrides,
+            draft: { kind: "text", text: kind === "empty" ? "" : "keep draft" },
+          });
+    const input = composer.input ?? composer.textarea;
+    const original = input.value;
+    input.focus();
+    fireEvent.keyDown(input, { key: "Escape" });
+    assert.equal(stops, 0);
+    if (kind === "empty")
+      assert.equal(
+        screen.getByRole("button", { name: "Press Esc again to stop" })
+          .textContent,
+        "Esc",
+      );
+    else {
+      assert.ok(screen.getByRole("button", { name: "Send" }));
+      assert.equal(
+        screen.queryByRole("button", { name: "Press Esc again to stop" }),
+        null,
+      );
+      assert.equal(screen.queryByText("Esc"), null);
+    }
+    fireEvent.keyDown(input, { key: "Escape", repeat: true });
+    assert.equal(stops, 0);
+    fireEvent.keyUp(input, { key: "Escape" });
+    fireEvent.keyDown(input, { key: "Escape" });
+    assert.equal(stops, 1);
+    assert.equal(input.value, original);
+    assert.equal(composer.submissions(), 0);
+  });
+}
+
+test("Composer Escape cannot arm without stop eligibility or from an auto-repeat", () => {
+  for (const [action, disabled] of [
+    [null, false],
+    ["run", true],
+  ]) {
+    const composer = renderComposer({
+      draft: { kind: "text", text: "" },
+      stopAction: action,
+      stopDisabled: disabled,
+      onStop: () => assert.fail("unavailable stop must not run"),
+    });
+    for (let i = 0; i < 2; i++)
+      assert.equal(
+        fireEvent.keyDown(composer.textarea, { key: "Escape" }),
+        true,
+      );
+    assert.equal(screen.queryByText("Esc"), null);
+    cleanup();
+  }
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+  });
+  fireEvent.keyDown(composer.textarea, { key: "Escape", repeat: true });
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  assert.ok(screen.getByRole("button", { name: "Press Esc again to stop" }));
+});
+
+test("Composer Escape uses its deadline even before the timeout callback can run", (ctx) => {
+  let now = 100;
+  ctx.mock.method(performance, "now", () => now);
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+  });
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  now += 1001;
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  now += 999;
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 1);
+});
+
+test("Composer restores the Stop icon when confirmation times out", (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setTimeout"] });
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+  });
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(
+    screen.getByRole("button", { name: "Press Esc again to stop" }).textContent,
+    "Esc",
+  );
+  act(() => ctx.mock.timers.tick(1000));
+  assert.ok(
+    screen.getByRole("button", { name: "Stop task" }).querySelector("svg"),
+  );
+});
+
+test("Composer Escape confirmation resets on edits, other actions, scope and stop availability", () => {
+  for (const reset of [
+    (c) => fireEvent.change(c.textarea, { target: { value: "changed" } }),
+    (c) => fireEvent.keyDown(c.textarea, { key: "ArrowLeft" }),
+    (c) => fireEvent.pointerDown(c.textarea),
+    (c) => {
+      fireEvent.compositionStart(c.textarea);
+      fireEvent.compositionEnd(c.textarea);
+    },
+    () => fireEvent.blur(window),
+    (c) => act(() => c.setScope("task:another")),
+    (c) => {
+      act(() => c.setStopState({ action: "run", disabled: true }));
+      act(() => c.setStopState({ action: "run", disabled: false }));
+    },
+    (c) => {
+      act(() => c.setStopState({ action: null, disabled: false }));
+      act(() => c.setStopState({ action: "run", disabled: false }));
+    },
+  ]) {
+    let stops = 0;
+    const composer = renderComposer({
+      stopAction: "run",
+      onStop: () => stops++,
+    });
+    composer.textarea.focus();
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    reset(composer);
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    assert.equal(stops, 0);
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    assert.equal(stops, 1);
+    cleanup();
+  }
+});
+
+test("Composer Escape retains confirmation across internal focus and clears it on leaving", () => {
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+  });
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  const stop = screen.getByRole("button", { name: "Press Esc again to stop" });
+  act(() => stop.focus());
+  fireEvent.keyDown(stop, { key: "Escape" });
+  assert.equal(stops, 1);
+  const outside = document.createElement("button");
+  document.body.append(outside);
+  try {
+    act(() => composer.textarea.focus());
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    act(() => outside.focus());
+    act(() => composer.textarea.focus());
+    fireEvent.keyDown(composer.textarea, { key: "Escape" });
+    assert.equal(stops, 1);
+  } finally {
+    outside.remove();
+  }
+});
+
+test("Composer leaves IME Escape and modified Escape alone and gives Slash first refusal", () => {
+  let stops = 0;
+  const composer = renderComposer({
+    stopAction: "run",
+    onStop: () => stops++,
+    draft: { kind: "text", text: "/" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+  });
+  for (const props of [
+    { isComposing: true },
+    { keyCode: 229 },
+    { shiftKey: true },
+    { ctrlKey: true },
+    { altKey: true },
+    { metaKey: true },
+  ])
+    assert.equal(
+      fireEvent.keyDown(composer.textarea, { key: "Escape", ...props }),
+      true,
+    );
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(composer.textarea.getAttribute("aria-expanded"), "false");
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 1);
+});
+
+test("Composer menu Escape closes only the menu before stopping can be armed", async () => {
+  let stops = 0;
+  renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+    modelEditable: true,
+    modelLabel: "Alpha",
+    selectedModelId: "alpha",
+    modelOptions: [
+      { selectionId: "alpha", displayName: "Alpha" },
+      { selectionId: "beta", displayName: "Beta" },
+    ],
+    shell: composerShell({ attentionNotice: null }),
+  });
+  const user = userEvent.setup({ document });
+  const trigger = screen.getByRole("combobox", { name: "Model" });
+  await user.click(trigger);
+  await screen.findByRole("listbox");
+  await user.keyboard("{Escape}");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(document.activeElement, trigger);
+  assert.equal(stops, 0);
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  await user.keyboard("{Escape}");
+  assert.equal(stops, 0);
+  await user.keyboard("{Escape}");
+  assert.equal(stops, 1);
+});
+
+for (const action of ["submit", "feedback"]) {
+  test(`a replacement editor clears stale IME state before ${action}`, async () => {
+    const composer = renderSkillComposer({ shell: composerShell() });
+    composer.input.focus();
+    fireEvent.compositionStart(composer.input);
+    // Draft owner replaces the editor without a native blur/compositionend.
+    act(() => composer.setDraft({ kind: "text", text: "next draft" }));
+    assert.equal(composer.input.isConnected, false);
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    const input = screen.getByRole("combobox", { name: "" });
+    assert.equal(document.activeElement === input, true);
+    if (action === "submit") {
+      fireEvent.keyDown(input, { key: "Enter" });
+      assert.equal(composer.submissions(), 1);
+    } else {
+      const details = document.querySelector(".commandbar-alert");
+      fireEvent.click(details.querySelector("summary"));
+      input.focus();
+      fireEvent.keyDown(input, { key: "Escape" });
+      assert.equal(details.open, false);
+      assert.equal(composer.submissions(), 0);
+    }
+  });
+}
+
+test("Composer buttons retain native Enter activation without a duplicate submit", async () => {
+  const composer = renderComposer();
+  const user = userEvent.setup({ document });
+  screen.getByRole("button", { name: "Send" }).focus();
+  await user.keyboard("{Enter}");
+  assert.equal(composer.submissions(), 1);
+});
+
+function composerShell(overrides = {}) {
+  return {
+    taskTitle: "Keyboard test",
+    contextVisible: true,
+    attentionNotice: "Earlier stop failed",
+    attentionContent: createElement("button", null, "Retry stop"),
+    onSearch() {},
+    left: null,
+    rightPanel: createElement("div", null, "Task details"),
+    rightPanelOpen: true,
+    onDismissRightPanel: () =>
+      assert.fail("consumed Escape must not close the right panel"),
+    onToggleRightPanel() {},
+    ...overrides,
+  };
+}
+
+test("Shell closes feedback before Composer can arm Escape and preserves right-panel handling", () => {
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+    shell: composerShell(),
+  });
+  const details = document.querySelector(".commandbar-alert");
+  const summary = details.querySelector("summary");
+  fireEvent.click(summary);
+  assert.equal(details.open, true);
+  composer.textarea.focus();
+  let preventedAtEditor = false;
+  composer.textarea.addEventListener(
+    "keydown",
+    (event) => {
+      preventedAtEditor = event.defaultPrevented;
+    },
+    { once: true },
+  );
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(preventedAtEditor, true);
+  assert.equal(details.open, false);
+  assert.equal(document.activeElement, summary);
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  assert.ok(screen.getByRole("button", { name: "Press Esc again to stop" }));
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 1);
+});
+
+for (const feedbackOpen of [false, true]) {
+  test(`Shell preserves IME Escape and native confirmation with feedback ${feedbackOpen ? "open" : "closed"}`, () => {
+    let stops = 0;
+    const composer = renderComposer({
+      stopAction: "run",
+      onStop: () => stops++,
+      shell: composerShell(),
+    });
+    const details = document.querySelector(".commandbar-alert");
+    if (feedbackOpen) fireEvent.click(details.querySelector("summary"));
+    composer.textarea.focus();
+    const original = composer.textarea.value;
+    for (const marker of [{ isComposing: true }, { keyCode: 229 }]) {
+      for (const key of ["Escape", "Enter"]) {
+        assert.equal(
+          fireEvent.keyDown(composer.textarea, { key, ...marker }),
+          true,
+        );
+        assert.equal(details.open, feedbackOpen);
+        assert.equal(document.activeElement, composer.textarea);
+      }
+    }
+    fireEvent.compositionStart(composer.textarea);
+    for (const key of ["Escape", "Enter"]) {
+      assert.equal(
+        fireEvent.keyDown(composer.textarea, { key, isComposing: false }),
+        true,
+      );
+      assert.equal(details.open, feedbackOpen);
+    }
+    fireEvent.compositionEnd(composer.textarea);
+    assert.equal(composer.textarea.value, original);
+    assert.equal(composer.submissions(), 0);
+    assert.equal(stops, 0);
+  });
+}
+
+test("Shell composition latch ends with focus leaving the composing field", () => {
+  let closed = 0;
+  const composer = renderComposer({
+    shell: composerShell({
+      attentionNotice: null,
+      onDismissRightPanel: () => closed++,
+    }),
+  });
+  composer.textarea.focus();
+  fireEvent.compositionStart(composer.textarea);
+  const toggle = document.querySelector(".commandbar-task-panel-toggle");
+  act(() => toggle.focus());
+  fireEvent.keyDown(toggle, { key: "Escape" });
+  assert.equal(closed, 1);
 });
 
 test("Composer recalculates its height when its rendered width changes", () => {

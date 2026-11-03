@@ -5,3 +5,11 @@ export function desktopPlatform(
   if (/Win/i.test(platform)) return "windows";
   return "linux";
 }
+
+export function isInputMethodKey(
+  event: { isComposing: boolean; keyCode: number },
+  composing = false,
+): boolean {
+  // WebKit can deliver the confirming key after compositionend.
+  return composing || event.isComposing || event.keyCode === 229;
+}

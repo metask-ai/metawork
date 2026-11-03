@@ -794,7 +794,24 @@ Composer 是唯一 Task 停止入口，发送与停止共用一个主动作位�
 
 普通文本与带附件草稿遵守[产品输入限制](requirements.md#53-task)，按 UTF-8 字节预算判断发送能力。输入框不设置会截断粘贴的字符上限；超限时保留全文、禁用按钮与 Enter 发送，并在输入框附近提示如何缩短内容或改用文本文件。超限草稿仍可在本地有界保存预算内恢复。
 
-每次点击或 Enter 将本次提交与当前草稿分离，立即清空本次编辑版本并允许编辑、发送下一条；IME 组合期间不触发发送，Shift+Enter 换行。逐条显示正在提交、等待或明确未执行；只有 Host 事实才能确认接收。未知回执不自动重发，用户可将失败/未确认内容放回编辑器检查后明确发送，不能覆盖已有草稿，失效附件需重新选择。旧响应不能修改较新草稿或抢走其他控件/Task 的焦点。
+每次点击发送或使用允许的提交组合，将本次提交与当前草稿分离，立即清空本次编辑版本并允许编辑、发送下一条。逐条显示正在提交、等待或明确未执行；只有 Host 事实才能确认接收。未知回执不自动重发，用户可将失败/未确认内容放回编辑器检查后明确发送，不能覆盖已有草稿，失效附件需重新选择。旧响应不能修改较新草稿或抢走其他控件/Task 的焦点。
+
+普通文本与 Skill 参数使用一致的输入法保护：组合输入及用于确认或取消候选的按键只交给输入法，不提交消息、执行 Slash、浏览历史、停止执行或关闭反馈弹层与右栏，也不阻止输入法默认动作。确认候选的回车即使在组合结束事件之后交付，也不得作为提交；随后独立按下的有效提交组合正常生效。组词状态属于实际输入控件，New task 创建交接保留同一控件时不得中断仍在进行的组词。
+
+| 按键 | 普通文本 | Skill 单行参数 |
+| --- | --- | --- |
+| 裸 `Enter` | 满足发送条件时提交 | 满足发送条件时提交 |
+| `Shift+Enter` | 换行 | 不提交 |
+| macOS `Cmd+Enter`、Windows/Linux `Ctrl+Enter` | 与发送按钮相同的提交 | 与发送按钮相同的提交 |
+| 其他修饰组合 | 不触发自定义提交 | 不触发自定义提交 |
+
+上述提交不增加强制中断或排队模式，也不绕过未解析 Slash 的限制。输入框的提交处理不得重复执行按钮原生的 Enter/Space 激活。
+
+Composer 内未被子控件消费的裸 `Escape` 在当前存在可用停止动作时进入一秒确认窗口；窗口内第二次独立按下才通过既有停止入口执行。长按产生的重复事件不进入或完成确认，截止时间以当次按键时刻核对，不依赖定时器及时回调。Stop 可见时，首次按键将其方块改为 `Esc`，维持底座、点击区和焦点，提供明确的可访问确认名称；Stop 不可见时确认仍生效，不添加替代提示、文案或播报。鼠标点击 Stop 直接停止。确认与停止均不提交或清空草稿，不提前宣称执行已结束。
+
+非 Escape 按键、带修饰键的 Escape、草稿编辑、开始组词、指针操作、焦点离开整个 Composer、窗口失焦、Composer scope 或停止动作变化、停止不可用以及卸载均清除确认；内部字段间移动焦点本身不清除确认。确认只属于当前窗口运行态，不持久化，不按 Run identity 建立另一套停止语义。
+
+Escape 按输入法、当前打开的命令栏反馈弹层、当前输入控件的候选/菜单、Composer 停止确认的顺序处理。反馈弹层打开时应在 Composer 处理前消费按键并沿既有规则恢复焦点；关闭弹层或 Slash 的按键不得同时进入停止确认。Composer 已消费的按键不得继续关闭右栏；其他控件保留自己的 Escape 行为。
 
 Composer 输入历史只召回当前 Task 中 Host 已确认接收且可安全读取的普通文本，包括追加输入及尚在等待执行的已接收消息；本地提交中、接收结果未知、带附件、Skill 和被脱敏的输入不参与。按原提交顺序浏览，同一提交转入后续 Run 时只出现一次；连续完全相同的可召回文本合并为一条。应用重启后复用仍保留的 Task 历史，不另建输入历史存储；已不再保存或无法安全读取的原文不能重建。New task 没有 Task identity，不跨任务召回。
 
@@ -809,7 +826,7 @@ Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非�
 - `Commands` 来自 Renderer 单一 registry，只注册当前产品真实存在且适合从 Composer 发起的动作；
 - `Skills` 来自 owning Workspace current catalog，表示下一轮候选；打开候选面时自动检查目录。Session 已安装的执行快照不要求用户手动推进；Renderer 只消费 Host 提供的逻辑 policy key 和已授权目录，不扫描或合并来源。
 
-菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，使用确定性的大小写不敏感 prefix/substring 过滤；`ArrowUp / ArrowDown` 移动，`Enter / Tab` 选择，`Escape` 关闭但保留可见文本。菜单打开时 `Enter` 绝不能提交普通 Text；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
+菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，使用确定性的大小写不敏感 prefix/substring 过滤；裸 `ArrowUp / ArrowDown` 移动，裸 `Enter` 选择当前可用候选，裸 `Escape` 关闭但保留可见文本。裸 `Tab` 只在当前候选真实可用时选择，否则关闭候选并正常移动焦点；`Shift+Tab` 关闭候选并正常反向移动焦点，`Shift+Enter` 保留换行，修饰方向键保留原生光标与选区操作。目录刷新后高亮候选失效也遵守该规则。菜单打开时 Enter 不得提交普通 Text，即使没有可用候选或带提交修饰键；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
 
 Command 只是现有动作的键盘入口。选择后由 `App` action controller 消费，不创建 command history，也不把原始 `/command` 送入 Bridge。V1 registry 包含 `/new` 与 `/compact`：`/new` 从已有 Task 打开 New task；`/compact` 在已有 finalized Run、continuation available 且没有 active operation 时触发 typed Task maintenance action。不可用 Command 保留候选并明确显示各自的禁用原因；New task draft 中 `/new` 说明草稿已打开，`/compact` 说明尚无可压缩历史，不能让一个 Command 的 gate 覆盖另一个 Command。`/model`、`/status`、`/goal`、`/resume`、`/continue` 以及其他尚无正式产品 owner/合同的 CLI/TUI identifier 不注册。带尾随参数的 Command 不执行；无法解析的首 token Slash 保持可见但发送禁用，用户必须选择候选、删除 `/` 或改写为普通正文。Command 与 Skill 同名时，裸 `/name` 归 Command，Skill 通过 `/skill:name` 显式选择。
 
@@ -1366,6 +1383,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.3 Task 状态
 
 - Composer 主动作遵循第 8 节的单按钮切换规则，覆盖输入、清空、IME 组合、附件、Skill 与不可发送草稿，验证发送与停止不同时出现；发送立即清空本次编辑版本，允许继续编辑；Enter 不破坏 IME、换行和 Slash 选择；审批始终保留独立处理面；
+- 按第 8 节验证普通文本与 Skill 的输入法和提交组合、Slash 的原生编辑及焦点移动、Esc 确认期限/重复事件/失焦清理，以及反馈弹层、候选、Composer 与右栏的一次按键只完成一项动作。有草稿时静默确认仍可停止且保留草稿；真实中文输入法候选确认和长按 Esc 须分别在 macOS、Windows 桌面验收，DOM 回归不替代平台证据；
 - 插话在所有内部状态下都保持普通用户气泡、通用脱敏提示和复制操作，不展示采纳、接续、转入状态或专属动作，技术过程不重复正文；响应丢失沿用既有发送对账反馈；
 - 较新草稿、切换 Task、重载及旧连接迟到响应不丢输入、不重发、不抢焦点；桌面和约 390px、深浅主题、键盘、长内容及减少动效均须验收；
 

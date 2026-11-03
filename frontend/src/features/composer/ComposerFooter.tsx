@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type ClipboardEvent,
-  type KeyboardEvent,
   type RefObject,
   type ReactNode,
 } from "react";
@@ -38,6 +37,7 @@ import {
   type SlashCommandState,
 } from "./slash.ts";
 import { WorkspaceContextSelector } from "./WorkspaceContextSelector.tsx";
+import { useComposerKeyboard } from "./useComposerKeyboard.ts";
 
 export type ComposerInputHistory = {
   load: () => Promise<readonly string[]>;
@@ -228,7 +228,6 @@ export function ComposerFooter({
   const [activeCandidateKey, setActiveCandidateKey] = useState<string | null>(
     null,
   );
-  const [composing, setComposing] = useState(false);
   const [fileDragActive, setFileDragActive] = useState(false);
   const historyBrowse = useRef<{
     scope: string;
@@ -290,12 +289,6 @@ export function ComposerFooter({
     !composeDisabled &&
     !attachmentActionsDisabled &&
     !attachmentBusy;
-  const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
-  const refreshCatalogRef = useRef(onRefreshSkillCatalog);
-  refreshCatalogRef.current = onRefreshSkillCatalog;
-  useEffect(() => {
-    if (menuOpen) refreshCatalogRef.current();
-  }, [menuOpen, draftScope]);
   const draftProblem =
     draft.kind === "skill" ? skillDraftProblem(draft, skillCatalog) : null;
 
@@ -308,7 +301,6 @@ export function ComposerFooter({
     draft.kind === "skill" ||
     draft.text.length > 0 ||
     (draft.kind === "multimodal" && draft.attachments.length > 0);
-  const showStop = Boolean(stopAction) && !hasDraft && !composing;
   const submitPrimary = () => {
     const input =
       draft.kind === "skill"
@@ -332,6 +324,33 @@ export function ComposerFooter({
     candidates.find((candidate) => candidate.key === activeCandidateKey) ??
     candidates.find((candidate) => candidate.enabled) ??
     null;
+
+  const keyboard = useComposerKeyboard({
+    draftScope,
+    sendEnabled,
+    stopAction,
+    stopDisabled,
+    onStop,
+    slash: {
+      open: Boolean(slashInput && !menuDismissed),
+      canChoose: Boolean(activeCandidate?.enabled),
+      move: moveActive,
+      choose: () => {
+        if (activeCandidate) chooseCandidate(activeCandidate);
+      },
+      dismiss: () => setMenuDismissed(true),
+    },
+    onSubmit: submitPrimary,
+    onNavigateHistory: navigateInputHistory,
+  });
+  const composing = keyboard.composing;
+  const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
+  const showStop = Boolean(stopAction) && !hasDraft && !composing;
+  const refreshCatalogRef = useRef(onRefreshSkillCatalog);
+  refreshCatalogRef.current = onRefreshSkillCatalog;
+  useEffect(() => {
+    if (menuOpen) refreshCatalogRef.current();
+  }, [menuOpen, draftScope]);
 
   useEffect(() => {
     if (!fileDropEnabled) setFileDragActive(false);
@@ -474,43 +493,6 @@ export function ComposerFooter({
     const next =
       current < 0 ? 0 : (current + direction + enabled.length) % enabled.length;
     setActiveCandidateKey(enabled[next]?.key ?? null);
-  }
-
-  function handleTextKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (composing || event.nativeEvent.isComposing) return;
-    if (menuOpen) {
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        moveActive(event.key === "ArrowDown" ? 1 : -1);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setMenuDismissed(true);
-        return;
-      }
-      if (event.key === "Enter" || event.key === "Tab") {
-        event.preventDefault();
-        if (activeCandidate) chooseCandidate(activeCandidate);
-        return;
-      }
-    }
-    if (
-      !event.defaultPrevented &&
-      !event.shiftKey &&
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey &&
-      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
-      navigateInputHistory(event.key === "ArrowUp" ? -1 : 1)
-    ) {
-      event.preventDefault();
-      return;
-    }
-    if (event.key === "Enter" && !event.shiftKey && sendEnabled) {
-      event.preventDefault();
-      submitPrimary();
-    }
   }
 
   function navigateInputHistory(direction: -1 | 1): boolean {
@@ -661,7 +643,18 @@ export function ComposerFooter({
   }
 
   return (
-    <footer ref={footerRef} className="composer-bar">
+    <footer
+      ref={footerRef}
+      className="composer-bar"
+      onCompositionStartCapture={keyboard.onCompositionStartCapture}
+      onCompositionEndCapture={keyboard.onCompositionEndCapture}
+      onFocusCapture={keyboard.onFocusCapture}
+      onBlurCapture={keyboard.onBlurCapture}
+      onKeyDownCapture={keyboard.onKeyDownCapture}
+      onKeyDown={keyboard.onKeyDown}
+      onPointerDownCapture={keyboard.onPointerDownCapture}
+      onChangeCapture={keyboard.onChangeCapture}
+    >
       <div className="composer-shell" data-file-drag-active={fileDragActive}>
         {fileDragActive && (
           <div className="composer-file-drop" aria-hidden="true">
@@ -803,16 +796,14 @@ export function ComposerFooter({
                         ? t("run.placeholder_archived")
                         : t("run.placeholder")
                 }
-                onCompositionStart={() => setComposing(true)}
                 onCompositionEnd={(event) => {
-                  setComposing(false);
                   updateText(event.currentTarget.value);
                 }}
                 onChange={(event) => {
                   setMenuDismissed(false);
                   updateText(event.target.value);
                 }}
-                onKeyDown={handleTextKeyDown}
+                onKeyDown={keyboard.onTextKeyDown}
                 onPaste={pasteImages}
               />
               {historyRead && (
@@ -872,16 +863,7 @@ export function ComposerFooter({
                         onChange={(event) =>
                           updateSkillArgument(draft, index, event.target.value)
                         }
-                        onKeyDown={(event) => {
-                          if (
-                            event.key === "Enter" &&
-                            !event.nativeEvent.isComposing &&
-                            sendEnabled
-                          ) {
-                            event.preventDefault();
-                            submitPrimary();
-                          }
-                        }}
+                        onKeyDown={keyboard.onSkillKeyDown}
                       />
                     </label>
                   ))}
@@ -1034,15 +1016,29 @@ export function ComposerFooter({
                   size="icon"
                   className="composer-stop"
                   aria-label={t(
-                    stopAction === "compact" ? "compact.stop" : "task.stop",
+                    keyboard.stopConfirming
+                      ? "task.stop_confirm"
+                      : stopAction === "compact"
+                        ? "compact.stop"
+                        : "task.stop",
                   )}
                   title={t(
-                    stopAction === "compact" ? "compact.stop" : "task.stop",
+                    keyboard.stopConfirming
+                      ? "task.stop_confirm"
+                      : stopAction === "compact"
+                        ? "compact.stop"
+                        : "task.stop",
                   )}
                   disabled={stopDisabled}
                   onClick={onStop}
                 >
-                  <Icon name="stop" />
+                  {keyboard.stopConfirming ? (
+                    <span className="composer-stop-confirm" aria-hidden="true">
+                      Esc
+                    </span>
+                  ) : (
+                    <Icon name="stop" />
+                  )}
                 </Button>
               ) : (
                 <Button
