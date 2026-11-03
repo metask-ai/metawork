@@ -502,19 +502,23 @@ pub const Runtime = struct {
         return started;
     }
 
+    fn catalogBoundaryBusy(self: *const Runtime) bool {
+        if (self.refresh_job != null or self.state.configuration_apply_state == .applying) return true;
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        return registry.oauth_operation != null;
+    }
+
     fn startPendingRefresh(self: *Runtime) Error!bool {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const mcp = &self.state;
         if (!mcp.refresh_pending) return false;
-        if (self.refresh_job != null or
-            mcp.configuration_apply_state == .applying)
-            return false;
+        if (self.catalogBoundaryBusy()) return false;
         const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
         const inspection = management.inspect();
         if (inspection.health != .ready) return error.McpManagementUnavailable;
         const desired = management.desiredRegistry() orelse
             return error.McpManagementUnavailable;
-        if (desired.oauth_operation != null) return false;
         if (self.ports.timer.now()) |now_ms| if (mcp.refresh_not_before_ms) |not_before|
             if (now_ms < not_before) return false;
         const generation = mcp.refresh_request_generation;
@@ -1323,6 +1327,7 @@ pub const Runtime = struct {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
         };
+        defer preparation.deinit();
         return self.commitOauthOperationBegin(&preparation);
     }
 
@@ -1361,6 +1366,7 @@ pub const Runtime = struct {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
         };
+        defer preparation.deinit();
         const outcome = try self.commitOauthOperationBegin(&preparation);
         const handle = switch (outcome) {
             .started => |value| value,
@@ -1406,7 +1412,6 @@ pub const Runtime = struct {
         self: *Runtime,
         preparation: *configuration.PreparedOauthOperationState,
     ) Error!state_module.McpOauthOperationBeginOutcome {
-        defer preparation.deinit();
         var reduced = try self.admissionForTarget(preparation.target());
         var reduced_owned = true;
         defer if (reduced_owned) reduced.deinit();
@@ -1471,32 +1476,18 @@ pub const Runtime = struct {
             .prepared => |prepared| prepared,
         };
         defer preparation.deinit();
-        var reduced = try self.admissionForTarget(preparation.target());
-        var reduced_owned = true;
-        defer if (reduced_owned) reduced.deinit();
-        if (reduced != .ready) return .rejected;
         var binding = try policy.buildOauthRefreshBinding(self.allocator, preparation.target());
         var binding_owned = true;
         defer if (binding_owned) binding.deinit();
-        switch (try management.commitPreparedOauthOperationState(&preparation)) {
-            .saved => {
-                self.ports.timer.cancel();
-                self.installCommittedDesired(reduced);
-                reduced_owned = false;
+        return switch (try self.commitOauthOperationBegin(&preparation)) {
+            .started => ready: {
                 binding_owned = false;
                 started = true;
-                self.markChanged();
-                return .{ .started = binding };
+                break :ready .{ .started = binding };
             },
-            .indeterminate => {
-                self.ports.timer.cancel();
-                policy.blockAdmission(&self.state, .persistence_outcome_unknown);
-                self.markChanged();
-                return .persistence_outcome_unknown;
-            },
-            .rejected => return .rejected,
-            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
-        }
+            .rejected => .rejected,
+            .persistence_outcome_unknown => .persistence_outcome_unknown,
+        };
     }
 
     pub fn completeOauthRefresh(
@@ -1725,11 +1716,7 @@ pub const Runtime = struct {
                 const now_ms = self.ports.timer.now() orelse return;
                 // Busy transactions and running jobs have explicit completion
                 // wakeups. Only time/capacity waits need a retry timer.
-                const marker_active = if (self.state.management) |*management|
-                    if (management.desiredRegistry()) |registry| registry.oauth_operation != null else false
-                else
-                    false;
-                if (self.refresh_job != null or self.state.configuration_apply_state == .applying or marker_active) {
+                if (self.catalogBoundaryBusy()) {
                     if (self.state.expiry_deadline_ms) |expiry| if (self.state.admissionFresh() and expiry > now_ms)
                         self.armRefreshAt(expiry);
                     return;

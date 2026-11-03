@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const mcp_http_protocol = @import("agent_mcp_http_protocol");
+const grant_schedule = @import("grant_schedule.zig");
 
 pub const schema_version: u8 = 2;
 pub const transaction_schema_version: u8 = 1;
@@ -2130,10 +2131,7 @@ pub const OauthRefreshSchedule = struct {
     const Entry = struct {
         id_len: usize = 0,
         binding: [32]u8 = undefined,
-        expiry: u64 = 0,
-        due: ?u64 = null,
-        retry_not_before: u64 = 0,
-        failures: u8 = 0,
+        timing: grant_schedule.Grant = .{ .expires_at = 0 },
     };
     allocator: std.mem.Allocator,
     entries: []Entry,
@@ -2191,31 +2189,21 @@ pub const OauthRefreshSchedule = struct {
             } else unreachable;
             std.debug.assert(server.id.len <= self.id_capacity);
             @memcpy(self.ids[index * self.id_capacity ..][0..server.id.len], server.id);
-            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .expiry = server.auth.oauth.?.grant.?.expires_at_unix_ms.? };
+            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .timing = .{ .expires_at = server.auth.oauth.?.grant.?.expires_at_unix_ms.? } };
         }
     }
     pub fn observeTime(self: *OauthRefreshSchedule, now_ms: ?u64) void {
-        const now = now_ms orelse return;
-        if (now == 0) return;
         for (self.entries) |*entry| {
-            if (entry.id_len == 0 or entry.due != null) continue;
-            const remaining = entry.expiry -| now;
-            entry.due = entry.expiry - @min(remaining / 4, 60_000);
+            if (entry.id_len != 0) entry.timing.observeTime(now_ms);
         }
     }
     pub fn eligibleAt(self: *const OauthRefreshSchedule, server_id: []const u8, expiry: u64) u64 {
         const index = self.indexOf(server_id) orelse return expiry;
-        const entry = self.entries[index];
-        return @max(entry.due orelse expiry, entry.retry_not_before);
+        return self.entries[index].timing.eligibleAt();
     }
     pub fn deferServer(self: *OauthRefreshSchedule, server_id: []const u8, now_ms: ?u64) void {
         const index = self.indexOf(server_id) orelse return;
-        const now = now_ms orelse return;
-        if (now == 0) return;
-        const entry = &self.entries[index];
-        const delay = @min(@as(u64, 30_000) << @as(u6, @intCast(@min(entry.failures, 4))), 300_000);
-        entry.failures +|= 1;
-        entry.retry_not_before = now +| delay;
+        self.entries[index].timing.deferAttempt(now_ms);
     }
 };
 
