@@ -1886,6 +1886,123 @@ const TestHarness = struct {
     }
 };
 
+const OauthTestEffects = struct {
+    entropy: u8 = 0,
+    deleted: usize = 0,
+    registry_effect: configuration.PersistenceEffect = .committed,
+
+    fn fill(raw: ?*anyopaque, output: *[16]u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.entropy += 1;
+        @memset(output, self.entropy);
+        return true;
+    }
+    fn journal(_: ?*anyopaque, _: []const u8) configuration.PersistenceEffect {
+        return .committed;
+    }
+    fn registry(raw: ?*anyopaque, _: []const u8) configuration.PersistenceEffect {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        return self.registry_effect;
+    }
+    fn clear(_: ?*anyopaque) configuration.PersistenceEffect {
+        return .committed;
+    }
+    fn probe(_: ?*anyopaque, _: []const u8) configuration.CredentialPresence {
+        return .missing;
+    }
+    fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+        return true;
+    }
+    fn delete(raw: ?*anyopaque, _: []const u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.deleted += 1;
+        return true;
+    }
+
+    fn coldRuntime(self: *@This(), harness: *TestHarness, initial_status: []const u8) !Runtime {
+        const allocator = std.testing.allocator;
+        const dynamic = std.mem.eql(u8, initial_status, "client_registration_required");
+        var server: configuration.ServerWire = .{
+            .id = "oauth",
+            .namespace = "oauth",
+            .display_name = "OAuth",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/mcp" },
+            .auth = .{ .kind = "oauth", .oauth = .{
+                .status = initial_status,
+                .registration = .{ .kind = if (dynamic) "dynamic_registration" else "pre_registered", .issuer = null, .client_id = if (dynamic) null else "client", .token_endpoint_auth_method = if (dynamic) null else "none", .client_credential_revision = if (dynamic) 0 else 1, .client_secret_ref = null },
+                .consent = null,
+                .grant = null,
+            } },
+            .connection_approval = null,
+            .tools = &.{},
+        };
+        const approval = configuration.connectionFingerprint(server);
+        server.connection_approval = .{ .fingerprint = &approval };
+        var servers = [_]configuration.ServerWire{server};
+        const initial: configuration.RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+        var buffer: [8192]u8 = undefined;
+        var preparation = try configuration.prepare(allocator, try configuration.encode(&buffer, initial, test_limits), true, false, .{}, test_limits);
+        errdefer preparation.deinit();
+        var manifest = (try configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+        errdefer manifest.deinit();
+        const management = try configuration.ManagementPort.init(allocator, initial, .{
+            .persistence = .{ .context = self, .available = true, .commit_journal_fn = journal, .commit_registry_fn = registry, .clear_journal_fn = clear },
+            .credentials = .{ .context = self, .available = true, .probe_fn = probe, .create_fn = create, .delete_fn = delete },
+            .locator_generator = .{ .context = self, .available = true, .fill_fn = fill },
+            .identity_generator = .{ .context = self, .available = true, .fill_fn = fill },
+            .limits = test_limits,
+            .runtime_manifest = &manifest,
+        });
+        return Runtime.init(allocator, harness.ports(), .{
+            .preparation = preparation,
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+            .host_capabilities = .{ .oauth = true },
+            .committed = true,
+        });
+    }
+};
+
+test "cold absence supports consent DCR with a secret and reauthorization through token commit" {
+    for ([_][]const u8{ "consent_required", "client_registration_required", "reauth_required" }) |initial_status| {
+        var effects = OauthTestEffects{};
+        var harness = TestHarness{};
+        var runtime = try effects.coldRuntime(&harness, initial_status);
+        defer runtime.deinit();
+        try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+        var start = (try runtime.beginAuthorization(1, "oauth", "attempt")).?;
+        defer start.deinit();
+        try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_consent));
+        if (std.mem.eql(u8, initial_status, "client_registration_required")) {
+            const begun = try runtime.beginOauthDynamicRegistration(.{ .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" });
+            try std.testing.expect(begun == .started);
+            try std.testing.expect(runtime.advanceAuthorization("attempt", .registering));
+            var secret = "client-secret".*;
+            try std.testing.expectEqual(.saved, try runtime.completeOauthDynamicRegistration(.{ .operation_id = begun.started.id, .server_id = "oauth", .client_id = "issued-client", .token_endpoint_auth_method = "client_secret_basic", .client_secret = &secret }));
+            try std.testing.expect(runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.registration.client_secret_ref != null);
+        }
+        try std.testing.expect((try runtime.authorizeOauth(.{ .attempt_id = 1, .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" })) == .ready);
+        try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+        try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_browser));
+        const exchange = try runtime.beginOauthCodeExchange("oauth");
+        try std.testing.expect(exchange == .started);
+        try std.testing.expect(runtime.advanceAuthorization("attempt", .exchanging));
+        var access = "access-token".*;
+        var refresh = "refresh-token".*;
+        try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.started.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = &refresh, .expires_at_unix_ms = 90_000 }));
+        try std.testing.expect(runtime.finishAuthorization("attempt"));
+        const current = runtime.state.management.?.desiredRegistry().?;
+        try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
+        // Tokens now require real configuration apply; absence cannot pretend loaded.
+        try std.testing.expectEqual(.restart_required, runtime.state.management.?.inspect().runtime_alignment);
+    }
+}
+
 fn testEmptyRuntime(harness: *TestHarness) !Runtime {
     const allocator = std.testing.allocator;
     const preparation: configuration.Preparation = .{ .allocator = allocator, .state = .empty };

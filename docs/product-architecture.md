@@ -290,6 +290,8 @@ Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事�
 - Runtime Manifest 表达正式 Agent Runtime 已接管的 descriptor，或无法接管的无 secret absence proof；
 - Admission Authority 表达新 Task 当前可以同步借用的已验证 Selection，或明确的 blocked reason。
 
+授权缺失的 absence proof 按连接是否真正需要加载对账：未具备加载条件时，consent、DCR 注册所得 client identity/secret locator 或 reauthorization 中间状态变化不能单独使正式 Runtime 失配；具备加载条件后仍须真实 apply 才能成为 loaded，不能将授权成功当作 Runtime 接管成功。static credential absence 仍绑定对应 credential 引用，不能借 OAuth 中间态规则放宽其校验。
+
 MCP mutation 必须从 canonical Desired 构造完整 candidate，先提交 registry，再由 Application coordinator 构造 Runtime input、调用 Agent declarative apply、取得正式 Activation，最后由 Product Control 原子安装 Manifest、Activation 与 Admission Authority。正式 apply 成功只影响之后创建的 Session；已有 Session 保持创建时已复制的 authority，不热替换或即时撤权。
 
 registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。Agent apply 拒绝、malformed report、resource limit 或 activation failure 形成 typed failure 并保持 fail-closed admission，不能把未接管的 descriptor 标记为 loaded。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。

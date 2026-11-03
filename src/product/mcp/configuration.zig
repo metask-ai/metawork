@@ -2530,12 +2530,14 @@ fn entryCompatible(
             .needs_authentication => |fingerprint| if (target) |server|
                 !server.enabled or
                     serverProblem(server, limits) != null or
+                    oauthDoesNotRequireLoading(server) or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
             else
                 true,
             .reauth_required => |fingerprint| if (target) |server|
                 !server.enabled or
                     serverProblem(server, limits) != null or
+                    oauthDoesNotRequireLoading(server) or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
             else
                 true,
@@ -2555,6 +2557,12 @@ fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
     if (server.auth.oauth) |oauth|
         return std.mem.eql(u8, oauth.status, "ready");
     return true;
+}
+
+fn oauthDoesNotRequireLoading(server: ServerWire) bool {
+    if (!std.mem.eql(u8, server.auth.kind, "oauth")) return false;
+    const oauth = server.auth.oauth orelse return false;
+    return !std.mem.eql(u8, oauth.status, "ready");
 }
 
 fn findManifestEntry(
