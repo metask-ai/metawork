@@ -2449,6 +2449,38 @@ for (const kind of ["empty", "text", "skill"]) {
   });
 }
 
+test("Composer Escape cannot arm without stop eligibility or from an auto-repeat", () => {
+  for (const [action, disabled] of [
+    [null, false],
+    ["run", true],
+  ]) {
+    const composer = renderComposer({
+      draft: { kind: "text", text: "" },
+      stopAction: action,
+      stopDisabled: disabled,
+      onStop: () => assert.fail("unavailable stop must not run"),
+    });
+    for (let i = 0; i < 2; i++)
+      assert.equal(
+        fireEvent.keyDown(composer.textarea, { key: "Escape" }),
+        true,
+      );
+    assert.equal(screen.queryByText("Esc"), null);
+    cleanup();
+  }
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+  });
+  fireEvent.keyDown(composer.textarea, { key: "Escape", repeat: true });
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  assert.ok(screen.getByRole("button", { name: "Press Esc again to stop" }));
+});
+
 test("Composer Escape uses its deadline even before the timeout callback can run", (ctx) => {
   let now = 100;
   ctx.mock.method(performance, "now", () => now);
