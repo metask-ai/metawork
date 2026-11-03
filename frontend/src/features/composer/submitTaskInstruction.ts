@@ -120,21 +120,29 @@ export class TaskSubmissionSession {
     }
   }
 
-  async stop(): Promise<void> {
+  async stop(
+    onTarget: (taskId: string) => void = () => undefined,
+  ): Promise<{ localOnly: boolean }> {
+    // Before creation resolves none of these submissions has reached the Host.
+    const localOnly = this.taskId === null;
     for (const entry of this.pending)
       if (!entry.delivered && !entry.cancelled) {
         entry.cancelled = true;
         entry.onCancelled();
       }
     if (this.taskId) {
+      onTarget(this.taskId);
       await this.options.stop(this.taskId);
-      return;
+      return { localOnly };
     }
-    if (!this.creation) return;
+    if (!this.creation) return { localOnly };
     // This callback precedes sends clicked after stop while creation is pending.
     const created = await this.creation;
-    if (created.accepted && this.options.current())
+    if (created.accepted && this.options.current()) {
+      onTarget(created.taskId);
       await this.options.stop(created.taskId);
+    }
+    return { localOnly };
   }
 }
 

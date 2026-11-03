@@ -1,0 +1,402 @@
+{
+  "date": "2026-11-02T10:35:37.843Z",
+  "platform": "win32",
+  "sourceRevision": "3e911fc70c0210b1a004f87011ebe0326b0fdb64",
+  "scope": "Production App, UI components and CSS in real Windows WebView2 automation Debug shell; isolated synthetic BridgeClient replies. Does not prove real Host stop, Metask/OAuth/credential recovery, native OS keyboard gestures, distribution or other platforms.",
+  "binary": {
+    "path": ".zig-cache\\feedback-lifecycle-native\\bin\\metawork.exe",
+    "sha256": "05bf51883613c07dfd2b808a6e6a7ff9aff8bac481af5f402dd37f2d6e52bd03"
+  },
+  "sources": [
+    {
+      "path": "frontend/src/app/App.tsx",
+      "sha256": "5e22a58312b8b3104b85395214c89dfbc2a7b93f6a946e878074fb2ea48d7f96"
+    },
+    {
+      "path": "frontend/src/app/command-bar-status.ts",
+      "sha256": "0d585838e4bbb351e43efd7d0ded65cef18f9d87ca3461004ff71edae1512fc4"
+    },
+    {
+      "path": "frontend/src/app/task-stop-feedback.ts",
+      "sha256": "7be7dc314f8252e967cb72df39df81820ef0970d814be102782a280b7316a337"
+    },
+    {
+      "path": "frontend/src/features/tasks/TaskContent.tsx",
+      "sha256": "50037a28459f635846cc348ba593630ef9b169c5fc3652d86393b1990bb0a17e"
+    },
+    {
+      "path": "frontend/src/features/tasks/RunDiagnostics.tsx",
+      "sha256": "809608eac11181f33d9a11c7791552dba909d5f58cdb2cb1b252f04b101b2c1c"
+    },
+    {
+      "path": "frontend/src/components/ui/DiagnosticDisclosure.tsx",
+      "sha256": "6bd48cada1b7ebe7b9ae88a2247d8b6b9b5f761cba8a5404424683cba165ab7c"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-fixture/entry.tsx",
+      "sha256": "5fe912d531e998ba92507601e4f419024f70c98c68a2301f7702b9ccaa36335f"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-fixture/projection.mjs",
+      "sha256": "753cde79f0a536abb45dbb34479e036ec5bea4e9f43eccd737c0cbcb74f7b109"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-fixture/vite.config.mts",
+      "sha256": "1e62129b5ade7798e0dba100769bff80ee84329b78602f7b02d668762a2515dd"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview.mjs",
+      "sha256": "7fc7720bcb0fd1cd3ba6a7415de0faabc21e7b5c789a2c27129ca26dde2e7bda"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-build.mjs",
+      "sha256": "5006df5716f4e2b313e432b73600c685732ca05224c166c528638f74152e8ce5"
+    }
+  ],
+  "frontend": [
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\index-BP3muVof.css",
+      "sha256": "2fb4dfae36f99a27d2ba5d3468515b311bdef2f4632d5a41dc7191e4f83afb98"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\index-C1BUZdAq.js",
+      "sha256": "d6703f4256eabc021e2fe4e1ae1f437ed4e2d75be054b7aa5b66748bb94494d3"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\index-CxHau8WQ.js",
+      "sha256": "07173587a82b8091f44ebc450331a24b5bc0b5485e54b6a37b66882f1f5b576e"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\index-Dxtm2rqj.css",
+      "sha256": "876ba803ab60d85c1f44e1a97114dedb18845c4ef58492381963936cf6c7e1ed"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\index-vmGLq01l.js",
+      "sha256": "981179a2ee4e7010be5eb2fd3ebe35d9e6619236c317dcd769c9e6aaf09d1102"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\server.browser-BgRkQ042.js",
+      "sha256": "df33d4f8cbaed99f6703e86dab72c133b3e23f730df9d0637ba1a23f09712fed"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\server.browser-qnAheFiM.js",
+      "sha256": "50f8e9a1f3f710abceb77e8d819895bb628fb97d76c1a39f373742dae784d33e"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\server.browser-vum0CSW5.js",
+      "sha256": "528cc1b9ce7a7e1eee0875cb04d24d1ae594bf093d3fdf010e8137f7fc0f16c4"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\syntax-highlight-Chrsv3fn.js",
+      "sha256": "826b5b346c6319d43fd0fabf71b29ce1008724ca30c9633784e197d6f4fecf01"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\syntax-highlight-ConBoBUB.js",
+      "sha256": "0bd38bc5b4dd3879f2640c86f3cf95d2ddf727393771fc2bb530f1dddf5be962"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\assets\\syntax-highlight-D6k5oLbS.js",
+      "sha256": "3dea98c747043ba48e14570bc8a68a90e67e012bb326f009428c44ad8ff19dda"
+    },
+    {
+      "path": ".zig-cache\\feedback-lifecycle-frontend\\index.html",
+      "sha256": "7b2a6c263d6523350103eac7702b863c9caa6c88dd26a4a88e3993963485f0e8"
+    }
+  ],
+  "observations": [
+    {
+      "stopTargetIdentity": true,
+      "newRunCannotResolve": true,
+      "originalCompletedIsNotStopSuccess": true,
+      "stopCommands": 1
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "layout": {
+        "overflow": false,
+        "text": "等待模型服务回复超时。回复未完成。填回输入框",
+        "reply": "已完成前两项核对，剩余部分尚未确认。复制回复fixture-model",
+        "hasCopy": true,
+        "buttons": [
+          "填回输入框"
+        ],
+        "menuHeight": 44,
+        "menuFits": true
+      },
+      "runDiagnostic": {
+        "text": "错误详情safe diagnostic: <plain text>没有附带其他技术信息。本次运行模型fixture-model执行协议Anthropic Messages运行 ID8错误标识provider_failure模型错误分类等待模型服务回复超时。Agent 执行 IDagent-8服务端错误代码fixture_timeout服务端请求 IDrequest-fixture本次请求尝试次数1再次请求建议无法确定再次发送此请求是否有效。",
+        "plain": true,
+        "focusInside": true,
+        "overflow": false
+      },
+      "escapeRestoresRunMenu": true
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "layout": {
+        "overflow": false,
+        "text": "等待模型服务回复超时。回复未完成。填回输入框",
+        "reply": "已完成前两项核对，剩余部分尚未确认。复制回复fixture-model",
+        "hasCopy": true,
+        "buttons": [
+          "填回输入框"
+        ],
+        "menuHeight": 44,
+        "menuFits": true
+      },
+      "runDiagnostic": {
+        "text": "错误详情safe diagnostic: <plain text>没有附带其他技术信息。本次运行模型fixture-model执行协议Anthropic Messages运行 ID8错误标识provider_failure模型错误分类等待模型服务回复超时。Agent 执行 IDagent-8服务端错误代码fixture_timeout服务端请求 IDrequest-fixture本次请求尝试次数1再次请求建议无法确定再次发送此请求是否有效。",
+        "plain": true,
+        "focusInside": true,
+        "overflow": false
+      },
+      "escapeRestoresRunMenu": true
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "layout": {
+        "overflow": false,
+        "text": "等待模型服务回复超时。回复未完成。填回输入框",
+        "reply": "已完成前两项核对，剩余部分尚未确认。复制回复fixture-model",
+        "hasCopy": true,
+        "buttons": [
+          "填回输入框"
+        ],
+        "menuHeight": 44,
+        "menuFits": true
+      },
+      "runDiagnostic": {
+        "text": "错误详情safe diagnostic: <plain text>没有附带其他技术信息。本次运行模型fixture-model执行协议Anthropic Messages运行 ID8错误标识provider_failure模型错误分类等待模型服务回复超时。Agent 执行 IDagent-8服务端错误代码fixture_timeout服务端请求 IDrequest-fixture本次请求尝试次数1再次请求建议无法确定再次发送此请求是否有效。",
+        "plain": true,
+        "focusInside": true,
+        "overflow": false
+      },
+      "escapeRestoresRunMenu": true
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "layout": {
+        "overflow": false,
+        "text": "等待模型服务回复超时。回复未完成。填回输入框",
+        "reply": "已完成前两项核对，剩余部分尚未确认。复制回复fixture-model",
+        "hasCopy": true,
+        "buttons": [
+          "填回输入框"
+        ],
+        "menuHeight": 44,
+        "menuFits": true
+      },
+      "runDiagnostic": {
+        "text": "错误详情safe diagnostic: <plain text>没有附带其他技术信息。本次运行模型fixture-model执行协议Anthropic Messages运行 ID8错误标识provider_failure模型错误分类等待模型服务回复超时。Agent 执行 IDagent-8服务端错误代码fixture_timeout服务端请求 IDrequest-fixture本次请求尝试次数1再次请求建议无法确定再次发送此请求是否有效。",
+        "plain": true,
+        "focusInside": true,
+        "overflow": false
+      },
+      "escapeRestoresRunMenu": true
+    },
+    {
+      "emptyCompletedIsExplicit": true,
+      "historicalPartialRetained": true,
+      "oldRunCannotPrepareRetry": true
+    },
+    {
+      "accountAfterDismiss": {
+        "width": 122,
+        "theme": "light",
+        "disabled": false,
+        "height": 44,
+        "contained": true,
+        "overflow": false,
+        "diagnosticAvailable": true,
+        "keyboardCollapse": true
+      }
+    },
+    {
+      "accountAfterDismiss": {
+        "width": 122,
+        "theme": "dark",
+        "disabled": false,
+        "height": 44,
+        "contained": true,
+        "overflow": false,
+        "diagnosticAvailable": true,
+        "keyboardCollapse": true
+      }
+    },
+    {
+      "accountAfterDismiss": {
+        "width": 301,
+        "theme": "light",
+        "disabled": false,
+        "height": 44,
+        "contained": true,
+        "overflow": false,
+        "diagnosticAvailable": true,
+        "keyboardCollapse": true
+      }
+    },
+    {
+      "accountAfterDismiss": {
+        "width": 301,
+        "theme": "dark",
+        "disabled": false,
+        "height": 44,
+        "contained": true,
+        "overflow": false,
+        "diagnosticAvailable": true,
+        "keyboardCollapse": true
+      }
+    },
+    {
+      "dismissedAccountRecoveryExecuted": true,
+      "explicitRecoveryCommands": 1
+    },
+    {
+      "connectionReadFailureIsGlobal": true,
+      "noMutationReplay": true
+    }
+  ],
+  "errors": [],
+  "consoleErrors": [],
+  "validation": {
+    "node": {
+      "command": "node --input-type=module -e \"import {runNodeTests} from './scripts/run-tests.mjs'; await runNodeTests();\"",
+      "tests": 1138,
+      "passed": 1127,
+      "failed": 0,
+      "skipped": 11,
+      "conditionalSkips": [
+        "﹣ rejects payload and root symbolic links (32.3547ms) # Windows symlink creation requires Developer Mode or elevation",
+        "﹣ baseline probe records the frozen artifact (0.1938ms) # SKIP",
+        "﹣ baseline probe rejects a larger pool (0.1443ms) # SKIP",
+        "﹣ cancelled development retains output while an owned descendant is still running (0.4187ms) # SKIP",
+        "﹣ failed development retains output while an owned descendant is still running (0.1322ms) # SKIP",
+        "﹣ cancelled development retains output while an owned detached descendant is still running (0.1189ms) # SKIP",
+        "﹣ failed development retains output while an owned detached descendant is still running (0.1201ms) # SKIP",
+        "﹣ macOS Icon Composer resources replace the Native SDK fallback before signing (0.133ms) # SKIP",
+        "﹣ Office resource sources reject links (0.1742ms) # Creating symlinks requires Windows developer mode or elevation",
+        "﹣ packaged minimum macOS version replaces the SDK default and rejects drift (0.1088ms) # SKIP",
+        "﹣ cancellation finishes even when an owned child ignores SIGTERM (0.4318ms) # SKIP"
+      ]
+    },
+    "formalCheck": {
+      "command": "npm run check",
+      "exitCode": 0
+    },
+    "productionBuild": {
+      "command": "buildFrontend() through scripts/build.mjs",
+      "exitCode": 0,
+      "cspVerified": true
+    },
+    "fixtureBuild": {
+      "command": "node .zig-cache/feedback-lifecycle-build.mjs",
+      "exitCode": 0,
+      "cspVerified": true,
+      "canonicalBundleVerified": true
+    },
+    "nativeGraph": "Not run: this change modifies Renderer feedback/UI and tests, not Native business owners or wire/persistence contracts."
+  },
+  "logs": [
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-node-tests.log",
+      "sha256": "4e6b4651f191b7d693f9d5fd83aba92daad52ff6fb20bf8ca0d22d9c719acdf4"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-check.log",
+      "sha256": "e552347d0c4c70880b7a990ebfcc74348ae66d292dee07279fd75a64713c915b"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-production-build.log",
+      "sha256": "38af674aaee3a9fb33e6763e845504a53149d53a49c02ba8bfbed0eded79e858"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-build.log",
+      "sha256": "df5cd3c3d0b38b363eec5341e8fc13395a4e8e9e8ef70be941f5223ccf795d33"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-webview.log",
+      "sha256": "0af18c40162d951ebcfc99ead8621faf1378dcfbc39c9b9ce88e212faf7f963e"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-archive-before.log",
+      "sha256": "7c647c70edaba6e2b3a4e19320ea1e93f61a5aa301c6ebc09bc79be5a7e72053"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-manifest-before.log",
+      "sha256": "5a0d0069a9cff863ac2fa86206546878718b9fabcf49d2af34607711f54a233f"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-L7-manifest-after.log",
+      "sha256": "fe5dfc3bcbb3a2a8a82f40dbf12e64a5f4a0dd34eb1e912aba31e0dc9bc77648"
+    }
+  ],
+  "screenshots": [
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/dismissed-account-1440-dark.png",
+      "sha256": "87d542dc0f478089ba04515c0f04582500ab3a4f15d0b8d313807c64c8b62641"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/dismissed-account-1440-light.png",
+      "sha256": "197a148342f03d8356013e3991c03e540df1d56eb546988beeaca08046dd7322"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/dismissed-account-390-dark.png",
+      "sha256": "de1d40507685d84476c7f1e1792872524d44ff4b64fef23852ef8109af23b313"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/dismissed-account-390-light.png",
+      "sha256": "72b37e10acabc3a68a7177a51ebc899ed4001abdaf9dd565261a5546c8be6c6e"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/partial-1440-dark.png",
+      "sha256": "17c5b59c46ce7ddcdd7ce4b6b2c2d2d0de4386a2d198f0a812531368ede46d00"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/partial-1440-light.png",
+      "sha256": "09144b62fcec2792b4f011c27725096665ed09186c9ba34271f1dc5eec429784"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/partial-390-dark.png",
+      "sha256": "e9a114da62438f473ad541de5d96fdad3cfd6d35848c883e3d3cc4c6a5e946c5"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/partial-390-light.png",
+      "sha256": "ea2a1ff2f42b98753ed121463ceacc82afd3ae5712087458444dbf3f47fad75a"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/run-diagnostic-1440-dark.png",
+      "sha256": "be92dab0f3ab4441a5d1679e1a779ad0dde4d2c2e8a37d43bb62f75c32410cbe"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/run-diagnostic-1440-light.png",
+      "sha256": "b9303d400d70883ae4f2cb05176e4b0585b23eae4fff08147a49a1b48ba77429"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/run-diagnostic-390-dark.png",
+      "sha256": "affb511ff572532d05f5b1e0d9e0123e10ce4d81916995378cfaa055163cd52e"
+    },
+    {
+      "path": ".zig-cache/feedback-lifecycle-webview-evidence/run-diagnostic-390-light.png",
+      "sha256": "47b39108a4f62f7f48edfa47b5ff7a62fb94d1da9b397da83f097bdf726c44ba"
+    }
+  ],
+  "regressions": [
+    {
+      "scenario": "Security reset must admit a new Task operation and late old archive reply cannot unlock it or publish old failure.",
+      "baseline": "c1180dc8",
+      "before": ".zig-cache/feedback-lifecycle-L7-archive-before.log",
+      "test": "scripts/task-archive-visibility.test.mjs"
+    },
+    {
+      "scenario": "Exact target Run facts in the current Task manifest settle uncertainty with unloaded body; other Run or Task facts do not.",
+      "baseline": "8051a903",
+      "before": ".zig-cache/feedback-lifecycle-L7-manifest-before.log",
+      "after": ".zig-cache/feedback-lifecycle-L7-manifest-after.log",
+      "test": "scripts/task-stop-feedback.test.mjs"
+    }
+  ]
+}

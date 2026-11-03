@@ -112,6 +112,7 @@ export function ComposerFooter({
   workspaceMissing,
   workspaceLabel,
   workspaceTitle,
+  workspaceDiagnostic,
   workspaceOptions,
   selectedWorkspaceOptionId,
   workspaceEditable,
@@ -168,6 +169,7 @@ export function ComposerFooter({
   workspaceMissing: boolean;
   workspaceLabel: string;
   workspaceTitle: string;
+  workspaceDiagnostic?: string;
   workspaceOptions: {
     id: string;
     label: string;
@@ -942,6 +944,7 @@ export function ComposerFooter({
           missing={workspaceMissing}
           label={workspaceLabel}
           title={workspaceTitle}
+          diagnostic={workspaceDiagnostic}
           options={workspaceOptions}
           selectedId={selectedWorkspaceOptionId}
           editable={workspaceEditable}

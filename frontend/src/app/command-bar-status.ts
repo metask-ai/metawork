@@ -15,11 +15,12 @@ export type ShellStatus = {
   values?: Record<string, string>;
   diagnostic?: string;
   sourceId?: MessageId;
+  local?: boolean;
 };
 
 export type FeedbackEntry = ShellStatus & {
   key: string;
-  lifecycle: "condition" | "result" | "legacy";
+  lifecycle: "condition" | "result";
   cycle: number;
   dismissed: boolean;
 };
@@ -39,14 +40,19 @@ export function createFeedbackState(epoch = 0): ShellStatusState {
 export function resetFeedback(state: ShellStatusState): ShellStatusState {
   return createFeedbackState(state.epoch + 1);
 }
-export type ShellRoute = "workbench" | "skills" | "mcp" | "scheduled-tasks";
 
-type ShellStatusContext = {
-  route: ShellRoute;
-  settingsOpen: boolean;
-  workspaceId: string | null;
-  taskId: string | null;
-};
+/** Projection invalidation clears diagnostics, not in-flight operation tokens. */
+export function clearSecurityFeedback(
+  state: ShellStatusState,
+): ShellStatusState {
+  const entries: Record<string, FeedbackEntry> = {};
+  for (const [key, entry] of Object.entries(state.entries)) {
+    if (entry && entry.audience.scope !== "account")
+      entries[key] = { ...entry, diagnostic: undefined };
+  }
+  return { ...state, entries, announcement: null };
+}
+export type ShellRoute = "workbench" | "skills" | "mcp" | "scheduled-tasks";
 
 type StatusDetails = Pick<ShellStatus, "values" | "diagnostic" | "sourceId">;
 
@@ -79,25 +85,6 @@ export function statusKey(audience: StatusAudience): string {
   return `task:${audience.taskId}`;
 }
 
-export function publishStatus(
-  state: ShellStatusState,
-  status: ShellStatus,
-): ShellStatusState {
-  const entries = { ...state.entries };
-  if (
-    status.tone === "quiet" &&
-    status.audience.scope === "workspace" &&
-    status.audience.workspaceId !== null
-  )
-    delete entries["legacy:workspace:*"];
-  return observeFeedback(
-    { ...state, entries },
-    `legacy:${statusKey(status.audience)}`,
-    "legacy",
-    status,
-  );
-}
-
 function sameStatus(left: ShellStatus, right: ShellStatus): boolean {
   return (
     left.id === right.id &&
@@ -105,6 +92,7 @@ function sameStatus(left: ShellStatus, right: ShellStatus): boolean {
     statusKey(left.audience) === statusKey(right.audience) &&
     left.diagnostic === right.diagnostic &&
     left.sourceId === right.sourceId &&
+    left.local === right.local &&
     JSON.stringify(left.values) === JSON.stringify(right.values)
   );
 }
@@ -206,68 +194,27 @@ export function dismissFeedback(
   };
 }
 
-function commandBarScopes(context: ShellStatusContext): string[] {
-  return context.settingsOpen
-    ? ["connection", "execution", "account"]
-    : context.route === "skills"
-      ? ["connection", "skills", "execution", "account"]
-      : [
-          "connection",
-          `task:${context.taskId}`,
-          `workspace:${context.workspaceId}`,
-          "workspace:*",
-          "execution",
-          "account",
-        ];
-}
-
-export function statusVisibleInCommandBar(
-  status: ShellStatus,
-  context: ShellStatusContext,
-): boolean {
-  if (status.tone !== "attention") return false;
-  if (!commandBarScopes(context).includes(statusKey(status.audience)))
-    return false;
-  if (status.audience.scope === "connection") return true;
-  if (status.audience.scope === "account") return true;
-  if (status.audience.scope === "execution") return true;
-  if (status.audience.scope === "skills")
-    return !context.settingsOpen && context.route === "skills";
-  if (status.audience.scope === "workspace")
-    return (
-      !context.settingsOpen &&
-      (status.audience.workspaceId === null ||
-        status.audience.workspaceId === context.workspaceId)
-    );
+/** Task history and local business results never enter the global collection. */
+export function statusVisibleInCommandBar(status: ShellStatus): boolean {
   return (
-    !context.settingsOpen &&
-    context.route === "workbench" &&
-    status.audience.taskId === context.taskId
+    status.tone === "attention" &&
+    !status.local &&
+    ["connection", "account", "execution"].includes(status.audience.scope)
   );
-}
-
-export function selectCommandBarStatus(
-  state: ShellStatusState,
-  context: ShellStatusContext,
-): FeedbackEntry | null {
-  return selectCommandBarFeedback(state, context)[0] ?? null;
 }
 
 export function selectCommandBarFeedback(
   state: ShellStatusState,
-  context: ShellStatusContext,
 ): FeedbackEntry[] {
-  const scopes = commandBarScopes(context);
+  const scopes = ["connection", "execution", "account"];
   return Object.values(state.entries)
     .filter(
       (entry): entry is FeedbackEntry =>
-        !!entry &&
-        !entry.dismissed &&
-        statusVisibleInCommandBar(entry, context),
+        !!entry && !entry.dismissed && statusVisibleInCommandBar(entry),
     )
     .sort(
       (left, right) =>
-        scopes.indexOf(statusKey(left.audience)) -
-        scopes.indexOf(statusKey(right.audience)),
+        scopes.indexOf(left.audience.scope) -
+        scopes.indexOf(right.audience.scope),
     );
 }

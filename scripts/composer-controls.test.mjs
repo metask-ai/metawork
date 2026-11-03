@@ -434,6 +434,7 @@ function settingsElement(account, overrides = {}) {
       },
     },
     createElement(SettingsPage, {
+      modelContext: "fixture:1",
       account,
       models: readySettingsModels,
       automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
@@ -1400,7 +1401,7 @@ test("model test rejection and exceptions produce an actionable local message", 
     );
     assert.match(
       screen.getByRole("alert").textContent,
-      /Could not start the test for Model A/,
+      /Test start for Model A not yet confirmed/,
     );
   }
   assert.equal(attempts, 2);
@@ -1441,7 +1442,7 @@ test("delete confirmation uses current revisions and recovers focus when the row
   assert.deepEqual(calls, [["delete-source", "8", "14", "model-a"]]);
   assert.match(
     within(dialog).getByRole("alert").textContent,
-    /Could not delete/,
+    /Model removal result not yet confirmed/,
   );
   view.rerenderModels({ ...readySettingsModels, customProviders: [] });
   await new Promise((resolve) => setTimeout(resolve, 50));

@@ -22,4 +22,8 @@ export class PendingScopes {
   end(scope: string) {
     return this.active.delete(scope);
   }
+
+  clear() {
+    this.active.clear();
+  }
 }

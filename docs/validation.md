@@ -496,6 +496,34 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
 
+### E-WIN-FEEDBACK-MAIN-INTEGRATION-20261103
+
+统一反馈分支与显式 Task 模型准入、模型偏好及创建拒绝恢复的合并验收见[双父版本与合并内容绑定证据](evidence/feedback-main-integration-windows-20261103.json)。完整 Node 回归、正式检查、生产 Renderer/CSP 与隔离 automation Native Debug 构建通过；条件跳过项与源代码、fixture、artifact、日志和截图摘要由机器证据列明。此前反馈证据保留各自采集基线，不作为本次合并结果的替代验收。
+
+真实 App 回归覆盖两边既有行为，并补充偏好失败提示关闭跨安全代次保持、首次创建期间停止与后续输入隔离，以及安全代次变化后创建被明确拒绝、释放原会话并显式重选模型。真实 Windows WebView2 使用生产 App/CSS、当前 scoped view fixture 与合成 Bridge 回执，复验原停止和诊断场景，并验证偏好失败不阻止模型选择、明确拒绝后仅用户重试才再次创建、已选模型随新请求提交且旧输入不重发；桌面与约 390 px 窄窗的明暗主题截图已核对，无横向溢出。
+
+范围限于记录合并内容的 Renderer 与隔离 WebView 交互，不证明真实 Host 授权恢复、AgentCore 取消或失败接续、跨夜审批恢复、系统键盘手势、分发或其他平台。Host 业务改动来自已合入 main 的版本，本次冲突处理不新增 Host 业务路径；Native 构建不能替代这些真实业务链路验收。
+
+### E-WIN-FEEDBACK-SECURITY-20261103
+
+Windows x64 的反馈安全代次修正验收见[工作树与 artifact 绑定证据](evidence/feedback-security-lifecycle-windows-20261103.json)。证据采集时，代码位于所记基线之上的未提交工作树；记录绑定该基线 revision、Renderer/测试 diff 摘要和源码、构建资源、日志及截图摘要。完整 Node 回归、正式检查、生产 Renderer/CSP 与隔离 automation Debug 构建通过；条件跳过项由机器证据列明。
+
+真实 Windows WebView2 使用生产 App 和样式、隔离 profile 与合成 BridgeClient 回执，验证在途停止跨安全代次继续有效、受理后仍显示进行中且同一目标无法重复发送；1440/390 px 明暗主题均无横向溢出。目标终态解除等待，新 Run 不继承旧等待；旧安全上下文的迟到诊断被丢弃，当前诊断可查且再次安全失效后清除。模型命令自身推进安全代次时不误报失败，操作正常释放自己的忙碌标记。首次提交停止、归档/来源修改、删除/改名重读与可信空索引、generation 更换及账号迟到回执隔离由真实 App 回归负责。
+
+没有 Run 或 Compact 的停止补充验收见[准备阶段停止证据](evidence/feedback-stop-targets-windows-20261103.json)。控制器与真实 App 回归覆盖原 restore、原 waiting 输入、输入转交 Run 和缺失记录的边界；WebView2 合成事实验证 restore 与仅等待输入的停止结束后移除等待提示，后续输入与新 Run 不继承旧等待，也不自动重发停止。此处只证明 Renderer 消费这些可信事实的行为，不证明真实 Host 的取消或 restore 执行链。
+
+范围仅限记录工作树的 Renderer 与 WebView 内容交互；不证明真实 Host 模型恢复、AgentCore 停止、Metask/OAuth/系统凭据轮换、系统键盘手势、安装分发或其他平台。安全失效的既有缓存与清洗边界继续生效，不通过保留旧投影维持操作状态。
+
+### E-WIN-FEEDBACK-LIFECYCLE-20261102
+
+2026-11-03 纠正：本条安全代次相关回归把“安全失效应允许新操作进入”作为预期，前提错误，不能作为操作生命周期收口依据。原执行记录保留，修正验收见[反馈安全代次修正](#e-win-feedback-security-20261103)；其余视觉与诊断观测继续仅证明原记录版本。
+
+Windows x64 的统一反馈生命周期验收见[绑定源码与 artifact 的机器证据](evidence/feedback-lifecycle-windows-20261102.json)。完整 Node 回归、正式检查、生产 Renderer/CSP 与隔离 automation Debug 构建通过；条件跳过项、反例及修复前后的回归由证据列明。反馈迁移层与按范围覆盖路径已移除，来源之间独立；对应交互合同见[反馈协调与生命周期](ui-design.md#44-反馈协调与生命周期)。
+
+真实 Windows WebView2 中，生产 App、组件与样式在隔离 profile、合成 BridgeClient 回复下验证目标 Run 停止待确认、后续轮次隔离、部分回复复制入口、空回复说明和历史动作范围；1440/390 px 明暗主题均核对简洁提示、低频纯文本诊断、Dialog 关闭后焦点返回、键盘收起、44 px 命中区及无横向溢出。关闭账号说明后仍可查看诊断并显式恢复，恢复与同步没有自动重发业务命令；窗口错误、未处理 rejection 和捕获的 console error 为空。历史分页与安全代次反例由对应真实 App/状态测试负责。
+
+证据仅证明记录 revision 的 Renderer 与 WebView 内容交互；不证明真实 Host 停止、Metask/OAuth/系统凭据故障恢复、系统键盘手势、安装分发或其他平台，也不替代 Native 业务测试图。临时测试入口、日志与截图的位置及摘要由机器证据拥有，后续源码或 artifact 变化需重新验证。
+
 ### E-WIN-FEEDBACK-REVIEW-20261102
 
 2026-11-02，Windows x64，Renderer runtime source `5f0010c2`。本轮四项评审反例均先在回归中失败，修复后通过：关闭刷新调度失败说明仍保留实时恢复入口；账号待确认不遮蔽新的错误或安全诊断；Skills 不接收 workspace 范围反馈且连接优先；未迁移来源超时在可信读取成功后退出命令栏，读取失败仅归连接。17 个相关 Renderer/Node suite 共 426 项通过；正式 `npm run check`、生产 Renderer/CSP、隔离 automation Debug 构建通过，Host、Bridge wire 与持久化未变。

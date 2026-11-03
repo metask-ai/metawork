@@ -1189,3 +1189,128 @@ for (const kind of ["project", "task"])
       ),
     );
   });
+
+test("security refresh retains archive admission and processes its original failure", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.invoke("3", "Archive");
+  app.snapshot.securityEpoch = "2";
+  await app.publishTask("3", {});
+  await waitFor(() => assert.ok(taskRows("3").length));
+  fireEvent.contextMenu(taskRows("3")[0]);
+  await app.user.click(
+    await screen.findByRole("menuitem", { name: "Archive", exact: true }),
+  );
+  assert.equal(app.requests.length, 1);
+  await app.settle({
+    error: new Error("diagnostic from before security refresh"),
+  });
+  await waitFor(() => assert.ok(document.querySelector(".archive-notice")));
+  await app.user.click(
+    screen.getByRole("button", { name: "Task information", exact: true }),
+  );
+  assert.ok(screen.queryByText("Operation diagnostics") === null);
+  assert.ok(
+    !document.body.textContent.includes(
+      "diagnostic from before security refresh",
+    ),
+  );
+});
+
+for (const dialog of ["delete", "rename"]) {
+  test(`security refresh preserves ${dialog} intent through an unloaded snapshot`, async (ctx) => {
+    const app = await renderApp(ctx);
+    if (dialog === "rename") {
+      const input = await app.openRename();
+      await app.user.clear(input);
+      await app.user.type(input, "unsaved rename survives");
+    } else {
+      fireEvent.contextMenu(taskRows("3")[0]);
+      await app.user.click(
+        await screen.findByRole("menuitem", {
+          name: "Delete record",
+          exact: true,
+        }),
+      );
+      await screen.findByRole("alertdialog");
+    }
+    let release,
+      hold = true;
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", (scope) => {
+      if (!hold)
+        return Promise.resolve(productStateFixture(app.snapshot, scope));
+      return new Promise((resolve) => {
+        release = () => {
+          hold = false;
+          resolve(productStateFixture(app.snapshot, scope));
+        };
+      });
+    });
+    app.snapshot.securityEpoch = "2";
+    await app.publishTask("3", {});
+    await waitFor(() => assert.equal(typeof release, "function"));
+    await act(async () => release());
+    if (dialog === "rename") {
+      assert.equal(
+        (await screen.findByRole("textbox", { name: "Task name" })).value,
+        "unsaved rename survives",
+      );
+    } else {
+      await screen.findByRole("alertdialog");
+      await app.user.click(
+        screen.getByRole("button", { name: "Delete record", exact: true }),
+      );
+      await waitFor(() => assert.deepEqual(app.deletions, ["3"]));
+    }
+  });
+}
+
+test("a loaded empty index confirms the last Task removal and closes its deletion intent", async (ctx) => {
+  const app = await renderApp(ctx);
+  app.snapshot.tasks = app.snapshot.tasks.filter((t) => t.id === "3");
+  await app.publishTask("3", {});
+  fireEvent.contextMenu(taskRows("3")[0]);
+  await app.user.click(
+    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+  );
+  await screen.findByRole("alertdialog");
+  await app.publishTask("3", null);
+  await waitFor(() => assert.ok(screen.queryByRole("alertdialog") === null));
+  assert.equal(app.snapshot.tasks.length, 0);
+});
+
+test("generation replacement isolates old archive replies from a newer operation", async (ctx) => {
+  const { WorkbenchConnection } = await vite.ssrLoadModule(
+    "/src/bridge/connection.ts",
+  );
+  const start = WorkbenchConnection.prototype.start;
+  let connection;
+  ctx.mock.method(WorkbenchConnection.prototype, "start", function () {
+    connection = this;
+    return start.call(this);
+  });
+  let generation = "1";
+  const app = await renderApp(ctx);
+  ctx.mock.method(BridgeClient.prototype, "connect", async () => generation);
+  await app.invoke("3", "Archive");
+  generation = "2";
+  await act(async () => connection.retry({ replaceConnection: true }));
+  await waitFor(() => assert.ok(taskRows("3").length));
+  const invoke = async () => {
+    fireEvent.contextMenu(taskRows("3")[0]);
+    await app.user.click(
+      await screen.findByRole("menuitem", { name: "Archive", exact: true }),
+    );
+  };
+  await invoke();
+  await waitFor(() => assert.equal(app.requests.length, 2));
+  await act(async () =>
+    app.requests[0].resolve({
+      error: new Error("old generation archive failure"),
+    }),
+  );
+  assert.ok(!document.querySelector(".archive-notice"));
+  await invoke();
+  assert.equal(app.requests.length, 2);
+  await app.settle({ archived: true });
+  await waitFor(() => assert.ok(document.querySelector(".archive-notice")));
+});

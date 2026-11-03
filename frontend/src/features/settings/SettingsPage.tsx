@@ -32,7 +32,9 @@ export function SettingsPage({
   archiveManagement,
   account,
   accountFeedback,
+  accountDiagnostics,
   models,
+  modelContext,
   automaticWorkspaceRoot,
   customProviderCapabilities,
   focusTarget,
@@ -61,7 +63,9 @@ export function SettingsPage({
   archiveManagement?: ArchivedTasksProps;
   account: AccountView;
   accountFeedback?: ReactNode;
+  accountDiagnostics?: ReactNode;
   models: ModelsView;
+  modelContext: string;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
   customProviderCapabilities: {
     management: boolean;
@@ -560,6 +564,7 @@ export function SettingsPage({
               </div>
 
               {accountFeedback}
+              {accountDiagnostics}
 
               {authenticated && (
                 <AccountUsageSummary
@@ -662,6 +667,7 @@ export function SettingsPage({
               )}
               {customProviderSettingsAvailable && (
                 <CustomModelsSettings
+                  key={modelContext}
                   models={models}
                   disabled={disabled || executionDisabled}
                   onCreateCustomProvider={onCreateCustomProvider}

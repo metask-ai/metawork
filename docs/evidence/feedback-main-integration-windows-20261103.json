@@ -1,0 +1,584 @@
+{
+  "date": "2026-11-03T03:06:36.019Z",
+  "platform": "win32",
+  "preMergeHead": "70168b66954ba83f5f10f51760add838ac37eff9",
+  "mainRevision": "cc75a0db083cbea20bdf7eefb962ee685ca7176e",
+  "mergeBase": "6751dacacee1906dce134077aad79db08fc64532",
+  "captureContext": "Local resolved merge before commit; no push or remote PR modification authorized.",
+  "runtimeAndTestsDiffBase": "cc75a0db083cbea20bdf7eefb962ee685ca7176e",
+  "runtimeAndTestsDiffSha256": "136953d83f806ab809f74efa9b6274790eb760c038ac13341c549aede15b26b1",
+  "resolvedConflicts": [
+    "frontend/src/app/App.tsx",
+    "scripts/composer-submission.test.mjs",
+    "scripts/first-task-flow.test.mjs",
+    "scripts/task-panel.test.mjs"
+  ],
+  "sources": [
+    {
+      "path": "frontend/src/app/App.tsx",
+      "sha256": "288dbcd34ad7121f07b408b512dac59e904f094cfa1afbc07756e106803fc923"
+    },
+    {
+      "path": "frontend/src/app/command-bar-status.ts",
+      "sha256": "2b6f3f5cdd7eb594d1de07335cb76d1182a3f291d5616f37c7b1a559f8bb2e0b"
+    },
+    {
+      "path": "frontend/src/app/task-stop-feedback.ts",
+      "sha256": "7947ca554003ecadc85bd6c4c8ed03e04a65cc3d373ecaa2399f75bc211a1617"
+    },
+    {
+      "path": "frontend/src/components/ui/DiagnosticDisclosure.tsx",
+      "sha256": "6bd48cada1b7ebe7b9ae88a2247d8b6b9b5f761cba8a5404424683cba165ab7c"
+    },
+    {
+      "path": "frontend/src/components/ui/Icon.tsx",
+      "sha256": "21dd49882ff7c52f1d094dafd1bf421c43ea7d1f59f12632228adf07f09550ac"
+    },
+    {
+      "path": "frontend/src/features/composer/ComposerFooter.tsx",
+      "sha256": "0396a28b01b15001ee04f1310d58a2bc85d63bd83c68bf7da98ffd6f7a3683f2"
+    },
+    {
+      "path": "frontend/src/features/composer/WorkspaceContextSelector.tsx",
+      "sha256": "6e9b286d4812c97a412090a32871a5268d823f7c227257b298dbeece77f2252d"
+    },
+    {
+      "path": "frontend/src/features/composer/submitTaskInstruction.ts",
+      "sha256": "b22c1c77deb3e2c44706b18d96990977917b235cd11aeae8cb2c7c2f77054682"
+    },
+    {
+      "path": "frontend/src/features/settings/ArchivedTasks.tsx",
+      "sha256": "4491f1841540e7e8a3b7b9f53bf1e270cc11b2feebb838f6dd9bd318165e5b41"
+    },
+    {
+      "path": "frontend/src/features/settings/SettingsPage.tsx",
+      "sha256": "6598cedeac151d8cd3a0e97908cfe6584c779220e00cdf2529ab635a4443d8b4"
+    },
+    {
+      "path": "frontend/src/features/tasks/ArchiveNotice.tsx",
+      "sha256": "5401cb16fd767438abe705915140ce722fa094798059fd3ed183f0d8c613eebe"
+    },
+    {
+      "path": "frontend/src/features/tasks/RunDiagnostics.tsx",
+      "sha256": "809608eac11181f33d9a11c7791552dba909d5f58cdb2cb1b252f04b101b2c1c"
+    },
+    {
+      "path": "frontend/src/features/tasks/TaskContent.tsx",
+      "sha256": "50037a28459f635846cc348ba593630ef9b169c5fc3652d86393b1990bb0a17e"
+    },
+    {
+      "path": "frontend/src/features/tasks/TaskInformation.tsx",
+      "sha256": "5e01fa297f71727903ce514a64a87a49c3c9f3439ee8d1deb8e9beae11f68763"
+    },
+    {
+      "path": "frontend/src/features/workspaces/chooseWorkspace.ts",
+      "sha256": "f317744dd004a6e9cb5d6575ee2a6841a110a8e01c7d6c9601d80273c16f1e43"
+    },
+    {
+      "path": "frontend/src/i18n/messages/en-US.ts",
+      "sha256": "4cff790b5c859bc495361fdc4b0150be60f12d89b1623dc9b7c0a4bf910c085f"
+    },
+    {
+      "path": "frontend/src/i18n/messages/zh-CN.ts",
+      "sha256": "c731328bfccd4b6f64f339fe93bb7c176cf70d3bf00680ca74630e2a81ec93eb"
+    },
+    {
+      "path": "frontend/src/index.css",
+      "sha256": "d90246e4cf520701b0b4bf4921d12040b979d1f6436361653a51446d0a0bf038"
+    },
+    {
+      "path": "frontend/src/workbench/pendingScopes.ts",
+      "sha256": "d428ebe0dc251127417d6f50ce5a4c84b0d3bf28b31ac4e97275ee798f5adbf6"
+    },
+    {
+      "path": "scripts/account-panel.test.mjs",
+      "sha256": "10273b5c19aa04acae433631e1580fb6b1877f55c41f16c05359fc9151588798"
+    },
+    {
+      "path": "scripts/composer-controls.test.mjs",
+      "sha256": "d860197bae26cdb849973e3d151f2332f41462d79e879cb41ba83275541232d6"
+    },
+    {
+      "path": "scripts/composer-render.test.mjs",
+      "sha256": "b6cccf4063329ffdf3d25efebb908dcd84f48d7a8ec010e6d341f01bcbe94641"
+    },
+    {
+      "path": "scripts/composer-submission.test.mjs",
+      "sha256": "9dedff4e0d7e48c736355647aa6b6907e634b3196ce9a029979dc417657696b8"
+    },
+    {
+      "path": "scripts/feedback-coordination.test.mjs",
+      "sha256": "d95a0f3c0c348e837f2d52c487d02c75558c062a31df8878c404edf31714ba14"
+    },
+    {
+      "path": "scripts/feedback-interaction.test.mjs",
+      "sha256": "1464362500892a2956b392f7afbe0161b27336597c4bd53ea49ade9635d1eea1"
+    },
+    {
+      "path": "scripts/first-task-flow.test.mjs",
+      "sha256": "e623308ae449c4db2a84758baf20fe06c80913ea278f6b8648410681db16c466"
+    },
+    {
+      "path": "scripts/model-setup.test.mjs",
+      "sha256": "1b3e50200e3601724fb4b85ece4d4826ee6310a58d16ab31ecbfacc5d7dbafbf"
+    },
+    {
+      "path": "scripts/skill-sources-interaction.test.mjs",
+      "sha256": "0af3cea57ac9626e3339dc3ed2541ce722c18bcdbf2b6bd34953af86eea0998b"
+    },
+    {
+      "path": "scripts/skills-center.test.mjs",
+      "sha256": "548eb650a2bbce8ea272dd0ee0263e77004d9cf10b1fa10849294c2a30744f22"
+    },
+    {
+      "path": "scripts/task-archive-visibility.test.mjs",
+      "sha256": "daca1ff6b3cdaa0c74dc643f2c5bda9df3b5422b6055a4a7f493bfce9e785534"
+    },
+    {
+      "path": "scripts/task-panel.test.mjs",
+      "sha256": "cb81c8c22deb3109abe5ec464d73458d5b832c4f732bb8fd2b30d31c73d2456a"
+    },
+    {
+      "path": "scripts/task-stop-feedback.test.mjs",
+      "sha256": "c75bac5608a002a69ecd60794cc5f82b8298ae04aef9bcaea597f3ee7dd7a199"
+    },
+    {
+      "path": "scripts/workbench-navigation.test.mjs",
+      "sha256": "e526f0d77cae350fa2ff359aa84aadcf00b0c979325729eb85e5e514bc88ae60"
+    },
+    {
+      "path": "docs/ui-design.md",
+      "sha256": "0ce5670bfe12a8425a5d785ef6b703a07aac1916e34ddb5279e3327d954b5614"
+    },
+    {
+      "path": "frontend/src/bridge/contracts.ts",
+      "sha256": "1f81c7a8457e72c879f401a916714afe398f2321db2cbdb423337c2d14a7ead4"
+    },
+    {
+      "path": "src/bridge/commands.zig",
+      "sha256": "f2852daee0fb3e801fcb537afb19ee742f6c7a3a30709efb689072acef68dce8"
+    },
+    {
+      "path": "src/bridge/handlers.zig",
+      "sha256": "2e9192dbac2f819c18a3f21f4783db6a9b8b9c04a0083676ed294a4531141138"
+    },
+    {
+      "path": "app.zon",
+      "sha256": "da2e87779be63129e7c64744a4bdb29cb99a154e668af612be1c07f4dfab9121"
+    },
+    {
+      "path": "build_support/agentcore-bundle.windows-x86_64.lock.json",
+      "sha256": "ad43f893f4ced4f4a04960af932ec957c10706ac7ebf5d015ce28072f08cade5"
+    },
+    {
+      "path": "frontend/src/app/new-task-model-selection.ts",
+      "sha256": "d895bb04bb979ee665599a606dfdf9a9a479c026f923bebfe7c33b1b9791ce7b"
+    },
+    {
+      "path": "scripts/test-support/product-view-fixture.mjs",
+      "sha256": "35bafeb6cb22847e53851d4900cd741af5feb6e1d5707ed8de42071ca3d9fd9a"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": ".zig-cache/feedback-main-integration/fixture/entry.tsx",
+      "sha256": "3bddcde4490a2bac5fc3d54948cb32c07c52093c160a52586e42a5d6b46b2413"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/fixture/projection.mjs",
+      "sha256": "798530fb7e2ef9be58ec82f78ca45d3f1a6c69a903983441c6b0fe022236b1b6"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/fixture/fixture.css",
+      "sha256": "32837d941b9ba36bc4f6c89ee7c17c2f85667931f9475787a9f8736af37b3e24"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/fixture/index.html",
+      "sha256": "56df802854430532ea2982f48e1da0170aef1743154304d54c23732720e2cd40"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/fixture/vite.config.mts",
+      "sha256": "a6246376f38fed8f39915e041614aff570d7dd2cbe7760991a0ae609a7a95db6"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/build.mjs",
+      "sha256": "bc88cc3ce952dc53f32a295b703719893a0c726427f48e964aa5e7712fc671f1"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-webview.mjs",
+      "sha256": "42aa09a1d0185d5592ca8cfc1f5c239d61eb092b62ecb98fc45603cb91017039"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-webview.mjs",
+      "sha256": "76ac3cf1af9581f93e0acfa71a3dec1672e60e10cd1405960726a336d40a541e"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/model-webview.mjs",
+      "sha256": "f0676af280d3e16dffe5523391a9f0d653e2d5ac3e31c0199ce95b6aff12528e"
+    }
+  ],
+  "binary": {
+    "path": ".zig-cache/feedback-main-integration/native/bin/metawork.exe",
+    "sha256": "c538918b1d65673cff209fa317b4ff88c8eca0d9436952d0739e56e692039bdf"
+  },
+  "frontend": [
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\index-BhIfweTK.js",
+      "sha256": "e9f85cb493e211085b324524667b4005cfcba5a9c797eadbfce4f262d0ed57db"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\index-BoTemfmS.js",
+      "sha256": "3e9be3598bf9a568c7197f0dcb2e5a100360ee103a9f3103865f3e2db7d89615"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\index-BP3muVof.css",
+      "sha256": "2fb4dfae36f99a27d2ba5d3468515b311bdef2f4632d5a41dc7191e4f83afb98"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\server.browser-B--0ktn-.js",
+      "sha256": "1084197da483e251b18c562d17adf1889e8f3461d0c91cbd0be4a1f7e0b8636d"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\server.browser-DFWG00-M.js",
+      "sha256": "6f40be0f9156db17a3bc9e31ae802e4c2fde403550a96e5db841eaaed2f6aac8"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\syntax-highlight-BSuIiSgh.js",
+      "sha256": "896147eb987ec298a86e43b10a344f822e586f7123ebf5efe74488dc9550cdea"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\assets\\syntax-highlight-KHHddRu7.js",
+      "sha256": "2e36223752c0ea73b6d8bb6d979c3104db06193f4f743ec5497703b3432b921b"
+    },
+    {
+      "path": ".zig-cache\\feedback-main-integration\\frontend\\index.html",
+      "sha256": "db03084be72a25eb954d37b3a800edef53b354188411d26b072c355386c36b41"
+    }
+  ],
+  "validation": {
+    "node": {
+      "tests": 1178,
+      "passed": 1167,
+      "failed": 0,
+      "skipped": 11,
+      "conditionalSkips": [
+        "﹣ rejects payload and root symbolic links (25.8867ms) # Windows symlink creation requires Developer Mode or elevation",
+        "﹣ baseline probe records the frozen artifact (0.1435ms) # SKIP",
+        "﹣ baseline probe rejects a larger pool (0.1206ms) # SKIP",
+        "﹣ cancelled development retains output while an owned descendant is still running (0.1862ms) # SKIP",
+        "﹣ failed development retains output while an owned descendant is still running (0.1371ms) # SKIP",
+        "﹣ cancelled development retains output while an owned detached descendant is still running (0.0853ms) # SKIP",
+        "﹣ failed development retains output while an owned detached descendant is still running (0.0733ms) # SKIP",
+        "﹣ macOS Icon Composer resources replace the Native SDK fallback before signing (0.1262ms) # SKIP",
+        "﹣ Office resource sources reject links (0.1837ms) # Creating symlinks requires Windows developer mode or elevation",
+        "﹣ packaged minimum macOS version replaces the SDK default and rejects drift (0.1079ms) # SKIP",
+        "﹣ cancellation finishes even when an owned child ignores SIGTERM (0.342ms) # SKIP"
+      ]
+    },
+    "affectedSuitesBeforeCross": {
+      "tests": 352,
+      "passed": 352
+    },
+    "newCrossRegressions": {
+      "tests": 2,
+      "passed": 2
+    },
+    "check": {
+      "command": "npm run check",
+      "exitCode": 0
+    },
+    "productionBuild": {
+      "command": "buildFrontend() from scripts/build.mjs",
+      "exitCode": 0,
+      "cspVerified": true
+    },
+    "nativeBuild": {
+      "command": "node .zig-cache/feedback-main-integration/build.mjs",
+      "exitCode": 0,
+      "canonicalBundleVerified": true,
+      "cspVerified": true
+    },
+    "nativeBusinessTests": "Not rerun: integration conflict changes are Renderer/tests; Host implementation is inherited from main. No new assertion of real Host admission/credential/cancellation recovery."
+  },
+  "logs": [
+    {
+      "path": ".zig-cache/feedback-main-integration/check.log",
+      "sha256": "e552347d0c4c70880b7a990ebfcc74348ae66d292dee07279fd75a64713c915b"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/tests-initial.log",
+      "sha256": "2cf4438367871422e3c6c94b38dd485896d6e48b547b7f080b57ff4933b2604d"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/cross-tests.log",
+      "sha256": "d26fa8486787a3ad3113905fd588b4bfa9a425542f4ed954470c34ec47aeda93"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/node-tests.log",
+      "sha256": "73ca5b6b18c8eff6221e9c37f060c2d7247db010f817b8b91bec9d57e414ce65"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/production-build.log",
+      "sha256": "d67499634b445d53589c3ec001ad4a0fd96012c75ccb4e4646bcb214929291fe"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/native-build.log",
+      "sha256": "f61a5340dd3146be2ecf1a7174dc66559bebf5835c771ef73ab16199d6310042"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-webview.log",
+      "sha256": "1ba4f719e14b7ab613f4460c9f8ff9612eadadd5d89235c9bc96b6afed19db60"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-webview.log",
+      "sha256": "ee2ecd7727cff72524685740d286177377190d8dface275f45d55b8c39a07a54"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/model-webview.log",
+      "sha256": "d4181d75107789ef9e8d54a3895872dd502506a92243b7d40433d28ced29a48e"
+    }
+  ],
+  "observationsFiles": [
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/observations.json",
+      "sha256": "43fc72a4ac9f29efa67a9aa155947bf0c93dc69d7c78814b3d4e95b6e349560d"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/observations.json",
+      "sha256": "f8ef664ab92abf4d0cf6cc1a5bf9d135d2d746817c8d5efcb43d783ed1a50bea"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/model-evidence/observations.json",
+      "sha256": "33fdc751545fb5bd6faa3c6c6311bda58eaffd01c9d9e4eb182e5bb5735047ef"
+    }
+  ],
+  "observations": [
+    {
+      "scenario": "security",
+      "scope": "Production App and CSS in isolated Windows WebView2 automation Debug shell, with synthetic BridgeClient replies and security notifications. Does not prove real Host model recovery, AgentCore stop, Metask/OAuth/credential rotation, OS keyboard gestures, distribution or other platforms.",
+      "observations": [
+        {
+          "inFlightAcrossSecurity": {
+            "disabled": true,
+            "pending": true,
+            "unknown": false,
+            "attempts": 1,
+            "overflow": false
+          }
+        },
+        {
+          "width": 1440,
+          "theme": "light",
+          "accepted": {
+            "disabled": true,
+            "pending": true,
+            "unknown": false,
+            "attempts": 1,
+            "overflow": false
+          },
+          "disabledPointerDoesNotResend": true
+        },
+        {
+          "width": 1440,
+          "theme": "dark",
+          "accepted": {
+            "disabled": true,
+            "pending": true,
+            "unknown": false,
+            "attempts": 1,
+            "overflow": false
+          },
+          "disabledPointerDoesNotResend": true
+        },
+        {
+          "width": 390,
+          "theme": "light",
+          "accepted": {
+            "disabled": true,
+            "pending": true,
+            "unknown": false,
+            "attempts": 1,
+            "overflow": false
+          },
+          "disabledPointerDoesNotResend": true
+        },
+        {
+          "width": 390,
+          "theme": "dark",
+          "accepted": {
+            "disabled": true,
+            "pending": true,
+            "unknown": false,
+            "attempts": 1,
+            "overflow": false
+          },
+          "disabledPointerDoesNotResend": true
+        },
+        {
+          "terminalRetiresAwaiting": true,
+          "newRunIndependent": true,
+          "lateOldDiagnosticDiscarded": true,
+          "currentDiagnosticReadable": true,
+          "nextSecurityScrubsCurrentDiagnostic": true,
+          "failureFactPreserved": true
+        },
+        {
+          "modelResetAdvancesOwnSecurity": true,
+          "acceptedResultPreserved": true,
+          "busyReleased": true,
+          "resetCommands": 1
+        }
+      ],
+      "errors": [],
+      "consoleErrors": []
+    },
+    {
+      "scenario": "preparation",
+      "scope": "Production App and CSS in isolated real Windows WebView2 automation shell with synthetic BridgeClient data. Exercises restore/waiting-only Stop, original input cancellation, restore completion and later input/Run independence. Does not prove real Host cancellation, AgentCore restore, credentials, OS keyboard or other platforms.",
+      "observations": [
+        {
+          "kind": "restore",
+          "accepted": {
+            "text": true,
+            "disabled": true,
+            "calls": 1,
+            "overflow": false
+          },
+          "settled": {
+            "text": false,
+            "disabled": false,
+            "calls": 1,
+            "overflow": false
+          },
+          "next": {
+            "text": false,
+            "disabled": false,
+            "calls": 1,
+            "overflow": false
+          },
+          "originalWaitingInput": "cancelled",
+          "postStopInputDoesNotHoldOldRequest": true,
+          "originalRestoreFinished": true,
+          "stopCommands": 1
+        },
+        {
+          "kind": "waiting-only",
+          "accepted": {
+            "text": true,
+            "disabled": true,
+            "calls": 2,
+            "overflow": false
+          },
+          "settled": {
+            "text": false,
+            "disabled": false,
+            "calls": 2,
+            "overflow": false
+          },
+          "next": {
+            "text": false,
+            "disabled": false,
+            "calls": 2,
+            "overflow": false
+          },
+          "originalWaitingInput": "cancelled",
+          "postStopInputDoesNotHoldOldRequest": true,
+          "originalRestoreFinished": false,
+          "stopCommands": 2
+        }
+      ],
+      "errors": [],
+      "consoleErrors": []
+    },
+    {
+      "scenario": "model",
+      "scope": "Real Windows WebView2 with production App/CSS, current canonical product-view fixture and synthetic Bridge replies. Exercises preference failure dismissal, security invalidation, creation rejection and explicit model reselection; no claim about real Host credential/model admission.",
+      "observations": [
+        {
+          "preferenceDismissalSurvivesSecurity": true,
+          "securityEpoch": "2",
+          "definiteCreationRejectionReleasesSession": true,
+          "explicitRetryUsesChosenModel": {
+            "sourceId": "metask",
+            "modelId": "integration-alternative"
+          },
+          "createAttempts": 2,
+          "noAutomaticReplay": true,
+          "sentInputCount": 1,
+          "sentTaskId": "99",
+          "viewportChecks": [
+            {
+              "width": 1440,
+              "theme": "light"
+            },
+            {
+              "width": 390,
+              "theme": "dark"
+            }
+          ],
+          "overflow": false
+        }
+      ],
+      "errors": [],
+      "consoleErrors": []
+    }
+  ],
+  "screenshots": [
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/awaiting-1440-dark.png",
+      "sha256": "d71794f41967cd97692d2eacd4e859c2e1895a142249d4eae30cf89489813d37"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/awaiting-1440-light.png",
+      "sha256": "54f3746c83fc2f488d7b91fadd9f693b0df7737f6c111b97fe6678103eb80361"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/awaiting-390-dark.png",
+      "sha256": "d996f8f45c9de580ed4092ed96d15070c4db6862b5c26d0b57f6742619790e16"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/awaiting-390-light.png",
+      "sha256": "69a1ca6817ea9809292c059ba529cd11852c3d215acf0e68a987f2334f96443e"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/current-diagnostic.png",
+      "sha256": "6b82f4146912f63e7f53cbe21ce7d6e3cd4b2cd00185a457317c49a6f72a15b8"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/security-evidence/self-security-model-reset.png",
+      "sha256": "f9690fac939ed41d29ad7f7b215ef014290086e2e8e109c7bae4a761f84a3b40"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/restore-awaiting.png",
+      "sha256": "5f1d07ad22ca940e3e3668a7d31689e2502725d2d170bd4bb73acf137eca58f7"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/restore-later-run.png",
+      "sha256": "978915fbe8f7bcd19692322eab41c73964a95761ad7134965d87a551b0484bee"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/restore-settled-with-new-input.png",
+      "sha256": "b58151a696427b50dd90149857904113da80a4d9b6a8050574c862218cc935cc"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/waiting-only-awaiting.png",
+      "sha256": "f53a9389d6a0e09f41caf4c3be3dc001d45f7faabd17fd3e8f2f93473c0e26f6"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/waiting-only-later-run.png",
+      "sha256": "692b6a3e3456fedb7711017d990e261f6d4e6f1e12316b37c6ae30c88fe7c013"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/preparation-evidence/waiting-only-settled-with-new-input.png",
+      "sha256": "f2560e1acc9a360825553d40a0f037c181dd5432df15ed2e33d0032ae815e5ff"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/model-evidence/accepted-explicit-model-dark.png",
+      "sha256": "0bff3a35c9939ab8670170616e46763f7ef8afd62dda7ed44ec2a6551ade3749"
+    },
+    {
+      "path": ".zig-cache/feedback-main-integration/model-evidence/explicit-model-retry-light.png",
+      "sha256": "3c7be36e2055cdc45fd9d6de275a7367700b48740a3e4da52278ef8c3f2b2c70"
+    }
+  ]
+}

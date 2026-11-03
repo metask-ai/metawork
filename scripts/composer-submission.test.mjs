@@ -1822,6 +1822,33 @@ test("App names the Task blocking Session release and allows a later explicit cr
   await fixture.settle();
 });
 
+test("security refresh during first creation preserves local Stop and later input ordering", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "cancel before identity" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  fixture.snapshot.securityEpoch = "2";
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  await screen.findByText("Stopped");
+  const textarea = document.querySelector(".composer-bar textarea");
+  fireEvent.change(textarea, { target: { value: "after security and stop" } });
+  fireEvent.keyDown(textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 1);
+  await fixture.created();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "after security and stop");
+  assert.equal(fixture.cancellations.length, 1);
+  await fixture.settle();
+});
+
 for (const missingSource of [false, true]) {
   test(`App lets a historical Task ${missingSource ? "whose source was deleted" : "without intent"} explicitly choose any ready source`, async (ctx) => {
     const fixture = await renderSubmissionApp(ctx);
@@ -2020,5 +2047,101 @@ test("preference save failure is separate feedback and keeps valid creation and 
     fixture.inputs[0][2].text,
     "Send with the explicitly selected model",
   );
+  await fixture.settle();
+});
+
+test("dismissed preference failure survives security refresh while first creation can still stop and retain later input", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  fixture.snapshot.models.errorCode = "preference_not_saved";
+  await fixture.publish();
+  const message =
+    "Your model preference could not be saved. Confirmed task choices are unchanged.";
+  fireEvent.click(
+    await screen.findByLabelText(message, { selector: "summary" }),
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Dismiss this notice" }),
+  );
+  fireEvent.change(fixture.textarea, {
+    target: { value: "cancel this creation input" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 1);
+  assert.ok(fixture.createRequests[0][1].targetModelRef);
+  fixture.snapshot.securityEpoch = "2";
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      false,
+    ),
+  );
+  assert.ok(screen.queryByLabelText(message, { selector: "summary" }) === null);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  await screen.findByText("Stopped");
+  const textarea = document.querySelector(".composer-bar textarea");
+  fireEvent.change(textarea, {
+    target: { value: "send only this later input" },
+  });
+  fireEvent.keyDown(textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 1);
+  await fixture.created();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "send only this later input");
+  assert.equal(fixture.cancellations.length, 1);
+  assert.ok(screen.queryByLabelText(message, { selector: "summary" }) === null);
+  await fixture.settle();
+});
+
+test("creation rejection after security refresh releases its session for an explicit new model choice", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const provider = fixture.snapshot.models.providers[0];
+  provider.models.push({
+    ...structuredClone(provider.models[0]),
+    id: "integration-alternative",
+    displayName: "Integration alternative",
+  });
+  await fixture.publish();
+  fireEvent.change(fixture.textarea, {
+    target: { value: "first rejected instruction" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 1);
+  const first = fixture.createRequests[0][1].targetModelRef;
+  fixture.snapshot.securityEpoch = "2";
+  await fixture.publish();
+  await fixture.rejectCreation("execution_unavailable");
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("combobox", { name: "Model" }).disabled,
+      false,
+    ),
+  );
+  const source = fixture.snapshot.models.providers.find(
+    (provider) => provider.id === first.sourceId,
+  );
+  const next = source.models.find(
+    (model) => model.id !== first.modelId && model.ready !== false,
+  );
+  assert.ok(next);
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  await user.click(
+    await screen.findByRole("option", { name: next.displayName, exact: true }),
+  );
+  const textarea = document.querySelector(".composer-bar textarea");
+  fireEvent.change(textarea, {
+    target: { value: "explicit retry with new model" },
+  });
+  fireEvent.keyDown(textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  assert.deepEqual(fixture.createRequests[1][1].targetModelRef, {
+    sourceId: source.id,
+    modelId: next.id,
+  });
+  assert.equal(fixture.inputs.length, 0);
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "explicit retry with new model");
   await fixture.settle();
 });

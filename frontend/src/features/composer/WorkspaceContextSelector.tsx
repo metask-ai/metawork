@@ -1,6 +1,7 @@
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
+import { Popover } from "../../components/ui/popover.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type WorkspaceOption = {
@@ -16,6 +17,7 @@ export function WorkspaceContextSelector({
   missing,
   label,
   title,
+  diagnostic,
   options,
   selectedId,
   editable,
@@ -27,6 +29,7 @@ export function WorkspaceContextSelector({
   missing: boolean;
   label: string;
   title: string;
+  diagnostic?: string;
   options: WorkspaceOption[];
   selectedId: string;
   editable: boolean;
@@ -98,6 +101,25 @@ export function WorkspaceContextSelector({
           <Icon name={accessRequired ? "warning" : "plus"} />
           {accessRequired && <span>{t("workspace.confirm_access")}</span>}
         </Button>
+      )}
+      {diagnostic && (
+        <Popover.Root>
+          <Popover.Trigger
+            className="icon-button"
+            aria-label={t("workspace.diagnostics")}
+            title={t("workspace.diagnostics")}
+          >
+            <Icon name="more" />
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Positioner>
+              <Popover.Popup className="p-4 max-w-[min(32rem,calc(100vw-2rem))]">
+                <Popover.Title>{t("workspace.diagnostics")}</Popover.Title>
+                <pre className="feedback-notice-details">{diagnostic}</pre>
+              </Popover.Popup>
+            </Popover.Positioner>
+          </Popover.Portal>
+        </Popover.Root>
       )}
     </div>
   );
