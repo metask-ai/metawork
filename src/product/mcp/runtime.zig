@@ -212,7 +212,7 @@ pub const Runtime = struct {
     /// Capture availability together with the synchronous Selection borrow,
     /// rather than sampling readiness again after copying that pointer.
     pub fn selectionForNewTask(self: *const Runtime) NewTaskAdmission {
-        if (!self.state.committed or self.state.admission != .ready or self.admissionExpired())
+        if (self.shutting_down or !self.state.committed or self.state.admission != .ready or self.admissionExpired())
             return .{ .available = false, .selection = null };
         const selection = policy.selectionForNewTask(&self.state);
         if (selection == null and self.state.admission.ready.selection != null)
@@ -730,8 +730,17 @@ pub const Runtime = struct {
             return false;
 
         if (self.state.activation) |old| old.deinit();
-        self.state.activation = activation;
-        self.state.activation_failed = activation_failed;
+        if (self.shutting_down) {
+            // Core already took the configuration. Accept its Manifest below,
+            // but do not recreate leases released by beginShutdown.
+            if (selection) |value| value.deinit();
+            if (activation) |value| value.deinit();
+            self.state.activation = null;
+            self.state.activation_failed = true;
+        } else {
+            self.state.activation = activation;
+            self.state.activation_failed = activation_failed;
+        }
         self.state.preparation.deinit();
         self.state.preparation = preparation.take();
         management.installRuntimeManifest(manifest);
@@ -740,7 +749,9 @@ pub const Runtime = struct {
         self.state.refresh_failures = 0;
         self.state.refresh_paused = false;
         self.state.refresh_visible = false;
-        if (activation_failed) {
+        if (self.shutting_down) {
+            policy.blockAdmission(&self.state, .shutting_down);
+        } else if (activation_failed) {
             if (selection) |value| value.deinit();
             policy.blockAdmission(&self.state, .activation_unavailable);
         } else {
@@ -763,7 +774,10 @@ pub const Runtime = struct {
         const management = if (self.state.management) |*value| value else return false;
         if (management.inspect().desired_generation != expected_generation) return false;
         self.state.configuration_apply_state = .failed;
-        policy.blockAdmissionForCurrentState(&self.state);
+        if (self.shutting_down)
+            policy.blockAdmission(&self.state, .shutting_down)
+        else
+            policy.blockAdmissionForCurrentState(&self.state);
         self.releaseBoundary();
         return true;
     }
@@ -2451,6 +2465,58 @@ test "Product MCP Runtime releases a prepared mutation rejected during apply" {
         }),
     );
     try std.testing.expectEqual(@as(u64, 1), runtime.state.management.?.inspect().desired_generation);
+}
+
+test "Product MCP apply keeps stale ownership and settles late success without reopening shutdown" {
+    for ([_]bool{ false, true }) |shutdown| {
+        const allocator = std.testing.allocator;
+        const registry: configuration.RegistryWire = .{
+            .schema_version = configuration.schema_version,
+            .generation = 1,
+            .oauth_operation = null,
+            .servers = &.{},
+        };
+        const management = try configuration.ManagementPort.init(allocator, registry, .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .limits = test_limits,
+        });
+        var harness = TestHarness{};
+        var runtime = Runtime.init(allocator, harness.ports(), .{
+            .preparation = .{ .allocator = allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+            .host_capabilities = .{},
+        });
+        defer runtime.deinit();
+        _ = runtime.syncInitialHealth();
+        try std.testing.expect(try runtime.beginConfigurationApply(1));
+        var bytes: [configuration.max_store_bytes]u8 = undefined;
+        const encoded = try configuration.encode(&bytes, registry, test_limits);
+        var preparation = try configuration.prepare(allocator, encoded, true, false, .{}, test_limits);
+        var preparation_owned = true;
+        defer if (preparation_owned) preparation.deinit();
+        var manifest = (try configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+        var manifest_owned = true;
+        defer if (manifest_owned) manifest.deinit();
+
+        try std.testing.expect(!runtime.completeConfigurationApply(2, &preparation, &manifest, null, null, false));
+        try std.testing.expectEqual(@as(?u64, 1), preparation.generation());
+        try std.testing.expectEqual(McpConfigurationApplyState.applying, runtime.state.configuration_apply_state);
+        if (shutdown) runtime.beginShutdown();
+        try std.testing.expect(runtime.completeConfigurationApply(1, &preparation, &manifest, null, null, !shutdown));
+        preparation_owned = false;
+        manifest_owned = false;
+        try std.testing.expectEqual(@as(?u64, 1), runtime.state.preparation.generation());
+        try std.testing.expectEqual(configuration.RuntimeAlignment.current, runtime.state.management.?.inspect().runtime_alignment);
+        try std.testing.expectEqual(McpConfigurationApplyState.idle, runtime.state.configuration_apply_state);
+        try std.testing.expectEqual(if (shutdown) McpAdmissionBlockReason.shutting_down else .activation_unavailable, runtime.state.admission.blocked);
+        try std.testing.expect(runtime.state.activation == null);
+        try std.testing.expect(harness.queued == null);
+        try std.testing.expect(!runtime.selectionForNewTask().available);
+    }
 }
 
 test "Product MCP Runtime wakes retained auth delivery when apply releases the boundary" {

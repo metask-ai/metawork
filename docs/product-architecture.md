@@ -310,6 +310,8 @@ OAuth grant 的提前刷新时间在提交安装或启动恢复时固定；暂�
 
 Product Control 为该共享刷新作业持有独立于 Run 池的有界控制执行容量，所有 Run worker 等待人工审批或 Run 队列已满时，目录刷新仍须推进；此容量不执行 Run，不改变 MCP apply/OAuth/refresh 的既有串行化边界。关闭先停止 MCP admission/timer 并取消尚未开始的刷新，join 在途刷新后才接纳或丢弃其 completion、释放对应 owner；Agent Runtime 和 transport 必须活到该 join 完成。
 
+关闭期间返回的正式 apply completion 仍须按当前绑定接纳已发生的 Runtime 接管事实并更新 Manifest，但不能重新安装 Activation、Selection、新 Task 准入或刷新任务；候选执行资源由完成交接的 owner 释放。stale completion 不消费候选，失败 completion 不能覆盖 shutting_down 边界。
+
 ### 2.6 文件 attachment staging
 
 Attachment staging 是 Product Control 内部候选资源 owner，原件存储属于 Product 附件能力，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 组装 store、持有独占 writer lock，并注入公开 Native SDK 图片预览能力；Product 决定分类、配额、接纳与清理。输入可以是系统 picker/Native SDK 拖放提供的本地路径，或 Renderer 从本次 DOM File 提取的有界字节块。Bridge 只拥有 source/window/connection authority、批次关联及 Renderer opaque token 到 Product identity 的 grant，不缓存正文、原路径或 Product 指针。
