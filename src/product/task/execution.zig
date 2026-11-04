@@ -535,6 +535,8 @@ pub fn commitRunTerminal(
 }
 
 fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: *const agent.TerminalResult) bool {
+    if (!result.receipts.isEmpty() and state.terminalPayload(run) == null)
+        run.execution.?.terminal_receipts = result.receipts;
     run.completed_input_counts = result.input_counts;
     if (result.file_changes_lost and run.file_change_observation != null) {
         run.file_changes_known_loss = true;

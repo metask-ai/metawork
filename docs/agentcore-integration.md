@@ -168,11 +168,11 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
 
-当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
+当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配后标为待交付；owning event 成功入队后才移除 Agent 槽。消费者关闭导致未入队时，已合法匹配的引用通过有界 TerminalResult 尾部交接，下一 Run 不继承槽位。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
 `DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
 
-Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才一次性消费该回执，以独立 sideband 交给 Product 的成果登记入口；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
+Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才标为待交付，以独立 sideband 交给 Product 的成果登记入口；入队成功后才移除，关闭时未入队的匹配回执通过有界 TerminalResult 尾部交接；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。Product 先登记可信回执，再处理可降级的 Tool 详情。未匹配的槽不能仅因文件存在或 Run 终态而登记；队列和终态尾部按可信 identity 去重，生图同时保留 Tool 关联。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
 

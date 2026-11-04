@@ -17,7 +17,7 @@ const execution_credentials = @import("product_task_execution_binding").credenti
 pub const automatic_title_result_capacity: usize = 512;
 pub const ui_record_detail_capacity: usize = 512;
 pub const permission_summary_field_capacity: usize = 128;
-pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+pub const tool_route_digest_bytes = agent.tool_route_digest_bytes;
 pub const tool_product_id_capacity = "tool-".len + 20;
 pub const file_change_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const file_change_product_id_capacity = "change-".len + (20 * 3) + 2;
@@ -377,6 +377,8 @@ pub const ToolView = struct {
     content_truncated: bool = false,
     redacted: bool = false,
     file_refs: ?[]?FileReferenceView = null,
+    /// Runtime accounting; cold restoration derives this from trusted images.
+    receipt_metadata: bool = false,
 };
 
 pub const UsageView = struct {
@@ -878,6 +880,9 @@ pub const RunExecution = struct {
     run_control: agent.RunControl = undefined,
     checkpoint_export_context: CheckpointExportContext = undefined,
     automatic_title: AutomaticTitle = .{},
+    /// Worker writes before terminal publication; the main loop consumes the
+    /// bounded trusted tail before finalization, without borrowing Agent state.
+    terminal_receipts: agent.TerminalReceipts = .{},
 };
 
 pub const RunRecord = struct {
@@ -1568,6 +1573,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         const run = &(entry.* orelse continue);
         if (!run.terminal_event_drain_marked) continue;
         std.debug.assert(terminalPayload(run) != null);
+        if (run.execution) |execution| if (!execution.terminal_receipts.isEmpty()) continue;
         run.terminal_event_drain_marked = false;
         if (run.open_output_segment != null or
             run.output_continued_group != null or
@@ -1658,6 +1664,7 @@ pub const TextProjectionResult = struct {
 /// performs memory mechanics and never retains Task, Run, or Agent values.
 pub const EventProjection = struct {
     context: *anyopaque,
+    retain_generated_image_fn: *const fn (*anyopaque, *RunRecord, []const u8, []const u8, u64) EventProjectionError!*ToolView,
     record_output_fn: ?*const fn (*anyopaque, *RunRecord, *const agent.FileDeliveryReceipt) EventProjectionError!void = null,
     max_assistant_message_bytes: usize,
     max_commentary_segments_per_run: usize,
@@ -2021,12 +2028,10 @@ pub fn applyEvent(
                 const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
                 try record(projection.context, run, receipt);
             }
-            const tool = try projection.findOrCreateTool(
-                run,
-                result.id,
-                result.name,
-                result.input,
-            );
+            const tool = if (envelope.generated_image_path) |path|
+                try projection.retain_generated_image_fn(projection.context, run, result.id, path, task.durable.id)
+            else
+                try projection.findOrCreateTool(run, result.id, result.name, result.input);
             tool.is_error = result.is_error;
             tool.elapsed_ms = result.elapsed_ms;
             tool.state = if (result.is_error) .failed else .completed;
@@ -2043,13 +2048,8 @@ pub fn applyEvent(
             tool.input_truncated = input.truncated;
             tool.content_truncated = content.truncated;
             tool.redacted = tool.redacted or input.redacted or content.redacted;
-            try projection.replaceFileReferences(
-                tool,
-                envelope,
-                run.initial_credentials[0],
-                task.durable.id,
-                run.generation,
-            );
+            if (envelope.generated_image_path == null and !tool.receipt_metadata)
+                try projection.replaceFileReferences(tool, envelope, run.initial_credentials[0], task.durable.id, run.generation);
             checkCoreToolCount(run);
             durable_boundary = true;
         },
@@ -2369,11 +2369,7 @@ fn findUiRecordByAgentRequestId(
     return null;
 }
 
-fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
-    var digest: [tool_route_digest_bytes]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
-    return digest;
-}
+const toolRouteDigest = agent.toolRouteDigest;
 
 fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
     const digest = toolRouteDigest(id);

@@ -6124,24 +6124,28 @@ pub const Runtime = struct {
         }
     }
 
+    fn taskEventEffects(self: *Runtime) task_runtime.EventEffects {
+        return .{
+            .text = self.taskRuntimeTextProjection(),
+            .file_change_diff = .{
+                .context = self,
+                .enqueue_fn = enqueueFileChangeDiff,
+            },
+            .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
+            .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
+            .max_tool_field_bytes = self.limits.max_tool_field_bytes,
+            .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
+            .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
+            .max_file_changes_per_run = self.limits.max_file_changes_per_run,
+            .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
+            .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
+        };
+    }
+
     pub fn applyEvent(self: *Runtime, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
         const outcome = self.task_runtime.applyEvent(
             envelope,
-            .{
-                .text = self.taskRuntimeTextProjection(),
-                .file_change_diff = .{
-                    .context = self,
-                    .enqueue_fn = enqueueFileChangeDiff,
-                },
-                .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
-                .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
-                .max_tool_field_bytes = self.limits.max_tool_field_bytes,
-                .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
-                .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
-                .max_file_changes_per_run = self.limits.max_file_changes_per_run,
-                .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
-                .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
-            },
+            self.taskEventEffects(),
         ) catch |err| {
             if (self.task_runtime.takeEventRejectionDiagnostic(envelope.session_id, envelope.run_id)) |rejection|
                 std.log.warn("task.event_rejection session_id={d} run_id={d} core_manifest_sha256={s} facts={any}", .{
@@ -6741,6 +6745,25 @@ pub const Runtime = struct {
     }
 
     fn finalizeTerminalRunsAfterDrain(self: *Runtime, events: task_runtime.EventDrainStatus) void {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (events.pending(task.runtime.routeId()) != 0) continue;
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (!run.terminal_event_drain_marked) continue;
+                const execution = run.execution orelse continue;
+                if (execution.terminal_receipts.isEmpty()) continue;
+                const changed = self.task_runtime.adoptTerminalReceipts(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| failed: {
+                    switch (err) {
+                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
+                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
+                    }
+                    // No borrowed receipt or Agent pointer outlives this fact.
+                    // Physical allocation failures retain the real Host failure.
+                    execution.terminal_receipts = .{};
+                    break :failed true;
+                };
+                if (changed) self.encoded_views.invalidateEvent(task.durable.id, run.id);
+            };
+        };
         const finished_at_ms = self.run_clock.now();
         const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
@@ -8436,6 +8459,7 @@ pub const Runtime = struct {
             .allocator = self.allocator,
             .limits = self.taskPersistenceLimits(),
             .copy_fn = copyRestoredTaskText,
+            .copy_receipt_fn = copyRestoredReceiptText,
             .alloc_fn = allocRestoredTaskText,
             .append_text_fn = appendRestoredTaskText,
             .free_fn = freeRestoredTaskText,
@@ -8452,6 +8476,11 @@ pub const Runtime = struct {
     ) task_persistence.ProjectionError![]u8 {
         const self: *Runtime = @ptrCast(@alignCast(context));
         return self.copyBounded(value, max) catch |err| return @errorCast(err);
+    }
+
+    fn copyRestoredReceiptText(context: *anyopaque, value: []const u8, max: usize) task_persistence.ProjectionError![]u8 {
+        const projected = try projectTaskReceiptText(context, value, max, &.{});
+        return projected.value;
     }
 
     fn allocRestoredTaskText(
@@ -8709,6 +8738,12 @@ pub const Runtime = struct {
         };
     }
 
+    fn projectTaskReceiptText(context: *anyopaque, value: []const u8, max: usize, sensitive: []const []const u8) (std.mem.Allocator.Error || error{ProjectionCapacity})!task_runtime.ProjectedText {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const projected = self.copySanitizedText(value, max, sensitive, .receipt) catch |err| return @errorCast(err);
+        return .{ .value = projected.value, .truncated = projected.truncated, .redacted = projected.redacted };
+    }
+
     fn freeTaskRuntimeText(context: *anyopaque, value: []u8) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.freeTracked(value);
@@ -8752,6 +8787,7 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .project_fn = projectTaskRuntimeText,
+            .project_receipt_fn = projectTaskReceiptText,
             .discard_candidate_fn = freeTaskRuntimeText,
             .discard_previous_fn = discardPreviousTaskRuntimeText,
             .restore_previous_fn = restorePreviousTaskRuntimeText,
@@ -9744,6 +9780,11 @@ pub const Runtime = struct {
         max: usize,
         credentials: []const []const u8,
     ) Error!ProjectedCopy {
+        return self.copySanitizedText(value, max, credentials, .display);
+    }
+
+    const TextRetention = enum { display, receipt };
+    fn copySanitizedText(self: *Runtime, value: []const u8, max: usize, credentials: []const []const u8, retention: TextRetention) Error!ProjectedCopy {
         // Synchronous main-thread preparation may borrow these values. Include
         // every live owner, so another Task's old token is sanitized before it
         // becomes product history, including matches across the truncation edge.
@@ -9772,7 +9813,10 @@ pub const Runtime = struct {
             known.values.items,
         );
         return .{
-            .value = try self.copyBounded(scratch[0..result.len], max),
+            .value = switch (retention) {
+                .display => try self.copyBounded(scratch[0..result.len], max),
+                .receipt => try self.allocator.dupe(u8, scratch[0..result.len]),
+            },
             .truncated = result.truncated,
             .redacted = result.redacted,
         };
@@ -22031,7 +22075,7 @@ test "Outputs require trusted delivery sideband and reject conflicting or excess
     try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
     try std.testing.expectEqual(@as(u64, 42), run.outputs[0].?.size_bytes);
     const admitted_bytes = control.projection_bytes;
-    try std.testing.expectEqual(baseline_bytes + "成果/final.docx".len, admitted_bytes);
+    try std.testing.expectEqual(baseline_bytes, admitted_bytes);
     try control.applyEvent(&envelope);
     try std.testing.expectEqual(admitted_bytes, control.projection_bytes);
     try std.testing.expect(run.outputs[1] == null);
@@ -22050,6 +22094,82 @@ test "Outputs require trusted delivery sideband and reject conflicting or excess
     defer wrong_tool.deinit();
     wrong_tool.delivered_file = envelope.delivered_file;
     try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&wrong_tool));
+}
+
+test "terminal receipt tail is adopted before completion and deduplicates queued delivery" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const receipt = try lifecycle.FileDeliveryReceipt.init(@splat(7), "outputs/tail.docx", 17, @splat(8));
+    var queued = try testEnvelope(task.runtime.routeId(), run.id, "{\"tool_result\":{\"id\":\"queued-delivery\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified\",\"is_error\":false}}");
+    defer queued.deinit();
+    queued.delivered_file = receipt;
+    try control.applyEvent(&queued);
+    try std.testing.expect(run.execution != null);
+    run.execution.?.terminal_receipts.delivered_files[0] = receipt;
+    run.execution.?.terminal_receipts.generated_images[0] = .{
+        .tool_route_digest = lifecycle.toolRouteDigest("tail-generated"),
+        .receipt = try lifecycle.ImageGenerationReceipt.init("generated-images/tail.png", 32, .png),
+    };
+    _ = task_test_state.recordEventProjectionFailure(run);
+    control.limits.max_projection_bytes = control.projection_bytes;
+    try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+    control.markTerminalRunsBeforeEventDrain();
+    try std.testing.expect(!task_test_state.finalizeMarkedTerminalRunsAfterEventDrain(task, null, null));
+    try std.testing.expect(!run.event_stream_finalized);
+    finalizeTestTerminalDrain(&control);
+    try std.testing.expect(run.execution.?.terminal_receipts.isEmpty());
+    try std.testing.expect(run.event_stream_finalized);
+    try std.testing.expectEqual(.completed, productTerminalFacts(run).?.outcome);
+    try std.testing.expectEqualStrings(receipt.pathView(), run.outputs[0].?.locator);
+    try std.testing.expect(run.outputs[1] == null);
+    const image_tool = for (run.tools) |entry| {
+        if (entry) |tool| if (tool.receipt_metadata) break tool;
+    } else return error.MissingGeneratedImage;
+    try std.testing.expectEqualStrings("generated-images/tail.png", image_tool.file_refs.?[0].?.locator);
+    const order = task.durable.next_presentation_order;
+    finalizeTestTerminalDrain(&control);
+    try std.testing.expectEqual(order, task.durable.next_presentation_order);
+    try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
+}
+
+test "trusted delivery and image metadata survive full Tool and display capacity" {
+    for ([_]bool{ false, true }) |generated| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        for ([_][]const u8{
+            "{\"tool_start\":{\"id\":\"one\",\"name\":\"Read\",\"input\":\"first file\"}}",
+            "{\"tool_start\":{\"id\":\"two\",\"name\":\"Read\",\"input\":\"second file\"}}",
+        }) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        control.limits.max_projection_bytes = control.projection_bytes;
+        var result = try testEnvelope(task.runtime.routeId(), run.id, if (generated)
+            "{\"tool_result\":{\"id\":\"image\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}"
+        else
+            "{\"tool_result\":{\"id\":\"delivery\",\"name\":\"DeliverFile\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
+        defer result.deinit();
+        if (generated) {
+            result.generated_image_path = try std.testing.allocator.dupe(u8, "generated-images/kept.png");
+            try control.applyEvent(&result);
+            const protected = for (run.tools) |entry| {
+                if (entry) |tool| if (tool.receipt_metadata) break tool;
+            } else return error.MissingGeneratedImage;
+            try std.testing.expectEqualStrings("generated-images/kept.png", protected.file_refs.?[0].?.locator);
+            try std.testing.expect(protected.file_refs.?[0].?.generated_image);
+            try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        } else {
+            result.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "outputs/kept.docx", 12, @splat(4));
+            try std.testing.expectError(error.ToolCapacity, control.applyEvent(&result));
+            try std.testing.expectEqualStrings("outputs/kept.docx", run.outputs[0].?.locator);
+        }
+        try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
+    }
 }
 
 test "Outputs persist through real history restore and sanitized locators lose file authority" {

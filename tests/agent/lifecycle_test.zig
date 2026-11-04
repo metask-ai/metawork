@@ -3771,6 +3771,85 @@ test "close wakes a saturated event callback without fatal or poison" {
     try std.testing.expect(runtime.takeEvent() == null);
 }
 
+test "close returns a matched generated image through the terminal tail when its event cannot enqueue" {
+    const Callback = struct {
+        session: *lifecycle.Session,
+        identity: wire.RunContextV1,
+        encoded: []const u8,
+        status: u32 = wire.EVENT_FATAL,
+        done: std.Io.Event = .unset,
+        fn run(self: *@This()) void {
+            self.status = lifecycle.Session.onEvent(self.session, &self.identity, sdk.bytesView(self.encoded));
+            self.done.set(std.testing.io);
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_capacity = 1,
+        .per_session_event_capacity = 1,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "retain matched image while closing" });
+    var core = ImageRunWork{ .session = session, .id = id };
+    {
+        const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&core});
+        defer thread.join();
+        defer fake_core.releaseControlled();
+        fake_core.waitRunEntered();
+        const receipt = try lifecycle.ImageGenerationReceipt.init("generated-images/tail.png", 123, .png);
+        session.mutex.lockUncancelable(std.testing.io);
+        session.image_receipts[0] = receipt;
+        session.mutex.unlock(std.testing.io);
+        try runtime.events.enqueue(try fixture.pumpEnvelope(session.id, id, "{\"text_chunk\":\"retained queue owner\"}"));
+        const content = "{\"status\":\"saved\",\"path\":\"generated-images/tail.png\",\"media_type\":\"image/png\",\"size_bytes\":123}";
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try std.json.Stringify.value(.{ .tool_result = .{ .id = "tail-image", .name = "GenerateImage", .input = "{}", .content = content, .is_error = false } }, .{}, &writer);
+        var callback = Callback{ .session = session, .identity = imageIdentity(session, id), .encoded = writer.buffered() };
+        const callback_thread = try std.Thread.spawn(.{}, Callback.run, .{&callback});
+        defer callback_thread.join();
+        defer session.stopEventDelivery();
+        var matched = false;
+        for (0..5000) |_| {
+            session.mutex.lockUncancelable(std.testing.io);
+            matched = session.matched_image_receipts[0] != null;
+            session.mutex.unlock(std.testing.io);
+            if (matched) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(matched);
+        const closing = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+        defer closing.join();
+        defer fake_core.releaseControlled();
+        try callback.done.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .boot } });
+        try std.testing.expectEqual(wire.EVENT_CONTINUE, callback.status);
+        fake_core.releaseControlled();
+    }
+    var terminal = core.result.?;
+    defer terminal.deinit();
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expect(terminal.first_callback_rejection == null);
+    try std.testing.expect(terminal.event_delivery_lost);
+    const image = terminal.receipts.generated_images[0].?;
+    try std.testing.expectEqualStrings("generated-images/tail.png", image.receipt.pathView());
+    try std.testing.expectEqualSlices(u8, &lifecycle.toolRouteDigest("tail-image"), &image.tool_route_digest);
+    try std.testing.expect(session.image_receipts[0] == null);
+    var retained = runtime.takeEvent().?;
+    retained.deinit();
+    try std.testing.expect(runtime.takeEvent() == null);
+}
+
 test "ordinary Stop leaves the saturated event callback waiting for consumption" {
     fake_core.reset();
     fake_core.setNextPlan(.event_callback);

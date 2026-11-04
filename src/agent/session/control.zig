@@ -197,6 +197,32 @@ pub const SubmittedInputs = struct {
     }
 };
 
+pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+pub fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
+    var digest: [tool_route_digest_bytes]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
+    return digest;
+}
+
+/// Only exact successful tool-result matches may enter this bounded tail.
+/// A route digest retains tool identity without copying raw tool text.
+pub const TerminalReceipts = struct {
+    const delivery = @import("agent_file_delivery");
+    const images = @import("../image_generation.zig");
+    pub const GeneratedImage = struct {
+        tool_route_digest: [tool_route_digest_bytes]u8,
+        receipt: images.Receipt,
+    };
+    delivered_files: [delivery.max_receipts_per_run]?delivery.Receipt = @splat(null),
+    generated_images: [images.production_limits.sends_per_run]?GeneratedImage = @splat(null),
+
+    pub fn isEmpty(self: *const TerminalReceipts) bool {
+        for (self.delivered_files) |entry| if (entry != null) return false;
+        for (self.generated_images) |entry| if (entry != null) return false;
+        return true;
+    }
+};
+
 /// Immutable Agent-owned facts for exactly one begun Run. The caller must copy
 /// the bounded diagnostic into its admission-reserved Run record, then deinit
 /// this value. `session_disposition_at_completion` is a completion-time
@@ -218,6 +244,7 @@ pub const TerminalResult = struct {
     file_changes_lost: bool = false,
     /// Validated events omitted after the consumer stopped, not a Core failure.
     event_delivery_lost: bool = false,
+    receipts: TerminalReceipts = .{},
     failure: ?TerminalFailure,
     session_disposition_at_completion: SessionDisposition,
     durable_budget: ?DurableBudgetObservation = null,

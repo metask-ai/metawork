@@ -130,6 +130,9 @@ pub const TerminalFailure = session_control.TerminalFailure;
 pub const SessionDisposition = session_control.SessionDisposition;
 pub const DurableBudgetObservation = session_control.DurableBudgetObservation;
 pub const TerminalResult = session_control.TerminalResult;
+pub const TerminalReceipts = session_control.TerminalReceipts;
+pub const tool_route_digest_bytes = session_control.tool_route_digest_bytes;
+pub const toolRouteDigest = session_control.toolRouteDigest;
 pub const ModelError = session_control.ModelError;
 pub const CallbackRejection = session_control.CallbackRejection;
 pub const CoreEventKind = session_control.CoreEventKind;
@@ -652,10 +655,12 @@ pub const Session = struct {
     run_image: ?RunImage = null,
     image_sends: usize = 0,
     image_receipts: [image_generation.production_limits.sends_per_run]?image_generation.Receipt = @splat(null),
+    matched_image_receipts: [image_generation.production_limits.sends_per_run]?[tool_route_digest_bytes]u8 = @splat(null),
     image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
     run_delivery: ?FileDeliveryInput = null,
     delivery_attempts: usize = 0,
     delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
+    matched_delivery_receipts: [deliver_file.max_receipts_per_run]bool = @splat(false),
     delivery_calls: [deliver_file.max_active_calls]?*std.atomic.Value(bool) = @splat(null),
     id: u64,
     provider_id: []u8,
@@ -833,9 +838,11 @@ pub const Session = struct {
         image.* = null;
         self.image_sends = 0;
         @memset(&self.image_receipts, null);
+        @memset(&self.matched_image_receipts, null);
         self.run_delivery = delivery;
         self.delivery_attempts = 0;
         @memset(&self.delivery_receipts, null);
+        @memset(&self.matched_delivery_receipts, false);
         self.input_ready = false;
         self.input_window_started = false;
         self.submitted_inputs = .{};
@@ -2472,6 +2479,7 @@ pub const Session = struct {
             .first_callback_rejection = self.first_callback_rejection,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
             .event_delivery_lost = self.event_delivery_lost.load(.acquire),
+            .receipts = self.takeTerminalReceiptsLocked(),
             .failure = final_failure,
             .model_error = if (final_failure == .dependency_contract) null else observed_model_error,
             .session_disposition_at_completion = self.dispositionLocked(),
@@ -2766,7 +2774,10 @@ pub const Session = struct {
         return .{ .failed = .capacity };
     }
 
-    fn takeDeliveredFile(self: *Session, event: sdk.DecodedCoreEvent) ?FileDeliveryReceipt {
+    const MatchedDelivery = struct { slot: usize, receipt: FileDeliveryReceipt };
+    const MatchedImage = struct { slot: usize, path: []u8 };
+
+    fn matchDeliveredFile(self: *Session, event: sdk.DecodedCoreEvent) ?MatchedDelivery {
         const result = switch (event) {
             .known => |value| switch (value) {
                 .tool_result => |value_result| value_result,
@@ -2777,18 +2788,19 @@ pub const Session = struct {
         if (result.is_error or !std.mem.eql(u8, result.name, deliver_file.name)) return null;
         self.lock();
         defer self.unlock();
-        for (&self.delivery_receipts) |*entry| {
-            const receipt = entry.* orelse continue;
+        for (self.delivery_receipts, 0..) |entry, index| {
+            if (self.matched_delivery_receipts[index]) continue;
+            const receipt = entry orelse continue;
             var buffer: [deliver_file.result_bytes]u8 = undefined;
             const expected = deliver_file.result(&buffer, .{ .verified = receipt }) catch unreachable;
             if (!std.mem.eql(u8, expected, result.content)) continue;
-            entry.* = null;
-            return receipt;
+            self.matched_delivery_receipts[index] = true;
+            return .{ .slot = index, .receipt = receipt };
         }
         return null;
     }
 
-    fn takeGeneratedImagePath(self: *Session, event: sdk.DecodedCoreEvent) !?[]u8 {
+    fn matchGeneratedImage(self: *Session, event: sdk.DecodedCoreEvent) !?MatchedImage {
         const result = switch (event) {
             .known => |value| switch (value) {
                 .tool_result => |result| result,
@@ -2799,16 +2811,49 @@ pub const Session = struct {
         if (result.is_error or !std.mem.eql(u8, result.name, generate_image.name)) return null;
         self.lock();
         defer self.unlock();
-        for (&self.image_receipts) |*slot| {
-            const receipt = slot.* orelse continue;
+        for (self.image_receipts, 0..) |slot, index| {
+            if (self.matched_image_receipts[index] != null) continue;
+            const receipt = slot orelse continue;
             var buffer: [4096]u8 = undefined;
             const expected = generate_image.result(&buffer, .{ .saved = receipt }) catch unreachable;
             if (!std.mem.eql(u8, result.content, expected)) continue;
+            self.matched_image_receipts[index] = toolRouteDigest(result.id);
             const path = try self.agent_runtime.allocator.dupe(u8, receipt.pathView());
-            slot.* = null;
-            return path;
+            return .{ .slot = index, .path = path };
         }
         return null;
+    }
+
+    fn acknowledgeReceipts(self: *Session, delivery: ?usize, image: ?usize) void {
+        self.lock();
+        defer self.unlock();
+        if (delivery) |index| {
+            std.debug.assert(self.matched_delivery_receipts[index]);
+            self.delivery_receipts[index] = null;
+            self.matched_delivery_receipts[index] = false;
+        }
+        if (image) |index| {
+            std.debug.assert(self.matched_image_receipts[index] != null);
+            self.image_receipts[index] = null;
+            self.matched_image_receipts[index] = null;
+        }
+    }
+
+    fn takeTerminalReceiptsLocked(self: *Session) TerminalReceipts {
+        var receipts: TerminalReceipts = .{};
+        for (&self.delivery_receipts, 0..) |*entry, index| {
+            if (!self.matched_delivery_receipts[index]) continue;
+            receipts.delivered_files[index] = entry.*;
+            entry.* = null;
+            self.matched_delivery_receipts[index] = false;
+        }
+        for (&self.image_receipts, 0..) |*entry, index| {
+            const digest = self.matched_image_receipts[index] orelse continue;
+            receipts.generated_images[index] = .{ .tool_route_digest = digest, .receipt = entry.*.? };
+            entry.* = null;
+            self.matched_image_receipts[index] = null;
+        }
+        return receipts;
     }
 
     pub fn onEvent(
@@ -2914,16 +2959,17 @@ pub const Session = struct {
             self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = kind, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
-        const generated_image_path = self.takeGeneratedImagePath(parsed.value) catch {
+        const generated_image = self.matchGeneratedImage(parsed.value) catch {
             self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len });
             self.agent_runtime.allocator.free(owned_json);
             parsed.deinit();
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.EVENT_FATAL;
         };
+        const delivered_file = self.matchDeliveredFile(parsed.value);
         var envelope = OwnedCoreEvent{
-            .generated_image_path = generated_image_path,
-            .delivered_file = self.takeDeliveredFile(parsed.value),
+            .generated_image_path = if (generated_image) |image| image.path else null,
+            .delivered_file = if (delivered_file) |delivery| delivery.receipt else null,
             .session_id = self.id,
             .run_id = run_id,
             .encoded_bytes = encoded.len,
@@ -2970,6 +3016,9 @@ pub const Session = struct {
             self.recordCallbackRejection(.{ .boundary = .event_pump, .reason = .queue_rejected, .event = event_kind, .failure = err, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
+        // The consumer may already have released the envelope. Only captured
+        // slot identities are used after successful ownership transfer.
+        self.acknowledgeReceipts(if (delivered_file) |delivery| delivery.slot else null, if (generated_image) |image| image.slot else null);
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
             self.stopEventDelivery();
@@ -3654,49 +3703,67 @@ test "generated image attestation requires one matching committed Host receipt" 
     session.agent_runtime = &runtime;
     session.mutex = .init;
     session.image_receipts = @splat(null);
+    session.matched_image_receipts = @splat(null);
     const receipt = try image_generation.Receipt.init("generated-images/real.jpg", 123, .jpeg);
     var buffer: [4096]u8 = undefined;
     const content = try generate_image.result(&buffer, .{ .saved = receipt });
     var event: sdk.DecodedCoreEvent = .{ .known = .{ .tool_result = .{ .id = "call", .name = generate_image.name, .input = "{}", .content = content, .is_error = false } } };
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     session.image_receipts[0] = receipt;
     event.known.tool_result.name = "Read";
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     event.known.tool_result.name = generate_image.name;
     event.known.tool_result.is_error = true;
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     event.known.tool_result.is_error = false;
     event.known.tool_result.content = "{\"status\":\"saved\",\"path\":\"generated-images/forged.jpg\"}";
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     event.known.tool_result.content = content;
-    const path = (try session.takeGeneratedImagePath(event)).?;
+    const matched = (try session.matchGeneratedImage(event)).?;
+    const path = matched.path;
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings(receipt.pathView(), path);
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
+    try std.testing.expect(session.image_receipts[0] != null);
+    session.image_receipts[1] = try image_generation.Receipt.init("generated-images/unmatched.jpg", 9, .jpeg);
+    const tail = session.takeTerminalReceiptsLocked();
+    try std.testing.expectEqualSlices(u8, &toolRouteDigest("call"), &tail.generated_images[0].?.tool_route_digest);
+    try std.testing.expectEqualStrings(receipt.pathView(), tail.generated_images[0].?.receipt.pathView());
+    try std.testing.expect(tail.generated_images[1] == null);
+    try std.testing.expect(session.takeTerminalReceiptsLocked().isEmpty());
+    try std.testing.expect(session.image_receipts[1] != null);
 }
 
-test "delivery attestation consumes only the exact successful Host receipt once" {
+test "delivery attestation claims only the exact successful Host receipt once" {
     var runtime: Runtime = undefined;
     runtime.io = std.testing.io;
     var session: Session = undefined;
     session.agent_runtime = &runtime;
     session.mutex = .init;
     session.delivery_receipts = @splat(null);
+    session.matched_delivery_receipts = @splat(false);
     const receipt = try FileDeliveryReceipt.init(@splat(1), "outputs/final.docx", 123, @splat(2));
     var buffer: [deliver_file.result_bytes]u8 = undefined;
     const content = try deliver_file.result(&buffer, .{ .verified = receipt });
     var event: sdk.DecodedCoreEvent = .{ .known = .{ .tool_result = .{ .id = "call", .name = deliver_file.name, .input = "{}", .content = content, .is_error = false } } };
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     session.delivery_receipts[0] = receipt;
     event.known.tool_result.name = "Read";
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.name = deliver_file.name;
     event.known.tool_result.is_error = true;
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.is_error = false;
     event.known.tool_result.content = "forged receipt";
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.content = content;
-    try std.testing.expectEqualStrings(receipt.pathView(), session.takeDeliveredFile(event).?.pathView());
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expectEqualStrings(receipt.pathView(), session.matchDeliveredFile(event).?.receipt.pathView());
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
+    try std.testing.expect(session.delivery_receipts[0] != null);
+    session.delivery_receipts[1] = try FileDeliveryReceipt.init(@splat(3), "outputs/unmatched.docx", 9, @splat(4));
+    const tail = session.takeTerminalReceiptsLocked();
+    try std.testing.expectEqualStrings(receipt.pathView(), tail.delivered_files[0].?.pathView());
+    try std.testing.expect(tail.delivered_files[1] == null);
+    try std.testing.expect(session.takeTerminalReceiptsLocked().isEmpty());
+    try std.testing.expect(session.delivery_receipts[1] != null);
 }
