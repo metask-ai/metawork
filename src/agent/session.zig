@@ -590,6 +590,7 @@ pub const Error = error{
     McpRestoreSourceChanged,
     McpRefreshInProgress,
     McpConfigurationApplyFailed,
+    McpConfigurationApplyUncertain,
     McpConfigurationApplyLimit,
     McpNotRefreshed,
     McpCheckpointBudgetRequired,

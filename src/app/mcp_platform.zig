@@ -11,6 +11,8 @@ const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 const process_compat = @import("metawork_mcp_process_compat");
+const catalog_budget = @import("mcp_catalog_budget.zig");
+pub const CatalogBudget = catalog_budget.Budget;
 
 // Shared by formal connections and disposable test Runtime connections.
 // Core-internal process creation cannot participate in this lock.
@@ -647,6 +649,24 @@ pub const HttpAuthorizations = struct {
     allocator: std.mem.Allocator,
     slots: []*HttpAuthSlot = &.{},
 
+    /// Prepare the actual member mapping before apply. Unchanged transports
+    /// retain their existing rotation/failure slot, including retained members.
+    pub fn compose(self: *const HttpAuthorizations, additions: *const HttpAuthorizations, ids: []const []const u8, replaced_id: ?[]const u8) std.mem.Allocator.Error!HttpAuthorizations {
+        var slots: std.ArrayList(*HttpAuthSlot) = .empty;
+        defer slots.deinit(self.allocator);
+        errdefer for (slots.items) |slot| slot.release();
+        for (ids) |id| {
+            const source = if (replaced_id != null and std.mem.eql(u8, replaced_id.?, id)) additions else self;
+            for (source.slots) |slot| {
+                if (!std.mem.eql(u8, slot.server_id, id)) continue;
+                try slots.append(self.allocator, slot);
+                slot.retain();
+                break;
+            }
+        }
+        return .{ .allocator = self.allocator, .slots = try slots.toOwnedSlice(self.allocator) };
+    }
+
     pub fn deinit(self: *HttpAuthorizations) void {
         for (self.slots) |slot| slot.release();
         if (self.slots.len != 0) self.allocator.free(self.slots);
@@ -822,6 +842,7 @@ pub const RuntimeBuild = struct {
 };
 
 pub const HostEnvironment = struct {
+    catalog_budget: ?*catalog_budget.Budget = null,
     executable_search_path: ?[]const u8 = null,
     windows_system_root: ?[]const u8 = null,
 
@@ -902,6 +923,11 @@ pub fn buildRuntime(
             createHttpOwner(io, allocator, server, preparation, &authorization)
         else
             error.InvalidConfig) catch |err| {
+            allocator.destroy(owner);
+            return err;
+        };
+        owner.* = catalog_budget.wrapTransport(allocator, owner, server.timeout_ms, host_environment.catalog_budget) catch |err| {
+            owner.deinit();
             allocator.destroy(owner);
             return err;
         };

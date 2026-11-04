@@ -15,6 +15,13 @@ pub const max_store_bytes: usize = 256 * 1024;
 pub const max_transaction_bytes: usize = 64 * 1024;
 const lock_file_name = ".registry.lock";
 
+/// Management exchanges have a Host ceiling; tool calls keep the user timeout.
+pub const max_management_timeout_ms: u32 = 120_000;
+pub const candidate_timeout_windows: u32 = 8;
+pub fn managementTimeoutMs(configured: u32) u32 {
+    return @min(configured, max_management_timeout_ms);
+}
+
 pub const Limits = struct {
     max_servers: usize,
     max_tools_per_server: usize,
@@ -584,6 +591,8 @@ pub const BeginCodeExchangeInput = struct {
 
 pub const BeginRefreshInput = struct {
     server_id: []const u8,
+    /// Product has proved a disabled row is still the referenced actual source.
+    retained_member: bool = false,
 };
 
 pub const CompleteRefreshInput = struct {
@@ -712,6 +721,162 @@ pub const ManagementInspection = struct {
     server_count: usize,
 };
 
+/// The attempted target is independent of the global Desired generation.
+/// IDs and fingerprints contain no credential material.
+pub const RuntimeApplyTarget = struct {
+    id_storage: [128]u8 = undefined,
+    id_len: usize,
+    fingerprint: [32]u8,
+    kind: enum { add, replace, remove },
+
+    pub fn init(id_value: []const u8, server: ?ServerWire, kind: @FieldType(RuntimeApplyTarget, "kind")) RuntimeApplyTarget {
+        std.debug.assert(id_value.len <= 128);
+        var value: RuntimeApplyTarget = .{ .id_len = id_value.len, .fingerprint = @splat(0), .kind = kind };
+        @memcpy(value.id_storage[0..id_value.len], id_value);
+        if (server) |target| {
+            var hash = Sha256.init(.{});
+            hashField(&hash, "metawork.mcp.apply-target/v1");
+            hashField(&hash, &runtimeDescriptorFingerprint(target));
+            hashField(&hash, &authenticationFingerprint(target));
+            hashField(&hash, if (target.enabled) "enabled" else "disabled");
+            if (target.connection_approval) |approval| hashField(&hash, approval.fingerprint);
+            hash.final(&value.fingerprint);
+        }
+        return value;
+    }
+
+    pub fn id(self: *const RuntimeApplyTarget) []const u8 {
+        return self.id_storage[0..self.id_len];
+    }
+};
+
+pub const RuntimeApplyFailure = enum { preparation, rejected, unknown };
+
+pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server: []const u8 };
+
+/// Product's attempt ledger. Membership growth never invalidates failures;
+/// removal/replacement can reopen them after the current round finishes.
+pub const RuntimeConvergence = struct {
+    pub const Outcome = enum { pending, rejected, failed, capacity };
+    const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome };
+    results: std.ArrayList(Result) = .empty,
+    epoch: u64 = 0,
+    round: u64 = 1,
+
+    pub fn deinit(self: *RuntimeConvergence, allocator: std.mem.Allocator) void {
+        self.results.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn handled(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        return self.handledInRound(target, false);
+    }
+
+    fn handledInRound(self: *const RuntimeConvergence, target: RuntimeApplyTarget, next_round: bool) bool {
+        for (self.results.items) |result| {
+            if (!std.mem.eql(u8, result.target.id(), target.id()) or
+                !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
+            return result.outcome != .pending and (result.epoch == self.epoch or (!next_round and result.round == self.round));
+        }
+        return false;
+    }
+
+    /// Reserve result storage before any external effect.
+    pub fn prepare(self: *RuntimeConvergence, allocator: std.mem.Allocator, target: RuntimeApplyTarget) std.mem.Allocator.Error!void {
+        for (self.results.items) |*result| {
+            if (!std.mem.eql(u8, result.target.id(), target.id())) continue;
+            result.* = .{ .target = target, .epoch = self.epoch, .round = self.round, .outcome = .pending };
+            return;
+        }
+        try self.results.append(allocator, .{ .target = target, .epoch = self.epoch, .round = self.round, .outcome = .pending });
+    }
+
+    pub fn reject(self: *RuntimeConvergence, target: RuntimeApplyTarget, outcome: Outcome) void {
+        std.debug.assert(outcome != .pending);
+        for (self.results.items) |*result| {
+            if (std.mem.eql(u8, result.target.id(), target.id()) and
+                std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint))
+            {
+                result.outcome = outcome;
+                return;
+            }
+        }
+        unreachable;
+    }
+
+    pub fn applied(self: *RuntimeConvergence, target: RuntimeApplyTarget) void {
+        for (self.results.items, 0..) |result, index| {
+            if (std.mem.eql(u8, result.target.id(), target.id())) {
+                _ = self.results.swapRemove(index);
+                break;
+            }
+        }
+        if (target.kind != .add) self.epoch +|= 1;
+    }
+
+    pub fn nextRound(self: *RuntimeConvergence) bool {
+        for (self.results.items) |result| {
+            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending) {
+                self.round +|= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn retry(self: *RuntimeConvergence) void {
+        self.results.clearRetainingCapacity();
+        self.round +|= 1;
+    }
+
+    pub fn retryServer(self: *RuntimeConvergence, server_id: []const u8) void {
+        for (self.results.items, 0..) |result, index| {
+            if (std.mem.eql(u8, result.target.id(), server_id)) {
+                _ = self.results.swapRemove(index);
+                break;
+            }
+        }
+    }
+};
+
+/// Immutable full Runtime target for one atomic apply. Only candidate_id
+/// requires a newly constructed transport; every other member is shared.
+pub const RuntimeApplyStep = struct {
+    pub const Grant = struct { id: []const u8, tools: []const []const u8 };
+    preparation: Preparation,
+    member_ids: []const []const u8,
+    grants: []const Grant,
+    candidate_id: ?[]const u8,
+    target: RuntimeApplyTarget,
+
+    pub fn init(allocator: std.mem.Allocator, desired: RegistryWire, servers: []ServerWire, target: RuntimeApplyTarget, limits: Limits) (Error || std.mem.Allocator.Error)!RuntimeApplyStep {
+        var registry = try cloneRegistry(allocator, .{ .schema_version = schema_version, .generation = desired.generation, .oauth_operation = null, .servers = servers }, limits);
+        errdefer registry.deinit();
+        const states = try allocator.alloc(ServerPreparationState, servers.len);
+        errdefer allocator.free(states);
+        @memset(states, .eligible);
+        const ids = try registry.arena.allocator().alloc([]const u8, servers.len);
+        const grants = try registry.arena.allocator().alloc(Grant, servers.len);
+        var candidate_id: ?[]const u8 = null;
+        for (registry.value.servers, ids, grants) |server, *id_value, *grant| {
+            id_value.* = server.id;
+            if (target.kind != .remove and std.mem.eql(u8, server.id, target.id())) candidate_id = server.id;
+            const current = findServer(desired.servers, server.id);
+            const tools: []const []const u8 = if (current != null and
+                std.mem.eql(u8, &runtimeDescriptorFingerprint(current.?), &runtimeDescriptorFingerprint(server))) admissionTools(desired, current.?) else &.{};
+            const copied = try registry.arena.allocator().alloc([]const u8, tools.len);
+            for (tools, copied) |tool, *value| value.* = try registry.arena.allocator().dupe(u8, tool);
+            grant.* = .{ .id = server.id, .tools = copied };
+        }
+        return .{ .preparation = .{ .allocator = allocator, .state = .available, .registry = registry, .server_states = states }, .member_ids = ids, .grants = grants, .candidate_id = candidate_id, .target = target };
+    }
+
+    pub fn deinit(self: *RuntimeApplyStep) void {
+        self.preparation.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const ManagementOutcome = enum {
     unchanged,
     saved,
@@ -759,6 +924,7 @@ pub const ManagementPort = struct {
     identity_generator: FreshServerIdentityGenerator,
     coordinator: TransactionCoordinator,
     oauth_schedule: OauthRefreshSchedule,
+    convergence: RuntimeConvergence = .{},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -799,6 +965,7 @@ pub const ManagementPort = struct {
     }
 
     pub fn deinit(self: *ManagementPort) void {
+        self.convergence.deinit(self.allocator);
         self.oauth_schedule.deinit();
         if (self.runtime_manifest) |*manifest| manifest.deinit();
         if (self.desired) |*registry| registry.deinit();
@@ -814,7 +981,7 @@ pub const ManagementPort = struct {
             .health = self.coordinator.health,
             .desired_generation = desired_generation,
             .runtime_alignment = if (self.runtime_manifest) |*manifest|
-                manifest.alignment(if (self.desired) |registry| registry.value else null, self.limits)
+                manifest.alignmentWithResults(if (self.desired) |registry| registry.value else null, self.limits, &self.convergence)
             else
                 .unknown,
             .server_count = if (self.desired) |registry| registry.value.servers.len else 0,
@@ -826,7 +993,7 @@ pub const ManagementPort = struct {
         target: RegistryWire,
     ) RuntimeAlignment {
         return if (self.runtime_manifest) |*manifest|
-            manifest.alignment(target, self.limits)
+            manifest.alignmentWithResults(target, self.limits, &self.convergence)
         else
             .unknown;
     }
@@ -1540,7 +1707,7 @@ pub const ManagementPort = struct {
         const oauth = server.auth.oauth orelse return .rejected;
         const consent = oauth.consent orelse return .rejected;
         const grant = oauth.grant orelse return .rejected;
-        if (!server.enabled or !std.mem.eql(u8, oauth.status, "ready") or
+        if ((!server.enabled and !input.retained_member) or !std.mem.eql(u8, oauth.status, "ready") or
             grant.refresh_token_ref == null or
             grant.consent_epoch != consent.epoch or
             grant.token_revision == std.math.maxInt(u64))
@@ -2123,6 +2290,14 @@ pub const ManagementPort = struct {
         self.oauth_schedule.reconcile(replacement.value);
         if (self.desired) |*registry| registry.deinit();
         self.desired = replacement;
+        var index: usize = 0;
+        while (index < self.convergence.results.items.len) {
+            const id = self.convergence.results.items[index].target.id();
+            const retained = if (self.runtime_manifest) |*manifest| findManifestEntry(manifest.entries, id) != null else false;
+            if (findServer(replacement.value.servers, id) != null or retained) {
+                index += 1;
+            } else _ = self.convergence.results.swapRemove(index);
+        }
     }
 };
 
@@ -2507,15 +2682,16 @@ const AbsenceProof = union(enum) {
 
 const RuntimeManifestEntry = struct {
     id: []const u8,
+    task_references: u32 = 0,
     state: union(enum) {
         loaded: DescriptorFingerprint,
         absent: AbsenceProof,
     },
 };
 
-/// Immutable, in-memory proof of the descriptors accepted by one Agent
-/// Runtime. It contains no credential bytes and is never persisted or
-/// projected through Bridge.
+/// In-memory proof of accepted descriptors with live Product lifetime counts.
+/// Descriptor facts are immutable until apply; reference counts never authorize
+/// a tool. It contains no credentials and is never persisted or sent over Bridge.
 pub const RuntimeManifest = struct {
     allocator: std.mem.Allocator,
     entries: []RuntimeManifestEntry,
@@ -2587,22 +2763,61 @@ pub const RuntimeManifest = struct {
         desired: ?RegistryWire,
         limits: Limits,
     ) RuntimeAlignment {
-        for (self.entries) |entry| {
-            const target = if (desired) |registry|
-                findServer(registry.servers, entry.id)
-            else
-                null;
-            if (!entryCompatible(entry, target, limits)) return .restart_required;
-        }
-        if (desired) |registry| {
-            for (registry.servers) |server| {
-                if (findManifestEntry(self.entries, server.id) != null) continue;
-                if (server.enabled and serverRuntimeAuthorizationReady(server) and
-                    serverProblem(server, limits) == null)
-                    return .restart_required;
+        return self.alignmentWithResults(desired, limits, null);
+    }
+
+    pub fn alignmentWithResults(
+        self: *const RuntimeManifest,
+        desired: ?RegistryWire,
+        limits: Limits,
+        convergence: ?*const RuntimeConvergence,
+    ) RuntimeAlignment {
+        return if (self.nextStep(desired, limits, convergence) != null) .restart_required else .current;
+    }
+
+    pub const Plan = struct { target: RuntimeApplyTarget, next_round: bool = false };
+
+    /// The sole membership policy. A waiting/unloadable Desired is not work;
+    /// retained membership and admission authorization are independent facts.
+    pub fn targetFor(self: *const RuntimeManifest, id: []const u8, desired: ?RegistryWire, limits: Limits) ?RuntimeApplyTarget {
+        const target = if (desired) |registry| findServer(registry.servers, id) else null;
+        const entry = findManifestEntry(self.entries, id);
+        const eligible = if (target) |server| runtimeLoadEligible(server, limits) else false;
+        if (entry) |actual| {
+            if (actual.state == .loaded) {
+                if (!eligible) return if (actual.task_references != 0) null else RuntimeApplyTarget.init(id, target, .remove);
+                if (std.mem.eql(u8, &actual.state.loaded, &runtimeDescriptorFingerprint(target.?))) return null;
+                return RuntimeApplyTarget.init(id, target, .replace);
             }
+            if (entryCompatible(actual.*, target, limits)) return null;
         }
-        return .current;
+        return if (eligible) RuntimeApplyTarget.init(id, target, .add) else null;
+    }
+
+    pub fn nextStep(self: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits, convergence: ?*const RuntimeConvergence) ?Plan {
+        // Removal makes space first. All other actions follow Desired order.
+        for ([_]bool{ false, true }) |next_round| {
+            if (next_round) {
+                const ledger = convergence orelse break;
+                const eligible_round = for (ledger.results.items) |result| {
+                    if (result.epoch != ledger.epoch and result.round == ledger.round and result.outcome != .pending) break true;
+                } else false;
+                if (!eligible_round) break;
+            }
+            for (self.entries) |entry| {
+                const target = self.targetFor(entry.id, desired, limits) orelse continue;
+                if (target.kind != .remove) continue;
+                if (convergence) |ledger| if (ledger.handledInRound(target, next_round)) continue;
+                return .{ .target = target, .next_round = next_round };
+            }
+            if (desired) |registry| for (registry.servers) |server| {
+                const target = self.targetFor(server.id, desired, limits) orelse continue;
+                if (target.kind == .remove) continue;
+                if (convergence) |ledger| if (ledger.handledInRound(target, next_round)) continue;
+                return .{ .target = target, .next_round = next_round };
+            };
+        }
+        return null;
     }
 };
 
@@ -2612,18 +2827,7 @@ fn entryCompatible(
     limits: Limits,
 ) bool {
     return switch (entry.state) {
-        .loaded => |fingerprint| if (target) |server|
-            server.enabled and
-                serverProblem(server, limits) == null and
-                std.mem.eql(u8, &fingerprint, &runtimeDescriptorFingerprint(server)) and
-                (serverRuntimeAuthorizationReady(server) or
-                    if (server.auth.oauth) |oauth|
-                        std.mem.eql(u8, oauth.status, "reauth_required") or
-                            std.mem.eql(u8, oauth.status, "awaiting_tokens")
-                    else
-                        false)
-        else
-            false,
+        .loaded => unreachable,
         .absent => |proof| switch (proof) {
             .disabled => if (target) |server| !server.enabled else true,
             .unapproved => if (target) |server|
@@ -2655,11 +2859,22 @@ fn entryCompatible(
     };
 }
 
-fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
+pub fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
     if (server.connection_approval == null) return false;
     if (server.auth.oauth) |oauth|
-        return std.mem.eql(u8, oauth.status, "ready");
+        return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;
     return true;
+}
+
+pub fn runtimeLoadEligible(server: ServerWire, limits: Limits) bool {
+    return server.enabled and serverRuntimeAuthorizationReady(server) and serverProblem(server, limits) == null;
+}
+
+pub fn admissionTools(registry: RegistryWire, server: ServerWire) []const []const u8 {
+    if (!server.enabled or !serverRuntimeAuthorizationReady(server)) return &.{};
+    if (registry.oauth_operation) |operation|
+        if (std.mem.eql(u8, operation.server_id, server.id)) return &.{};
+    return server.tools;
 }
 
 fn oauthDoesNotRequireLoading(server: ServerWire) bool {
@@ -8411,19 +8626,18 @@ test "runtime OAuth rejection retires the grant without invalidating its loaded 
     );
     try std.testing.expect(target.servers[0].auth.oauth.?.grant == null);
     try std.testing.expectEqual(@as(usize, 2), preparation.prepared.plan.transaction.retired_locators.len);
-    try std.testing.expect(entryCompatible(.{
-        .id = "oauth",
-        .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
-    }, target.servers[0], test_limits));
-    var awaiting = target.servers[0];
-    var awaiting_oauth = awaiting.auth.oauth.?;
-    awaiting_oauth.status = "awaiting_tokens";
-    awaiting_oauth.grant = null;
-    awaiting.auth.oauth = awaiting_oauth;
-    try std.testing.expect(entryCompatible(.{
-        .id = "oauth",
-        .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
-    }, awaiting, test_limits));
+    var entries = [_]RuntimeManifestEntry{.{ .id = "oauth", .state = .{ .loaded = runtimeDescriptorFingerprint(server) } }};
+    const manifest: RuntimeManifest = .{ .allocator = std.testing.allocator, .entries = &entries };
+    try std.testing.expectEqual(.remove, manifest.targetFor("oauth", target, test_limits).?.kind);
+    entries[0].task_references = 1;
+    try std.testing.expect(manifest.targetFor("oauth", target, test_limits) == null);
+    var awaiting_servers = [_]ServerWire{target.servers[0]};
+    awaiting_servers[0].auth.oauth.?.status = "awaiting_tokens";
+    var awaiting_registry = target;
+    awaiting_registry.servers = &awaiting_servers;
+    try std.testing.expect(manifest.targetFor("oauth", awaiting_registry, test_limits) == null);
+    entries[0].task_references = 0;
+    try std.testing.expectEqual(.remove, manifest.targetFor("oauth", awaiting_registry, test_limits).?.kind);
 }
 
 test "typed OAuth management commits consent marker and fresh token locators" {
@@ -8735,7 +8949,7 @@ test "dynamic registration marker durably binds draft before issued identity" {
     );
 }
 
-test "OAuth refresh rebases unrelated changes and rotates fresh token locators" {
+test "disabled referenced OAuth refresh rebases unrelated changes and rotates fresh token locators" {
     const Harness = struct {
         entropy: u8 = 0,
 
@@ -8766,7 +8980,7 @@ test "OAuth refresh rebases unrelated changes and rotates fresh token locators" 
         .id = "oauth",
         .namespace = "oauth",
         .display_name = "OAuth",
-        .enabled = true,
+        .enabled = false,
         .negotiation = "automatic",
         .timeout_ms = 1000,
         .transport = .{
@@ -8853,8 +9067,10 @@ test "OAuth refresh rebases unrelated changes and rotates fresh token locators" 
         .limits = test_limits,
     });
     defer management.deinit();
+    try std.testing.expect((try management.prepareBeginRefresh(20, .{ .server_id = "oauth" })) == .rejected);
     var begin = switch (try management.prepareBeginRefresh(20, .{
         .server_id = "oauth",
+        .retained_member = true,
     })) {
         .prepared => |prepared| prepared,
         .rejected => return error.TestUnexpectedResult,
@@ -8979,4 +9195,94 @@ test "unapproved server never resolves credentials" {
     try std.testing.expect(prepared.server_states[0] == .unapproved);
     try std.testing.expectEqual(@as(usize, 0), Resolver.calls);
     try std.testing.expectEqual(@as(usize, 0), prepared.credentials.len);
+}
+
+test "failed MCP candidate survives membership growth and retries once after replacement" {
+    var ledger: RuntimeConvergence = .{};
+    defer ledger.deinit(std.testing.allocator);
+    const bad = RuntimeApplyTarget.init("bad", null, .add);
+    try ledger.prepare(std.testing.allocator, bad);
+    ledger.reject(bad, .rejected);
+    ledger.applied(RuntimeApplyTarget.init("healthy", null, .add));
+    try std.testing.expect(ledger.handled(bad));
+    try std.testing.expect(!ledger.nextRound());
+    ledger.applied(RuntimeApplyTarget.init("healthy", null, .replace));
+    try std.testing.expect(ledger.handled(bad));
+    try std.testing.expect(ledger.nextRound());
+    try std.testing.expect(!ledger.handled(bad));
+    try ledger.prepare(std.testing.allocator, bad);
+    ledger.reject(bad, .rejected);
+    try std.testing.expect(ledger.handled(bad));
+    try std.testing.expect(!ledger.nextRound());
+    ledger.retry();
+    try std.testing.expect(!ledger.handled(bad));
+}
+
+test "removed unattemptable MCP targets cannot create endless follow-up rounds" {
+    var ledger: RuntimeConvergence = .{};
+    defer ledger.deinit(std.testing.allocator);
+    const bad = RuntimeApplyTarget.init("bad", null, .add);
+    try ledger.prepare(std.testing.allocator, bad);
+    ledger.reject(bad, .failed);
+    ledger.applied(RuntimeApplyTarget.init("other", null, .remove));
+    try std.testing.expect(ledger.nextRound());
+    try std.testing.expect(!ledger.nextRound());
+}
+
+test "Runtime explicit member retry preserves unrelated failures across growth" {
+    var ledger: RuntimeConvergence = .{};
+    defer ledger.deinit(std.testing.allocator);
+    const a = RuntimeApplyTarget.init("a", null, .add);
+    const b = RuntimeApplyTarget.init("b", null, .add);
+    try ledger.prepare(std.testing.allocator, a);
+    ledger.reject(a, .rejected);
+    try ledger.prepare(std.testing.allocator, b);
+    ledger.reject(b, .failed);
+    ledger.retryServer("a");
+    try std.testing.expect(!ledger.handled(a));
+    try std.testing.expect(ledger.handled(b));
+    try ledger.prepare(std.testing.allocator, a);
+    ledger.applied(a);
+    try std.testing.expect(ledger.handled(b));
+    ledger.retryServer("missing");
+    try std.testing.expect(ledger.handled(b));
+    ledger.retry();
+    try std.testing.expect(!ledger.handled(b));
+}
+
+test "membership planner exhausts eligibility membership retention and processed outcomes" {
+    var server: ServerWire = .{ .id = "source", .namespace = "source", .display_name = "Source", .enabled = true, .negotiation = "automatic", .timeout_ms = 2000, .transport = .{ .kind = "streamable_http", .url = "https://example.test/mcp" }, .auth = .{ .kind = "none", .oauth = null }, .connection_approval = null, .tools = &.{} };
+    const approval = connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &approval };
+    var entries = [_]RuntimeManifestEntry{.{ .id = server.id, .state = .{ .loaded = runtimeDescriptorFingerprint(server) } }};
+    var manifest: RuntimeManifest = .{ .allocator = std.testing.allocator, .entries = &entries };
+    var desired_servers = [_]ServerWire{server};
+    var desired: RegistryWire = .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &desired_servers };
+    for ([_]bool{ false, true }) |present| for ([_]bool{ false, true }) |enabled| for ([_]bool{ false, true }) |approved| for ([_]bool{ false, true }) |valid| for ([_]bool{ false, true }) |changed| for ([_]bool{ false, true }) |loaded| for ([_]bool{ false, true }) |referenced| {
+        desired_servers[0] = server;
+        desired_servers[0].enabled = enabled;
+        desired_servers[0].connection_approval = if (approved) server.connection_approval else null;
+        if (!valid) desired_servers[0].timeout_ms = 0;
+        if (changed) desired_servers[0].display_name = "Changed";
+        // A connection change (rather than presentation) changes Runtime identity.
+        if (changed) desired_servers[0].transport.url = "https://changed.example.test/mcp";
+        const current_approval = connectionFingerprint(desired_servers[0]);
+        if (approved) desired_servers[0].connection_approval = .{ .fingerprint = &current_approval };
+        desired.servers = if (present) &desired_servers else &.{};
+        manifest.entries = if (loaded) &entries else &.{};
+        entries[0].task_references = @intFromBool(referenced);
+        const eligible = present and enabled and approved and valid;
+        const expected: ?@FieldType(RuntimeApplyTarget, "kind") = if (loaded and !eligible) (if (referenced) null else .remove) else if (eligible and !loaded) .add else if (eligible and loaded and changed) .replace else null;
+        const plan = manifest.nextStep(desired, test_limits, null);
+        try std.testing.expectEqual(expected, if (plan) |value| value.target.kind else null);
+        try std.testing.expectEqual(if (plan == null) RuntimeAlignment.current else .restart_required, manifest.alignment(desired, test_limits));
+        if (plan) |value| {
+            var ledger: RuntimeConvergence = .{};
+            defer ledger.deinit(std.testing.allocator);
+            try ledger.prepare(std.testing.allocator, value.target);
+            ledger.reject(value.target, .failed);
+            try std.testing.expect(manifest.nextStep(desired, test_limits, &ledger) == null);
+            try std.testing.expectEqual(.current, manifest.alignmentWithResults(desired, test_limits, &ledger));
+        }
+    };
 }

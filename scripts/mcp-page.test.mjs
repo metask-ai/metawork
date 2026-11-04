@@ -70,6 +70,8 @@ const servers = [
     authMode: "oauth",
     negotiation: "automatic",
     timeoutMs: 30_000,
+    taskReferenceCount: 0,
+    applyStatus: "current",
     connection: {
       kind: "streamable_http",
       endpoint: "https://github.example/mcp",
@@ -109,6 +111,8 @@ const servers = [
     authMode: "oauth",
     negotiation: "automatic",
     timeoutMs: 30_000,
+    taskReferenceCount: 0,
+    applyStatus: "current",
     connection: {
       kind: "streamable_http",
       endpoint: "https://notion.example/mcp",
@@ -135,6 +139,8 @@ const servers = [
     authMode: "none",
     negotiation: "modern_only",
     timeoutMs: 30_000,
+    taskReferenceCount: 0,
+    applyStatus: "current",
     connection: {
       kind: "stdio",
       command: "/usr/local/bin/filesystem-server",
@@ -177,6 +183,10 @@ function pageElement(management, query = "", overrides = {}) {
       management: {
         authorizationOperation: { kind: "idle" },
         configurationApply: "idle",
+        retainedMemberCount: 0,
+        applyFailureCount: 0,
+        runtimeUncertain: false,
+        runtimeTimeoutLimitMs: 120000,
         ...management,
       },
       capabilities: {
@@ -234,7 +244,7 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.equal(document.querySelector(".mcp-workspace"), null);
 });
 
-test("MCP presents eligible servers as connecting during configuration apply", () => {
+test("MCP marks only the current member connecting and preserves healthy rows", () => {
   render(
     pageElement({
       availability: "degraded",
@@ -248,11 +258,18 @@ test("MCP presents eligible servers as connecting during configuration apply", (
         {
           ...servers[0],
           runtimeStatus: "unreachable",
+          applyStatus: "applying",
           newTaskAccess: "unavailable",
           tools: servers[0].tools.map((tool) => ({
             ...tool,
             availableToNewTasks: false,
           })),
+        },
+        {
+          ...servers[0],
+          id: "healthy",
+          displayName: "Healthy",
+          namespace: "healthy",
         },
       ],
     }),
@@ -264,6 +281,11 @@ test("MCP presents eligible servers as connecting during configuration apply", (
   assert.equal(screen.queryByText("Needs attention"), null);
   assert.ok(screen.getByRole("heading", { name: "Available servers" }));
   assert.equal(row.closest("li")?.dataset.status, "connecting");
+  assert.equal(
+    screen.getByRole("button", { name: /Healthy/ }).closest("li")?.dataset
+      .status,
+    "ready",
+  );
 });
 
 test("MCP opens details only on request and restores the list trigger on close", async () => {
@@ -1448,6 +1470,7 @@ test("MCP destructive changes require an explicit confirmation", async () => {
   });
   const cancel = within(confirmation).getByRole("button", { name: "Cancel" });
   assert.equal(document.activeElement, cancel);
+  assert.ok(within(confirmation).getByText(/Renewal stops after deletion/));
 
   fireEvent.keyDown(document.activeElement, { key: "Escape" });
   await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
@@ -1551,6 +1574,8 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
         ...management,
         configurationApply: "failed",
         runtimeAlignment: "restart_required",
+        applyFailureCount: 1,
+        servers: [{ ...pending, applyStatus: "rejected" }],
       },
       "",
       handlers,
@@ -1772,5 +1797,125 @@ test("MCP Renderer does not persist credentials or access OAuth tokens or native
   assert.doesNotMatch(
     page,
     /window\.zero|localStorage|apiKey|marketplace|accessToken|refreshToken|clientSecretValue/i,
+  );
+});
+
+test("MCP keeps rejected members visible after another success and retries only the selected member", async () => {
+  const calls = [];
+  const rejected = {
+    ...servers[0],
+    id: "bad",
+    displayName: "Bad",
+    namespace: "bad",
+    applyStatus: "rejected",
+    runtimeStatus: "not_loaded",
+    newTaskAccess: "unavailable",
+    tools: [],
+  };
+  render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        configurationApply: "idle",
+        desiredGeneration: "8",
+        runtimeAlignment: "current",
+        redacted: false,
+        applyFailureCount: 1,
+        servers: [rejected, servers[0]],
+      },
+      "",
+      {
+        onApply: async (id) => {
+          calls.push(id);
+          return { outcome: "started" };
+        },
+      },
+    ),
+  );
+  assert.ok(screen.getByText("Connection changes were not applied"));
+  assert.ok(screen.getByText("Change rejected"));
+  assert.equal(
+    screen.getByRole("button", { name: /GitHub/ }).closest("li")?.dataset
+      .status,
+    "ready",
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Bad/ }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Retry connection",
+    }),
+  );
+  await waitFor(() => assert.deepEqual(calls, ["bad"]));
+});
+
+test("MCP shows retained members after deletion and keeps disabled edits dormant", async () => {
+  const management = {
+    availability: "ready",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "8",
+    runtimeAlignment: "current",
+    redacted: false,
+    retainedMemberCount: 1,
+    servers: [],
+  };
+  const view = render(pageElement(management));
+  assert.ok(screen.getByText(/Services kept for existing tasks: 1/));
+  view.rerender(
+    pageElement({
+      ...management,
+      servers: [{ ...servers[2], taskReferenceCount: 2 }],
+    }),
+  );
+  assert.ok(screen.getByText("Task references: 2"));
+  const row = screen.getByRole("button", { name: /Filesystem/ });
+  assert.equal(row.closest("li")?.dataset.status, "disabled");
+  fireEvent.click(row);
+  assert.ok(
+    within(screen.getByRole("dialog")).getByText(
+      /Existing tasks keep the applied configuration/,
+    ),
+  );
+  assert.equal(
+    within(screen.getByRole("dialog")).queryByRole("button", {
+      name: "Retry connection",
+    }),
+    null,
+  );
+});
+
+test("MCP unknown takeover pauses effects while retaining canonical Desired visibility", () => {
+  render(
+    pageElement({
+      availability: "unavailable",
+      managementHealth: "ready",
+      operation: "idle",
+      configurationApply: "failed",
+      runtimeUncertain: true,
+      desiredGeneration: "8",
+      runtimeAlignment: "unknown",
+      redacted: false,
+      servers: [
+        {
+          ...servers[0],
+          applyStatus: "unknown",
+          runtimeStatus: "not_loaded",
+          newTaskAccess: "unavailable",
+          tools: [],
+        },
+      ],
+    }),
+  );
+  assert.ok(screen.getByText("Connection change could not be confirmed"));
+  assert.ok(screen.getByRole("button", { name: /GitHub/ }));
+  assert.equal(
+    screen.getByRole("button", { name: "Refresh tools" }).disabled,
+    true,
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Retry connection" }),
+    null,
   );
 });

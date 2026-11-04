@@ -5475,3 +5475,55 @@ test "canonical AgentCore loads builtin document and ZIP resources and binds the
     try session.refreshSkillCatalog(acquired.lease, .{ .granted_skill_ids = &ids });
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
 }
+
+test "MCP retirement rechecks shared members after each released list" {
+    for ([_]bool{ false, true }) |connection_busy| {
+        fake_core.reset();
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        var transport: McpFixtureTransport = .{};
+        var owner = lifecycle.McpTransportOwner.init(transport.descriptor(), McpFixtureTransport.deinit);
+        var source = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
+            .id = "shared",
+            .namespace = "shared",
+            .transport_owner = &owner,
+            .transport = .stdio,
+            .client_name = "MetaWork",
+            .client_version = "test",
+            .timeout_ms = 100,
+            .configuration_fingerprint = @splat(1),
+        }});
+        defer source.deinit();
+        const first = try source.take();
+        const second = try @TypeOf(first).compose(std.testing.allocator, &first, null, &.{"shared"});
+        const adapter = &first.members[0].adapter;
+        const descriptor = first.descriptors[0].connector;
+        if (connection_busy) adapter.active_connections.store(1, .release) else descriptor.retain_connector.?(descriptor.ctx);
+        var held = true;
+        defer if (held) {
+            if (connection_busy) adapter.active_connections.store(0, .release) else descriptor.release_connector.?(descriptor.ctx);
+        };
+        // Both are individually droppable while they share ownership. Dropping
+        // one changes the safety condition for dropping the remaining list.
+        try std.testing.expect(first.isQuiescent());
+        try std.testing.expect(second.isQuiescent());
+        try runtime.retired_mcp_servers.append(std.testing.allocator, first);
+        try runtime.retired_mcp_servers.append(std.testing.allocator, second);
+        var empty = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 2, &.{});
+        defer empty.deinit();
+        try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&empty));
+        var retained_members: usize = 0;
+        for (runtime.retired_mcp_servers.items) |list| retained_members += list.members.len;
+        try std.testing.expectEqual(@as(usize, 1), retained_members);
+        try std.testing.expectEqual(@as(usize, 0), transport.deinits);
+        if (connection_busy) adapter.active_connections.store(0, .release) else descriptor.release_connector.?(descriptor.ctx);
+        held = false;
+        var next = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 3, &.{});
+        defer next.deinit();
+        try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&next));
+        try std.testing.expectEqual(@as(usize, 1), transport.deinits);
+    }
+}

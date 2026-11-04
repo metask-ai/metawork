@@ -4,21 +4,33 @@
     "managementHealth": "outcome_unknown",
     "operation": "idle",
     "configurationApply": "idle",
-    "authorizationOperation": { "kind": "idle" },
+    "authorizationOperation": {
+      "kind": "idle"
+    },
     "desiredGeneration": null,
     "runtimeAlignment": "unknown",
     "redacted": false,
-    "servers": []
+    "servers": [],
+    "retainedMemberCount": 0,
+    "applyFailureCount": 0,
+    "runtimeUncertain": false,
+    "runtimeTimeoutLimitMs": 120000
   },
   "missing_desired": {
     "availability": "unavailable",
     "managementHealth": "recovery_required",
     "operation": "idle",
     "configurationApply": "idle",
-    "authorizationOperation": { "kind": "idle" },
+    "authorizationOperation": {
+      "kind": "idle"
+    },
     "desiredGeneration": null,
     "runtimeAlignment": "unknown",
     "redacted": false,
-    "servers": []
+    "servers": [],
+    "retainedMemberCount": 0,
+    "applyFailureCount": 0,
+    "runtimeUncertain": false,
+    "runtimeTimeoutLimitMs": 120000
   }
 }

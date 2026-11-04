@@ -1599,6 +1599,14 @@ export const mcpRuntimeAlignmentValues = [
   "restart_required",
   "unknown",
 ] as const;
+export const mcpApplyStatusValues = [
+  "current",
+  "pending",
+  "applying",
+  "rejected",
+  "failed",
+  "unknown",
+] as const;
 export const mcpConfigurationApplyValues = [
   "idle",
   "applying",
@@ -1691,6 +1699,10 @@ export type McpManagementView = {
   desiredGeneration: string | null;
   runtimeAlignment: (typeof mcpRuntimeAlignmentValues)[number];
   redacted: boolean;
+  retainedMemberCount: number;
+  applyFailureCount: number;
+  runtimeUncertain: boolean;
+  runtimeTimeoutLimitMs: number;
   servers: {
     id: string;
     displayName: string;
@@ -1726,6 +1738,8 @@ export type McpManagementView = {
         };
     approvalStatus: "unapproved" | "approved";
     authorizationStatus: (typeof mcpAuthorizationStatusValues)[number];
+    taskReferenceCount: number;
+    applyStatus: (typeof mcpApplyStatusValues)[number];
     desiredEnabled: boolean;
     runtimeStatus: (typeof mcpRuntimeStatusValues)[number];
     newTaskAccess: (typeof mcpNewTaskAccessValues)[number];

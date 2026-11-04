@@ -464,6 +464,7 @@ const ConfigurationApplyResult = union(enum) {
     },
     rejected,
     failed,
+    unknown,
 };
 
 const ConfigurationApplyJob = struct {
@@ -476,6 +477,8 @@ const ConfigurationApplyJob = struct {
     input: ?agent.McpRuntimeInput,
     authorizations: mcp_platform.HttpAuthorizations,
     allowlists: []agent.McpServerAllowlist,
+    budget: ?*mcp_platform.CatalogBudget = null,
+    existing_member_count: usize = 0,
     product_state_installed: bool = false,
     result: ConfigurationApplyResult = .pending,
     finished: std.atomic.Value(bool) = .init(false),
@@ -486,18 +489,24 @@ const ConfigurationApplyJob = struct {
     }
 
     fn run(self: *ConfigurationApplyJob) void {
+        if (self.budget) |budget| budget.begin(self.existing_member_count) catch {
+            self.publish(.failed);
+            return;
+        };
+        defer if (self.budget) |budget| budget.end();
         const input = if (self.input) |*value| value else {
             self.publish(.failed);
             return;
         };
-        const apply = self.runtime.applyMcpConfiguration(input) catch {
-            self.publish(.failed);
+        const apply = self.runtime.applyMcpConfiguration(input) catch |err| {
+            self.publish(if (err == error.McpConfigurationApplyUncertain) .unknown else .failed);
             return;
         };
         if (apply != .applied) {
             self.publish(.rejected);
             return;
         }
+        if (self.budget) |budget| budget.applied();
         const activation_outcome = self.runtime.activateMcp() catch {
             self.publish(.{ .applied = .{
                 .activation = null,
@@ -566,7 +575,7 @@ const ConfigurationApplyJob = struct {
                 if (applied.selection) |selection| selection.deinit();
                 if (applied.activation) |activation| activation.deinit();
             },
-            .pending, .rejected, .failed => {},
+            .pending, .rejected, .failed, .unknown => {},
         }
         if (self.input) |*input| input.deinit();
         self.authorizations.deinit();
@@ -609,6 +618,7 @@ pub const Coordinator = struct {
     flow: ?*Flow = null,
     connection_test_job: ?*ConnectionTestJob = null,
     configuration_apply_job: ?*ConfigurationApplyJob = null,
+    apply_pending: bool = false,
     last_cancel_outcome: ?Outcome = null,
     stopping: bool = false,
     confirmation: ?ConfirmationState = null,
@@ -766,11 +776,15 @@ pub const Coordinator = struct {
             if (state_index != index) state.* = .disabled;
         }
 
+        // A diagnostic Runtime is a separate fault domain and does not
+        // borrow the formal Runtime's serialized catalog budget.
+        var test_environment = self.host_environment;
+        test_environment.catalog_budget = null;
         var runtime_build = mcp_platform.buildRuntime(
             self.io,
             self.allocator,
             &preparation,
-            self.host_environment,
+            test_environment,
         ) catch return .unavailable;
         defer runtime_build.deinit();
         const input = if (runtime_build.input) |*value| value else return .unavailable;
@@ -813,83 +827,63 @@ pub const Coordinator = struct {
         return .started;
     }
 
-    pub fn applyConfiguration(self: *Coordinator) !ConfigurationApplyStartOutcome {
+    pub fn applyConfiguration(self: *Coordinator, intent: mcp_configuration.RuntimeApplyIntent) !ConfigurationApplyStartOutcome {
         if (self.confirmation != null) return .busy;
         if (self.stopping) return .unavailable;
         if (self.configuration_apply_job != null or self.connection_test_job != null or
             self.flow != null) return .busy;
-        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
-            return .unavailable;
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse return .unavailable;
         if (inspection.health != .ready) return .unavailable;
         const generation = inspection.desired_generation orelse return .rejected;
         if (generation == 0) return .rejected;
-
-        self.control.beginMcpConfigurationApply(generation) catch
-            return .busy;
-        var apply_state_owned = true;
-        defer if (apply_state_owned)
-            self.control.failMcpConfigurationApply(generation);
-
-        const registry_storage = try self.allocator.alloc(
-            u8,
-            mcp_configuration.max_store_bytes,
-        );
-        defer self.allocator.free(registry_storage);
-        const registry_bytes = self.control.writeMcpDesiredConfiguration(
-            generation,
-            registry_storage,
-        ) catch return .unavailable;
-        var preparation = try mcp_configuration.prepare(
-            self.allocator,
-            registry_bytes,
-            true,
-            false,
-            self.credential_store.resolver(),
-            mcp_startup.configuration_limits,
-        );
+        var step = (self.control.prepareMcpConfigurationStep(generation, intent) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.McpManagementUnavailable => return .unavailable,
+            else => return .busy,
+        }) orelse {
+            self.apply_pending = false;
+            return .rejected;
+        };
+        self.apply_pending = false;
         var preparation_owned = true;
-        defer if (preparation_owned) preparation.deinit();
-        const manifest_optional = try mcp_configuration.RuntimeManifest.candidate(
-            self.allocator,
-            &preparation,
-        );
-        var manifest = manifest_optional orelse return .unavailable;
+        defer if (preparation_owned) step.deinit();
+        var apply_state_owned = true;
+        defer if (apply_state_owned) self.control.failMcpConfigurationApply(generation, .preparation);
+
+        const registry_storage = try self.allocator.alloc(u8, mcp_configuration.max_store_bytes);
+        defer self.allocator.free(registry_storage);
+        const registry_bytes = self.control.writeMcpDesiredConfiguration(generation, registry_storage) catch return .unavailable;
+        var credentials = try mcp_configuration.prepare(self.allocator, registry_bytes, true, false, self.credential_store.resolver(), mcp_startup.configuration_limits);
+        defer credentials.deinit();
+        const desired = if (credentials.registry) |registry| registry.value else return .unavailable;
+        var candidate_eligible = step.candidate_id == null;
+        for (desired.servers, credentials.server_states) |server, *state| {
+            if (step.candidate_id != null and std.mem.eql(u8, server.id, step.candidate_id.?)) {
+                candidate_eligible = state.* == .eligible;
+            } else state.* = .disabled;
+        }
+        if (!candidate_eligible) {
+            self.apply_pending = true;
+            self.host.notify();
+            return .rejected;
+        }
+        var runtime_build = try mcp_platform.buildRuntime(self.io, self.allocator, &credentials, self.host_environment);
+        defer runtime_build.deinit();
+        var input = try self.agent_runtime.prepareMcpMembership(generation, if (runtime_build.input) |*value| value else null, step.member_ids);
+        var input_owned = true;
+        defer if (input_owned) input.deinit();
+        var authorizations = try self.active_authorizations.compose(&runtime_build.authorizations, step.member_ids, step.candidate_id);
+        var authorizations_owned = true;
+        defer if (authorizations_owned) authorizations.deinit();
+        authorizations.setRuntimeAuthFailureNotifier(.{ .context = self.host.context, .notify_fn = self.host.notify_fn });
+        credentials.releaseCredentials();
+        var manifest = (try mcp_configuration.RuntimeManifest.candidate(self.allocator, &step.preparation)) orelse return .unavailable;
         var manifest_owned = true;
         defer if (manifest_owned) manifest.deinit();
-        var runtime_build = mcp_platform.buildRuntime(
-            self.io,
-            self.allocator,
-            &preparation,
-            self.host_environment,
-        ) catch return .unavailable;
-        // Bind before Core can open any candidate connection. A rejection
-        // observed during apply remains pending until these slots are handed
-        // over and the OAuth coordinator reconciles the new active mapping.
-        runtime_build.authorizations.setRuntimeAuthFailureNotifier(.{
-            .context = self.host.context,
-            .notify_fn = self.host.notify_fn,
-        });
-        var build_owned = true;
-        defer if (build_owned) runtime_build.deinit();
-        preparation.releaseCredentials();
-        if (runtime_build.input == null) return .rejected;
-
-        const registry = preparation.registry orelse return .unavailable;
-        var eligible_count: usize = 0;
-        for (preparation.server_states) |state| {
-            if (state == .eligible) eligible_count += 1;
-        }
-        const allowlists = try self.allocator.alloc(
-            agent.McpServerAllowlist,
-            eligible_count,
-        );
-        errdefer if (allowlists.len != 0) self.allocator.free(allowlists);
-        var write: usize = 0;
-        for (registry.value.servers, preparation.server_states) |server, state| {
-            if (state != .eligible) continue;
-            allowlists[write] = .{ .id = server.id, .tools = server.tools };
-            write += 1;
-        }
+        const allowlists = try self.allocator.alloc(agent.McpServerAllowlist, step.grants.len);
+        errdefer self.allocator.free(allowlists);
+        for (step.grants, allowlists) |grant, *allowlist|
+            allowlist.* = .{ .id = grant.id, .tools = grant.tools };
         const job = try self.allocator.create(ConfigurationApplyJob);
         errdefer self.allocator.destroy(job);
         job.* = .{
@@ -897,16 +891,18 @@ pub const Coordinator = struct {
             .host = self.host,
             .generation = generation,
             .runtime = self.agent_runtime,
-            .preparation = preparation,
+            .preparation = step.preparation,
             .manifest = manifest,
-            .input = runtime_build.input,
-            .authorizations = runtime_build.takeAuthorizations(),
+            .input = input,
+            .authorizations = authorizations,
             .allowlists = allowlists,
+            .budget = self.host_environment.catalog_budget,
+            .existing_member_count = step.member_ids.len - @intFromBool(step.target.kind == .add),
         };
-        runtime_build.input = null;
-        build_owned = false;
-        runtime_build.deinit();
+        // Ownership has moved even if thread creation fails.
         preparation_owned = false;
+        input_owned = false;
+        authorizations_owned = false;
         manifest_owned = false;
         job.start() catch {
             job.deinit();
@@ -937,18 +933,26 @@ pub const Coordinator = struct {
                         if (installed) {
                             apply_job.product_state_installed = true;
                             apply_job.result = .pending;
+                            self.apply_pending = !self.stopping;
                         } else self.control.failMcpConfigurationApply(
                             apply_job.generation,
+                            .unknown,
                         );
                     },
-                    .rejected, .failed => self.control.failMcpConfigurationApply(
-                        apply_job.generation,
-                    ),
+                    .rejected => {
+                        self.control.failMcpConfigurationApply(apply_job.generation, .rejected);
+                        self.apply_pending = !self.stopping;
+                    },
+                    .failed => self.control.failMcpConfigurationApply(apply_job.generation, .preparation),
+                    .unknown => self.control.failMcpConfigurationApply(apply_job.generation, .unknown),
                     .pending => unreachable,
                 }
                 self.configuration_apply_job = null;
                 apply_job.deinit();
-                changed = true;
+                // Give due maintenance one main-loop opportunity before the
+                // next candidate. Admission already reflects this settled step.
+                self.host.notify();
+                return true;
             }
         }
         if (self.connection_test_job) |test_job| {
@@ -964,6 +968,20 @@ pub const Coordinator = struct {
                 test_job.deinit();
                 changed = true;
             }
+        }
+        if (!self.stopping and self.configuration_apply_job == null) {
+            if (self.control.inspectMcpDesiredConfiguration()) |inspection| {
+                if (inspection.health == .ready and inspection.runtime_alignment == .restart_required)
+                    self.apply_pending = true;
+            }
+        }
+        if (self.apply_pending and !self.stopping and self.configuration_apply_job == null) {
+            const outcome = self.applyConfiguration(.automatic) catch {
+                self.apply_pending = false;
+                return true;
+            };
+            if (outcome == .unavailable) self.apply_pending = false;
+            changed = changed or outcome == .started;
         }
         const flow = self.flow orelse return changed;
         const job = flow.job orelse return changed;
@@ -982,6 +1000,7 @@ pub const Coordinator = struct {
         if (self.stopping) return;
         self.stopping = true;
         self.cancelConfirmation();
+        self.apply_pending = false;
         if (self.configuration_apply_job) |apply_job| {
             apply_job.join();
             _ = self.drain();
@@ -1567,7 +1586,7 @@ pub const Coordinator = struct {
                     .unchanged, .stale_generation, .rejected => _ = self.recoverDurable(flow),
                 }
                 self.finishFlow(flow);
-                if (apply_after_finish) _ = self.applyConfiguration() catch {};
+                if (apply_after_finish) _ = self.applyConfiguration(.automatic) catch {};
             },
             .failed => |failure| {
                 if (durableFailureRequiresRecovery(failure))
@@ -1916,15 +1935,20 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     );
     defer coordinator.deinit();
 
-    try std.testing.expectError(error.OutOfMemory, coordinator.applyConfiguration());
+    try std.testing.expectError(error.OutOfMemory, coordinator.applyConfiguration(.automatic));
     try std.testing.expectEqual(
         mcp_types.McpConfigurationApplyState.failed,
         product_mcp.testing.state(&workbench_owner.mcp.?).configuration_apply_state,
     );
-    try std.testing.expectEqual(
-        mcp_types.McpAdmissionBlockReason.pending_restart,
-        product_mcp.testing.state(&workbench_owner.mcp.?).admission.blocked,
-    );
+    const state = product_mcp.testing.state(&workbench_owner.mcp.?);
+    try std.testing.expect(state.admission == .ready);
+    try std.testing.expect(state.admission.ready.selection == null);
+    try std.testing.expectEqual(.current, workbench_owner.inspectMcpDesiredConfiguration().?.runtime_alignment);
+    for (0..3) |_| {
+        try std.testing.expect(!coordinator.drain());
+        try std.testing.expect(coordinator.configuration_apply_job == null);
+        try std.testing.expect(!coordinator.apply_pending);
+    }
 }
 
 test "MCP Application coordinator completes dynamic registration and OAuth loopback" {
@@ -2373,7 +2397,7 @@ test "MCP asynchronous confirmation owns paging cancellation and failure termina
         try coordinator.requestConfirmationPage();
         try std.testing.expectEqual(AuthorizationStartOutcome.rejected, try coordinator.authorizeOauth(1, "server"));
         try std.testing.expectEqual(ConnectionTestStartOutcome.busy, try coordinator.testConnection(1, "server"));
-        try std.testing.expectEqual(ConfigurationApplyStartOutcome.busy, try coordinator.applyConfiguration());
+        try std.testing.expectEqual(ConfigurationApplyStartOutcome.busy, try coordinator.applyConfiguration(.automatic));
         try std.testing.expectEqual(Outcome.rejected, try coordinator.captureSecret(1, "server", .oauth_client_secret, "value"));
         try std.testing.expectEqual(Approval.Start{ .immediate = .rejected }, try coordinator.beginApproval(99, 1, "server", &completion));
         const old_token = probe.token;

@@ -1576,6 +1576,10 @@ test("MCP management is capability-gated and identity checked", () => {
     managementHealth: "ready",
     operation: "idle",
     configurationApply: "idle",
+    retainedMemberCount: 0,
+    applyFailureCount: 0,
+    runtimeUncertain: false,
+    runtimeTimeoutLimitMs: 120000,
     authorizationOperation: { kind: "idle" },
     desiredGeneration: "1",
     runtimeAlignment: "current",
@@ -1589,6 +1593,8 @@ test("MCP management is capability-gated and identity checked", () => {
         authMode: "oauth",
         negotiation: "automatic",
         timeoutMs: 30_000,
+        taskReferenceCount: 0,
+        applyStatus: "current",
         connection: {
           kind: "streamable_http",
           endpoint: "https://github.example/mcp",
@@ -1622,6 +1628,8 @@ test("MCP management is capability-gated and identity checked", () => {
         authMode: "oauth",
         negotiation: "automatic",
         timeoutMs: 30_000,
+        taskReferenceCount: 0,
+        applyStatus: "current",
         connection: {
           kind: "streamable_http",
           endpoint: "https://notion.example/mcp",
@@ -1706,6 +1714,60 @@ test("MCP management is capability-gated and identity checked", () => {
     () => decodeWorkbenchSnapshot(unavailableLeak),
     /MCP secret byte limit must be positive when management is enabled and zero otherwise/,
   );
+
+  for (const key of ["retainedMemberCount", "applyFailureCount"]) {
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const invalid = clone(withMcp);
+      invalid.mcp[key] = value;
+      assert.throws(() => decodeWorkbenchSnapshot(invalid), new RegExp(key));
+    }
+  }
+  const retained = clone(withMcp);
+  const disabled = retained.mcp.servers[0];
+  Object.assign(disabled, {
+    desiredEnabled: false,
+    runtimeStatus: "disabled",
+    newTaskAccess: "not_allowed",
+    taskReferenceCount: 2,
+  });
+  disabled.tools.forEach((tool) => {
+    tool.availableToNewTasks = false;
+  });
+  assert.throws(() => decodeWorkbenchSnapshot(retained), /retained members/);
+  retained.mcp.retainedMemberCount = 1;
+  assert.deepEqual(decodeWorkbenchSnapshot(retained), retained);
+  retained.mcp.retainedMemberCount = 2; // Deleted retained members have no Desired row.
+  assert.deepEqual(decodeWorkbenchSnapshot(retained), retained);
+  const failed = clone(withMcp);
+  Object.assign(failed.mcp.servers[0], {
+    applyStatus: "rejected",
+    runtimeStatus: "not_loaded",
+    newTaskAccess: "unavailable",
+    tools: [],
+  });
+  assert.throws(() => decodeWorkbenchSnapshot(failed), /failure count/);
+  failed.mcp.applyFailureCount = 1;
+  assert.deepEqual(decodeWorkbenchSnapshot(failed), failed);
+  const applying = clone(withMcp);
+  applying.mcp.configurationApply = "applying";
+  for (const server of applying.mcp.servers) server.applyStatus = "applying";
+  assert.throws(() => decodeWorkbenchSnapshot(applying), /single-member/);
+  const unknownRuntime = clone(withMcp);
+  unknownRuntime.mcp.runtimeUncertain = true;
+  unknownRuntime.mcp.runtimeAlignment = "unknown";
+  unknownRuntime.mcp.availability = "unavailable";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unknownRuntime),
+    /unknown Runtime takeover/,
+  );
+  for (const server of unknownRuntime.mcp.servers)
+    Object.assign(server, {
+      applyStatus: "unknown",
+      runtimeStatus: "not_loaded",
+      newTaskAccess: "unavailable",
+      tools: [],
+    });
+  assert.deepEqual(decodeWorkbenchSnapshot(unknownRuntime), unknownRuntime);
 
   const unknownDesired = clone(withMcp);
   unknownDesired.mcp.managementHealth = "outcome_unknown";

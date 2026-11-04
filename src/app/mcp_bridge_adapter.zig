@@ -3,6 +3,7 @@
 //! outcomes and secret slot identities; no platform authority crosses it.
 
 const bridge_api = @import("metawork_bridge");
+const mcp_contract = @import("metawork_product_mcp").contract;
 const mcp_management_coordinator = @import("mcp_management_coordinator.zig");
 
 pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.McpManagementHost {
@@ -21,9 +22,10 @@ pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.Mcp
 
 fn applyConfiguration(
     context: *anyopaque,
+    intent: mcp_contract.RuntimeApplyIntent,
 ) anyerror!bridge_api.McpConfigurationApplyStartOutcome {
     const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    return switch (try coordinator.applyConfiguration()) {
+    return switch (try coordinator.applyConfiguration(intent)) {
         .started => .started,
         .busy => .busy,
         .rejected => .rejected,

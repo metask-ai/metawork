@@ -9,6 +9,7 @@ const mcp_state = @import("product_mcp_state");
 pub const Error = error{SnapshotTooLarge};
 
 const McpAvailability = enum { unavailable, ready, degraded };
+const McpApplyStatus = enum { current, pending, applying, rejected, failed, unknown };
 const McpRuntimeStatus = enum {
     not_loaded,
     ready,
@@ -77,7 +78,7 @@ fn mcpRuntimeServerStatus(
 
 fn mcpAvailability(mcp: ?*const mcp_state.McpProductState) McpAvailability {
     const current = mcp orelse return .unavailable;
-    if (!current.committed) return .unavailable;
+    if (!current.committed or current.runtime_uncertain) return .unavailable;
     if (current.preparation.state == .unavailable or current.activation_failed) return .unavailable;
     const management = if (current.management) |*value| value else return .unavailable;
     if (management.inspect().health != .ready) return .unavailable;
@@ -94,7 +95,7 @@ fn mcpAvailability(mcp: ?*const mcp_state.McpProductState) McpAvailability {
         }
     };
     if (missing and !observed and !unhealthy) return .unavailable;
-    if (missing or unhealthy or current.configuration_apply_state == .failed) return .degraded;
+    if (missing or unhealthy or current.configuration_apply_state == .failed or applyFailureCount(current) > 0) return .degraded;
     return .ready;
 }
 
@@ -103,11 +104,96 @@ fn mcpDesiredServerRuntimeStatus(
     desired: mcp_configuration.ServerWire,
 ) McpRuntimeStatus {
     if (!desired.enabled) return .disabled;
+    if (mcp.runtime_uncertain) return .not_loaded;
     const startup = mcp.preparation.registry orelse return .not_loaded;
     for (startup.value.servers, mcp.preparation.server_states) |server, state|
         if (sameRuntimeDescriptor(server, desired))
             return mcpRuntimeServerStatus(mcp, desired.id, state);
     return .not_loaded;
+}
+
+fn actualEntry(mcp: *const mcp_state.McpProductState, id: []const u8) ?@typeInfo(@FieldType(mcp_configuration.RuntimeManifest, "entries")).pointer.child {
+    const management = if (mcp.management) |*value| value else return null;
+    const manifest = if (management.runtime_manifest) |*value| value else return null;
+    for (manifest.entries) |entry| if (std.mem.eql(u8, entry.id, id)) return entry;
+    return null;
+}
+
+fn taskReferenceCount(mcp: *const mcp_state.McpProductState, id: []const u8) usize {
+    if (mcp.runtime_uncertain) return 0;
+    const entry = actualEntry(mcp, id) orelse return 0;
+    return if (entry.state == .loaded) entry.task_references else 0;
+}
+
+fn serverApplyStatus(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) McpApplyStatus {
+    if (mcp.runtime_uncertain) return .unknown;
+    if (mcp.apply_target) |target| if (std.mem.eql(u8, target.id(), server.id)) return .applying;
+    const management = if (mcp.management) |*value| value else return .unknown;
+    if (management.runtime_manifest == null) return .unknown;
+    const target = management.runtime_manifest.?.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return .current;
+    if (management.convergence.handled(target)) for (management.convergence.results.items) |result| {
+        if (!std.mem.eql(u8, result.target.id(), server.id) or !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
+        return switch (result.outcome) {
+            .pending => .applying,
+            .rejected => .rejected,
+            .failed, .capacity => .failed,
+        };
+    };
+    return .pending;
+}
+
+fn serverCapacityBlocked(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    if (serverApplyStatus(mcp, server) != .failed) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    for (management.convergence.results.items) |result| {
+        if (std.mem.eql(u8, result.target.id(), server.id)) return result.outcome == .capacity;
+    }
+    return false;
+}
+
+fn retainedMemberCount(mcp: *const mcp_state.McpProductState) usize {
+    if (mcp.runtime_uncertain) return 0;
+    const management = if (mcp.management) |*value| value else return 0;
+    const desired = management.desiredRegistry() orelse return 0;
+    const manifest = if (management.runtime_manifest) |*value| value else return 0;
+    var count: usize = 0;
+    for (manifest.entries) |entry| {
+        if (entry.state != .loaded or entry.task_references == 0) continue;
+        var enabled = false;
+        for (desired.servers) |server| if (std.mem.eql(u8, entry.id, server.id)) {
+            enabled = server.enabled;
+            break;
+        };
+        if (!enabled) count += 1;
+    }
+    return count;
+}
+
+fn applyFailureCount(mcp: *const mcp_state.McpProductState) usize {
+    if (mcp.runtime_uncertain) return 0;
+    const management = if (mcp.management) |*value| value else return 0;
+    const desired = management.desiredRegistry() orelse return 0;
+    var count: usize = 0;
+    for (management.convergence.results.items) |result| {
+        if (result.outcome == .pending or !management.convergence.handled(result.target)) continue;
+        var found = false;
+        for (desired.servers) |server| {
+            if (!std.mem.eql(u8, result.target.id(), server.id)) continue;
+            found = true;
+            const status = serverApplyStatus(mcp, server);
+            if (status == .rejected or status == .failed) count += 1;
+            break;
+        }
+        if (!found and result.target.kind == .remove) {
+            const target = mcp_configuration.RuntimeApplyTarget.init(result.target.id(), null, .remove);
+            if (!std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint)) continue;
+            if (actualEntry(mcp, result.target.id())) |entry|
+                if (entry.state == .loaded and entry.task_references == 0) {
+                    count += 1;
+                };
+        }
+    }
+    return count;
 }
 
 fn sameRuntimeDescriptor(loaded: mcp_configuration.ServerWire, desired: mcp_configuration.ServerWire) bool {
@@ -179,6 +265,7 @@ fn activationServerIndex(
     mcp: *const mcp_state.McpProductState,
     desired: mcp_configuration.ServerWire,
 ) ?usize {
+    if (mcp.runtime_uncertain) return null;
     if (mcpDesiredServerRuntimeStatus(mcp, desired) == .not_loaded) return null;
     const startup = mcp.preparation.registry orelse return null;
     const matching = for (startup.value.servers) |server| {
@@ -500,7 +587,7 @@ pub fn writeProjection(
     if (trusted) writer.print("\"{d}\"", .{inspection.desired_generation orelse 0}) catch
         return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"runtimeAlignment\":\"{s}\",\"redacted\":{},\"servers\":[", .{
-        if (trusted) @tagName(inspection.runtime_alignment) else "unknown",
+        if (trusted and !mcp.runtime_uncertain) @tagName(inspection.runtime_alignment) else "unknown",
         projection_redacted,
     }) catch return error.SnapshotTooLarge;
     const servers = if (registry) |value| value.servers else &.{};
@@ -560,7 +647,11 @@ pub fn writeProjection(
             @tagName(status),
             mcpNewTaskAccess(mcp, server.id),
         }) catch return error.SnapshotTooLarge;
-        try input.text.writeJson(writer, if (mcp.refresh_schedule_failed)
+        try input.text.writeJson(writer, if (mcp.runtime_uncertain)
+            "Runtime configuration outcome is unknown. Restart the application."
+        else if (serverCapacityBlocked(mcp, server))
+            "MCP connection capacity is full. Close unused tasks, then retry the connection."
+        else if (mcp.refresh_schedule_failed)
             "Automatic refresh could not be scheduled. Select Refresh to retry."
         else if (mcp.refresh_paused)
             "Tool catalog refresh paused after repeated failures. Select Refresh to retry."
@@ -623,13 +714,13 @@ pub fn writeProjection(
                 try writeMcpTool(writer, input.text, mcp, server, tool.name, true);
             }
         };
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        writer.print("],\"taskReferenceCount\":{d},\"applyStatus\":\"{s}\"}}", .{ taskReferenceCount(mcp, server.id), @tagName(serverApplyStatus(mcp, server)) }) catch return error.SnapshotTooLarge;
     }
-    writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    writer.print("],\"retainedMemberCount\":{d},\"applyFailureCount\":{d},\"runtimeUncertain\":{},\"runtimeTimeoutLimitMs\":{d}}}", .{ if (trusted) retainedMemberCount(mcp) else 0, if (trusted) applyFailureCount(mcp) else 0, trusted and mcp.runtime_uncertain, mcp_configuration.max_management_timeout_ms }) catch return error.SnapshotTooLarge;
 }
 
 const unavailable_projection =
-    "{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}";
+    "{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[],\"retainedMemberCount\":0,\"applyFailureCount\":0,\"runtimeUncertain\":false,\"runtimeTimeoutLimitMs\":" ++ std.fmt.comptimePrint("{d}", .{mcp_configuration.max_management_timeout_ms}) ++ "}";
 
 test "Product MCP View preserves the unavailable snapshot bytes" {
     const Text = struct {

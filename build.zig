@@ -1200,7 +1200,7 @@ fn addMcpInteropTests(
         .optimize = modules.app.optimize,
         .link_libc = link_libc,
     });
-    cases.addImport("lifecycle_fixture", createLifecycleFixture(b, modules, link_libc));
+    cases.addImport("lifecycle_fixture", existingImport(modules.app, "lifecycle_fixture"));
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("metawork_account_contract", modules.account_contract);
     cases.addImport("metawork_product_models_contract", modules.models_contract);
@@ -1210,6 +1210,12 @@ fn addMcpInteropTests(
     cases.addImport("metawork_product_task", modules.product_task);
     cases.addImport("metawork_product_skill", modules.product_skill);
     cases.addImport("product_models_ports", modules.models_ports);
+    // Exercise the production coordinator against the canonical Runtime and
+    // real fixture transports, sharing the Application's dependency identities.
+    const mcp_coordinator = b.createModule(.{ .root_source_file = b.path("src/app/mcp_management_coordinator.zig"), .target = modules.app.resolved_target, .optimize = modules.app.optimize });
+    for (modules.app.import_table.keys(), modules.app.import_table.values()) |name, dependency| mcp_coordinator.addImport(name, dependency);
+    mcp_coordinator.addImport("lifecycle_fixture", existingImport(cases, "lifecycle_fixture"));
+    cases.addImport("mcp_management_coordinator", mcp_coordinator);
     cases.addOptions("mcp_interop_options", fixture_options);
     const tests = b.addTest(.{
         .name = "metawork-mcp-interop",

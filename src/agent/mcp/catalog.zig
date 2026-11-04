@@ -89,6 +89,10 @@ pub const Selection = opaque {
 /// Process-only original selection and connection provenance. It is not a
 /// live Selection and cannot be passed to Core or have its generation edited.
 pub const RestoreSelection = opaque {
+    pub fn isEmpty(self: *const RestoreSelection) bool {
+        return restoreStorageConst(self).tools.len == 0;
+    }
+
     pub fn deinit(self: *RestoreSelection) void {
         const storage = restoreStorage(self);
         const allocator = storage.allocator;

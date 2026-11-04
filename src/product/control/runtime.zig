@@ -412,6 +412,7 @@ pub const Configuration = struct {
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
     mcp_refresh_timer: McpRefreshTimer = .{},
+    mcp_catalog: ?product_mcp.Catalog = null,
     schedule_persistence: SchedulePersistence = .{},
     task_persistence: TaskPersistence = .{},
     checkpoint_store: CheckpointStoreConfiguration = .{},
@@ -614,7 +615,9 @@ const PreparedTaskCreate = struct {
     }
 
     fn rollback(self: *PreparedTaskCreate, control: *Runtime) void {
+        const task_id = self.id();
         self.task.rollback();
+        if (control.mcp) |*mcp| mcp.releaseTaskReference(task_id);
         if (self.order.isActive()) control.workspace.rollbackOrder(&self.order);
     }
 };
@@ -889,14 +892,14 @@ fn mcpTimerPort(timer: McpRefreshTimer) mcp_ports.Timer {
 
 fn productMcpPorts(
     executor: *executor_impl.Executor,
-    runtime: *lifecycle.Runtime,
+    catalog: mcp_ports.Catalog,
     timer: McpRefreshTimer,
     notifier: ChangeNotifier,
     clock: ScheduleTimer,
 ) mcp_ports.Ports {
     return .{
         .executor = mcpExecutorPort(executor),
-        .catalog = mcpCatalogPort(runtime),
+        .catalog = catalog,
         .timer = mcpTimerPort(timer),
         .notifier = mcpNotifierPort(notifier),
         .unix_clock = .{ .enabled = clock.enabled, .context = clock.context, .now_seconds_fn = clock.now_unix_seconds },
@@ -1777,7 +1780,7 @@ pub const Runtime = struct {
             control.mcp = startup.takeRuntime(
                 productMcpPorts(
                     mcp_executor.?,
-                    agent_runtime,
+                    configuration.mcp_catalog orelse mcpCatalogPort(agent_runtime),
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
                     configuration.schedule_timer,
@@ -4119,6 +4122,9 @@ pub const Runtime = struct {
             .text = self.taskRuntimeTextProjection(),
             .release = self.taskRuntimeReleaseEffects(),
         };
+        const task_id = self.task_runtime.next_task_id;
+        if (self.mcp) |*mcp| try mcp.retainTaskReference(task_id, task_input.mcp_selection);
+        errdefer if (self.mcp) |*mcp| mcp.releaseTaskReference(task_id);
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
             error.SessionCapacity => return self.sessionPressureError(null),
             error.McpNotRefreshed, error.InvalidMcpSelection, error.StaleMcpSelection => retry: {
@@ -4126,6 +4132,7 @@ pub const Runtime = struct {
                 // authority. A malformed null create is not recoverable here.
                 if (task_input.mcp_selection == null) return err;
                 self.recoverExpiredMcpCatalogNoFail();
+                if (self.mcp) |*mcp| mcp.releaseTaskReference(task_id);
                 mcp_authority = .unavailable;
                 task_input.mcp_selection = null;
                 task_input.mcp_authority = mcp_authority;
@@ -4264,7 +4271,7 @@ pub const Runtime = struct {
         }
         if (original.mcp) |captured| {
             const mcp = if (self.mcp) |*value| value else return error.RecoveryUnavailable;
-            var authority = try mcp.restoreAuthority(captured);
+            var authority = try mcp.restoreAuthorityForTask(task_id, captured);
             const selection = authority.selection;
             authority.selection = null;
             const generation = authority.catalog_generation;
@@ -6265,6 +6272,12 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
+    pub fn prepareMcpConfigurationStep(self: *Runtime, generation: u64, intent: mcp_configuration.RuntimeApplyIntent) Error!?mcp_configuration.RuntimeApplyStep {
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        defer self.publishMcpRuntimeChanges();
+        return mcp.prepareConfigurationStep(generation, intent);
+    }
+
     /// Installs the exact Runtime preparation and authority produced by one
     /// successful declarative AgentCore apply. Every pointer remains owned by
     /// the caller when the generation no longer matches.
@@ -6293,9 +6306,10 @@ pub const Runtime = struct {
     pub fn failMcpConfigurationApply(
         self: *Runtime,
         expected_generation: u64,
+        reason: mcp_configuration.RuntimeApplyFailure,
     ) void {
         const runtime = if (self.mcp) |*value| value else return;
-        if (runtime.failConfigurationApply(expected_generation)) self.bumpRevision();
+        if (runtime.failConfigurationApply(expected_generation, reason)) self.bumpRevision();
     }
 
     pub fn completeMcpConnectionTest(
@@ -8824,12 +8838,18 @@ pub const Runtime = struct {
             (if (self.file_change_lane) |lane| !lane.hasTaskJob(task_id) else true);
     }
 
+    fn taskRecordDeleted(context: *anyopaque, task_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.mcp) |*mcp| mcp.releaseTaskReference(task_id);
+    }
+
     fn taskRuntimeDeletionEffects(self: *Runtime) task_runtime.DeletionEffects {
         return .{
             .context = self,
             .release_session_fn = releaseTaskRuntimeSession,
             .commit_without_task_fn = commitTaskRuntimeWithoutTask,
             .resources_quiescent_fn = taskResourcesQuiescent,
+            .task_deleted_fn = taskRecordDeleted,
             .delete_checkpoint_task_fn = deleteTaskRuntimeCheckpointTask,
             .delete_file_change_task_fn = deleteTaskRuntimeFileChanges,
             .delete_attachment_task_fn = deleteTaskRuntimeAttachments,
@@ -10270,6 +10290,7 @@ pub const Runtime = struct {
             .begin_connection_test_fn = controlMcpBeginConnectionTest,
             .complete_connection_test_fn = controlMcpCompleteConnectionTest,
             .begin_apply_fn = controlMcpBeginApply,
+            .prepare_apply_fn = controlMcpPrepareApply,
             .complete_apply_fn = controlMcpCompleteApply,
             .fail_apply_fn = controlMcpFailApply,
             .authorization_operation_fn = controlMcpAuthorizationOperation,
@@ -10817,11 +10838,14 @@ fn controlMcpCompleteConnectionTest(context: *anyopaque, server_id: []const u8, 
 fn controlMcpBeginApply(context: *anyopaque, generation: u64) anyerror!void {
     return controlOwner(context).beginMcpConfigurationApply(generation);
 }
+fn controlMcpPrepareApply(context: *anyopaque, generation: u64, intent: mcp_configuration.RuntimeApplyIntent) anyerror!?mcp_configuration.RuntimeApplyStep {
+    return controlOwner(context).prepareMcpConfigurationStep(generation, intent);
+}
 fn controlMcpCompleteApply(context: *anyopaque, generation: u64, preparation: *mcp_configuration.Preparation, manifest: *mcp_configuration.RuntimeManifest, activation: ?*lifecycle.McpActivation, selection: ?*lifecycle.McpSelection, activation_failed: bool) bool {
     return controlOwner(context).completeMcpConfigurationApply(generation, preparation, manifest, activation, selection, activation_failed);
 }
-fn controlMcpFailApply(context: *anyopaque, generation: u64) void {
-    controlOwner(context).failMcpConfigurationApply(generation);
+fn controlMcpFailApply(context: *anyopaque, generation: u64, reason: mcp_configuration.RuntimeApplyFailure) void {
+    controlOwner(context).failMcpConfigurationApply(generation, reason);
 }
 fn controlMcpAuthorizationOperation(context: *anyopaque) ?McpAuthorizationOperationView {
     return controlOwner(context).mcpAuthorizationOperation();
@@ -20205,7 +20229,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         control.allocator,
         productMcpPorts(
             control.executor,
-            control.agent_runtime,
+            mcpCatalogPort(control.agent_runtime),
             .{},
             .{},
             .{},
@@ -20257,10 +20281,37 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
     try std.testing.expect(desired.servers[0].auth.oauth.?.grant == null);
     try std.testing.expectEqual(
-        mcp_configuration.RuntimeAlignment.current,
+        mcp_configuration.RuntimeAlignment.restart_required,
         control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
-    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
+    var removal = (try control.prepareMcpConfigurationStep(5, .automatic)).?;
+    var removal_owned = true;
+    defer if (removal_owned) removal.deinit();
+    try std.testing.expectEqual(.remove, removal.target.kind);
+    try std.testing.expectEqualStrings("oauth", removal.target.id());
+    var removed_manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &removal.preparation)).?;
+    var removed_manifest_owned = true;
+    defer if (removed_manifest_owned) removed_manifest.deinit();
+    // This Product-boundary test has no catalog. Keep its recovery enqueue
+    // explicitly unavailable while accepting the confirmed membership result.
+    const NoCatalogExecutor = struct {
+        fn enqueue(_: *anyopaque, _: mcp_runtime.Job) error{ ExecutorShuttingDown, QueueFull }!void {
+            return error.QueueFull;
+        }
+        fn cancel(_: *anyopaque, _: *anyopaque) bool {
+            return false;
+        }
+    };
+    const previous_executor = control.mcp.?.ports.executor;
+    defer control.mcp.?.ports.executor = previous_executor;
+    control.mcp.?.ports.executor = .{ .context = &control, .enqueue_fn = NoCatalogExecutor.enqueue, .cancel_fn = NoCatalogExecutor.cancel };
+    try std.testing.expect(control.completeMcpConfigurationApply(5, &removal.preparation, &removed_manifest, null, null, true));
+    removal_owned = false;
+    removed_manifest_owned = false;
+    try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, control.inspectMcpDesiredConfiguration().?.runtime_alignment);
+    for (mcp_testing.state(&control.mcp.?).management.?.runtime_manifest.?.entries) |entry|
+        try std.testing.expect(!std.mem.eql(u8, entry.id, "oauth"));
+    try std.testing.expectEqual(McpAdmissionBlockReason.activation_unavailable, mcp_testing.state(&control.mcp.?).admission.blocked);
     try std.testing.expectEqual(
         @as(usize, 1),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
@@ -20283,7 +20334,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             .display_name = "Renamed OAuth",
         }),
     );
-    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
+    try std.testing.expectEqual(McpAdmissionBlockReason.activation_unavailable, mcp_testing.state(&control.mcp.?).admission.blocked);
     try std.testing.expectEqual(
         @as(usize, 1),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
@@ -20486,10 +20537,10 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"configurationApply\":\"applying\"",
     ) != null);
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.refreshing,
+        McpAdmissionBlockReason.pending_restart,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    control.failMcpConfigurationApply(1);
+    control.failMcpConfigurationApply(1, .preparation);
     const failed_apply_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -20838,7 +20889,7 @@ test "MCP startup activation failure stays globally unavailable without inventin
         control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.pending_restart,
+        McpAdmissionBlockReason.activation_unavailable,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(

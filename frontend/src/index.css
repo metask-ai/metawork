@@ -6788,6 +6788,29 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (max-width: 620px) {
+  .mcp-toolbar > * {
+    min-height: 44px;
+  }
+
+  .mcp-page button:not([role="switch"]),
+  .mcp-detail-pane button:not([role="checkbox"]),
+  .mcp-confirm-actions button,
+  .mcp-page input,
+  .mcp-detail-pane
+    input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]) {
+    min-height: 44px;
+  }
+
+  .mcp-detail-pane > header button {
+    min-width: 44px;
+  }
+
+  .mcp-server-enablement [role="switch"]::after {
+    content: "";
+    position: absolute;
+    inset: -12px -4px;
+  }
+
   .mcp-page-inner {
     padding: 28px 16px 48px;
   }

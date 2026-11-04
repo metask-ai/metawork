@@ -997,6 +997,7 @@ pub const DeletionEffects = struct {
     release_session_fn: *const fn (*anyopaque, u64) SessionReleaseOutcome,
     commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
     resources_quiescent_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
+    task_deleted_fn: ?*const fn (*anyopaque, u64) void = null,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
     delete_file_change_task_fn: *const fn (*anyopaque, u64) void,
     delete_attachment_task_fn: *const fn (*anyopaque, u64) void,
@@ -3716,6 +3717,7 @@ pub const Runtime = struct {
                     entry.* = null;
                     switch (effects.commitWithoutTask(workspace_id)) {
                         .committed => {
+                            if (effects.task_deleted_fn) |deleted| deleted(effects.context, task_id);
                             effects.deleteCheckpointTask(task_id);
                             effects.deleteFileChangeTask(task_id);
                             effects.deleteAttachmentTask(task_id);

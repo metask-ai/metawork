@@ -103,6 +103,7 @@ pub const Runtime = struct {
     mcp_servers: mcp_runtime.Servers,
     retired_mcp_servers: std.ArrayList(mcp_runtime.Servers) = .empty,
     mcp_apply_revision: u64 = 0,
+    mcp_configuration_uncertain: bool = false,
     next_session_id: u64 = 0,
 
     pub fn init(
@@ -365,6 +366,25 @@ pub const Runtime = struct {
         return projection;
     }
 
+    /// Compose a complete configuration from actual members and newly prepared
+    /// candidates. Product supplies membership; Agent shares resource owners.
+    pub fn prepareMcpMembership(
+        self: *Runtime,
+        generation: u64,
+        additions: ?*const root.McpRuntimeInput,
+        server_ids: []const []const u8,
+    ) (Error || std.mem.Allocator.Error)!root.McpRuntimeInput {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        if (self.mcp_configuration_uncertain) return error.McpConfigurationApplyUncertain;
+        if (self.mcp_operation.busy()) return error.McpRefreshInProgress;
+        return mcp_runtime.Input.compose(self.allocator, generation, &self.mcp_servers, additions, server_ids) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidConfig => return error.McpConfigurationApplyFailed,
+        };
+    }
+
     /// Applies one complete MCP server set to the shared AgentCore Runtime.
     /// Errors before input.take leave it owned by the caller. Once taken,
     /// every outcome consumes it: applied transfers the candidate to Runtime;
@@ -374,51 +394,54 @@ pub const Runtime = struct {
         self: *Runtime,
         input: *root.McpRuntimeInput,
     ) (Error || std.mem.Allocator.Error)!McpConfigurationApplyOutcome {
-        var reaped: [max_mcp_configuration_applies]mcp_runtime.Servers = undefined;
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
+        }
+        if (self.mcp_configuration_uncertain) {
+            self.sessions_mutex.unlock(self.io);
+            return error.McpConfigurationApplyUncertain;
         }
         if (self.mcp_operation.busy()) {
             self.sessions_mutex.unlock(self.io);
             return error.McpRefreshInProgress;
         }
         std.debug.assert(self.mcp_operation.begin(.apply));
-        var reap_count: usize = 0;
         var retired_index: usize = 0;
         while (retired_index < self.retired_mcp_servers.items.len) {
             if (!self.retired_mcp_servers.items[retired_index].isQuiescent()) {
                 retired_index += 1;
                 continue;
             }
-            reaped[reap_count] = self.retired_mcp_servers.swapRemove(retired_index);
-            reap_count += 1;
+            var retired = self.retired_mcp_servers.swapRemove(retired_index);
+            self.sessions_mutex.unlock(self.io);
+            // Dropping this list changes shared member reference counts. Recheck
+            // the next list after the release, without holding the Session lock
+            // across transport cleanup.
+            retired.deinit();
+            self.sessions_mutex.lockUncancelable(self.io);
         }
-        self.sessions_mutex.unlock(self.io);
-        for (reaped[0..reap_count]) |*servers| servers.deinit();
-
-        self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire) or self.runtime == null) {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall(false);
+            self.finishMcpCall(true);
             return error.RuntimeShuttingDown;
         }
         if (self.retired_mcp_servers.items.len >= max_mcp_configuration_applies or
             self.mcp_apply_revision == std.math.maxInt(u64))
         {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall(false);
+            self.finishMcpCall(true);
             return error.McpConfigurationApplyLimit;
         }
         self.retired_mcp_servers.ensureUnusedCapacity(self.allocator, 1) catch |err| {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall(false);
+            self.finishMcpCall(true);
             return err;
         };
         const raw_runtime = self.runtime orelse {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall(false);
+            self.finishMcpCall(true);
             return error.RuntimeShuttingDown;
         };
         const desired_revision = self.mcp_apply_revision + 1;
@@ -426,7 +449,7 @@ pub const Runtime = struct {
         self.sessions_mutex.unlock(self.io);
 
         var replacement = input.take() catch {
-            self.finishMcpCall(false);
+            self.finishMcpCall(true);
             return error.McpConfigurationApplyFailed;
         };
         var replacement_owned = true;
@@ -443,34 +466,38 @@ pub const Runtime = struct {
         );
         releaseOwned(self.api, &diagnostic);
         const status = sdk.Status.fromCode(status_code) catch {
-            self.finishMcpCall(false);
-            return error.McpConfigurationApplyFailed;
+            replacement_owned = false;
+            self.finishUncertainMcpApply(replacement);
+            return error.McpConfigurationApplyUncertain;
         };
         const disposition: McpConfigurationApplyOutcome = if (status == .ok)
             switch (report.disposition_code) {
                 wire.MCP_APPLY_APPLIED => .applied,
-                wire.MCP_APPLY_SUPERSEDED => .superseded,
                 wire.MCP_APPLY_REJECTED => .rejected,
                 else => {
-                    self.finishMcpCall(false);
-                    return error.McpConfigurationApplyFailed;
+                    replacement_owned = false;
+                    self.finishUncertainMcpApply(replacement);
+                    return error.McpConfigurationApplyUncertain;
                 },
             }
         else {
-            self.finishMcpCall(false);
-            return switch (status) {
-                .busy => error.McpRefreshInProgress,
-                .resource_limit => error.McpConfigurationApplyLimit,
-                else => error.McpConfigurationApplyFailed,
-            };
+            if (status == .busy or status == .resource_limit) {
+                self.finishMcpCall(true);
+                return if (status == .busy) error.McpRefreshInProgress else error.McpConfigurationApplyLimit;
+            }
+            replacement_owned = false;
+            self.finishUncertainMcpApply(replacement);
+            return error.McpConfigurationApplyUncertain;
         };
         if (report.struct_size != @sizeOf(wire.McpApplyReportV1) or
             report.desired_revision != desired_revision or
             !std.mem.allEqual(u64, &report.reserved, 0) or
-            (disposition == .applied and report.active_revision != desired_revision))
+            (disposition == .applied and report.active_revision != desired_revision) or
+            (disposition == .rejected and report.active_revision != self.mcp_apply_revision))
         {
-            self.finishMcpCall(false);
-            return error.McpConfigurationApplyFailed;
+            replacement_owned = false;
+            self.finishUncertainMcpApply(replacement);
+            return error.McpConfigurationApplyUncertain;
         }
 
         self.sessions_mutex.lockUncancelable(self.io);
@@ -484,11 +511,20 @@ pub const Runtime = struct {
             self.mcp_apply_revision = desired_revision;
         }
         self.mcp_operation.completeApply();
-        const reject = self.shutting_down.load(.acquire);
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
-        if (reject) return error.RuntimeShuttingDown;
         return disposition;
+    }
+
+    // Reserve retirement capacity before the ABI call. Unknown publication
+    // keeps both resource sets alive and stops future MCP effects fail-closed.
+    fn finishUncertainMcpApply(self: *Runtime, replacement: mcp_runtime.Servers) void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        self.retired_mcp_servers.appendAssumeCapacity(replacement);
+        self.mcp_configuration_uncertain = true;
+        self.mcp_operation.fail(false);
+        self.shutdown_condition.broadcast(self.io);
     }
 
     fn beginMcpRefresh(self: *Runtime) Error!McpRefreshLease {
@@ -496,6 +532,10 @@ pub const Runtime = struct {
         if (self.shutting_down.load(.acquire)) {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
+        }
+        if (self.mcp_configuration_uncertain) {
+            self.sessions_mutex.unlock(self.io);
+            return error.McpConfigurationApplyUncertain;
         }
         if (self.mcp_operation.busy()) {
             self.sessions_mutex.unlock(self.io);
@@ -602,7 +642,6 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_operation.phase == .apply) return error.McpRefreshInProgress;
         if (!mcp_catalog.projectionBelongsTo(
             projection,
             self.mcp_owner_id,
@@ -629,7 +668,6 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_operation.phase == .apply) return error.McpRefreshInProgress;
         if (!self.acceptsMcpGeneration(activation.catalogGeneration()))
             return error.StaleMcpSelection;
         return mcp_catalog.createSelectionForActivation(
@@ -733,9 +771,19 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
-        if (self.mcp_operation.phase == .apply) return error.McpRefreshInProgress;
         if (!self.acceptsMcpGeneration(activation.catalogGeneration())) return error.StaleMcpSelection;
-        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers(), ceiling) catch |err| {
+        // Runtime descriptors prove source identity; today's Product ceiling
+        // supplies grants. The initial descriptor's allowlist may predate a
+        // later explicit tool grant and is not a current permission record.
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const expected = try arena.allocator().dupe(mcp_catalog.ExpectedServer, self.mcp_servers.expectedServers());
+        for (expected) |*server| {
+            var allowed: std.ArrayList([]const u8) = .empty;
+            for (ceiling) |tool| if (std.mem.eql(u8, server.id, tool.server_id)) try allowed.append(arena.allocator(), tool.name);
+            server.allowed_tools = allowed.items;
+        }
+        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, expected, ceiling) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);
         };
@@ -766,7 +814,7 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire) or self.runtime == null) return .unavailable;
-        if (self.mcp_operation.phase == .apply) return .mcp_busy;
+        if (self.mcp_operation.phase == .apply and self.mcp_operation.current_generation == null) return .mcp_busy;
         if (releasing_route_id) |route_id| {
             if (route_id == 0) return .unavailable;
             for (self.sessions) |entry| if (entry) |session|
@@ -839,10 +887,8 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
-        // Apply can change the configuration epoch. A pure catalog refresh
-        // preserves the published authority; Core checks actual availability.
-        if (self.mcp_operation.phase == .apply and options.mcp_selection != null)
-            return error.McpRefreshInProgress;
+        // Product filters published selectors by current source and grants;
+        // Core validates their actual availability even while apply is in flight.
         if (options.mcp_selection) |selection| {
             if (!mcp_catalog.belongsTo(selection, self.mcp_owner_id))
                 return error.McpCatalogBindingMismatch;
@@ -1098,7 +1144,7 @@ pub const Runtime = struct {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
         };
-        if (self.mcp_operation.phase == .apply) {
+        if (self.mcp_operation.phase == .apply and self.mcp_operation.current_generation == null) {
             self.sessions_mutex.unlock(self.io);
             return error.McpRefreshInProgress;
         }

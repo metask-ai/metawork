@@ -321,6 +321,47 @@ pub const McpOauthRuntimeCommit = struct {
     }
 };
 
+/// Process-lifetime Task cap. It owns names and provenance, never credentials.
+pub const McpTaskReference = struct {
+    pub const Tool = struct {
+        server_id: []const u8,
+        name: []const u8,
+        fingerprint: [32]u8,
+        allowed: bool = true,
+    };
+    arena: std.heap.ArenaAllocator,
+    task_id: u64,
+    tools: []Tool,
+
+    pub fn init(allocator: std.mem.Allocator, task_id: u64, selection: *const lifecycle.McpSelection, servers: []const mcp_configuration.ServerWire) (std.mem.Allocator.Error || error{InvalidMcpSelection})!McpTaskReference {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        const tools = try owned.alloc(Tool, selection.selectedTools().len);
+        for (selection.selectedTools(), tools) |selected, *tool| {
+            const applied = findMcpServer(servers, selected.server_id) orelse return error.InvalidMcpSelection;
+            tool.* = .{ .server_id = try owned.dupe(u8, selected.server_id), .name = try owned.dupe(u8, selected.name), .fingerprint = mcp_configuration.runtimeDescriptorFingerprint(applied) };
+        }
+        return .{ .arena = arena, .task_id = task_id, .tools = tools };
+    }
+
+    pub fn deinit(self: *McpTaskReference) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    pub fn reconcile(self: *McpTaskReference, desired: mcp_configuration.RegistryWire) void {
+        for (self.tools) |*tool| {
+            // A deletion preserves the last explicitly committed ceiling.
+            const server = findMcpServer(desired.servers, tool.server_id) orelse continue;
+            tool.allowed = for (server.tools) |name| {
+                if (std.mem.eql(u8, name, tool.name)) break true;
+            } else false;
+            if (std.mem.eql(u8, &tool.fingerprint, &mcp_configuration.runtimeDescriptorFingerprint(server)) and !mcp_configuration.serverRuntimeAuthorizationReady(server)) tool.allowed = false;
+        }
+    }
+};
+
 pub const McpProductState = struct {
     preparation: mcp_configuration.Preparation,
     activation: ?*lifecycle.McpActivation,
@@ -331,6 +372,7 @@ pub const McpProductState = struct {
     refresh_pending: bool = false,
     refresh_deadline_ms: ?u64 = null,
     expiry_deadline_ms: ?u64 = null,
+    catalog_observed_at_ms: ?u64 = null,
     refresh_not_before_ms: ?u64 = null,
     refresh_failures: u8 = 0,
     refresh_paused: bool = false,
@@ -338,6 +380,9 @@ pub const McpProductState = struct {
     refresh_schedule_failed: bool = false,
     connection_test: ?McpConnectionTest = null,
     configuration_apply_state: McpConfigurationApplyState = .idle,
+    apply_target: ?mcp_configuration.RuntimeApplyTarget = null,
+    runtime_uncertain: bool = false,
+    task_references: std.ArrayList(McpTaskReference) = .empty,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     host_capabilities: McpHostCapabilities,
@@ -366,6 +411,8 @@ pub const McpProductState = struct {
     }
 
     pub fn deinit(self: *McpProductState) void {
+        for (self.task_references.items) |*reference| reference.deinit();
+        self.task_references.deinit(self.preparation.allocator);
         if (self.authorization_operation) |*operation|
             operation.deinit(self.preparation.allocator);
         for (self.pending_reauthorizations.items) |*pending| pending.deinit();

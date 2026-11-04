@@ -211,7 +211,8 @@ pub const Runtime = struct {
 
     /// Capture availability together with the synchronous Selection borrow,
     /// rather than sampling readiness again after copying that pointer.
-    pub fn selectionForNewTask(self: *const Runtime) NewTaskAdmission {
+    pub fn selectionForNewTask(self: *Runtime) NewTaskAdmission {
+        self.expireAdmission();
         if (self.shutting_down or !self.state.committed or self.state.admission != .ready or self.admissionExpired())
             return .{ .available = false, .selection = null };
         const selection = policy.selectionForNewTask(&self.state);
@@ -221,7 +222,7 @@ pub const Runtime = struct {
     }
 
     pub fn newTaskAuthorityReady(self: *const Runtime) bool {
-        return self.selectionForNewTask().available;
+        return !self.shutting_down and self.state.committed and self.state.admission == .ready and !self.admissionExpired();
     }
 
     pub fn authorizationOperation(
@@ -307,6 +308,88 @@ pub const Runtime = struct {
         return .{
             .selection = try self.ports.catalog.prepareRestoreSelection(saved, activation, if (current.selection) |selection| selection.selectedTools() else &.{}),
             .catalog_generation = current.catalog_generation,
+        };
+    }
+
+    pub fn retainTaskReference(self: *Runtime, task_id: u64, selection: ?*const agent.McpSelection) Error!void {
+        const selected = selection orelse return;
+        if (selected.selectedTools().len == 0) return;
+        for (self.state.task_references.items) |reference| if (reference.task_id == task_id) return error.InvalidMcpSelection;
+        const registry = self.state.preparation.registry orelse return error.InvalidMcpSelection;
+        var reference = try state_module.McpTaskReference.init(self.allocator, task_id, selected, registry.value.servers);
+        errdefer reference.deinit();
+        if (self.state.management) |*management| if (management.desiredRegistry()) |desired| reference.reconcile(desired);
+        try self.state.task_references.append(self.allocator, reference);
+        self.updateMemberReferenceCounts();
+    }
+
+    pub fn releaseTaskReference(self: *Runtime, task_id: u64) void {
+        for (self.state.task_references.items, 0..) |reference, index| {
+            if (reference.task_id != task_id) continue;
+            var removed = self.state.task_references.orderedRemove(index);
+            removed.deinit();
+            self.updateMemberReferenceCounts();
+            self.markChanged();
+            if (!self.shutting_down) if (self.state.management) |*management| if (management.runtime_manifest) |*manifest| {
+                if (manifest.nextStep(management.desiredRegistry(), management.limits, &management.convergence) != null)
+                    _ = self.ports.notifier.notify();
+            };
+            return;
+        }
+    }
+
+    fn updateMemberReferenceCounts(self: *Runtime) void {
+        const management = if (self.state.management) |*value| value else return;
+        const manifest = if (management.runtime_manifest) |*value| value else return;
+        for (manifest.entries) |*entry| {
+            entry.task_references = 0;
+            if (entry.state != .loaded) continue;
+            for (self.state.task_references.items) |reference| {
+                for (reference.tools) |tool| {
+                    if (std.mem.eql(u8, tool.server_id, entry.id)) {
+                        entry.task_references += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restore only this process-lifetime Task cap; unrelated Desired rows
+    /// cannot invalidate it and a deleted row cannot resurrect a revoked tool.
+    pub fn restoreAuthorityForTask(self: *Runtime, task_id: u64, original: ?*const agent.McpRestoreSelection) Error!state_module.RecoveryMcpAuthority {
+        const saved = original orelse return .{ .selection = null, .catalog_generation = null };
+        if (saved.isEmpty()) return .{ .selection = null, .catalog_generation = null };
+        if (self.shutting_down or self.state.runtime_uncertain or self.state.activation_failed or !self.state.committed) return error.RecoveryUnavailable;
+        const management = if (self.state.management) |*value| value else return error.RecoveryUnavailable;
+        if (management.inspect().health != .ready) return error.RecoveryUnavailable;
+        const desired = management.desiredRegistry() orelse return error.RecoveryUnavailable;
+        const activation = self.state.activation orelse return error.RecoveryUnavailable;
+        const reference = for (self.state.task_references.items) |*value| {
+            if (value.task_id == task_id) break value;
+        } else return error.RecoveryUnavailable;
+        var tools: std.ArrayList(agent.McpActivationTool) = .empty;
+        defer tools.deinit(self.allocator);
+        const age_ms = activation.catalogAgeMs() orelse return error.RecoveryUnavailable;
+        for (reference.tools) |tool| {
+            if (state_module.findMcpServer(desired.servers, tool.server_id)) |server| {
+                if (server.enabled and !std.mem.eql(u8, &tool.fingerprint, &configuration.runtimeDescriptorFingerprint(server))) return error.RecoveryUnavailable;
+            }
+            if (!tool.allowed) continue;
+            const binding = for (activation.serverHealth()) |health| {
+                if (std.mem.eql(u8, health.id, tool.server_id)) break health.binding_identity;
+            } else continue;
+            const fresh = for (activation.catalogServers()) |server| {
+                if (std.mem.eql(u8, &server.binding_identity, &binding)) break server.fresh and age_ms < server.ttl_remaining_ms;
+            } else false;
+            if (fresh) try tools.append(self.allocator, .{ .server_id = tool.server_id, .name = tool.name });
+        }
+        return .{
+            .selection = self.ports.catalog.prepareRestoreSelection(saved, activation, tools.items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RecoveryUnavailable,
+            },
+            .catalog_generation = activation.catalogGeneration(),
         };
     }
 
@@ -512,6 +595,7 @@ pub const Runtime = struct {
     fn startPendingRefresh(self: *Runtime) Error!bool {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const mcp = &self.state;
+        if (mcp.runtime_uncertain) return error.CatalogUnavailable;
         if (!mcp.refresh_pending) return false;
         if (self.catalogBoundaryBusy()) return false;
         const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
@@ -539,7 +623,7 @@ pub const Runtime = struct {
             .request_generation = generation,
             .arena = refresh_arena,
             .allowlists = allowlists,
-            .build_admission = inspection.runtime_alignment == .current,
+            .build_admission = !self.state.runtime_uncertain,
         };
         try self.ports.executor.enqueue(job.executorJob());
         mcp.refresh_pending = false;
@@ -689,6 +773,94 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Freeze one real membership change and reserve its completion record.
+    /// The returned snapshot is the complete candidate Runtime, not Desired.
+    pub fn prepareConfigurationStep(
+        self: *Runtime,
+        expected_generation: u64,
+        intent: configuration.RuntimeApplyIntent,
+    ) Error!?configuration.RuntimeApplyStep {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.state.runtime_uncertain) return error.McpManagementUnavailable;
+        if (self.catalogBoundaryBusy() or self.state.authorization_operation != null)
+            return error.CatalogLoading;
+        const management = if (self.state.management) |*value| value else return error.McpManagementUnavailable;
+        if (management.inspect().health != .ready) return error.McpManagementUnavailable;
+        const desired = management.desiredRegistry() orelse return error.McpManagementUnavailable;
+        if (desired.generation != expected_generation or desired.oauth_operation != null)
+            return error.McpManagementUnavailable;
+        switch (intent) {
+            .automatic => {},
+            .retry_all => management.convergence.retry(),
+            .retry_server => |id| {
+                if (state_module.findMcpServer(desired.servers, id) == null) return error.McpManagementUnavailable;
+                management.convergence.retryServer(id);
+            },
+        }
+        if (self.state.refresh_pending and try self.startPendingRefresh()) return error.CatalogLoading;
+        if (self.ports.timer.now()) |now_ms| {
+            if (self.state.refresh_deadline_ms) |deadline| {
+                if (!self.state.refresh_paused and now_ms >= deadline and now_ms >= (self.state.refresh_not_before_ms orelse 0)) {
+                    if (try self.queueRefresh(false, false)) return error.CatalogLoading;
+                }
+            }
+        }
+        var members: std.ArrayList(configuration.ServerWire) = .empty;
+        defer members.deinit(self.allocator);
+        const manifest = if (management.runtime_manifest) |*value| value else return error.McpManagementUnavailable;
+        for (manifest.entries) |entry| {
+            if (entry.state != .loaded) continue;
+            const saved = self.state.preparation.registry orelse return error.McpManagementUnavailable;
+            const server = state_module.findMcpServer(saved.value.servers, entry.id) orelse return error.McpManagementUnavailable;
+            if (!std.mem.eql(u8, &configuration.runtimeDescriptorFingerprint(server), &entry.state.loaded))
+                return error.McpManagementUnavailable;
+            try members.append(self.allocator, server);
+        }
+        const plan = manifest.nextStep(desired, management.limits, &management.convergence) orelse {
+            self.finishConvergence();
+            return null;
+        };
+        if (plan.next_round) std.debug.assert(management.convergence.nextRound());
+        const selected = plan.target;
+        const existing = for (members.items, 0..) |member, index| {
+            if (std.mem.eql(u8, member.id, selected.id())) break index;
+        } else null;
+        switch (selected.kind) {
+            .remove => {
+                _ = members.orderedRemove(existing orelse return error.McpManagementUnavailable);
+            },
+            .replace => members.items[existing orelse return error.McpManagementUnavailable] = state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable,
+            .add => try members.append(self.allocator, state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable),
+        }
+        try management.convergence.prepare(self.allocator, selected);
+        var step = configuration.RuntimeApplyStep.init(self.allocator, desired, members.items, selected, management.limits) catch |err| {
+            // A rejected composition has no Core effect, but is still a processed
+            // attempt. Keep R intact and let the next candidate make progress.
+            management.convergence.reject(selected, if (members.items.len > management.limits.max_servers) .capacity else .failed);
+            self.state.configuration_apply_state = .failed;
+            self.markChanged();
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return self.prepareConfigurationStep(expected_generation, .automatic);
+        };
+        errdefer step.deinit();
+        _ = try self.beginConfigurationApply(expected_generation);
+        self.state.apply_target = selected;
+        self.markChanged();
+        return step;
+    }
+
+    fn finishConvergence(self: *Runtime) void {
+        const management = if (self.state.management) |*value| value else return;
+        const manifest = if (management.runtime_manifest) |*value| value else return;
+        if (self.state.runtime_uncertain or self.state.activation_failed) return;
+        if (manifest.nextStep(management.desiredRegistry(), management.limits, &management.convergence) != null) return;
+        for (manifest.entries) |entry| if (entry.state == .loaded) return;
+        if (self.state.admission == .blocked and self.state.admission.blocked == .pending_restart) {
+            policy.replaceAdmission(&self.state, .{ .ready = .{ .selection = null, .catalog_generation = null } });
+            self.markChanged();
+        }
+    }
+
     pub fn beginConfigurationApply(
         self: *Runtime,
         expected_generation: u64,
@@ -706,9 +878,7 @@ pub const Runtime = struct {
         const registry = management.desiredRegistry() orelse
             return error.McpManagementUnavailable;
         if (registry.oauth_operation != null) return error.CatalogLoading;
-        self.ports.timer.cancel();
         self.state.configuration_apply_state = .applying;
-        policy.blockAdmission(&self.state, .refreshing);
         return true;
     }
 
@@ -744,6 +914,9 @@ pub const Runtime = struct {
         self.state.preparation.deinit();
         self.state.preparation = preparation.take();
         management.installRuntimeManifest(manifest);
+        self.updateMemberReferenceCounts();
+        if (self.state.apply_target) |target| management.convergence.applied(target);
+        self.state.apply_target = null;
         self.state.configuration_apply_state = .idle;
         self.state.refresh_pending = false;
         self.state.refresh_failures = 0;
@@ -765,19 +938,35 @@ pub const Runtime = struct {
         }
         self.state.connection_test = null;
         self.updateRefreshDeadline();
+        if (activation_failed and !self.shutting_down)
+            _ = self.queueRefresh(false, false) catch self.armRefreshRetry();
         self.releaseBoundary();
         return true;
     }
 
-    pub fn failConfigurationApply(self: *Runtime, expected_generation: u64) bool {
+    pub fn failConfigurationApply(self: *Runtime, expected_generation: u64, reason: configuration.RuntimeApplyFailure) bool {
         if (self.state.configuration_apply_state != .applying) return false;
         const management = if (self.state.management) |*value| value else return false;
         if (management.inspect().desired_generation != expected_generation) return false;
+        if (self.state.apply_target) |target| {
+            if (reason != .unknown) management.convergence.reject(target, if (reason == .rejected) .rejected else .failed);
+        }
+        self.state.apply_target = null;
         self.state.configuration_apply_state = .failed;
         if (self.shutting_down)
             policy.blockAdmission(&self.state, .shutting_down)
-        else
-            policy.blockAdmissionForCurrentState(&self.state);
+        else if (reason == .unknown) {
+            self.state.runtime_uncertain = true;
+            self.state.refresh_pending = false;
+            self.state.refresh_paused = true;
+            self.state.refresh_deadline_ms = null;
+            self.state.expiry_deadline_ms = null;
+            self.ports.timer.cancel();
+            policy.blockAdmission(&self.state, .activation_unavailable);
+        } else {
+            self.expireAdmission();
+        }
+        self.finishConvergence();
         self.releaseBoundary();
         return true;
     }
@@ -1002,44 +1191,45 @@ pub const Runtime = struct {
         }
     }
 
-    fn admissionForTarget(
-        self: *Runtime,
-        target: configuration.RegistryWire,
-    ) Error!state_module.McpAdmissionAuthority {
+    fn admissionForTarget(self: *Runtime, target: configuration.RegistryWire) Error!state_module.McpAdmissionAuthority {
         const management = &self.state.management.?;
-        return switch (management.runtimeAlignmentFor(target)) {
-            .restart_required => .{ .blocked = .pending_restart },
-            .unknown => .{ .blocked = .alignment_unknown },
-            .current => current: {
-                // A rejected apply fences Agent admission even when Core
-                // retained its prior Runtime. Desired edits must remain
-                // possible, without rebuilding authority from that old view.
-                if (self.state.activation_failed or self.state.configuration_apply_state == .failed)
-                    break :current .{ .blocked = .activation_unavailable };
-                const activation = self.state.activation orelse break :current .{ .ready = .{
-                    .selection = null,
-                    .catalog_generation = null,
-                } };
-                const health = activation.serverHealth();
-                const allowlists = try self.allocator.alloc(agent.McpServerAllowlist, health.len);
-                defer self.allocator.free(allowlists);
-                for (health, allowlists) |server, *allowlist| {
-                    const desired = state_module.findMcpServer(target.servers, server.id) orelse
-                        return error.McpCatalogBindingMismatch;
-                    allowlist.* = .{
-                        .id = server.id,
-                        .tools = policy.serverToolsForAdmission(target, desired),
-                    };
-                }
-                break :current .{ .ready = .{
-                    .selection = try self.ports.catalog.createAdmissionSelection(
-                        activation,
-                        allowlists,
-                    ),
-                    .catalog_generation = activation.catalogGeneration(),
-                } };
-            },
+        const manifest = if (management.runtime_manifest) |*value| value else return .{ .blocked = .alignment_unknown };
+        if (self.state.runtime_uncertain or self.state.activation_failed)
+            return .{ .blocked = .activation_unavailable };
+        const activation = self.state.activation orelse {
+            if (management.runtimeAlignmentFor(target) == .restart_required) return .{ .blocked = .pending_restart };
+            for (manifest.entries) |entry|
+                if (entry.state == .loaded) return .{ .blocked = .activation_unavailable };
+            return .{ .ready = .{ .selection = null, .catalog_generation = null } };
         };
+        const health = activation.serverHealth();
+        const allowlists = try self.allocator.alloc(agent.McpServerAllowlist, health.len);
+        defer self.allocator.free(allowlists);
+        var matched_source = false;
+        for (health, allowlists) |server, *allowlist| {
+            const desired = state_module.findMcpServer(target.servers, server.id);
+            var tools: []const []const u8 = &.{};
+            if (desired) |current| {
+                for (manifest.entries) |entry| {
+                    if (entry.state == .loaded and std.mem.eql(u8, entry.id, server.id) and
+                        std.mem.eql(u8, &entry.state.loaded, &configuration.runtimeDescriptorFingerprint(current)))
+                    {
+                        tools = policy.serverToolsForAdmission(target, current);
+                        matched_source = matched_source or configuration.runtimeLoadEligible(current, management.limits);
+                        break;
+                    }
+                }
+            }
+            allowlist.* = .{ .id = server.id, .tools = tools };
+        }
+        if (!matched_source) {
+            for (target.servers) |server|
+                if (configuration.runtimeLoadEligible(server, management.limits)) return .{ .blocked = .pending_restart };
+        }
+        return .{ .ready = .{
+            .selection = try self.ports.catalog.createAdmissionSelection(activation, allowlists),
+            .catalog_generation = activation.catalogGeneration(),
+        } };
     }
 
     pub fn requireOauthReauthorization(
@@ -1426,10 +1616,13 @@ pub const Runtime = struct {
         self: *Runtime,
         preparation: *configuration.PreparedOauthOperationState,
     ) Error!state_module.McpOauthOperationBeginOutcome {
+        if (self.state.runtime_uncertain) return .rejected;
         var reduced = try self.admissionForTarget(preparation.target());
         var reduced_owned = true;
         defer if (reduced_owned) reduced.deinit();
-        if (reduced != .ready) return .rejected;
+        // A blocked authority already grants no new MCP access. Requiring a
+        // ready catalog here would deadlock token renewal after catalog/auth
+        // failure; the marker must atomically preserve that reduced state.
         const management = &self.state.management.?;
         switch (try management.commitPreparedOauthOperationState(preparation)) {
             .saved => {
@@ -1459,32 +1652,24 @@ pub const Runtime = struct {
         self: *Runtime,
         server_id: []const u8,
     ) Error!state_module.McpOauthRefreshBeginOutcome {
-        if (self.shutting_down or !self.state.committed or self.refresh_job != null or
+        if (self.shutting_down or self.state.runtime_uncertain or !self.state.committed or self.refresh_job != null or
             self.state.configuration_apply_state == .applying)
             return .rejected;
         if (self.state.authorization_operation) |operation|
             if (std.mem.eql(u8, operation.server_id, server_id)) return .rejected;
         const management = if (self.state.management) |*value| value else return .rejected;
         const inspection = management.inspect();
-        if (inspection.health != .ready or inspection.runtime_alignment != .current or
-            self.state.activation_failed)
-            return .rejected;
+        if (inspection.health != .ready) return .rejected;
         if (management.desiredRegistry().?.oauth_operation != null) return .rejected;
         var started = false;
         defer if (!started and management.inspect().health == .ready)
             management.oauth_schedule.deferServer(server_id, self.ports.unix_clock.nowMs());
-        const activation = self.state.activation orelse return .rejected;
-        var runtime_loaded = false;
-        for (activation.serverHealth()) |server| {
-            if (!std.mem.eql(u8, server.id, server_id)) continue;
-            runtime_loaded = true;
-            break;
-        }
-        if (!runtime_loaded) return .rejected;
         const desired = management.desiredRegistry() orelse return .rejected;
+        const server = state_module.findMcpServer(desired.servers, server_id) orelse return .rejected;
+        if (!policy.runtimeOauthRefreshEligible(&self.state, server)) return .rejected;
         var preparation = switch (try management.prepareBeginRefresh(
             desired.generation,
-            .{ .server_id = server_id },
+            .{ .server_id = server_id, .retained_member = !server.enabled },
         )) {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
@@ -1608,11 +1793,13 @@ pub const Runtime = struct {
     }
 
     pub fn nextOauthExpiry(self: *const Runtime) ?state_module.McpOauthExpiry {
-        if (self.shutting_down) return null;
+        if (self.state.runtime_uncertain) return null;
+        if (self.shutting_down or self.catalogBoundaryBusy()) return null;
         return policy.nextOauthExpiry(&self.state);
     }
 
     pub fn updateRefreshDeadline(self: *Runtime) void {
+        self.state.catalog_observed_at_ms = null;
         self.state.refresh_deadline_ms = null;
         self.state.expiry_deadline_ms = null;
         const activation = self.state.activation orelse return;
@@ -1630,13 +1817,81 @@ pub const Runtime = struct {
             activation.catalogServers(),
             observed_at_ms,
         );
+        self.state.catalog_observed_at_ms = observed_at_ms;
+        self.updateAdmissionDeadline();
+        self.expireAdmission();
+    }
+
+    fn updateAdmissionDeadline(self: *Runtime) void {
+        self.state.expiry_deadline_ms = null;
+        const activation = self.state.activation orelse return;
+        const observed_at_ms = self.state.catalog_observed_at_ms orelse return;
         var ttl_ms: ?u64 = null;
-        for (activation.catalogServers()) |server| if (server.fresh and server.ttl_remaining_ms != 0) {
-            ttl_ms = @min(ttl_ms orelse server.ttl_remaining_ms, server.ttl_remaining_ms);
+        if (self.state.admission == .ready) if (self.state.admission.ready.selection) |selection| {
+            for (selection.selectedTools()) |tool| {
+                const binding = for (activation.serverHealth()) |health| {
+                    if (std.mem.eql(u8, health.id, tool.server_id)) break health.binding_identity;
+                } else continue;
+                for (activation.catalogServers()) |server| {
+                    if (std.mem.eql(u8, &binding, &server.binding_identity) and server.fresh and server.ttl_remaining_ms != 0)
+                        ttl_ms = @min(ttl_ms orelse server.ttl_remaining_ms, server.ttl_remaining_ms);
+                }
+            }
         };
         if (ttl_ms) |ttl|
             self.state.expiry_deadline_ms = std.math.add(u64, observed_at_ms, ttl) catch null;
-        self.expireAdmission();
+    }
+
+    fn admissionCatalogAgeMs(self: *const Runtime) ?u64 {
+        const activation = self.state.activation orelse return null;
+        const age = activation.catalogAgeMs() orelse return null;
+        const observed = self.state.catalog_observed_at_ms orelse return age;
+        const now = self.ports.timer.now() orelse return age;
+        return @max(age, now -| observed);
+    }
+
+    /// Rebuild only from the already-published tool cap and still-fresh source
+    /// proofs. This is a local Selection copy, with no refresh or new authority.
+    fn narrowExpiredAdmission(self: *Runtime) Error!bool {
+        if (self.state.admission != .ready) return false;
+        const original = self.state.admission.ready.selection orelse return false;
+        const activation = self.state.activation orelse return false;
+        const age = self.admissionCatalogAgeMs() orelse return false;
+        const desired = if (self.state.management) |*management| management.desiredRegistry() else null;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const allowlists = @constCast(try policy.buildRefreshAllowlists(arena.allocator(), &self.state, desired));
+        for (allowlists) |*allowlist| {
+            const binding = for (activation.serverHealth()) |health| {
+                if (std.mem.eql(u8, health.id, allowlist.id)) break health.binding_identity;
+            } else {
+                allowlist.tools = &.{};
+                continue;
+            };
+            const fresh = for (activation.catalogServers()) |server| {
+                if (std.mem.eql(u8, &binding, &server.binding_identity)) break server.fresh and age < server.ttl_remaining_ms;
+            } else false;
+            if (!fresh) {
+                allowlist.tools = &.{};
+                continue;
+            }
+            var count: usize = 0;
+            const tools = @constCast(allowlist.tools);
+            for (allowlist.tools) |tool| {
+                const selected = for (original.selectedTools()) |entry| {
+                    if (std.mem.eql(u8, entry.server_id, allowlist.id) and std.mem.eql(u8, entry.name, tool)) break true;
+                } else false;
+                if (selected) {
+                    tools[count] = tool;
+                    count += 1;
+                }
+            }
+            allowlist.tools = tools[0..count];
+        }
+        const selection = (try self.ports.catalog.createAdmissionSelection(activation, allowlists)) orelse return false;
+        policy.replaceAdmission(&self.state, .{ .ready = .{ .selection = selection, .catalog_generation = activation.catalogGeneration() } });
+        self.updateAdmissionDeadline();
+        return true;
     }
 
     pub fn admissionExpired(self: *const Runtime) bool {
@@ -1660,16 +1915,17 @@ pub const Runtime = struct {
 
     fn expireAdmission(self: *Runtime) void {
         if (self.admissionExpired()) {
-            policy.blockAdmission(&self.state, .activation_unavailable);
+            const narrowed = self.narrowExpiredAdmission() catch false;
+            if (!narrowed) policy.blockAdmission(&self.state, .activation_unavailable);
             self.markChanged();
         }
     }
 
     pub fn syncFreshness(self: *Runtime) bool {
         self.observeOauthTime();
-        const was_ready = self.state.admission == .ready;
+        const expired = self.admissionExpired();
         self.expireAdmission();
-        if (!was_ready or self.state.admission == .ready) return false;
+        if (!expired) return false;
         if (!self.state.refresh_paused)
             _ = self.queueRefresh(false, false) catch {};
         return true;
@@ -1749,7 +2005,7 @@ pub const Runtime = struct {
             return;
         const management = if (self.state.management) |*value| value else return;
         const inspection = management.inspect();
-        if (inspection.health != .ready or inspection.runtime_alignment != .current)
+        if (inspection.health != .ready or self.state.runtime_uncertain)
             return;
         const desired = management.desiredRegistry() orelse return;
         if (desired.oauth_operation != null) return;
@@ -2045,10 +2301,12 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         try std.testing.expect(runtime.finishAuthorization("attempt"));
         const current = runtime.state.management.?.desiredRegistry().?;
         try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
-        const deadline = runtime.nextOauthExpiry().?.expires_at_unix_ms;
+        const deadline = runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000);
         try std.testing.expectEqual(@as(u64, 67_750), deadline);
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
         harness.unix_seconds = 80;
-        try std.testing.expectEqual(deadline, runtime.nextOauthExpiry().?.expires_at_unix_ms);
+        try std.testing.expectEqual(deadline, runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000));
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
         try std.testing.expectEqual(@as(?u64, 90_000), current.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
         harness.unix_seconds = 1;
         // Tokens now require real configuration apply; absence cannot pretend loaded.
@@ -2346,7 +2604,7 @@ test "Product MCP Runtime retains refresh requested during apply and starts it o
     try std.testing.expect(runtime.state.refresh_pending);
     try std.testing.expect(!runtime.hasRefreshJob());
 
-    try std.testing.expect(runtime.failConfigurationApply(1));
+    try std.testing.expect(runtime.failConfigurationApply(1, .preparation));
     try std.testing.expect(!runtime.state.refresh_pending);
     try std.testing.expect(runtime.hasRefreshJob());
     try std.testing.expect(harness.queued != null);
@@ -2490,7 +2748,12 @@ test "Product MCP apply keeps stale ownership and settles late success without r
             .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
             .host_capabilities = .{},
         });
-        defer runtime.deinit();
+        defer {
+            runtime.beginShutdown();
+            if (harness.queued != null) harness.executeQueued();
+            if (runtime.hasRefreshJob()) _ = runtime.syncRefreshJob();
+            runtime.deinit();
+        }
         _ = runtime.syncInitialHealth();
         try std.testing.expect(try runtime.beginConfigurationApply(1));
         var bytes: [configuration.max_store_bytes]u8 = undefined;
@@ -2514,7 +2777,8 @@ test "Product MCP apply keeps stale ownership and settles late success without r
         try std.testing.expectEqual(McpConfigurationApplyState.idle, runtime.state.configuration_apply_state);
         try std.testing.expectEqual(if (shutdown) McpAdmissionBlockReason.shutting_down else .activation_unavailable, runtime.state.admission.blocked);
         try std.testing.expect(runtime.state.activation == null);
-        try std.testing.expect(harness.queued == null);
+        try std.testing.expectEqual(!shutdown, harness.queued != null);
+        try std.testing.expectEqual(!shutdown, runtime.hasRefreshJob());
         try std.testing.expect(!runtime.selectionForNewTask().available);
     }
 }
@@ -2571,7 +2835,63 @@ test "Product MCP Runtime wakes retained auth delivery when apply releases the b
     );
     try std.testing.expect(runtime.runtime_auth_delivery_pending);
     try std.testing.expectEqual(@as(usize, 0), harness.notifications);
-    try std.testing.expect(runtime.failConfigurationApply(1));
+    try std.testing.expect(runtime.failConfigurationApply(1, .preparation));
     try std.testing.expect(!runtime.runtime_auth_delivery_pending);
     try std.testing.expectEqual(@as(usize, 1), harness.notifications);
+}
+
+test "Product MCP composition capacity failure is processed and does not starve a replacement" {
+    const allocator = std.testing.allocator;
+    var limits = test_limits;
+    limits.max_servers = 2;
+    var servers: [4]configuration.ServerWire = undefined;
+    var fingerprints: [4][64]u8 = undefined;
+    const ids = [_][]const u8{ "a", "b", "c", "a" };
+    for (&servers, 0..) |*server, i| {
+        server.* = .{
+            .id = ids[i],
+            .namespace = ids[i],
+            .display_name = ids[i],
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = if (i == 3) 2000 else 1000,
+            .transport = .{ .kind = "streamable_http", .url = "https://example.test/mcp" },
+            .auth = .{ .kind = "none", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        };
+        fingerprints[i] = configuration.connectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &fingerprints[i] };
+    }
+    const actual: configuration.RegistryWire = .{ .schema_version = configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = servers[0..2] };
+    var bytes: [8192]u8 = undefined;
+    var preparation = try configuration.prepare(allocator, try configuration.encode(&bytes, actual, limits), true, false, .{}, limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    for (manifest.entries) |*entry| entry.task_references = 1;
+    const desired: configuration.RegistryWire = .{ .schema_version = configuration.schema_version, .generation = 2, .oauth_operation = null, .servers = servers[2..4] };
+    const management = try configuration.ManagementPort.init(allocator, desired, .{ .persistence = .{ .available = true }, .credentials = .{ .available = true }, .limits = limits, .runtime_manifest = &manifest });
+    manifest_owned = false;
+    var harness = TestHarness{};
+    var runtime = Runtime.init(allocator, harness.ports(), .{ .preparation = preparation, .activation = null, .activation_failed = false, .management = management, .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } }, .host_capabilities = .{}, .committed = true });
+    preparation_owned = false;
+    defer runtime.deinit();
+    var step = (try runtime.prepareConfigurationStep(2, .automatic)).?;
+    defer step.deinit();
+    try std.testing.expectEqualStrings("a", step.target.id());
+    try std.testing.expectEqual(.replace, step.target.kind);
+    try std.testing.expectEqual(@as(usize, 2), step.member_ids.len);
+    const ledger = &runtime.state.management.?.convergence;
+    const c = configuration.RuntimeApplyTarget.init("c", servers[2], .add);
+    try std.testing.expect(ledger.handled(c));
+    try std.testing.expectEqual(.capacity, ledger.results.items[0].outcome);
+    try std.testing.expect(runtime.takeChanged());
+    try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
+    try std.testing.expect((try runtime.prepareConfigurationStep(2, .automatic)) == null);
+    try std.testing.expectEqual(configuration.RuntimeAlignment.current, runtime.state.management.?.inspect().runtime_alignment);
+    for (runtime.state.management.?.runtime_manifest.?.entries) |entry| try std.testing.expectEqual(@as(u32, 1), entry.task_references);
+    try std.testing.expect(harness.queued == null);
 }

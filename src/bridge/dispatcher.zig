@@ -183,7 +183,7 @@ pub const McpManagementHost = struct {
     capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot, []const u8) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
     cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
-    apply_fn: *const fn (*anyopaque) anyerror!McpConfigurationApplyStartOutcome,
+    apply_fn: *const fn (*anyopaque, mcp_configuration.RuntimeApplyIntent) anyerror!McpConfigurationApplyStartOutcome,
 };
 
 const Dialog = product_control.NativeDialog;
@@ -4690,11 +4690,15 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.McpApplyConfiguration, invocation.request.payload);
         defer parsed.deinit();
         const host = self.mcp_management_host orelse
             return std.fmt.bufPrint(output, "{{\"outcome\":\"unavailable\"}}", .{});
-        const outcome = try host.apply_fn(host.context);
+        if (parsed.value.serverId) |id| {
+            if (id.len == 0 or id.len > 128) return error.InvalidBridgePayload;
+        }
+        const intent: mcp_configuration.RuntimeApplyIntent = if (parsed.value.serverId) |id| .{ .retry_server = id } else .retry_all;
+        const outcome = try host.apply_fn(host.context, intent);
         if (outcome == .started) self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
     }
@@ -4768,7 +4772,7 @@ pub const Dispatcher = struct {
             inspection.runtime_alignment != .restart_required)
             return;
         const host = self.mcp_management_host orelse return;
-        _ = host.apply_fn(host.context) catch return;
+        _ = host.apply_fn(host.context, .automatic) catch return;
     }
 
     fn encodeMcpTypedOutcome(
@@ -7011,6 +7015,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
+        workspace_path: []const u8,
         update_calls: usize = 0,
         update_cancels: usize = 0,
         wake_calls: usize = 0,
@@ -7064,7 +7069,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         fn finish(self: *@This()) void {
             const completion = self.completion orelse return;
             self.completion = null;
-            completion.result_fn(completion.context, self.token, .{ .files = .{ .paths = "/tmp", .count = 1 } });
+            completion.result_fn(completion.context, self.token, .{ .files = .{ .paths = self.workspace_path, .count = 1 } });
         }
         fn canonicalizeDirectory(
             _: ?*anyopaque,
@@ -7194,7 +7199,11 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try fixture.installProductControlExecution(&workbench);
     const initial_revision = workbench.currentRevision();
-    var harness = Harness{};
+    var workspace_tmp = std.testing.tmpDir(.{});
+    defer workspace_tmp.cleanup();
+    const workspace_path = try workspace_tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(workspace_path);
+    var harness: Harness = .{ .workspace_path = workspace_path };
     var dispatcher = try Dispatcher.init(
         std.testing.allocator,
         &workbench,
@@ -7784,7 +7793,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, metask_default, "\"57\"") == null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
-    const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");
+    const unused_grant = try dispatcher.grants.issue(generation, source.window_id, workspace_path);
     var disconnect_storage: [256]u8 = undefined;
     const disconnect = try std.fmt.bufPrint(
         &disconnect_storage,

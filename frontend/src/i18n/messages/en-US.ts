@@ -429,7 +429,7 @@ export const enUS = {
   "mcp.desired.enabled": "Enabled",
   "mcp.desired.disabled": "Disabled",
   "mcp.existing_tasks_note":
-    "Open tasks keep the MCP access they received when they were created.",
+    "Existing tasks cannot gain newly added tools. Revoked permissions restrict future access.",
   "mcp.add.action": "Add server",
   "mcp.add.eyebrow": "New MCP server",
   "mcp.add.title": "Add an MCP server",
@@ -447,6 +447,8 @@ export const enUS = {
   "mcp.add.http_help": "Connect to a remote Streamable HTTP endpoint.",
   "mcp.add.protocol": "Protocol policy",
   "mcp.add.timeout": "Timeout (ms)",
+  "mcp.add.timeoutHelp":
+    "Per-request timeout. Connection and catalog management are limited to {limit} ms; tool calls keep the configured timeout.",
   "mcp.add.command": "Launch command",
   "mcp.add.command_help":
     "Paste the command you would normally run. Shell operators and substitutions are not executed.",
@@ -555,9 +557,26 @@ export const enUS = {
     "Connection settings are unavailable. Open details to review recovery options.",
   "mcp.enablement.approval_required":
     "Open details and finish connecting this server first.",
+  "mcp.tasks.count": "Task references: {count}",
+  "mcp.retained.summary":
+    "Services kept for existing tasks: {count}. They are unavailable to new tasks.",
+  "mcp.retained.disabled_body":
+    "Existing tasks keep the applied configuration. Changes apply when this service is enabled again.",
+  "mcp.apply_status.pending": "Waiting to connect",
+  "mcp.apply_status.rejected": "Change rejected",
+  "mcp.apply_status.failed": "Change not applied",
+  "mcp.apply_status.unknown": "Unconfirmed",
+  "mcp.apply_status.current": "Processed",
+  "mcp.apply_status.applying": "Connecting",
+  "mcp.banner.runtime_unknown.title":
+    "Connection change could not be confirmed",
+  "mcp.banner.runtime_unknown.body":
+    "MCP connections, tool refresh and authorization are paused. Restart MetaWork to confirm the service state.",
+  "mcp.confirm.delete.oauth_body":
+    "Renewal stops after deletion. Existing tasks lose access when the current authorization expires.",
   "mcp.confirm.delete.title": "Delete this server?",
   "mcp.confirm.delete.body":
-    "This removes the configuration and updates access for new tasks. Open tasks keep their current access.",
+    "This removes the configuration and prevents new tasks from using this service. Existing tasks keep their current connection, subject to tool permissions.",
   "mcp.confirm.delete.action": "Delete server",
   "skills.subtitle": "Manage local Skills available to MetaWork.",
   "skills.import": "Import Skill",

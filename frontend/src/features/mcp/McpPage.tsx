@@ -243,12 +243,13 @@ function validMcpNames(values: string[]): boolean {
 }
 
 function serverNeedsAttention(server: McpServer, applying: boolean) {
+  if (!server.desiredEnabled) return false;
   if (server.connection === null) return true;
   if (server.approvalStatus === "unapproved") return true;
-  if (!server.desiredEnabled) return false;
   if (applying) return false;
   return (
     !["not_required", "ready"].includes(server.authorizationStatus) ||
+    ["pending", "rejected", "failed", "unknown"].includes(server.applyStatus) ||
     attentionStatuses.has(server.runtimeStatus) ||
     server.newTaskAccess === "unavailable"
   );
@@ -263,6 +264,8 @@ function serverStateKey(server: McpServer, applying: boolean) {
   if (!["not_required", "ready"].includes(server.authorizationStatus))
     return `mcp.authorization_status.${server.authorizationStatus}` as const;
   if (applying) return "mcp.status.connecting" as const;
+  if (["pending", "rejected", "failed", "unknown"].includes(server.applyStatus))
+    return `mcp.apply_status.${server.applyStatus}` as const;
   if (server.runtimeStatus !== "ready")
     return `mcp.status.${server.runtimeStatus}` as const;
   return `mcp.access.${server.newTaskAccess}` as const;
@@ -282,7 +285,8 @@ function serverCanApply(server: McpServer) {
     server.connection !== null &&
     server.approvalStatus === "approved" &&
     server.desiredEnabled &&
-    ["not_required", "ready"].includes(server.authorizationStatus)
+    ["not_required", "ready"].includes(server.authorizationStatus) &&
+    server.applyStatus !== "unknown"
   );
 }
 
@@ -354,6 +358,11 @@ function McpServerRow({
         </span>
         <span className="mcp-server-state">
           <strong>{t(serverStateKey(server, applying))}</strong>
+          {server.taskReferenceCount > 0 && (
+            <small>
+              {t("mcp.tasks.count", { count: server.taskReferenceCount })}
+            </small>
+          )}
         </span>
         <Icon name="chevron-right" />
       </button>
@@ -652,7 +661,7 @@ export function McpPage({
     expectedGeneration: string,
     serverId: string,
   ) => Promise<McpConnectionTestResult>;
-  onApply: () => Promise<McpConfigurationApplyResult>;
+  onApply: (serverId?: string) => Promise<McpConfigurationApplyResult>;
   onRefresh: () => Promise<McpRefreshResult>;
 }) {
   const { t } = useI18n();
@@ -712,7 +721,7 @@ export function McpPage({
       ) ?? null)
     : null;
   const isServerApplying = (server: McpServer) =>
-    management.configurationApply === "applying" && serverCanApply(server);
+    server.applyStatus === "applying";
   const attention = visibleServers.filter((server) =>
     serverNeedsAttention(server, isServerApplying(server)),
   );
@@ -737,6 +746,7 @@ export function McpPage({
     refreshPending;
   const refreshLocked =
     disabled ||
+    management.runtimeUncertain ||
     !managementReady ||
     management.operation !== "idle" ||
     management.configurationApply === "applying" ||
@@ -1143,12 +1153,17 @@ export function McpPage({
     }
   }
 
-  async function applyConfiguration() {
-    if (applyPending || management.configurationApply === "applying") return;
+  async function applyConfiguration(serverId?: string) {
+    if (
+      applyPending ||
+      management.runtimeUncertain ||
+      management.configurationApply === "applying"
+    )
+      return;
     setApplyPending(true);
     setNotice(null);
     try {
-      const result = await onApply();
+      const result = await onApply(serverId);
       setNotice({
         tone: result.outcome === "started" ? "quiet" : "attention",
         text: t(`mcp.apply.${result.outcome}`),
@@ -1202,6 +1217,16 @@ export function McpPage({
           </div>
         </Alert>
       );
+    if (management.runtimeUncertain)
+      return (
+        <Alert variant="warning" className="mcp-state-banner">
+          <Icon name="warning" />
+          <div>
+            <strong>{t("mcp.banner.runtime_unknown.title")}</strong>
+            <p>{t("mcp.banner.runtime_unknown.body")}</p>
+          </div>
+        </Alert>
+      );
     if (management.managementHealth === "recovery_required")
       return (
         <Alert variant="warning" className="mcp-state-banner">
@@ -1222,7 +1247,10 @@ export function McpPage({
           </div>
         </Alert>
       );
-    if (management.configurationApply === "failed")
+    if (
+      management.configurationApply === "failed" ||
+      management.applyFailureCount > 0
+    )
       return (
         <Alert variant="warning" className="mcp-state-banner">
           <Icon name="warning" />
@@ -1419,8 +1447,7 @@ export function McpPage({
     if (server.runtimeStatus !== "ready") {
       const needsApply =
         server.runtimeStatus === "not_loaded" &&
-        (management.runtimeAlignment !== "current" ||
-          management.configurationApply === "failed");
+        ["pending", "rejected", "failed"].includes(server.applyStatus);
       return nextActionCard(
         t(`mcp.status.${server.runtimeStatus}`),
         server.runtimeStatus === "invalid_catalog"
@@ -1434,7 +1461,9 @@ export function McpPage({
               needsApply ? applyPending || mutationLocked : refreshLocked
             }
             onClick={() =>
-              void (needsApply ? applyConfiguration() : refreshCatalog())
+              void (needsApply
+                ? applyConfiguration(server.id)
+                : refreshCatalog())
             }
           >
             {t("mcp.next.retry_connection.action")}
@@ -1509,6 +1538,13 @@ export function McpPage({
           </header>
 
           {renderBanner()}
+          {management.retainedMemberCount > 0 && (
+            <p className="mcp-operation-notice" aria-live="polite">
+              {t("mcp.retained.summary", {
+                count: management.retainedMemberCount,
+              })}
+            </p>
+          )}
 
           {notice && (
             <p
@@ -1928,6 +1964,11 @@ export function McpPage({
                           value={timeoutMs}
                           onChange={(event) => setTimeoutMs(event.target.value)}
                         />
+                        <small>
+                          {t("mcp.add.timeoutHelp", {
+                            limit: management.runtimeTimeoutLimitMs,
+                          })}
+                        </small>
                       </label>
                     </div>
                   </details>
@@ -1983,8 +2024,7 @@ export function McpPage({
                         t(`mcp.status.${selected.runtimeStatus}`),
                         selected.runtimeStatus === "ready"
                           ? "complete"
-                          : management.configurationApply === "applying" &&
-                              serverCanApply(selected)
+                          : isServerApplying(selected)
                             ? "active"
                             : serverCanApply(selected)
                               ? "attention"
@@ -2017,6 +2057,12 @@ export function McpPage({
                   ))}
                 </section>
 
+                {!selected.desiredEnabled &&
+                  selected.taskReferenceCount > 0 && (
+                    <p className="mcp-operation-notice">
+                      {t("mcp.retained.disabled_body")}
+                    </p>
+                  )}
                 {renderNextAction(selected)}
 
                 {selected.safeDiagnostic && (
@@ -2416,7 +2462,17 @@ export function McpPage({
                         </div>
                         <div>
                           <dt>{t("mcp.add.timeout")}</dt>
-                          <dd>{selected.timeoutMs}</dd>
+                          <dd>
+                            {selected.timeoutMs}
+                            {selected.timeoutMs >
+                              management.runtimeTimeoutLimitMs && (
+                              <small>
+                                {t("mcp.add.timeoutHelp", {
+                                  limit: management.runtimeTimeoutLimitMs,
+                                })}
+                              </small>
+                            )}
+                          </dd>
                         </div>
                         <div>
                           <dt>{t("mcp.detail.authentication")}</dt>
@@ -2586,6 +2642,10 @@ export function McpPage({
                       ).length,
                     })
                   : t(`mcp.confirm.${confirmation.action}.body`)}
+                {confirmation.action === "delete" &&
+                  confirmationServer.authMode === "oauth" && (
+                    <> {t("mcp.confirm.delete.oauth_body")}</>
+                  )}
               </AlertDialog.Description>
               <div className="mcp-confirm-actions">
                 <Button
