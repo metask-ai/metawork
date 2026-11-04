@@ -993,7 +993,6 @@ test "notification activation follows SDK command routing into the real Task Bri
         .cancel_timer_fn = Host.cancel,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,

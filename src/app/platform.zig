@@ -203,9 +203,6 @@ pub const Adapter = struct {
     }
 
     pub fn supportsMcpConnectionApproval(self: *const Adapter) bool {
-        if (self.native_runtime == null) return false;
-        const services_value = self.platform_services orelse return false;
-        _ = services_value;
         return self.supportsAsyncDialogs();
     }
 
@@ -260,7 +257,6 @@ pub const Adapter = struct {
             .emit_fn = emit,
             .start_timer_fn = startTimer,
             .cancel_timer_fn = cancelTimer,
-            .show_open_dialog_fn = showOpenDialog,
             .request_dialog_fn = requestDialog,
             .cancel_dialog_fn = cancelDialog,
             .canonicalize_directory_fn = canonicalizeDirectory,
@@ -527,15 +523,6 @@ pub const Adapter = struct {
     pub fn cancelDialog(context: ?*anyopaque, handle: u64) void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         if (self.native_runtime) |runtime| runtime.cancelDialog(handle);
-    }
-
-    fn showOpenDialog(
-        context: ?*anyopaque,
-        options: native_sdk.platform.OpenDialogOptions,
-        output: []u8,
-    ) anyerror!native_sdk.platform.OpenDialogResult {
-        const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return (self.native_runtime orelse return error.RuntimeUnavailable).showOpenDialog(options, output);
     }
 
     fn canonicalizeDirectory(
@@ -849,53 +836,6 @@ test "SDK consumption timers preserve producer IDs and explicit failures" {
     try std.testing.expectError(error.RuntimeUnavailable, port.start_timer_fn(port.context, 99, 1, false));
 }
 
-test "SDK consumption file picker keeps multi-selection cancel and Runtime validation" {
-    const Spy = struct {
-        var calls: usize = 0;
-        var mode: enum { selected, cancel, fail } = .selected;
-        fn open(_: ?*anyopaque, options: native_sdk.platform.OpenDialogOptions, output: []u8) anyerror!native_sdk.platform.OpenDialogResult {
-            calls += 1;
-            try std.testing.expect(options.allow_multiple);
-            try std.testing.expectEqualStrings("Images", options.filters[0].name);
-            try std.testing.expectEqualStrings("png", options.filters[0].extensions[0]);
-            switch (mode) {
-                .cancel => return .{ .paths = "", .count = 0 },
-                .fail => return error.InjectedPickerFailure,
-                .selected => {},
-            }
-            const paths = "/first.png\n/second.png";
-            if (output.len < paths.len) return error.NoSpaceLeft;
-            @memcpy(output[0..paths.len], paths);
-            return .{ .paths = output[0..paths.len], .count = 2 };
-        }
-    };
-    Spy.calls = 0;
-    Spy.mode = .selected;
-    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
-    defer harness.destroy(std.testing.allocator);
-    harness.runtime.options.platform.services.show_open_dialog_fn = Spy.open;
-    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    try adapter.start(&harness.runtime);
-    defer adapter.stop(&harness.runtime);
-    const port = adapter.dispatcherPlatform();
-    const options: native_sdk.platform.OpenDialogOptions = .{
-        .allow_multiple = true,
-        .filters = &.{.{ .name = "Images", .extensions = &.{"png"} }},
-    };
-    var output: [128]u8 = undefined;
-    const result = try port.show_open_dialog_fn(port.context, options, &output);
-    try std.testing.expectEqual(@as(usize, 2), result.count);
-    try std.testing.expectEqualStrings("/first.png\n/second.png", result.paths);
-    Spy.mode = .cancel;
-    try std.testing.expectEqual(@as(usize, 0), (try port.show_open_dialog_fn(port.context, options, &output)).count);
-    Spy.mode = .fail;
-    try std.testing.expectError(error.InjectedPickerFailure, port.show_open_dialog_fn(port.context, options, &output));
-    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
-    try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, options, &.{}));
-    try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, .{ .title = "bad\x00title" }, &output));
-    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
-}
-
 test "Output location uses the SDK Runtime reveal boundary and rejects invalid input before the platform" {
     const Spy = struct {
         var calls: usize = 0;
@@ -927,18 +867,22 @@ test "Output location uses the SDK Runtime reveal boundary and rejects invalid i
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }
 
-test "Output Save picker uses SDK Runtime and freezes the selected path for worker publication" {
-    const Spy = struct {
-        var selected: []const u8 = "";
-        var cancelled = false;
-        var calls: usize = 0;
-        fn save(_: ?*anyopaque, options: native_sdk.platform.SaveDialogOptions, buffer: []u8) !?[]const u8 {
-            calls += 1;
-            try std.testing.expectEqualStrings("source.txt", options.default_name);
-            if (cancelled) return null;
-            if (selected.len > buffer.len) return error.NoSpaceLeft;
-            @memcpy(buffer[0..selected.len], selected);
-            return buffer[0..selected.len];
+test "SDK consumption Output Save picker freezes selected path for worker publication" {
+    const Probe = struct {
+        source: control_ports.OutputFileSaveInput,
+        effect: ?control_ports.OwnedOutputSave = null,
+        cancelled: bool = false,
+        fn borrow(raw: *anyopaque, _: u64) !control_ports.OutputFileSaveInput {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.source;
+        }
+        fn complete(raw: *anyopaque, _: u64, result: control_ports.OutputFileSave.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (result) {
+                .selected => |effect| self.effect = effect,
+                .cancelled => self.cancelled = true,
+                .failed => @panic("unexpected Save As failure"),
+            }
         }
     };
     const Worker = struct {
@@ -966,24 +910,29 @@ test "Output Save picker uses SDK Runtime and freezes the selected path for work
     defer std.testing.allocator.free(root);
     const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "selected.txt" });
     defer std.testing.allocator.free(selected);
-    Spy.selected = selected;
-    Spy.cancelled = true;
-    Spy.calls = 0;
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
-    harness.runtime.options.platform.services.show_save_dialog_fn = Spy.save;
+    const app: native_sdk.App = .{ .context = harness, .name = "save-publication", .source = native_sdk.WebViewSource.html("<p>Save</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .app_start);
+    harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     adapter.native_runtime = &harness.runtime;
     const port = adapter.outputFileSave();
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("abc", &hash, .{});
-    const source: control_ports.OutputFileSaveInput = .{ .workspace_root = root, .relative_path = "source.txt", .size_bytes = 3, .sha256 = hash };
-    try std.testing.expect((try port.prepare_fn(port.context, source)) == null);
-    Spy.cancelled = false;
-    var effect = (try port.prepare_fn(port.context, source)).?;
+    var probe: Probe = .{ .source = .{ .io = std.testing.io, .workspace_root = root, .relative_path = "source.txt", .size_bytes = 3, .sha256 = hash } };
+    const completion: control_ports.OutputFileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
+    const cancelled = try port.begin_fn(port.context, 1, 1, "source.txt", &completion);
+    try harness.null_platform.finishDialog(cancelled, .cancelled, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expect(probe.cancelled);
+    try std.testing.expect(probe.effect == null);
+    const chosen = try port.begin_fn(port.context, 2, 1, "source.txt", &completion);
+    try harness.null_platform.finishDialog(chosen, .selected, selected, .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    var effect = probe.effect.?;
     defer effect.deinit();
-    // Native dialog storage is temporary; publication uses the owned selection.
-    Spy.selected = "";
+    // SDK completion storage has been released before worker publication.
     var worker: Worker = .{ .effect = &effect, .operation = .stage };
     try worker.execute();
     const before = try tmp.dir.readFileAlloc(std.testing.io, "selected.txt", std.testing.allocator, .limited(32));
@@ -994,7 +943,6 @@ test "Output Save picker uses SDK Runtime and freezes the selected path for work
     const after = try tmp.dir.readFileAlloc(std.testing.io, "selected.txt", std.testing.allocator, .limited(32));
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings("abc", after);
-    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }
 
 test "SDK consumption async dialogs check capability before request and deliver typed outcomes later" {
@@ -1028,7 +976,8 @@ test "SDK consumption async dialogs check capability before request and deliver 
     harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
     try std.testing.expect(adapter.supportsAsyncDialogs());
     const port = adapter.dispatcherPlatform();
-    const id = try port.request_dialog_fn(port.context, 42, 1, .{ .open = .{ .allow_multiple = true } }, &completion);
+    try std.testing.expectError(error.InvalidDialogOptions, port.request_dialog_fn(port.context, 41, 1, .{ .open = .{ .title = "bad\x00title" } }, &completion));
+    const id = try port.request_dialog_fn(port.context, 42, 1, .{ .open = .{ .allow_multiple = true, .filters = &.{.{ .name = "Images", .extensions = &.{"png"} }} } }, &completion);
     try std.testing.expectEqual(@as(usize, 0), probe.calls);
     try harness.null_platform.finishDialog(id, .selected, "/a.txt\n/b.txt", .primary);
     while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);

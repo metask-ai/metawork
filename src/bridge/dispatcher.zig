@@ -68,11 +68,6 @@ pub const Platform = struct {
     ) anyerror!void,
     start_timer_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
     cancel_timer_fn: *const fn (?*anyopaque, u64) anyerror!void,
-    show_open_dialog_fn: *const fn (
-        ?*anyopaque,
-        native_sdk.platform.OpenDialogOptions,
-        []u8,
-    ) anyerror!native_sdk.platform.OpenDialogResult,
     request_dialog_fn: *const fn (?*anyopaque, u64, u64, product_control.NativeDialog.Options, *const product_control.NativeDialog.Completion) anyerror!u64 = unavailableDialog,
     cancel_dialog_fn: *const fn (?*anyopaque, u64) void = cancelUnavailableDialog,
 
@@ -6170,7 +6165,6 @@ test "file preview native grants bind authority and cancellation and expire with
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -6753,7 +6747,6 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
         // This test dispatches only the byte-input commands, never OS effects.
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -6810,6 +6803,29 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
 }
 
+const DialogTestDispatch = struct {
+    output: []u8,
+    len: usize = 0,
+    fn receive(raw: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (bytes.len > self.output.len) return error.NoSpaceLeft;
+        @memcpy(self.output[0..bytes.len], bytes);
+        self.len = bytes.len;
+    }
+    fn run(host: anytype, native: native_sdk.bridge.Dispatcher, request: []const u8, source: native_sdk.bridge.Source, output: []u8) ![]const u8 {
+        var parsed = try std.json.parseFromSlice(struct { id: []const u8, command: []const u8, payload: std.json.Value }, std.testing.allocator, request, .{});
+        defer parsed.deinit();
+        const handler = native.async_registry.find(parsed.value.command) orelse return native.dispatch(request, source, output);
+        const payload = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.payload, .{});
+        defer std.testing.allocator.free(payload);
+        var capture: @This() = .{ .output = output };
+        try handler.invoke_fn(handler.context, .{ .request = .{ .id = parsed.value.id, .command = parsed.value.command, .payload = payload }, .source = source }, .{ .context = &capture, .source = source, .respond_fn = receive });
+        host.finish();
+        try std.testing.expect(capture.len != 0);
+        return output[0..capture.len];
+    }
+};
+
 test "Automatic Workspace root Bridge keeps paths Host-only and mutates by generation" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
@@ -6817,28 +6833,28 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         expected_default_path: []const u8,
         cancel_next: bool = false,
 
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+
         fn wake(_: ?*anyopaque) anyerror!void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
         fn startTimer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
         fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
-        fn open(
-            context: ?*anyopaque,
-            options: native_sdk.platform.OpenDialogOptions,
-            output: []u8,
-        ) anyerror!native_sdk.platform.OpenDialogResult {
+        fn request(context: ?*anyopaque, token: u64, _: u64, options: Dialog.Options, completion: *const Dialog.Completion) !u64 {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            try std.testing.expect(options.allow_directories);
-            try std.testing.expect(!options.allow_multiple);
-            try std.testing.expectEqualStrings(
-                self.expected_default_path,
-                options.default_path,
-            );
-            if (self.cancel_next) {
-                self.cancel_next = false;
-                return .{ .paths = "", .count = 0 };
-            }
-            @memcpy(output[0..self.selected_path.len], self.selected_path);
-            return .{ .paths = output[0..self.selected_path.len], .count = 1 };
+            try std.testing.expect(options.open.allow_directories);
+            try std.testing.expect(!options.open.allow_multiple);
+            try std.testing.expectEqualStrings(self.expected_default_path, options.open.default_path);
+            self.completion = completion;
+            self.token = token;
+            return token;
+        }
+        fn finish(self: *@This()) void {
+            const completion = self.completion orelse return;
+            self.completion = null;
+            const cancelled = self.cancel_next;
+            self.cancel_next = false;
+            completion.result_fn(completion.context, self.token, if (cancelled) .cancelled else .{ .files = .{ .paths = self.selected_path, .count = 1 } });
         }
         fn canonicalizeDirectory(
             _: ?*anyopaque,
@@ -6900,7 +6916,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
             .emit_fn = Harness.emit,
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
-            .show_open_dialog_fn = Harness.open,
+            .request_dialog_fn = Harness.request,
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = undefined,
             .window_chrome_refresh_fn = undefined,
@@ -6921,7 +6937,9 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     const native = dispatcher.register(@import("policy.zig").product(.release));
     const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
     var output: [4096]u8 = undefined;
-    const connected = native.dispatch(
+    const connected = try DialogTestDispatch.run(
+        &harness,
+        native,
         "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
         source,
         &output,
@@ -6933,13 +6951,15 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         "{\"id\":\"bad-reset\",\"command\":\"metawork.workspaces.resetAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"0\"}}",
         "{\"id\":\"bad-retry\",\"command\":\"metawork.workspaces.retryAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\",\"extra\":true}}",
     }) |request| {
-        const response = native.dispatch(request, source, &output);
+        const response = try DialogTestDispatch.run(&harness, native, request, source, &output);
         try std.testing.expect(std.mem.indexOf(u8, response, "handler_failed") != null);
     }
     try std.testing.expectEqual(@as(u64, 1), workbench.automaticWorkspaceRootConfiguration().generation);
 
     harness.cancel_next = true;
-    const cancelled = native.dispatch(
+    const cancelled = try DialogTestDispatch.run(
+        &harness,
+        native,
         "{\"id\":\"cancel\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\"}}",
         source,
         &output,
@@ -6947,7 +6967,9 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     try std.testing.expect(std.mem.indexOf(u8, cancelled, "\"outcome\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(u64, 1), workbench.automaticWorkspaceRootConfiguration().generation);
 
-    const chosen = native.dispatch(
+    const chosen = try DialogTestDispatch.run(
+        &harness,
+        native,
         "{\"id\":\"choose\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\"}}",
         source,
         &output,
@@ -6965,7 +6987,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         "{{\"id\":\"cancel-custom\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{{\"expectedGeneration\":\"{d}\"}}}}",
         .{custom_view.generation},
     );
-    const cancelled_custom = native.dispatch(cancel_custom_request, source, &output);
+    const cancelled_custom = try DialogTestDispatch.run(&harness, native, cancel_custom_request, source, &output);
     try std.testing.expect(std.mem.indexOf(u8, cancelled_custom, "\"outcome\":\"cancelled\"") != null);
     try std.testing.expectEqual(
         custom_view.generation,
@@ -6978,7 +7000,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         "{{\"id\":\"reset\",\"command\":\"metawork.workspaces.resetAutomaticRoot\",\"payload\":{{\"expectedGeneration\":\"{d}\"}}}}",
         .{custom_view.generation},
     );
-    const reset = native.dispatch(reset_request, source, &output);
+    const reset = try DialogTestDispatch.run(&harness, native, reset_request, source, &output);
     try std.testing.expect(std.mem.indexOf(u8, reset, "\"outcome\":\"applied\"") != null);
     const reset_view = workbench.automaticWorkspaceRootConfiguration();
     try std.testing.expectEqualStrings(default_root, reset_view.canonical_root.?);
@@ -7003,6 +7025,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
         models_result: models_contract.CommandResult = .acceptedResult(),
+
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
 
         fn checkUpdates(context: *anyopaque) update.CommandOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -7029,16 +7054,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
         fn startTimer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
         fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
 
-        fn open(
-            _: ?*anyopaque,
-            _: native_sdk.platform.OpenDialogOptions,
-            output: []u8,
-        ) anyerror!native_sdk.platform.OpenDialogResult {
-            const path = "/tmp";
-            @memcpy(output[0..path.len], path);
-            return .{ .paths = output[0..path.len], .count = 1 };
+        fn request(context: ?*anyopaque, token: u64, _: u64, _: Dialog.Options, completion: *const Dialog.Completion) !u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.completion = completion;
+            self.token = token;
+            return token;
         }
-
+        fn finish(self: *@This()) void {
+            const completion = self.completion orelse return;
+            self.completion = null;
+            completion.result_fn(completion.context, self.token, .{ .files = .{ .paths = "/tmp", .count = 1 } });
+        }
         fn canonicalizeDirectory(
             _: ?*anyopaque,
             path: []const u8,
@@ -7185,7 +7211,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .emit_fn = Harness.emit,
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
-            .show_open_dialog_fn = Harness.open,
+            .request_dialog_fn = Harness.request,
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_refresh_fn = Harness.refreshWindowChrome,
@@ -7630,7 +7656,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
             "\"accepted\":true,\"errorCode\":\"none\",\"attemptId\":null",
         ) != null,
     );
-    const chosen = native_dispatcher.dispatch(
+    const chosen = try DialogTestDispatch.run(
+        &harness,
+        native_dispatcher,
         "{\"id\":\"choose\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}",
         source,
         &response,
@@ -7868,7 +7896,6 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = Host.picker,
         .request_dialog_fn = Host.request,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
@@ -8265,7 +8292,6 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8347,7 +8373,6 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8454,7 +8479,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try product_control.TestSupport.recordDeliveredOutputFixture(control);
     defer control.deinit();
     product_control.TestSupport.bindOutputFileEffect(control, &effect);
-    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
     defer boundary.deinit();
     defer {
         control.shutdownOutputChecks();
@@ -8618,7 +8643,6 @@ test "notification navigation retains only a real Task and uses the shared conne
         .cancel_timer_fn = Host.cancel,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8739,7 +8763,6 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
         .cancel_timer_fn = Host.cancel,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = Host.open,
         .request_dialog_fn = Host.request,
         .cancel_dialog_fn = Host.cancelDialog,
         .canonicalize_directory_fn = undefined,
@@ -8837,7 +8860,6 @@ test "Workspace removal Bridge validates authority and preserves files with shar
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
