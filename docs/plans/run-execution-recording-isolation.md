@@ -2,7 +2,7 @@
 
 日期：2026-11-04。关联：[MetaWork #72](https://github.com/shuzuan-org/metawork/issues/72)。
 
-状态：方案复审 APPROVE，无阻塞 finding；本文已合入复审随附的错误分类、违约优先级、RequiredWake 和 compact 修正。实施按下述依赖顺序推进，进展和验证证据由 Git 与 TinyKG 任务 DAG 跟踪。G1 仅限制正文截断相关实现。
+状态：方案复审 APPROVE，无阻塞 finding；本文已合入复审随附的错误分类、违约优先级、RequiredWake 和 compact 修正。实施按下述依赖顺序推进，进展和验证证据由 Git 与 TinyKG 任务 DAG 跟踪。正文额度、分预算和截断政策按用户决定延后另议。
 
 本文是实施方案，不是 decision record，不替代现行规范。实施时同步更新第 10 节列出的相关真源；方案通过不表示代码、性能或平台验收通过。
 
@@ -115,15 +115,11 @@ applyEvent 的 catch 必须明确分类，删除“除两种协议错误外都�
 
 本轮复用既有持久化列、枚举和完整性字段，不改 SQL、SQL codec 或迁移清单。completion_seen 涉及现有 SQL 关系列的组合校验，不新增持久化 JSON 字段或枚举。Product 架构历史版本条款的整理另行处理，不绑在本方案；若实施确实需要新的持久化表达，须先给出具体缺口评审。
 
-## 5. 正文保留与 G1
+## 5. 正文政策延后
 
-过程说明和最终回复分开预算，过程说明可淘汰，最终回复优先保留；仍受现有全局投影和历史额度约束，不指定新的任意数值。
+用户决定本分支先完成底层修复，正文额度、分预算、截断和独立存储后续单独处理。本轮不引入新的正文保留或截断政策，也不将 G1 作为本分支的前置选择。
 
-输出定性到 segment end 才成立。begin/text 阶段保留未定性组并核算，continued 保持同组连续性，discarded 的正文和临时省略标记一并撤销；只有实际提交的 commentary/final/partial 组形成完整性事实。跨 chunk 凭据尾部、分段清理和 credential replacement 后的历史清洗仍由原 owner 负责，不建立落盘旁路。
-
-**G1 待产品选择：最终正文超预算时，是否接受 UTF-8 安全前缀保留，并明确显示正文不完整。** 未选择前不实现截断；不阻挡有界 drain、Run/compact 屏障、背压、关闭唤醒及其他不依赖截断的修正。
-
-若选择前缀保留，consumer_rejected 本身不能区分 Tool 详情省略和最终正文截断。先核对现有 partial 输出类型能否准确表达，并验证执行终态、历史和 UI 组合；不足时提出具体表达缺口，不预设新增字段。任何方案都不能静默截断或把前缀显示成完整回复。
+输出仍遵守 segment 的已有定性、continued/discarded 语义和凭据清洗规则；不得因本轮简化而静默改变最终回复完整性。正文容量路径若与正在修改的记录降级发生直接冲突，须明确指出边界，不能以“G1 已批准”处理。
 
 ## 6. 交付回执与生图引用
 
@@ -166,7 +162,7 @@ Run 受控终止保留 stopped；Task 可等待新的用户意图，这不等于
 | --- | --- |
 | 1 | 有界 drain，Run/compact 按 Session 计数收口；验证跨 Session 公平性，测量单事件和提交耗时 |
 | 2 | 可取消背压、RequiredWake、关闭前粘性唤醒及回执尾部交接；验证普通 Stop、close、shutdown 不死锁、不因本地退出 poison |
-| 3 | 核算与保留分离，明确错误分类和违约升级，修正 completion_seen 与输入接续，落实回执和生图最小记录；正文截断部分等待 G1 |
+| 3 | 核算与保留分离，明确错误分类和违约升级，修正 completion_seen 与输入接续，落实回执和生图最小记录；正文政策按第 5 节延后 |
 | 4 | 修正既有 cause 映射和相关文档歧义；前述机制可用后最后删除 16，使用 MAX_TURNS_V1 |
 | 5 | 完成真实执行、桌面及历史重开验收，收集性能与 watchdog 证据后报告完成 |
 
@@ -204,10 +200,10 @@ Run 受控终止保留 stopped；Task 可等待新的用户意图，这不等于
 
 | 真源 | 对应变化 |
 | --- | --- |
-| [产品需求](../requirements.md) | 正常执行、记录缺口、正文政策及恢复边界的用户可观察语义 |
+| [产品需求](../requirements.md) | 正常执行、记录缺口及恢复边界的用户可观察语义 |
 | [AgentCore 集成契约](../agentcore-integration.md) | 背压、控制唤醒、缺口、回执、Run/compact 屏障和停止映射 |
 | [Product 架构](../product-architecture.md) | 核算与保留、真实结果与完整性、完成已读、输入接续及成果引用 |
-| [Renderer Bridge 合同](../renderer-bridge-contract.md) | 必要的完整性表达；输出分预算并受共享总额度约束，替换原单一预算约束，不新增 cause 或自动递增 revision |
+| [Renderer Bridge 合同](../renderer-bridge-contract.md) | 必要的完整性表达；保持现有正文预算合同，不新增 cause 或自动递增 revision |
 | [UI 设计规范](../ui-design.md) | 执行结果、记录/正文不完整和恢复限制的呈现 |
 | [验证规范](../validation.md) | 活性不变量、验收责任与经验证后形成的长期证据 |
 
