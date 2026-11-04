@@ -751,6 +751,7 @@ pub const Dispatcher = struct {
         self.cancelPreviewConnection();
         if (self.updates_host) |host| host.cancel_fn(host.context);
         self.settleDialogs();
+        self.cancelOutputConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.deliverNotificationTask() catch {};
         self.preview_high_water = 0;
@@ -8806,8 +8807,9 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
     try std.testing.expect(boundary.skill_grants.grant == null);
     try std.testing.expectError(error.InvalidPreparation, control.preflightSkillImport(grant.preparation.id, grant.preparation.revision, .create));
     _ = try home.dir.statFile(std.testing.io, ".agents/skills/demo/SKILL.md", .{ .follow_symlinks = false });
-    // A cancelled request must release its responder immediately, before the
-    // native completion. More than the SDK response capacity cannot exhaust it.
+    // Local pending state settles before the native completion, and a late
+    // selected result cannot respond again. SDK slot reuse is tested through
+    // Runtime dispatch in the Application SDK consumption suite.
     for (0..80) |_| {
         _ = try boundary.delivery.connect(3, boundary.transport());
         host.response_len = 0;
