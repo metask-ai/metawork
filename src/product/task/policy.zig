@@ -229,7 +229,8 @@ pub fn classifyAgentTerminal(
     };
     if (result.stop_reason) |reason| return switch (reason) {
         .end_turn => .{ .phase = .completed, .outcome = .completed, .cause = null },
-        .max_turns, .tool_loop => .{ .phase = .stopped, .outcome = .stopped, .cause = null },
+        .max_turns => .{ .phase = .stopped, .outcome = .stopped, .cause = .resource_limit },
+        .tool_loop => .{ .phase = .stopped, .outcome = .stopped, .cause = .tool_failure },
         .aborted => decisionForSignal(result.termination_signal),
         .tool_error => .{
             .phase = .failed,
@@ -666,6 +667,18 @@ test "Agent terminal facts map into Product Task outcomes" {
         TerminalDecision{ .phase = .completed, .outcome = .completed, .cause = null },
         classifyAgentTerminal(&terminal),
     );
+
+    terminal.stop_reason = .max_turns;
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .stopped, .outcome = .stopped, .cause = .resource_limit },
+        classifyAgentTerminal(&terminal),
+    );
+    terminal.stop_reason = .tool_loop;
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .stopped, .outcome = .stopped, .cause = .tool_failure },
+        classifyAgentTerminal(&terminal),
+    );
+    terminal.stop_reason = .end_turn;
 
     terminal.termination_signal = .permission_required;
     try std.testing.expectEqual(

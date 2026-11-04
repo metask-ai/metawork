@@ -473,13 +473,15 @@ call ABI
 | StopReason                    | 当前 Host 状态                                                                                 |
 | ----------------------------- | ---------------------------------------------------------------------------------------------- |
 | `end_turn`                    | completed                                                                                      |
-| `max_turns`                   | stopped / awaiting_user                                                                        |
+| `max_turns`                   | stopped / Product cause `resource_limit`                                                                        |
 | `aborted`                     | `TerminalResult.termination_signal` 由 Product Control 映射为 cancelled / interrupted / failed |
 | `tool_error`                  | failed / Product cause `tool_failure`                                                          |
 | `api_error`                   | failed / Product cause `provider_failure`                                                      |
-| `tool_loop`                   | stopped / awaiting_user                                                                        |
+| `tool_loop`                   | stopped / Product cause `tool_failure`                                                                        |
 | `checkpoint_budget_exhausted` | stopped / resource_limit                                                                       |
 | `checkpoint_resource_limit`   | stopped / resource_limit                                                                       |
+
+Run admission 使用 SDK 的 `MAX_TURNS_V1`，不另设产品回合阈值；它是依赖执行边界，不是用户对话次数额度。受控停止后 Task 可等待新的用户意图，但 Run 保持 stopped，不因此产生同步 `waiting_ui` 请求。
 
 每种 operation 按官方合同决定 result 的可读字段，不能从全局 status enum 推断合法性；已定义 Run 返回状态上的两个 input counts 均须验证。未知 status、其他 operation 的 status、未知 enum/flag 或跨字段矛盾均按 dependency contract failure 收口。
 

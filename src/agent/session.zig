@@ -2110,7 +2110,7 @@ pub const Session = struct {
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
-        options.max_turns = 16;
+        options.max_turns = wire.MAX_TURNS_V1;
         // Core samples the process date and timezone at Run admission.
         // Skill Runs carry no date block under the same SYSTEM policy.
         options.time_context_code = wire.TIME_CONTEXT_SYSTEM;

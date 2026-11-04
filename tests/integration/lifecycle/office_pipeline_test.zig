@@ -131,6 +131,17 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
                 return;
             }
+            if (std.mem.eql(u8, mode, "long-run")) {
+                try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
+                try std.testing.expect(run.event_stream_finalized);
+                try std.testing.expectEqual(state.EventProjectionFailure.consumer_rejected, run.event_projection_failure.?);
+                try std.testing.expectEqual(error.ToolCapacity, run.first_event_rejection.?.failure);
+                try std.testing.expect(run.terminal_drain_rejection == null);
+                try std.testing.expect(run.open_output_segment == null);
+                try std.testing.expect(std.mem.endsWith(u8, run.assistant.list.items, "Long run completed."));
+                try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
+                return;
+            }
             if (std.mem.eql(u8, mode, "fixture-error")) {
                 try std.testing.expectEqual(task_api.RunOutcome.failed, terminal.outcome);
                 try std.testing.expect(terminal.cause == .provider_failure);
@@ -210,7 +221,7 @@ fn qualify(mode: []const u8) !void {
         .max_tasks = 1,
         .max_workspaces = 1,
         .max_runs_per_task = 3,
-        .max_tools_per_run = 4,
+        .max_tools_per_run = if (std.mem.eql(u8, mode, "long-run")) 32 else 4,
     }, configuration);
     defer control.deinit();
     try control.startCustomProviders(root, vault.capability());
@@ -271,6 +282,13 @@ fn qualify(mode: []const u8) !void {
             try std.testing.expect(std.mem.indexOf(u8, trace, message) != null);
         }
         if (std.mem.eql(u8, mode, "unreachable-preparation")) try std.testing.expect(std.mem.indexOf(u8, trace, "preparation-cleanup") != null);
+        if (std.mem.eql(u8, mode, "long-run")) {
+            try std.testing.expectEqual(@as(usize, 41), std.mem.count(u8, trace, "\"kind\":\"request\""));
+            const saved = (try history.loadAlloc(std.testing.allocator)).?;
+            defer std.testing.allocator.free(saved);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "Long run completed.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "consumer_rejected") != null);
+        }
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
             defer std.testing.allocator.free(saved);
@@ -404,4 +422,8 @@ test "Skill resource context reads a managed import through tool and typed input
         try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
         try std.testing.expect(std.mem.indexOf(u8, trace, "skill-resource-read") != null);
     }
+}
+
+test "canonical single Run passes 16 turns and 32 Tool records without replay" {
+    try qualify("long-run");
 }
