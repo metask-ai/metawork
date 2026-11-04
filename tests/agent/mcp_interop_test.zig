@@ -3801,8 +3801,8 @@ const management_coordinator = @import("mcp_management_coordinator");
 
 const CoordinatorHost = struct {
     notifications: std.atomic.Value(usize) = .init(0),
-    fn confirm(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) management_coordinator.Confirmation {
-        return .approved;
+    fn request(_: *anyopaque, _: u64, _: product_control.NativeDialog.Message, _: *const product_control.NativeDialog.Completion) !u64 {
+        return error.UnexpectedDialog;
     }
     fn open(_: *anyopaque, _: []const u8) bool {
         return false;
@@ -3815,7 +3815,7 @@ const CoordinatorHost = struct {
         _ = self.notifications.fetchAdd(1, .release);
     }
     fn host(self: *@This()) management_coordinator.Host {
-        return .{ .context = self, .confirm_fn = confirm, .open_url_fn = open, .now_unix_ms_fn = now, .notify_fn = notify };
+        return .{ .context = self, .request_dialog_fn = request, .open_url_fn = open, .now_unix_ms_fn = now, .notify_fn = notify };
     }
 };
 

@@ -1,0 +1,215 @@
+{
+  "id": "E-MACOS-DIALOG-ASYNC-20261104",
+  "date": "2026-11-04",
+  "source": {
+    "base_revision": "cc5a554ff6399f49ef99cdbad43a69c704f697c9",
+    "additional_source_sha256": {
+      "src/app/automation.zig": "bc259300f124ff4464e9cb140802298a5604585033c8947fb90d59a0402b89f7"
+    },
+    "note": "The additional source only disables injected picker paths in automation artifacts. All production dialog code is in the base revision."
+  },
+  "platform": {
+    "os": "macOS",
+    "version": "27.0.1",
+    "build": "26A434",
+    "architecture": "arm64",
+    "target": "aarch64-macos"
+  },
+  "artifact": {
+    "kind": "automation Debug",
+    "binary_sha256": "856e640d3b372e1d75b2b02d79806c2d8ab74d4fca3e768cfb19d633d1dd8ebc",
+    "binary_bytes": 47317176,
+    "bundle_identifier": "com.metask.metawork.automation.dialog-test",
+    "packaging": "Local test bundle copied from canonical automation build; not a signed release acceptance."
+  },
+  "dependencies": {
+    "native_sdk": "0.11.0-fork.5",
+    "agentcore_version": "0.13.0",
+    "agentcore_abi": 1,
+    "agentcore_abi_revision": 26,
+    "agentcore_manifest_sha256": "8ffe5ffc83b26c59009041e702086c61ff402a25dfccb1a0726291e36cc3ed68",
+    "zig": "0.16.0"
+  },
+  "acquisition": {
+    "entry": "METAWORK_NATIVE_DIALOGS_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos",
+    "scopes": ["all (picker segment)", "mcp", "assets"],
+    "native_observer": "CUA accessibility and native input; actual AppKit open/save/message windows",
+    "path_injection": false,
+    "isolation": "Temporary HOME and Product data directory, existing fixture vault, synthetic local model replies; real canonical Core, Product, Bridge, SDK and OS timer.",
+    "response_observation": "SDK latest-response file; native-dialog scope uses bounded synchronous observation on setImmediate to avoid focus/chrome response replacement. No mutation is replayed.",
+    "qualification": "Picker segment passed before an invalid overlong MCP fixture argument stopped its first combined run. MCP was rerun separately with three legal 3000-byte arguments; final MCP and assets runs exited 0."
+  },
+  "picker_and_background": [
+    {
+      "label": "attachment-confirm",
+      "progressedAt": 1793765200362,
+      "taskId": "1",
+      "occurrence": {
+        "plannedAtUnixSeconds": "1793765194",
+        "triggeredAtUnixSeconds": "1793765194",
+        "source": "timer",
+        "result": "submitted",
+        "taskId": "2",
+        "reason": null,
+        "taskOutcome": "completed"
+      },
+      "closedAt": 1793765206253,
+      "result": {
+        "status": "ready",
+        "attachments": [
+          {
+            "kind": "file",
+            "displayName": "fixture.txt",
+            "sizeBytes": "26"
+          }
+        ]
+      }
+    },
+    {
+      "label": "attachment-cancel",
+      "progressedAt": 1793765223584,
+      "taskId": "3",
+      "closedAt": 1793765230547,
+      "result": {
+        "status": "cancelled"
+      }
+    },
+    {
+      "label": "workspace-confirm",
+      "progressedAt": 1793765264786,
+      "taskId": "4",
+      "closedAt": 1793765280711,
+      "result": {
+        "selected": true,
+        "workspaceId": "5"
+      }
+    },
+    {
+      "label": "workspace-cancel",
+      "progressedAt": 1793765302757,
+      "taskId": "5",
+      "closedAt": 1793765321354,
+      "result": {
+        "selected": false
+      }
+    },
+    {
+      "label": "save-confirm",
+      "progressedAt": 1793765346207,
+      "taskId": "7",
+      "closedAt": 1793765363759,
+      "result": {
+        "generation": "1",
+        "operationId": "1",
+        "state": "saved"
+      }
+    },
+    {
+      "label": "save-cancel",
+      "progressedAt": 1793765386389,
+      "taskId": "8",
+      "closedAt": 1793765403954,
+      "result": {
+        "generation": "1",
+        "operationId": "2",
+        "state": "cancelled"
+      }
+    }
+  ],
+  "asset_picker_smoke": [
+    {
+      "label": "root-confirm",
+      "result": {
+        "outcome": "applied"
+      },
+      "at": 1793766125538
+    },
+    {
+      "label": "root-cancel",
+      "result": {
+        "outcome": "cancelled"
+      },
+      "at": 1793766140596
+    },
+    {
+      "label": "skill-import-cancel",
+      "result": {
+        "status": "cancelled"
+      },
+      "at": 1793766153993
+    },
+    {
+      "label": "skill-import-confirm",
+      "result": {
+        "status": "prepared",
+        "sourceKind": "local_directory",
+        "effect": "create",
+        "scope": {
+          "kind": "personal",
+          "workspaceId": null,
+          "workspaceEpoch": null
+        },
+        "invocationName": "dialog-smoke",
+        "displayName": "dialog-smoke",
+        "description": "Native dialog smoke fixture",
+        "fileCount": 1,
+        "totalBytes": 82,
+        "blocker": null
+      },
+      "at": 1793766183321
+    },
+    {
+      "label": "skill-export-confirm",
+      "result": {
+        "exported": true,
+        "fileName": "dialog-smoke.skill",
+        "reason": null
+      },
+      "at": 1793766213169
+    },
+    {
+      "label": "skill-export-cancel",
+      "result": {
+        "exported": false,
+        "fileName": null,
+        "reason": "cancelled"
+      },
+      "at": 1793766229165
+    }
+  ],
+  "message_confirmation": {
+    "pages": 3,
+    "intermediate_buttons": ["Next", "Cancel"],
+    "final_buttons": ["Approve connection", "Cancel"],
+    "results": [
+      {
+        "label": "Cancel on page two",
+        "result": {
+          "outcome": "cancelled",
+          "desiredGeneration": "1"
+        }
+      },
+      {
+        "label": "approve only the final page",
+        "result": {
+          "outcome": "rejected",
+          "desiredGeneration": "1"
+        }
+      }
+    ],
+    "mapping": "Newly created fixture already has an approved fingerprint; final confirmation therefore exercises unchanged → rejected without advancing desired generation.",
+    "hidden_main_window": "Main-window close action was performed before first confirmation. Parentless pagination/cancel was observed; timer/wake progress during hidden OAuth consent was not established by this case."
+  },
+  "shutdown": {
+    "scenario": "Quit while a real Workspace picker remained open",
+    "exit_code": 0,
+    "normal_runtime_stop_observed": true,
+    "sdk_completion_not_required_for_owner_cleanup": true
+  },
+  "remaining_gaps": [
+    "Windows native picker/message runs, including Esc and close on every intermediate/final page.",
+    "macOS hidden-window OAuth consent: nested modal timer/wake and exit matrix. Generic MCP message pagination is not a substitute.",
+    "Native approval of an unapproved legacy configuration through saved/apply; this fixture instead proves the existing unchanged mapping.",
+    "Repeated schedules, exhaustive native disconnect/target invalidation and every dialog-kind quit permutation; shared deterministic cancellation/lifecycle regression does not substitute for those platform cases."
+  ]
+}

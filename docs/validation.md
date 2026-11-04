@@ -431,6 +431,10 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 
 Runtime 已提供语义等价能力的 Application effect 不能作为 compatibility 长期豁免；受限 public primitive 的允许边界由高层架构拥有。在结构 guard 和对应线程、行为、shutdown 证据全部完成前，仓库级兼容 Gate 保持打开。定向 binding 回归不替代领域事务或真实平台证据，单项兼容能力通过也不能证明全仓低层能力路径合规。
 
+异步原生对话框的确定性入口为 `zig build test-native-dialogs`，与正式 Native graph、SDK consumption 和 lifecycle 共同验证能力检查、pending authority、无 job 取消、错误与 stop 收口。真实 macOS 专项使用 `METAWORK_NATIVE_DIALOGS_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`；`METAWORK_NATIVE_DIALOGS_SCOPE=mcp` 和 `assets` 分别限定消息确认与 Root/Skill smoke，原生窗口由外部观察者操作，不能用路径注入替代。该入口仅支持 macOS，不是全量 desktop vertical 或性能测试。
+
+[E-MACOS-DIALOG-ASYNC-20261104](evidence/native-dialog-async-macos-20261104.json) 记录真实附件、Workspace、Automatic Root、Skill 导入/导出、Save As 确认/取消、多页 MCP 确认与打开选择器时正常 Quit。附件选择期间已观察到唯一到期 occurrence/Task 完成；附件、Workspace、Save As 的既有 Agent 在关闭窗口前完成。当前证据不关闭 Windows 逐页 Esc/关闭矩阵、macOS 隐藏窗口 OAuth consent 的 timer/wake/退出、未批准 legacy 配置的真实 saved/apply，以及证据文件列出的完整竞态矩阵；消息分页结果或确定性 fixture 不能代替这些验收。
+
 主循环 wake 按[高层架构](architecture.md#35-native-sdk)属于正常 SDK 消费，不再等待缺口确认或独立 compatibility seam。Application 回归由正式 Native graph 与 `zig build test-single-instance` 覆盖：服务缺失、启动绑定与 pending 交接、显式通知失败、已消费与较早需求的结算、停止入口及在途 callback join。架构 guard 约束启动前不发布回调、绑定晚于平台启动、join 早于平台清理；Agent 的有界重试/合并与 required completion 的失败策略保持各自 owner。macOS 真实 SDK 投递与竞态对照见 `E-MACOS-WAKE-20261019`；Windows Named Pipe、原生 wake 投递及 OS enqueue 失败的错误传播仍需独立平台证据，不能用注入错误或 SDK 返回成功代替。
 
 Account 凭据操作的返回与恢复语义由 [Account 架构](account-architecture.md)定义。SDK 维护方负责其公开凭据 API 的合同与行为验证；MetaWork 通过 Account credential store 与 Runtime 的故障注入回归，验证写入失败保留已提交凭据、删除失败保留身份、轮换保存失败阻断后续刷新，以及重启后的收敛。平台安全存储的真实行为由对应平台验收负责，故障注入不替代 SDK 或系统安全存储的行为验证。

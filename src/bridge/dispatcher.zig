@@ -20,7 +20,7 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 12;
+const async_product_handler_count = 17;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -51,6 +51,11 @@ pub const WindowChromeControlAction = enum {
     close,
 };
 
+fn unavailableDialog(_: ?*anyopaque, _: u64, _: u64, _: product_control.NativeDialog.Options, _: *const product_control.NativeDialog.Completion) anyerror!u64 {
+    return error.UnsupportedService;
+}
+fn cancelUnavailableDialog(_: ?*anyopaque, _: u64) void {}
+
 pub const Platform = struct {
     attachment_input: enum { native_paths, file_bytes } = .native_paths,
     context: ?*anyopaque,
@@ -63,11 +68,9 @@ pub const Platform = struct {
     ) anyerror!void,
     start_timer_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
     cancel_timer_fn: *const fn (?*anyopaque, u64) anyerror!void,
-    show_open_dialog_fn: *const fn (
-        ?*anyopaque,
-        native_sdk.platform.OpenDialogOptions,
-        []u8,
-    ) anyerror!native_sdk.platform.OpenDialogResult,
+    request_dialog_fn: *const fn (?*anyopaque, u64, u64, product_control.NativeDialog.Options, *const product_control.NativeDialog.Completion) anyerror!u64 = unavailableDialog,
+    cancel_dialog_fn: *const fn (?*anyopaque, u64) void = cancelUnavailableDialog,
+
     canonicalize_directory_fn: *const fn (
         ?*anyopaque,
         []const u8,
@@ -114,15 +117,8 @@ pub const AutomationAuthority = struct {
     }
 };
 
-pub const McpHostOutcome = enum {
-    saved,
-    saved_recovery_required,
-    stale_generation,
-    rejected,
-    indeterminate,
-    cancelled,
-    capability_unavailable,
-};
+pub const McpHostOutcome = product_control.McpHostOutcome;
+pub const McpApproval = product_control.McpApproval;
 
 pub const McpAuthorizationStartOutcome = union(enum) {
     started: []const u8,
@@ -181,13 +177,35 @@ pub const ModelsHost = struct {
 pub const McpManagementHost = struct {
     context: *anyopaque,
     test_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpConnectionTestStartOutcome,
-    approve_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpHostOutcome,
+    begin_approval_fn: *const fn (*anyopaque, u64, u64, []const u8, *const McpApproval.Completion) anyerror!McpApproval.Start,
+    cancel_approval_fn: *const fn (*anyopaque, u64) void,
+    map_approval_fn: *const fn (*anyopaque, mcp_configuration.ManagementOutcome) McpHostOutcome,
     capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot, []const u8) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
     cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
     apply_fn: *const fn (*anyopaque, mcp_configuration.RuntimeApplyIntent) anyerror!McpConfigurationApplyStartOutcome,
 };
 
+const Dialog = product_control.NativeDialog;
+const DialogContinuation = union(enum) {
+    workspace,
+    root: u64,
+    skill_import: struct { kind: product_control.SkillImportSourceKind, target: product_control.SkillImportTarget },
+    skill_export: skill_management.InstallId,
+    attachments,
+    mcp_approval: struct { generation: u64, server: []u8 },
+};
+const PendingDialog = struct {
+    active: bool = false,
+    id: u64 = 0,
+    handle: u64 = 0,
+    generation: u64 = 0,
+    window: u64 = 0,
+    responder: native_sdk.bridge.AsyncResponder = undefined,
+    request: [native_sdk.bridge.max_id_bytes]u8 = undefined,
+    request_len: usize = 0,
+    continuation: DialogContinuation = undefined,
+};
 pub const Dispatcher = struct {
     const PreviewRelease = struct {
         responder: native_sdk.bridge.AsyncResponder,
@@ -216,6 +234,7 @@ pub const Dispatcher = struct {
         request_id_len: usize = 0,
     };
     const OutputInFlight = struct {
+        dialog_handle: u64 = 0,
         completion_id: u64,
         generation: u64,
         operation_id: u64,
@@ -233,6 +252,8 @@ pub const Dispatcher = struct {
         request_id_len: usize = 0,
     };
     const AttachmentInFlight = struct {
+        dialog_handle: u64 = 0,
+        max_files: usize = attachment_grant.max_batch_files,
         batch_id: ?u64 = null,
         active: bool = false,
         completion_id: u64 = 0,
@@ -260,6 +281,12 @@ pub const Dispatcher = struct {
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
+    allocator: std.mem.Allocator,
+    approval_completion: McpApproval.Completion = undefined,
+    dialogs: [native_sdk.runtime.max_dialog_requests]PendingDialog = @splat(.{}),
+    next_dialog_id: u64 = 1,
+    dialog_completion: Dialog.Completion = undefined,
+    attachment_dialog_completion: Dialog.Completion = undefined,
     custom_provider_commands: models_contract.CommandSink,
     platform: Platform,
     automation: AutomationAuthority,
@@ -290,6 +317,7 @@ pub const Dispatcher = struct {
     preview_timer_armed: bool = false,
     output_timer_armed: bool = false,
     output_in_flight: [2]?OutputInFlight = @splat(null),
+    output_save_completion: product_control.OutputSavePort.Completion = undefined,
     output_high_water: u64 = 0,
     next_output_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
@@ -308,6 +336,7 @@ pub const Dispatcher = struct {
     ) std.mem.Allocator.Error!Dispatcher {
         std.debug.assert(bootstrap_window_id != 0);
         return .{
+            .allocator = allocator,
             .control = control,
             .account_commands = account_commands,
             .custom_provider_commands = custom_provider_commands,
@@ -320,6 +349,7 @@ pub const Dispatcher = struct {
 
     pub fn deinit(self: *Dispatcher) void {
         self.callbacks.stopIngress();
+        self.settleDialogs();
         self.callbacks.assertQuiescent();
         self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
@@ -364,9 +394,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.updates_open_download, .function = openUpdateDownload },
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
-            .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
-            .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
             .{ .name = commands.retry_automatic_workspace_root, .function = retryAutomaticWorkspaceRoot },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
@@ -374,20 +402,17 @@ pub const Dispatcher = struct {
             .{ .name = commands.set_skill_enabled, .function = setSkillEnabled },
             .{ .name = commands.set_skill_source_enabled, .function = setSkillSourceEnabled },
             .{ .name = commands.recover_skill_source_settings, .function = recoverSkillSourceSettings },
-            .{ .name = commands.choose_skill_import, .function = chooseSkillImport },
             .{ .name = commands.prepare_skill_import, .function = prepareSkillImport },
             .{ .name = commands.install_skill, .function = installSkill },
             .{ .name = commands.reimport_skill, .function = reimportSkill },
             .{ .name = commands.uninstall_skill, .function = uninstallSkill },
             .{ .name = commands.retry_skill, .function = retrySkill },
-            .{ .name = commands.export_skill, .function = exportSkill },
             .{ .name = commands.skill_detail, .function = skillDetail },
             .{ .name = commands.mcp_create_stdio_server, .function = createMcpStdioServer },
             .{ .name = commands.mcp_create_http_server, .function = createMcpHttpServer },
             .{ .name = commands.mcp_update_stdio_connection, .function = updateMcpStdioConnection },
             .{ .name = commands.mcp_update_http_connection, .function = updateMcpHttpConnection },
             .{ .name = commands.mcp_rename_server, .function = renameMcpServer },
-            .{ .name = commands.mcp_approve_connection, .function = approveMcpConnection },
             .{ .name = commands.mcp_capture_secret, .function = captureMcpSecret },
             .{ .name = commands.mcp_authorize_oauth, .function = authorizeMcpOauth },
             .{ .name = commands.mcp_cancel_authorization, .function = cancelMcpAuthorization },
@@ -480,6 +505,11 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
         self.registered_async_handlers[10] = .{ .name = commands.list_directory, .context = self, .invoke_fn = listDirectory };
         self.registered_async_handlers[11] = .{ .name = commands.preview_workspace_file, .context = self, .invoke_fn = previewWorkspaceFile };
+        self.registered_async_handlers[12] = .{ .name = commands.choose_workspace, .context = self, .invoke_fn = chooseWorkspace };
+        self.registered_async_handlers[13] = .{ .name = commands.choose_automatic_workspace_root, .context = self, .invoke_fn = chooseAutomaticWorkspaceRoot };
+        self.registered_async_handlers[14] = .{ .name = commands.choose_skill_import, .context = self, .invoke_fn = chooseSkillImport };
+        self.registered_async_handlers[15] = .{ .name = commands.export_skill, .context = self, .invoke_fn = exportSkill };
+        self.registered_async_handlers[16] = .{ .name = commands.mcp_approve_connection, .context = self, .invoke_fn = approveMcpConnection };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -489,6 +519,7 @@ pub const Dispatcher = struct {
 
     pub fn stopIngress(self: *Dispatcher) void {
         self.callbacks.stopIngress();
+        self.settleDialogs();
     }
 
     /// App closes the freshly constructed dispatcher until all startup product
@@ -500,6 +531,7 @@ pub const Dispatcher = struct {
 
     pub fn assertQuiescent(self: *Dispatcher) void {
         self.callbacks.assertQuiescent();
+        for (self.dialogs) |entry| std.debug.assert(!entry.active);
     }
 
     pub fn detachProductControl(self: *Dispatcher) void {
@@ -518,6 +550,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        self.settleDialogs();
         if (self.updates_host) |host| host.cancel_fn(host.context);
         self.cancelOutputConnection();
         self.cancelPreviewConnection();
@@ -530,7 +563,12 @@ pub const Dispatcher = struct {
 
     fn releaseAllAttachmentGrants(self: *Dispatcher) void {
         if (self.control) |workbench| for (self.attachment_in_flight) |slot| {
-            if (slot.active) _ = workbench.cancelAttachmentStaging(slot.completion_id);
+            if (slot.active) {
+                if (slot.dialog_handle != 0) {
+                    self.platform.cancel_dialog_fn(self.platform.context, slot.dialog_handle);
+                    self.completeAttachmentStaging(slot.completion_id, .cancelled);
+                } else _ = workbench.cancelAttachmentStaging(slot.completion_id);
+            }
         };
         if (self.receive_active) |receive| {
             if (self.control) |workbench| {
@@ -712,6 +750,8 @@ pub const Dispatcher = struct {
         if (self.control) |control| control.cancelSnapshot();
         self.cancelPreviewConnection();
         if (self.updates_host) |host| host.cancel_fn(host.context);
+        self.settleDialogs();
+        self.cancelOutputConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.deliverNotificationTask() catch {};
         self.preview_high_water = 0;
@@ -1051,12 +1091,73 @@ pub const Dispatcher = struct {
         self.next_output_completion_id += 1;
         vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
         @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
-        switch (control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value)) {
+        self.adoptOutputAdmission(completion, control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value));
+    }
+
+    fn adoptOutputAdmission(self: *Dispatcher, id: u64, admission: product_control.Runtime.OutputCheckAdmission) void {
+        const control = self.control orelse return;
+        switch (admission) {
+            .choosing => {
+                const slot = self.outputSlot(id) orelse {
+                    _ = control.cancelOutputCheck(id);
+                    return;
+                };
+                self.output_save_completion = .{ .context = self, .borrow_source_fn = borrowOutputSave, .complete_fn = outputSaveCompleted };
+                slot.dialog_handle = control.requestOutputSave(id, slot.window_id, &self.output_save_completion) catch |err| {
+                    outputSaveCompleted(self, id, .{ .failed = err });
+                    return;
+                };
+            },
             .queued => {
-                if (vacant.* == null or vacant.*.?.cancelled) _ = control.cancelOutputCheck(completion);
+                if (!outputRequestActive(self, id)) self.cancelOutputOperation(id);
                 self.updateOutputTimer();
             },
-            .immediate => |state| self.completeOutputAction(.{ .completion_id = completion, .state = state }),
+            .immediate => |state| self.completeOutputAction(.{ .completion_id = id, .state = state }),
+        }
+    }
+    fn outputSlot(self: *Dispatcher, id: u64) ?*OutputInFlight {
+        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+            if (slot.completion_id == id) return slot;
+        };
+        return null;
+    }
+    fn borrowOutputSave(context: *anyopaque, id: u64) !@import("metawork_product_control").OutputSaveInput {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        if (!outputRequestActive(self, id)) return error.UnknownOutput;
+        return (try self.requireProductControl()).borrowOutputSaveSource(id);
+    }
+    fn outputSaveCompleted(context: *anyopaque, id: u64, result: product_control.OutputSavePort.Result) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        const slot = self.outputSlot(id) orelse {
+            if (result == .selected) {
+                var effect = result.selected;
+                effect.deinit();
+            }
+            return;
+        };
+        slot.dialog_handle = 0;
+        if (self.control) |control| self.adoptOutputAdmission(id, control.completeOutputSave(id, result)) else {
+            if (result == .selected) {
+                var effect = result.selected;
+                effect.deinit();
+            }
+            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+        }
+    }
+    fn cancelOutputOperation(self: *Dispatcher, id: u64) void {
+        const slot = self.outputSlot(id) orelse return;
+        const control = self.control orelse {
+            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+            return;
+        };
+        const outcome = control.cancelOutputCheck(id);
+        if (outcome == .committed) return;
+        slot.cancelled = true;
+        if (outcome == .pending_cancelled or outcome == .not_found) {
+            const handle = slot.dialog_handle;
+            slot.dialog_handle = 0;
+            control.cancelOutputDialog(handle);
+            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
         }
     }
 
@@ -1107,13 +1208,12 @@ pub const Dispatcher = struct {
         const operation = parsed.value.operationId.value;
         try self.requireOutputConnection(invocation, generation, operation);
         var cancelled = false;
-        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+        for (self.output_in_flight) |entry| if (entry) |slot| {
             if (slot.generation != generation or slot.operation_id != operation or slot.window_id != invocation.source.window_id) continue;
             if (self.control) |control| {
                 if (control.outputPublicationCommitted(slot.completion_id)) break;
-                _ = control.cancelOutputCheck(slot.completion_id);
             }
-            slot.cancelled = true;
+            self.cancelOutputOperation(slot.completion_id);
             cancelled = true;
             break;
         };
@@ -1135,9 +1235,8 @@ pub const Dispatcher = struct {
     }
 
     fn cancelOutputConnection(self: *Dispatcher) void {
-        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
-            slot.cancelled = true;
-            if (self.control) |control| _ = control.cancelOutputCheck(slot.completion_id);
+        for (self.output_in_flight) |entry| if (entry) |slot| {
+            self.cancelOutputOperation(slot.completion_id);
         };
     }
 
@@ -1145,6 +1244,7 @@ pub const Dispatcher = struct {
         if (self.output_timer_armed) self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
         self.output_timer_armed = false;
         for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+            if (self.control) |control| if (slot.dialog_handle != 0) control.cancelOutputDialog(slot.dialog_handle);
             entry.* = null;
             respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
         };
@@ -1737,45 +1837,75 @@ pub const Dispatcher = struct {
             return;
         };
         self.receive_active = .{ .batch_id = key.batch_id, .product_id = product_id, .unified = true, .bytes = false };
-        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const selected = if (source.kind == .native_paths) native_sdk.platform.OpenDialogResult{ .paths = paths, .count = source.paths.?.len } else if (self.automation.active()) automation: {
+        for (&self.attachment_in_flight) |*slot| if (slot.active and slot.completion_id == completion) {
+            slot.max_files = max_files;
+        };
+        if (source.kind == .native_paths) {
+            self.attachmentDialogResult(completion, .{ .files = .{ .paths = paths, .count = source.paths.?.len } });
+        } else if (self.automation.active()) {
             const selected_paths = self.automation.attachmentPaths() orelse {
-                _ = workbench.cancelAttachmentPreparation(product_id);
-                self.completeAttachmentStaging(completion, .{ .rejected = .read_failed });
+                self.attachmentDialogResult(completion, .failed);
                 return;
             };
             const count = countAutomationAttachmentPaths(selected_paths) orelse {
-                _ = workbench.cancelAttachmentPreparation(product_id);
-                self.completeAttachmentStaging(completion, .{ .rejected = .read_failed });
+                self.attachmentDialogResult(completion, .failed);
                 return;
             };
-            break :automation native_sdk.platform.OpenDialogResult{ .paths = selected_paths, .count = count };
-        } else self.platform.show_open_dialog_fn(self.platform.context, .{ .title = "Choose files", .allow_directories = false, .allow_multiple = true }, &dialog_storage) catch {
-            _ = workbench.cancelAttachmentPreparation(product_id);
-            self.completeAttachmentStaging(completion, .{ .rejected = .read_failed });
+            self.attachmentDialogResult(completion, .{ .files = .{ .paths = selected_paths, .count = count } });
+        } else {
+            self.attachment_dialog_completion = .{ .context = self, .result_fn = attachmentDialogCallback };
+            const handle = self.platform.request_dialog_fn(self.platform.context, completion, invocation.source.window_id, .{ .open = .{ .title = "Choose files", .allow_multiple = true } }, &self.attachment_dialog_completion) catch {
+                self.attachmentDialogResult(completion, .failed);
+                return;
+            };
+            for (&self.attachment_in_flight) |*slot| if (slot.active and slot.completion_id == completion) {
+                slot.dialog_handle = handle;
+            };
+        }
+    }
+
+    fn attachmentDialogCallback(context: *anyopaque, id: u64, result: Dialog.Result) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.attachmentDialogResult(id, result);
+    }
+
+    fn attachmentDialogResult(self: *Dispatcher, id: u64, result: Dialog.Result) void {
+        const slot = for (&self.attachment_in_flight) |*item| {
+            if (item.active and item.completion_id == id) break item;
+        } else return;
+        slot.dialog_handle = 0;
+        const active = self.receive_active orelse {
+            self.completeAttachmentStaging(id, .cancelled);
             return;
         };
-        const active = self.receive_active;
-        if (active == null or active.?.product_id != product_id or self.delivery.connectedGeneration() != key.generation or self.delivery.connectedWindow() != invocation.source.window_id) {
-            _ = workbench.cancelAttachmentPreparation(product_id);
-            self.completeAttachmentStaging(completion, .cancelled);
+        const workbench = self.control orelse {
+            self.completeAttachmentStaging(id, .cancelled);
+            return;
+        };
+        self.delivery.validateConnection(slot.generation, slot.window_id) catch {
+            _ = workbench.cancelAttachmentPreparation(active.product_id);
+            self.completeAttachmentStaging(id, .cancelled);
+            return;
+        };
+        const selected = switch (result) {
+            .files => |files| files,
+            else => {
+                _ = workbench.cancelAttachmentPreparation(active.product_id);
+                self.completeAttachmentStaging(id, if (result == .cancelled) .cancelled else .{ .rejected = .read_failed });
+                return;
+            },
+        };
+        if (selected.count == 0 or selected.count > slot.max_files) {
+            _ = workbench.cancelAttachmentPreparation(active.product_id);
+            self.completeAttachmentStaging(id, .{ .rejected = .too_many_files });
             return;
         }
-        if (selected.count == 0) {
-            _ = workbench.cancelAttachmentPreparation(product_id);
-            self.completeAttachmentStaging(completion, .cancelled);
-            return;
-        }
-        if (selected.count > max_files) {
-            _ = workbench.cancelAttachmentPreparation(product_id);
-            self.completeAttachmentStaging(completion, .{ .rejected = .too_many_files });
-            return;
-        }
-        workbench.beginPreparedAttachmentStaging(completion, product_id, selected.count, selected.paths) catch |err| {
-            _ = workbench.cancelAttachmentPreparation(product_id);
-            self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
+        workbench.beginPreparedAttachmentStaging(id, active.product_id, selected.count, selected.paths) catch |err| {
+            _ = workbench.cancelAttachmentPreparation(active.product_id);
+            self.completeAttachmentStaging(id, .{ .rejected = addRejection(err) });
         };
     }
+
     fn addRejection(err: anyerror) product_control.AttachmentStagingRejection {
         return switch (err) {
             error.InvalidTransfer => .invalid_transfer,
@@ -1974,74 +2104,17 @@ pub const Dispatcher = struct {
         respondAddCancel(responder, invocation.request.id, true, released);
     }
 
-    fn chooseAttachments(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        responder: native_sdk.bridge.AsyncResponder,
-    ) anyerror!void {
+    fn chooseAttachments(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = self.callbacks.enter() catch {
-            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
-            return;
+        self.chooseAttachmentsChecked(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
         };
-        defer callback.deinit();
-        self.requireWindow(invocation.source.window_id) catch {
-            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
-            return;
-        };
-        var parsed = handlers.parsePayload(handlers.Empty, invocation.request.payload) catch {
-            respondAttachmentRejected(responder, invocation.request.id, .read_failed);
-            return;
-        };
+    }
+
+    fn chooseAttachmentsChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
         defer parsed.deinit();
-        const generation = self.delivery.connectedGeneration() orelse {
-            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
-            return;
-        };
-        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const selected = if (self.automation.active()) automation: {
-            const paths = self.automation.attachmentPaths() orelse {
-                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
-                return;
-            };
-            const count = countAutomationAttachmentPaths(paths) orelse {
-                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
-                return;
-            };
-            break :automation native_sdk.platform.OpenDialogResult{
-                .paths = paths,
-                .count = count,
-            };
-        } else user: {
-            break :user self.platform.show_open_dialog_fn(
-                self.platform.context,
-                .{
-                    .title = "Choose files",
-                    .allow_directories = false,
-                    .allow_multiple = true,
-                },
-                &dialog_storage,
-            ) catch {
-                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
-                return;
-            };
-        };
-        if (selected.count == 0) {
-            respondAttachmentCancelled(responder, invocation.request.id);
-            return;
-        }
-        if (selected.count > attachment_grant.max_batch_files or selected.paths.len == 0) {
-            respondAttachmentRejected(responder, invocation.request.id, .too_many_files);
-            return;
-        }
-        self.beginAttachmentStaging(
-            responder,
-            invocation.request.id,
-            generation,
-            invocation.source.window_id,
-            selected.count,
-            selected.paths,
-        );
+        try self.beginDialog(invocation, responder, .attachments, .{ .open = .{ .title = "Choose files", .allow_multiple = true } });
     }
 
     fn addDroppedAttachments(
@@ -2186,6 +2259,7 @@ pub const Dispatcher = struct {
             const responder = slot.responder;
             const generation = slot.generation;
             const window_id = slot.window_id;
+            if (slot.dialog_handle != 0) self.platform.cancel_dialog_fn(self.platform.context, slot.dialog_handle);
             const batch_id = slot.batch_id;
             var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
             @memcpy(request_id_storage[0..slot.request_id_len], slot.request_id_storage[0..slot.request_id_len]);
@@ -2288,6 +2362,7 @@ pub const Dispatcher = struct {
     pub fn settleAttachmentStagingForShutdown(self: *Dispatcher) void {
         for (&self.attachment_in_flight) |*slot| {
             if (!slot.active) continue;
+            if (slot.dialog_handle != 0) self.platform.cancel_dialog_fn(self.platform.context, slot.dialog_handle);
             const responder = slot.responder;
             var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
             @memcpy(request_id_storage[0..slot.request_id_len], slot.request_id_storage[0..slot.request_id_len]);
@@ -3030,60 +3105,155 @@ pub const Dispatcher = struct {
         return std.meta.stringToEnum(models_contract.Protocol, value);
     }
 
-    fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
+    fn beginDialog(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, continuation: DialogContinuation, options: Dialog.Options) !void {
+        const entry = try self.reserveDialog(invocation, responder, continuation);
+        errdefer entry.active = false;
+        self.dialog_completion = .{ .context = self, .result_fn = dialogResult };
+        if (self.automation.active() and (continuation == .workspace or continuation == .attachments)) {
+            const path = if (continuation == .workspace) self.automation.workspaceRoot() orelse return error.AutomationWorkspaceUnavailable else self.automation.attachmentPaths() orelse return error.AutomationAttachmentUnavailable;
+            const count = if (continuation == .workspace) 1 else countAutomationAttachmentPaths(path) orelse return error.InvalidBridgePayload;
+            dialogResult(self, entry.id, .{ .files = .{ .paths = path, .count = count } });
+            return;
+        }
+        entry.handle = try self.platform.request_dialog_fn(self.platform.context, entry.id, entry.window, options, &self.dialog_completion);
+    }
+
+    fn reserveDialog(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, continuation: DialogContinuation) !*PendingDialog {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
         const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
-        self.grants.invalidate();
-        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const selected_path: []const u8 = if (self.automation.active()) automation: {
-            break :automation self.automation.workspaceRoot() orelse
-                return error.AutomationWorkspaceUnavailable;
-        } else user: {
-            const selected = try self.platform.show_open_dialog_fn(
-                self.platform.context,
-                .{
-                    .title = "Choose a workspace",
-                    .allow_directories = true,
-                    .allow_multiple = false,
-                },
-                &dialog_storage,
-            );
-            if (selected.count == 0) return "{\"selected\":false}";
-            if (selected.count != 1 or selected.paths.len == 0 or
-                selected.paths.len > workspace_path_capacity)
-                return error.InvalidWorkspace;
-            break :user selected.paths;
+        if (self.next_dialog_id == std.math.maxInt(u64)) return error.Capacity;
+        const entry = for (&self.dialogs) |*slot| {
+            if (!slot.active) break slot;
+        } else return error.DialogQueueFull;
+        entry.* = .{ .active = true, .id = self.next_dialog_id, .window = invocation.source.window_id, .generation = generation, .responder = responder, .request_len = invocation.request.id.len, .continuation = continuation };
+        self.next_dialog_id += 1;
+        @memcpy(entry.request[0..entry.request_len], invocation.request.id);
+        return entry;
+    }
+    fn releaseDialogInput(self: *Dispatcher, entry: PendingDialog) void {
+        if (entry.continuation == .mcp_approval) self.allocator.free(entry.continuation.mcp_approval.server);
+    }
+
+    fn pendingDialog(self: *Dispatcher, id: u64) ?*PendingDialog {
+        for (&self.dialogs) |*entry| if (entry.active and entry.id == id) return entry;
+        return null;
+    }
+
+    fn dialogResult(context: *anyopaque, id: u64, result: Dialog.Result) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.finishDialogChecked(id, result) catch |err| {
+            const entry = self.pendingDialog(id) orelse return;
+            const owned = entry.*;
+            entry.active = false;
+            defer self.releaseDialogInput(owned);
+            owned.responder.fail(owned.request[0..owned.request_len], .handler_failed, @errorName(err)) catch {};
         };
-        if (selected_path.len == 0 or selected_path.len > workspace_path_capacity)
-            return error.InvalidWorkspace;
-        const token = try self.grants.issue(
-            generation,
-            invocation.source.window_id,
-            selected_path,
-        );
-        var path_storage: [workspace_path_capacity]u8 = undefined;
-        const consumed_path = try self.grants.consume(
-            token,
-            invocation.source.window_id,
-            self.delivery.connectedGeneration() orelse return error.NoConnection,
-            &path_storage,
-        );
-        const workspace_id = try (try self.requireProductControl()).openWorkspace(.{
-            .workspace_root = consumed_path,
-            .trust = if (self.automation.active())
-                .{ .temporary = consumed_path }
-            else
-                .explicitly_trusted,
-        });
-        self.notifyCommitted();
-        return std.fmt.bufPrint(
-            output,
-            "{{\"selected\":true,\"workspaceId\":\"{d}\"}}",
-            .{workspace_id},
-        );
+    }
+
+    pub fn settleDialogs(self: *Dispatcher) void {
+        for (&self.dialogs) |*entry| {
+            if (!entry.active) continue;
+            const owned = entry.*;
+            entry.active = false;
+            if (owned.continuation == .mcp_approval) {
+                if (self.mcp_management_host) |host| host.cancel_approval_fn(host.context, owned.handle);
+            } else self.platform.cancel_dialog_fn(self.platform.context, owned.handle);
+            self.releaseDialogInput(owned);
+            owned.responder.fail(owned.request[0..owned.request_len], .handler_failed, "DialogCancelled") catch {};
+        }
+    }
+
+    fn finishDialogChecked(self: *Dispatcher, id: u64, result: Dialog.Result) !void {
+        const entry = self.pendingDialog(id) orelse return;
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.delivery.validateConnection(entry.generation, entry.window);
+        const owned = entry.*;
+        const cancelled = result == .cancelled;
+        if (result == .failed) return error.DialogFailed;
+        const selected: Dialog.Files = switch (result) {
+            .files => |files| files,
+            .cancelled => .{ .count = 0, .paths = "" },
+            else => return error.InvalidDialogResult,
+        };
+        if (!cancelled and (selected.count == 0 or selected.paths.len == 0)) return error.InvalidDialogResult;
+        var output: [native_sdk.bridge.max_response_bytes]u8 = undefined;
+        const encoded: []const u8 = switch (owned.continuation) {
+            .workspace => workspace: {
+                if (cancelled) break :workspace "{\"selected\":false}";
+                if (selected.count != 1 or selected.paths.len > workspace_path_capacity) return error.InvalidWorkspace;
+                const token = try self.grants.issue(owned.generation, owned.window, selected.paths);
+                var storage: [workspace_path_capacity]u8 = undefined;
+                const path = try self.grants.consume(token, owned.window, owned.generation, &storage);
+                const workspace = try (try self.requireProductControl()).openWorkspace(.{ .workspace_root = path, .trust = if (self.automation.active()) .{ .temporary = path } else .explicitly_trusted });
+                self.notifyCommitted();
+                break :workspace try std.fmt.bufPrint(&output, "{{\"selected\":true,\"workspaceId\":\"{d}\"}}", .{workspace});
+            },
+            .root => |expected| root: {
+                if (cancelled) break :root "{\"outcome\":\"cancelled\"}";
+                if (selected.count != 1 or selected.paths.len > workspace_path_capacity) return error.InvalidWorkspace;
+                var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const path = try self.platform.canonicalize_directory_fn(self.platform.context, selected.paths, &storage);
+                try (try self.requireProductControl()).chooseAutomaticWorkspaceRoot(expected, path);
+                self.notifyCommitted();
+                break :root "{\"outcome\":\"applied\"}";
+            },
+            .skill_import => |input| skill: {
+                if (cancelled) break :skill "{\"status\":\"cancelled\"}";
+                if (selected.count != 1 or selected.paths.len > skill_grant.max_path_bytes) return error.InvalidBridgePayload;
+                const control = try self.requireProductControl();
+                const preparation = control.prepareSkillImport(selected.paths, input.kind, input.target) catch |err| {
+                    self.notifyCommitted();
+                    break :skill try encodeSkillImportRejection(&output, product_control.skillImportReason(err));
+                };
+                const token = self.skill_grants.issue(owned.generation, owned.window, self.now(), .{ .id = preparation.id, .revision = preparation.revision }) catch |err| {
+                    control.discardSkillImport(preparation.id);
+                    return err;
+                };
+                self.notifyCommitted();
+                break :skill encodeSkillImportPreparation(&output, token, preparation) catch {
+                    self.invalidateSkillPreparation();
+                    break :skill try encodeSkillImportRejection(&output, .too_large);
+                };
+            },
+            .skill_export => |install_id| skill: {
+                if (cancelled) break :skill "{\"exported\":false,\"fileName\":null,\"reason\":\"cancelled\"}";
+                if (selected.count != 1 or selected.paths.len > skill_grant.max_path_bytes) return error.InvalidBridgePayload;
+                const exported = (try self.requireProductControl()).exportSkill(install_id, selected.paths) catch |err| break :skill try encodeSkillExportResult(&output, false, null, @tagName(product_control.skillImportReason(err)));
+                break :skill try encodeSkillExportResult(&output, true, exported.fileName(), null);
+            },
+            .mcp_approval => return error.InvalidDialogResult,
+            .attachments => {
+                entry.active = false;
+                if (cancelled) {
+                    respondAttachmentCancelled(owned.responder, owned.request[0..owned.request_len]);
+                    return;
+                }
+                if (selected.count > attachment_grant.max_batch_files) {
+                    respondAttachmentRejected(owned.responder, owned.request[0..owned.request_len], .too_many_files);
+                    return;
+                }
+                self.beginAttachmentStaging(owned.responder, owned.request[0..owned.request_len], owned.generation, owned.window, selected.count, selected.paths);
+                return;
+            },
+        };
+        entry.active = false;
+        owned.responder.success(owned.request[0..owned.request_len], encoded) catch {};
+    }
+
+    fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.chooseWorkspaceChecked(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn chooseWorkspaceChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        try self.requireWindow(invocation.source.window_id);
+        self.grants.invalidate();
+        try self.beginDialog(invocation, responder, .workspace, .{ .open = .{ .title = "Choose a workspace", .allow_directories = true } });
     }
 
     fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -3113,47 +3283,16 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"accepted\":true,\"workspaceId\":\"{d}\",\"reason\":null}}", .{workspace_id});
     }
 
-    fn chooseAutomaticWorkspaceRoot(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        _: []u8,
-    ) anyerror![]const u8 {
+    fn chooseAutomaticWorkspaceRoot(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        const expected_generation = try parseAutomaticWorkspaceRootMutation(
-            invocation.request.payload,
-        );
-        const product_control_runtime = try self.requireProductControl();
-        const current_root = product_control_runtime.automaticWorkspaceRootConfiguration();
-        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const selected = try self.platform.show_open_dialog_fn(
-            self.platform.context,
-            .{
-                .title = "Choose the Automatic Workspace location",
-                .default_path = current_root.canonical_root orelse "",
-                .allow_directories = true,
-                .allow_multiple = false,
-            },
-            &dialog_storage,
-        );
-        if (selected.count == 0) return "{\"outcome\":\"cancelled\"}";
-        if (selected.count != 1 or selected.paths.len == 0 or
-            selected.paths.len > workspace_path_capacity)
-            return error.InvalidWorkspace;
-        var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const canonical = try self.platform.canonicalize_directory_fn(
-            self.platform.context,
-            selected.paths,
-            &canonical_storage,
-        );
-        try product_control_runtime.chooseAutomaticWorkspaceRoot(
-            expected_generation,
-            canonical,
-        );
-        self.notifyCommitted();
-        return "{\"outcome\":\"applied\"}";
+        self.chooseAutomaticRootChecked(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn chooseAutomaticRootChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const expected = try parseAutomaticWorkspaceRootMutation(invocation.request.payload);
+        const root = (try self.requireProductControl()).automaticWorkspaceRootConfiguration();
+        try self.beginDialog(invocation, responder, .{ .root = expected }, .{ .open = .{ .title = "Choose the Automatic Workspace location", .default_path = root.canonical_root orelse "", .allow_directories = true } });
     }
 
     fn resetAutomaticWorkspaceRoot(
@@ -3837,41 +3976,24 @@ pub const Dispatcher = struct {
         }
     }
 
-    fn chooseSkillImport(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn chooseSkillImport(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
+        self.chooseSkillImportChecked(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn chooseSkillImportChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         try self.requireWindow(invocation.source.window_id);
-        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
         var parsed = try handlers.parsePayload(handlers.SkillImportChoice, invocation.request.payload);
         defer parsed.deinit();
-        const source_kind: product_control.SkillImportSourceKind = if (std.mem.eql(u8, parsed.value.kind, "package")) .local_package else if (std.mem.eql(u8, parsed.value.kind, "directory")) .local_directory else return error.InvalidBridgePayload;
+        const kind: product_control.SkillImportSourceKind = if (std.mem.eql(u8, parsed.value.kind, "package")) .local_package else if (std.mem.eql(u8, parsed.value.kind, "directory")) .local_directory else return error.InvalidBridgePayload;
         const target = try parseSkillImportTarget(parsed.value.target);
         self.invalidateSkillPreparation();
-        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const package_filters = [_]native_sdk.platform.FileFilter{.{ .name = "Skill packages", .extensions = &.{ "skill", "zip" } }};
-        const selected = try self.platform.show_open_dialog_fn(self.platform.context, .{
-            .title = if (source_kind == .local_package) "Choose a Skill package" else "Choose a Skill folder",
-            .filters = if (source_kind == .local_package) &package_filters else &.{},
-            .allow_directories = source_kind == .local_directory,
-            .allow_multiple = false,
-        }, &dialog_storage);
-        if (selected.count == 0) return "{\"status\":\"cancelled\"}";
-        if (selected.count != 1 or selected.paths.len == 0 or selected.paths.len > skill_grant.max_path_bytes) return error.InvalidBridgePayload;
-        const control = try self.requireProductControl();
-        const preparation = control.prepareSkillImport(selected.paths, source_kind, target) catch |err| {
-            self.notifyCommitted();
-            return encodeSkillImportRejection(output, product_control.skillImportReason(err));
-        };
-        const token = self.skill_grants.issue(generation, invocation.source.window_id, self.now(), .{ .id = preparation.id, .revision = preparation.revision }) catch |err| {
-            control.discardSkillImport(preparation.id);
-            return err;
-        };
-        self.notifyCommitted();
-        return encodeSkillImportPreparation(output, token, preparation) catch {
-            self.invalidateSkillPreparation();
-            return encodeSkillImportRejection(output, .too_large);
-        };
+        try self.beginDialog(invocation, responder, .{ .skill_import = .{ .kind = kind, .target = target } }, .{ .open = .{
+            .title = if (kind == .local_package) "Choose a Skill package" else "Choose a Skill folder",
+            .filters = if (kind == .local_package) &.{.{ .name = "Skill packages", .extensions = &.{ "skill", "zip" } }} else &.{},
+            .allow_directories = kind == .local_directory,
+        } });
     }
 
     fn prepareSkillImport(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -4010,46 +4132,21 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn exportSkill(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
+    fn exportSkill(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.SkillIdentity,
-            invocation.request.payload,
-        );
+        self.exportSkillChecked(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn exportSkillChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var parsed = try handlers.parsePayload(handlers.SkillIdentity, invocation.request.payload);
         defer parsed.deinit();
-        const install_id = parseSkillInstallId(parsed.value.installId) catch
-            return encodeSkillExportResult(output, false, null, "asset_unavailable");
-        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const selected = try self.platform.show_open_dialog_fn(
-            self.platform.context,
-            .{
-                .title = "Export Skill package",
-                .allow_directories = true,
-                .allow_multiple = false,
-            },
-            &dialog_storage,
-        );
-        if (selected.count == 0) return "{\"exported\":false,\"fileName\":null,\"reason\":\"cancelled\"}";
-        if (selected.count != 1 or selected.paths.len == 0 or
-            selected.paths.len > skill_grant.max_path_bytes)
-            return error.InvalidBridgePayload;
-        const result = (try self.requireProductControl()).exportSkill(
-            install_id,
-            selected.paths,
-        ) catch |err| return encodeSkillExportResult(
-            output,
-            false,
-            null,
-            @tagName(product_control.skillImportReason(err)),
-        );
-        return encodeSkillExportResult(output, true, result.fileName(), null);
+        const id = parseSkillInstallId(parsed.value.installId) catch {
+            var output: [256]u8 = undefined;
+            try responder.success(invocation.request.id, try encodeSkillExportResult(&output, false, null, "asset_unavailable"));
+            return;
+        };
+        try self.beginDialog(invocation, responder, .{ .skill_export = id }, .{ .open = .{ .title = "Export Skill package", .allow_directories = true } });
     }
 
     fn skillDetail(
@@ -4285,25 +4382,67 @@ pub const Dispatcher = struct {
         return self.finishMcpMutation(workbench, output, outcome);
     }
 
-    fn approveMcpConnection(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
+    fn approveMcpConnection(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
+        self.beginMcpApproval(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn beginMcpApproval(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.McpServerIdentity, invocation.request.payload);
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireProductControl();
-        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
-            return encodeMcpTypedOutcome(output, "busy", null);
-        const host = self.mcp_management_host orelse
-            return self.finishMcpHostMutation(workbench, output, .capability_unavailable);
-        const outcome = try host.approve_fn(host.context, expected, parsed.value.serverId);
-        return self.finishMcpHostMutation(workbench, output, outcome);
+        const control = try self.requireProductControl();
+        const host = self.mcp_management_host orelse {
+            var output: [256]u8 = undefined;
+            try responder.success(invocation.request.id, try self.finishMcpHostMutation(control, &output, .capability_unavailable));
+            return;
+        };
+        if (control.mcpServerOperationBusy(parsed.value.serverId)) {
+            var output: [256]u8 = undefined;
+            try responder.success(invocation.request.id, try encodeMcpTypedOutcome(&output, "busy", null));
+            return;
+        }
+        const server = try self.allocator.dupe(u8, parsed.value.serverId);
+        errdefer self.allocator.free(server);
+        const entry = try self.reserveDialog(invocation, responder, .{ .mcp_approval = .{ .generation = expected, .server = server } });
+        errdefer entry.active = false;
+        self.approval_completion = .{ .context = self, .complete_fn = approvalResult };
+        switch (try host.begin_approval_fn(host.context, entry.id, expected, server, &self.approval_completion)) {
+            .started => |handle| entry.handle = handle,
+            .immediate => |outcome| approvalResult(self, entry.id, .{ .outcome = outcome }),
+        }
+    }
+    fn approvalResult(context: *anyopaque, id: u64, result: McpApproval.Result) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.approvalResultChecked(id, result) catch |err| {
+            const entry = self.pendingDialog(id) orelse return;
+            const owned = entry.*;
+            entry.active = false;
+            defer self.releaseDialogInput(owned);
+            owned.responder.fail(owned.request[0..owned.request_len], .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn approvalResultChecked(self: *Dispatcher, id: u64, result: McpApproval.Result) !void {
+        const entry = self.pendingDialog(id) orelse return;
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.delivery.validateConnection(entry.generation, entry.window);
+        const input = entry.continuation.mcp_approval;
+        const control = try self.requireProductControl();
+        const host = self.mcp_management_host orelse return error.HostUnavailable;
+        const outcome: McpHostOutcome = switch (result) {
+            .failed => |err| return err,
+            .outcome => |value| value,
+            .confirmed => if (control.mcpServerOperationBusy(input.server)) .rejected else host.map_approval_fn(host.context, try control.approveMcpConnection(input.generation, .{ .server_id = input.server })),
+        };
+        var output: [256]u8 = undefined;
+        const encoded = try self.finishMcpHostMutation(control, &output, outcome);
+        const owned = entry.*;
+        entry.active = false;
+        defer self.releaseDialogInput(owned);
+        owned.responder.success(owned.request[0..owned.request_len], encoded) catch {};
     }
 
     fn captureMcpSecret(
@@ -6031,7 +6170,6 @@ test "file preview native grants bind authority and cancellation and expire with
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -6614,7 +6752,6 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
         // This test dispatches only the byte-input commands, never OS effects.
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -6671,6 +6808,29 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
 }
 
+const DialogTestDispatch = struct {
+    output: []u8,
+    len: usize = 0,
+    fn receive(raw: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (bytes.len > self.output.len) return error.NoSpaceLeft;
+        @memcpy(self.output[0..bytes.len], bytes);
+        self.len = bytes.len;
+    }
+    fn run(host: anytype, native: native_sdk.bridge.Dispatcher, request: []const u8, source: native_sdk.bridge.Source, output: []u8) ![]const u8 {
+        var parsed = try std.json.parseFromSlice(struct { id: []const u8, command: []const u8, payload: std.json.Value }, std.testing.allocator, request, .{});
+        defer parsed.deinit();
+        const handler = native.async_registry.find(parsed.value.command) orelse return native.dispatch(request, source, output);
+        const payload = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.payload, .{});
+        defer std.testing.allocator.free(payload);
+        var capture: @This() = .{ .output = output };
+        try handler.invoke_fn(handler.context, .{ .request = .{ .id = parsed.value.id, .command = parsed.value.command, .payload = payload }, .source = source }, .{ .context = &capture, .source = source, .respond_fn = receive });
+        host.finish();
+        try std.testing.expect(capture.len != 0);
+        return output[0..capture.len];
+    }
+};
+
 test "Automatic Workspace root Bridge keeps paths Host-only and mutates by generation" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
@@ -6678,28 +6838,28 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         expected_default_path: []const u8,
         cancel_next: bool = false,
 
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+
         fn wake(_: ?*anyopaque) anyerror!void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
         fn startTimer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
         fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
-        fn open(
-            context: ?*anyopaque,
-            options: native_sdk.platform.OpenDialogOptions,
-            output: []u8,
-        ) anyerror!native_sdk.platform.OpenDialogResult {
+        fn request(context: ?*anyopaque, token: u64, _: u64, options: Dialog.Options, completion: *const Dialog.Completion) !u64 {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            try std.testing.expect(options.allow_directories);
-            try std.testing.expect(!options.allow_multiple);
-            try std.testing.expectEqualStrings(
-                self.expected_default_path,
-                options.default_path,
-            );
-            if (self.cancel_next) {
-                self.cancel_next = false;
-                return .{ .paths = "", .count = 0 };
-            }
-            @memcpy(output[0..self.selected_path.len], self.selected_path);
-            return .{ .paths = output[0..self.selected_path.len], .count = 1 };
+            try std.testing.expect(options.open.allow_directories);
+            try std.testing.expect(!options.open.allow_multiple);
+            try std.testing.expectEqualStrings(self.expected_default_path, options.open.default_path);
+            self.completion = completion;
+            self.token = token;
+            return token;
+        }
+        fn finish(self: *@This()) void {
+            const completion = self.completion orelse return;
+            self.completion = null;
+            const cancelled = self.cancel_next;
+            self.cancel_next = false;
+            completion.result_fn(completion.context, self.token, if (cancelled) .cancelled else .{ .files = .{ .paths = self.selected_path, .count = 1 } });
         }
         fn canonicalizeDirectory(
             _: ?*anyopaque,
@@ -6761,7 +6921,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
             .emit_fn = Harness.emit,
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
-            .show_open_dialog_fn = Harness.open,
+            .request_dialog_fn = Harness.request,
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = undefined,
             .window_chrome_refresh_fn = undefined,
@@ -6782,7 +6942,9 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     const native = dispatcher.register(@import("policy.zig").product(.release));
     const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
     var output: [4096]u8 = undefined;
-    const connected = native.dispatch(
+    const connected = try DialogTestDispatch.run(
+        &harness,
+        native,
         "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
         source,
         &output,
@@ -6794,13 +6956,15 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         "{\"id\":\"bad-reset\",\"command\":\"metawork.workspaces.resetAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"0\"}}",
         "{\"id\":\"bad-retry\",\"command\":\"metawork.workspaces.retryAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\",\"extra\":true}}",
     }) |request| {
-        const response = native.dispatch(request, source, &output);
+        const response = try DialogTestDispatch.run(&harness, native, request, source, &output);
         try std.testing.expect(std.mem.indexOf(u8, response, "handler_failed") != null);
     }
     try std.testing.expectEqual(@as(u64, 1), workbench.automaticWorkspaceRootConfiguration().generation);
 
     harness.cancel_next = true;
-    const cancelled = native.dispatch(
+    const cancelled = try DialogTestDispatch.run(
+        &harness,
+        native,
         "{\"id\":\"cancel\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\"}}",
         source,
         &output,
@@ -6808,7 +6972,9 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     try std.testing.expect(std.mem.indexOf(u8, cancelled, "\"outcome\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(u64, 1), workbench.automaticWorkspaceRootConfiguration().generation);
 
-    const chosen = native.dispatch(
+    const chosen = try DialogTestDispatch.run(
+        &harness,
+        native,
         "{\"id\":\"choose\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\"}}",
         source,
         &output,
@@ -6826,7 +6992,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         "{{\"id\":\"cancel-custom\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{{\"expectedGeneration\":\"{d}\"}}}}",
         .{custom_view.generation},
     );
-    const cancelled_custom = native.dispatch(cancel_custom_request, source, &output);
+    const cancelled_custom = try DialogTestDispatch.run(&harness, native, cancel_custom_request, source, &output);
     try std.testing.expect(std.mem.indexOf(u8, cancelled_custom, "\"outcome\":\"cancelled\"") != null);
     try std.testing.expectEqual(
         custom_view.generation,
@@ -6839,7 +7005,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         "{{\"id\":\"reset\",\"command\":\"metawork.workspaces.resetAutomaticRoot\",\"payload\":{{\"expectedGeneration\":\"{d}\"}}}}",
         .{custom_view.generation},
     );
-    const reset = native.dispatch(reset_request, source, &output);
+    const reset = try DialogTestDispatch.run(&harness, native, reset_request, source, &output);
     try std.testing.expect(std.mem.indexOf(u8, reset, "\"outcome\":\"applied\"") != null);
     const reset_view = workbench.automaticWorkspaceRootConfiguration();
     try std.testing.expectEqualStrings(default_root, reset_view.canonical_root.?);
@@ -6866,6 +7032,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .acceptedAttempt(41),
         models_result: models_contract.CommandResult = .acceptedResult(),
 
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+
         fn checkUpdates(context: *anyopaque) update.CommandOutcome {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.update_calls += 1;
@@ -6891,17 +7060,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
         fn startTimer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
         fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
 
-        fn open(
-            context: ?*anyopaque,
-            _: native_sdk.platform.OpenDialogOptions,
-            output: []u8,
-        ) anyerror!native_sdk.platform.OpenDialogResult {
+        fn request(context: ?*anyopaque, token: u64, _: u64, _: Dialog.Options, completion: *const Dialog.Completion) !u64 {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            const path = self.workspace_path;
-            @memcpy(output[0..path.len], path);
-            return .{ .paths = output[0..path.len], .count = 1 };
+            self.completion = completion;
+            self.token = token;
+            return token;
         }
-
+        fn finish(self: *@This()) void {
+            const completion = self.completion orelse return;
+            self.completion = null;
+            completion.result_fn(completion.context, self.token, .{ .files = .{ .paths = self.workspace_path, .count = 1 } });
+        }
         fn canonicalizeDirectory(
             _: ?*anyopaque,
             path: []const u8,
@@ -7052,7 +7221,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .emit_fn = Harness.emit,
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
-            .show_open_dialog_fn = Harness.open,
+            .request_dialog_fn = Harness.request,
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_refresh_fn = Harness.refreshWindowChrome,
@@ -7497,7 +7666,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
             "\"accepted\":true,\"errorCode\":\"none\",\"attemptId\":null",
         ) != null,
     );
-    const chosen = native_dispatcher.dispatch(
+    const chosen = try DialogTestDispatch.run(
+        &harness,
+        native_dispatcher,
         "{\"id\":\"choose\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}",
         source,
         &response,
@@ -7701,6 +7872,20 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         }
         var selection_count: usize = attachment_grant.max_batch_files + 1;
         var picker_calls: usize = 0;
+        var completion: ?*const Dialog.Completion = null;
+        var operation: u64 = 0;
+        fn request(_: ?*anyopaque, id: u64, _: u64, _: Dialog.Options, receiver: *const Dialog.Completion) !u64 {
+            picker_calls += 1;
+            completion = receiver;
+            operation = id;
+            return id;
+        }
+        fn finish() void {
+            const receiver = completion orelse return;
+            completion = null;
+            receiver.result_fn(receiver.context, operation, if (selection_count == 0) .cancelled else .{ .files = .{ .count = selection_count, .paths = "/ignored" } });
+        }
+
         fn picker(_: ?*anyopaque, _: native_sdk.platform.OpenDialogOptions, _: []u8) anyerror!native_sdk.platform.OpenDialogResult {
             picker_calls += 1;
             return .{ .count = selection_count, .paths = "/ignored" };
@@ -7721,7 +7906,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = Host.picker,
+        .request_dialog_fn = Host.request,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -7830,6 +8015,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     for (inputs, 0..) |input, index| {
         dispatcher.platform.attachment_input = if (index == 1) .native_paths else .file_bytes;
         try capture.invoke(native, source, commands.begin_attachment_add, input);
+        Host.finish();
         try capture.expect("\"reason\":\"too_many_files\"");
         try std.testing.expect(workbench.attachments.preparing == null);
         try std.testing.expect(workbench.attachment_io == null);
@@ -7950,6 +8136,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     dispatcher.platform.attachment_input = .native_paths;
     for (one_remaining, 20..) |input, batch| {
         try capture.invoke(native, source, commands.begin_attachment_add, input);
+        Host.finish();
         try capture.expect("\"reason\":\"too_many_files\"");
         try std.testing.expect(workbench.attachment_io == null);
         try std.testing.expect(workbench.attachments.preparing == null);
@@ -7965,6 +8152,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try std.testing.expectEqual(picker_calls, Host.picker_calls);
     Host.selection_count = 0;
     try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"24\",\"remainingFiles\":1,\"source\":{\"kind\":\"picker\"}}");
+    Host.finish();
     try capture.expect("\"status\":\"cancelled\"");
     try std.testing.expect(try workbench.attachments.releaseChecked(stock[0].id));
     workbench.attachments.limits.max_staged_bytes = old_bytes;
@@ -8114,7 +8302,6 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8196,7 +8383,6 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8303,7 +8489,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try product_control.TestSupport.recordDeliveredOutputFixture(control);
     defer control.deinit();
     product_control.TestSupport.bindOutputFileEffect(control, &effect);
-    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
     defer boundary.deinit();
     defer {
         control.shutdownOutputChecks();
@@ -8356,6 +8542,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     const save_request = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("request").?, .{});
     defer std.testing.allocator.free(save_request);
     try capture.invoke(native, save_request, 3);
+    try save_effect.finish();
     for (0..5000) |_| {
         _ = boundary.onTimer(output_timer_id);
         if (save_effect.publish_entered.load(.acquire)) break;
@@ -8376,11 +8563,34 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expectEqualStrings(expected_save, actual_save);
     try std.testing.expectEqual(@as(usize, 1), save_effect.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), save_effect.releases);
-    const fourth = "{\"generation\":\"1\",\"operationId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    // Every no-job terminal must release both the Product target and Bridge
+    // slot immediately, including Cancel in the system panel itself.
+    for (6..38) |operation| {
+        var request_buffer: [512]u8 = undefined;
+        const pending_request = try std.fmt.bufPrint(&request_buffer, "{{\"generation\":\"1\",\"operationId\":\"{d}\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"save\"}}", .{operation});
+        const before = capture.count;
+        try capture.invoke(native, pending_request, 3);
+        try std.testing.expectEqual(before, capture.count);
+        const receiver = save_effect.completion.?;
+        const pending_id = save_effect.operation;
+        if (operation % 3 == 0) {
+            receiver.complete_fn(receiver.context, pending_id, .cancelled);
+        } else if (operation % 3 == 1) {
+            receiver.complete_fn(receiver.context, pending_id, .{ .failed = error.DialogFailed });
+        } else {
+            boundary.cancelOutputOperation(pending_id);
+        }
+        try std.testing.expectEqual(before + 1, capture.count);
+        for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
+        for (boundary.output_in_flight) |entry| try std.testing.expect(entry == null);
+        receiver.complete_fn(receiver.context, pending_id, .cancelled);
+        try std.testing.expectEqual(before + 1, capture.count);
+    }
+    const fourth = "{\"generation\":\"1\",\"operationId\":\"38\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
     effect.blocked.store(true, .release);
     try capture.invoke(native, fourth, 3);
     boundary.breakConnection();
-    try capture.wait(control, &boundary, 7);
+    try capture.wait(control, &boundary, 39);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());
@@ -8443,7 +8653,6 @@ test "notification navigation retains only a real Task and uses the shared conne
         .cancel_timer_fn = Host.cancel,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8493,6 +8702,35 @@ test "Skill import preparation matches Renderer fixture and refuses mixed target
 test "Skill import admission retains busy confirmation, consumes once, and revokes preparation on disconnect" {
     const Host = struct {
         path: []const u8,
+        completion: ?*const Dialog.Completion = null,
+        operation: u64 = 0,
+        response: [native_sdk.bridge.max_response_bytes]u8 = undefined,
+        response_len: usize = 0,
+        responses: usize = 0,
+        cancellations: usize = 0,
+        fn request(context: ?*anyopaque, id: u64, _: u64, _: Dialog.Options, completion: *const Dialog.Completion) !u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.completion = completion;
+            self.operation = id;
+            return id;
+        }
+        fn respond(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.response[0..bytes.len], bytes);
+            self.response_len = bytes.len;
+            self.responses += 1;
+        }
+        fn cancelDialog(context: ?*anyopaque, _: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.cancellations += 1;
+        }
+        fn responder(self: *@This()) native_sdk.bridge.AsyncResponder {
+            return .{ .context = self, .source = .{ .window_id = 3 }, .respond_fn = respond };
+        }
+        fn finish(self: *@This()) void {
+            self.completion.?.result_fn(self.completion.?.context, self.operation, .{ .files = .{ .paths = self.path, .count = 1 } });
+        }
+
         fn wake(_: ?*anyopaque) anyerror!void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
         fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
@@ -8535,7 +8773,8 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
         .cancel_timer_fn = Host.cancel,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = Host.open,
+        .request_dialog_fn = Host.request,
+        .cancel_dialog_fn = Host.cancelDialog,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -8545,7 +8784,10 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
     _ = try boundary.delivery.connect(3, boundary.transport());
     var output: [4096]u8 = undefined;
     const choose = "{\"kind\":\"directory\",\"target\":{\"kind\":\"personal\",\"workspaceId\":null,\"expectedWorkspaceEpoch\":null,\"installId\":null}}";
-    const prepared = try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), &output);
+    try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), host.responder());
+    try std.testing.expectEqual(@as(usize, 0), host.response_len);
+    host.finish();
+    const prepared = host.response[0..host.response_len];
     try std.testing.expect(std.mem.indexOf(u8, prepared, "\"blocker\":\"busy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, prepared, source_path) == null);
     const commit = "{\"previewId\":\"1\",\"preparationRevision\":\"1\",\"confirmation\":\"create\"}";
@@ -8567,12 +8809,29 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
     try std.testing.expect(std.mem.indexOf(u8, replay, "\"reason\":\"invalid_preview\"") != null);
     // A later preparation cannot revoke the already published transaction.
     try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = "---\nname: another\ndescription: Another\n---\nHello.\n" });
-    _ = try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), &output);
+    try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), host.responder());
+    host.finish();
     const grant = boundary.skill_grants.grant.?;
     boundary.breakConnection();
     try std.testing.expect(boundary.skill_grants.grant == null);
     try std.testing.expectError(error.InvalidPreparation, control.preflightSkillImport(grant.preparation.id, grant.preparation.revision, .create));
     _ = try home.dir.statFile(std.testing.io, ".agents/skills/demo/SKILL.md", .{ .follow_symlinks = false });
+    // Local pending state settles before the native completion, and a late
+    // selected result cannot respond again. SDK slot reuse is tested through
+    // Runtime dispatch in the Application SDK consumption suite.
+    for (0..80) |_| {
+        _ = try boundary.delivery.connect(3, boundary.transport());
+        host.response_len = 0;
+        try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), host.responder());
+        try std.testing.expectEqual(@as(usize, 0), host.response_len);
+        boundary.breakConnection();
+        const responses = host.responses;
+        try std.testing.expect(host.response_len != 0);
+        host.finish();
+        try std.testing.expectEqual(responses, host.responses);
+        for (boundary.dialogs) |entry| try std.testing.expect(!entry.active);
+    }
+    try std.testing.expectEqual(@as(usize, 80), host.cancellations);
 }
 
 test "Workspace removal Bridge validates authority and preserves files with shared Renderer results" {
@@ -8612,7 +8871,6 @@ test "Workspace removal Bridge validates authority and preserves files with shar
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,

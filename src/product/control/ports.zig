@@ -314,6 +314,45 @@ pub const ScheduleHost = struct {
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
 
+pub const McpHostOutcome = enum { saved, saved_recovery_required, stale_generation, rejected, indeterminate, cancelled, capability_unavailable };
+pub const McpApproval = struct {
+    pub const Result = union(enum) { confirmed, outcome: McpHostOutcome, failed: anyerror };
+    pub const Start = union(enum) { started: u64, immediate: McpHostOutcome };
+    pub const Completion = struct { context: *anyopaque, complete_fn: *const fn (*anyopaque, u64, Result) void };
+};
+
+/// Main-loop native dialog capability. Completion storage belongs to the caller
+/// and must outlive cancellation until the native loop has stopped delivering.
+pub const NativeDialog = struct {
+    pub const Handle = u64;
+    pub const Filter = struct { name: []const u8, extensions: []const []const u8 };
+    pub const Open = struct {
+        title: []const u8 = "",
+        default_path: []const u8 = "",
+        filters: []const Filter = &.{},
+        allow_directories: bool = false,
+        allow_multiple: bool = false,
+    };
+    pub const Save = struct { title: []const u8 = "", default_path: []const u8 = "", default_name: []const u8 = "" };
+    pub const Button = enum { primary, secondary, tertiary };
+    pub const Message = struct {
+        title: []const u8 = "",
+        message: []const u8 = "",
+        informative_text: []const u8 = "",
+        style: enum { info, warning, critical } = .info,
+        primary_button: []const u8 = "OK",
+        secondary_button: []const u8 = "",
+        tertiary_button: []const u8 = "",
+    };
+    pub const Options = union(enum) { open: Open, save: Save, message: Message };
+    pub const Files = struct { paths: []const u8, count: usize };
+    pub const Result = union(enum) { files: Files, button: Button, cancelled, failed };
+    pub const Completion = struct {
+        context: *anyopaque,
+        result_fn: *const fn (*anyopaque, u64, Result) void,
+    };
+};
+
 /// Main-loop effect for a currently authorized, hash-verified Output only.
 pub const OutputFileReveal = struct {
     context: *anyopaque,
@@ -323,14 +362,22 @@ pub const OutputFileReveal = struct {
 /// Callback-scoped source identity. The Application copies this and the picker
 /// selection into an owned effect before returning; no Product pointer escapes.
 pub const OutputFileSaveInput = struct {
+    io: std.Io,
     workspace_root: []const u8,
     relative_path: []const u8,
     size_bytes: u64,
     sha256: [32]u8,
 };
 pub const OutputFileSave = struct {
+    pub const Result = union(enum) { selected: OwnedOutputSave, cancelled, failed: anyerror };
+    pub const Completion = struct {
+        context: *anyopaque,
+        borrow_source_fn: *const fn (*anyopaque, u64) anyerror!OutputFileSaveInput,
+        complete_fn: *const fn (*anyopaque, u64, Result) void,
+    };
     context: *anyopaque,
-    prepare_fn: *const fn (*anyopaque, OutputFileSaveInput) anyerror!?OwnedOutputSave,
+    begin_fn: *const fn (*anyopaque, u64, u64, []const u8, *const Completion) anyerror!u64,
+    cancel_fn: *const fn (*anyopaque, u64) void,
 };
 /// Owned exception to the borrowed coordination ports above. Stage, publish
 /// and discard run only on the worker; release runs after quiescence on main.

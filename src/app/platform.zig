@@ -118,7 +118,7 @@ pub const Adapter = struct {
     }
 
     pub fn outputFileSave(self: *Adapter) control_ports.OutputFileSave {
-        return .{ .context = self, .prepare_fn = prepareOutputSave };
+        return .{ .context = self, .begin_fn = prepareOutputSave, .cancel_fn = cancelOutputSave };
     }
 
     const OwnedSave = struct {
@@ -144,16 +144,45 @@ pub const Adapter = struct {
         }
     };
 
-    fn prepareOutputSave(context: *anyopaque, source: control_ports.OutputFileSaveInput) !?control_ports.OwnedOutputSave {
+    fn prepareOutputSave(context: *anyopaque, operation: u64, parent: u64, default_name: []const u8, completion: *const control_ports.OutputFileSave.Completion) !u64 {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
         const runtime = self.native_runtime orelse return error.RuntimeUnavailable;
-        var selected: [native_sdk.platform.max_dialog_path_bytes]u8 = undefined;
-        const path = (try runtime.showSaveDialog(.{ .default_name = std.fs.path.basename(source.relative_path) }, &selected)) orelse return null;
-        const owned = try std.heap.c_allocator.create(OwnedSave);
-        errdefer std.heap.c_allocator.destroy(owned);
-        owned.* = .{ .main_thread_id = self.main_thread_id, .value = try @import("app_output_file").Save.init(std.heap.c_allocator, self.io, .{ .workspace_root = source.workspace_root, .relative_path = source.relative_path, .main_thread_id = self.main_thread_id }, path, .{ .size_bytes = source.size_bytes, .sha256 = source.sha256 }) };
-        return .{ .context = owned, .stage_fn = OwnedSave.stage, .publish_fn = OwnedSave.publish, .discard_fn = OwnedSave.discard, .release_fn = OwnedSave.release };
+        if (!self.supportsAsyncDialogs()) return error.UnsupportedService;
+        var tag: [8]u8 = undefined;
+        std.mem.writeInt(u64, &tag, operation, .little);
+        return runtime.requestSaveDialog(.{ .default_name = default_name }, parent, .{ .context = @constCast(completion), .tag = &tag, .on_result = outputSaveResult });
+    }
+    fn cancelOutputSave(context: *anyopaque, handle: u64) void {
+        cancelDialog(context, handle);
+    }
+    fn outputSaveResult(context: *anyopaque, _: *native_sdk.Runtime, tag: []const u8, result: native_sdk.platform.DialogResult) !void {
+        const completion: *const control_ports.OutputFileSave.Completion = @ptrCast(@alignCast(context));
+        const operation = std.mem.readInt(u64, tag[0..8], .little);
+        switch (result.outcome) {
+            .cancelled => completion.complete_fn(completion.context, operation, .cancelled),
+            .failed => completion.complete_fn(completion.context, operation, .{ .failed = error.DialogFailed }),
+            .selected => {
+                const source = completion.borrow_source_fn(completion.context, operation) catch |err| {
+                    completion.complete_fn(completion.context, operation, .{ .failed = err });
+                    return;
+                };
+                if (result.count != 1 or result.paths.len == 0) {
+                    completion.complete_fn(completion.context, operation, .{ .failed = error.InvalidDialogResult });
+                    return;
+                }
+                const owned = std.heap.c_allocator.create(OwnedSave) catch |err| {
+                    completion.complete_fn(completion.context, operation, .{ .failed = err });
+                    return;
+                };
+                owned.* = .{ .main_thread_id = std.Thread.getCurrentId(), .value = @import("app_output_file").Save.init(std.heap.c_allocator, source.io, .{ .workspace_root = source.workspace_root, .relative_path = source.relative_path, .main_thread_id = std.Thread.getCurrentId() }, result.paths, .{ .size_bytes = source.size_bytes, .sha256 = source.sha256 }) catch |err| {
+                    std.heap.c_allocator.destroy(owned);
+                    completion.complete_fn(completion.context, operation, .{ .failed = err });
+                    return;
+                } };
+                completion.complete_fn(completion.context, operation, .{ .selected = .{ .context = owned, .stage_fn = OwnedSave.stage, .publish_fn = OwnedSave.publish, .discard_fn = OwnedSave.discard, .release_fn = OwnedSave.release } });
+            },
+        }
     }
 
     pub fn outputFileReveal(self: *Adapter) control_ports.OutputFileReveal {
@@ -174,9 +203,7 @@ pub const Adapter = struct {
     }
 
     pub fn supportsMcpConnectionApproval(self: *const Adapter) bool {
-        if (self.native_runtime == null) return false;
-        const services_value = self.platform_services orelse return false;
-        return services_value.show_message_dialog_fn != null;
+        return self.supportsAsyncDialogs();
     }
 
     pub fn supportsMcpExternalAuthorization(self: *const Adapter) bool {
@@ -230,7 +257,8 @@ pub const Adapter = struct {
             .emit_fn = emit,
             .start_timer_fn = startTimer,
             .cancel_timer_fn = cancelTimer,
-            .show_open_dialog_fn = showOpenDialog,
+            .request_dialog_fn = requestDialog,
+            .cancel_dialog_fn = cancelDialog,
             .canonicalize_directory_fn = canonicalizeDirectory,
             .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
@@ -324,44 +352,6 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context orelse return));
         if (self.native_runtime) |runtime|
             runtime.cancelTimer(mcp_catalog_timer_id) catch {};
-    }
-
-    /// Shows every byte of a Host-only MCP trust or OAuth consent document in
-    /// bounded native-dialog pages. Only the final page can approve; closing
-    /// or cancelling any page rejects the operation.
-    pub fn confirmMcpDetails(
-        self: *Adapter,
-        title: []const u8,
-        details: []const u8,
-        approval_label: []const u8,
-    ) ?bool {
-        const runtime = self.native_runtime orelse return null;
-        if (details.len == 0 or !std.unicode.utf8ValidateSlice(details) or
-            title.len == 0 or title.len > native_sdk.platform.max_dialog_title_bytes or
-            approval_label.len == 0 or
-            approval_label.len > native_sdk.platform.max_dialog_button_bytes)
-            return null;
-        var offset: usize = 0;
-        while (offset < details.len) {
-            var end = @min(
-                details.len,
-                offset + native_sdk.platform.max_dialog_message_bytes,
-            );
-            while (end > offset and !std.unicode.utf8ValidateSlice(details[offset..end]))
-                end -= 1;
-            if (end == offset) return null;
-            const final_page = end == details.len;
-            const result = runtime.showMessageDialog(.{
-                .style = .warning,
-                .title = title,
-                .message = details[offset..end],
-                .primary_button = if (final_page) approval_label else "Next",
-                .secondary_button = "Cancel",
-            }) catch return null;
-            if (result != .primary) return false;
-            offset = end;
-        }
-        return true;
     }
 
     pub fn openMcpAuthorizationUrl(self: *Adapter, url: []const u8) bool {
@@ -476,13 +466,63 @@ pub const Adapter = struct {
         try (self.native_runtime orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
     }
 
-    fn showOpenDialog(
-        context: ?*anyopaque,
-        options: native_sdk.platform.OpenDialogOptions,
-        output: []u8,
-    ) anyerror!native_sdk.platform.OpenDialogResult {
+    pub fn supportsAsyncDialogs(self: *const Adapter) bool {
+        const runtime = self.native_runtime orelse return false;
+        const services_value = runtime.options.platform.services;
+        return services_value.supportsAsyncDialogs() and services_value.cancel_dialog_fn != null and services_value.wake_fn != null;
+    }
+
+    pub fn requestDialog(context: ?*anyopaque, operation: u64, parent: u64, options: control_ports.NativeDialog.Options, completion: *const control_ports.NativeDialog.Completion) anyerror!u64 {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return (self.native_runtime orelse return error.RuntimeUnavailable).showOpenDialog(options, output);
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
+        const runtime = self.native_runtime orelse return error.RuntimeUnavailable;
+        if (!self.supportsAsyncDialogs()) return error.UnsupportedService;
+        var tag: [8]u8 = undefined;
+        std.mem.writeInt(u64, &tag, operation, .little);
+        const parent_id: ?u64 = if (parent == 0) null else parent;
+        const result: native_sdk.DialogCompletion = .{ .context = @constCast(completion), .tag = &tag, .on_result = dialogResult };
+        switch (options) {
+            .open => |open| {
+                const filters = try std.heap.c_allocator.alloc(native_sdk.platform.FileFilter, open.filters.len);
+                defer std.heap.c_allocator.free(filters);
+                for (open.filters, filters) |input, *output| output.* = .{ .name = input.name, .extensions = input.extensions };
+                return runtime.requestOpenDialog(.{ .title = open.title, .default_path = open.default_path, .filters = filters, .allow_directories = open.allow_directories, .allow_multiple = open.allow_multiple }, parent_id, result);
+            },
+            .save => |save| return runtime.requestSaveDialog(.{ .title = save.title, .default_path = save.default_path, .default_name = save.default_name }, parent_id, result),
+            .message => |message| return runtime.requestMessageDialog(.{
+                .title = message.title,
+                .message = message.message,
+                .informative_text = message.informative_text,
+                .style = switch (message.style) {
+                    .info => .info,
+                    .warning => .warning,
+                    .critical => .critical,
+                },
+                .primary_button = message.primary_button,
+                .secondary_button = message.secondary_button,
+                .tertiary_button = message.tertiary_button,
+            }, parent_id, result),
+        }
+    }
+
+    fn dialogResult(context: *anyopaque, _: *native_sdk.Runtime, tag: []const u8, result: native_sdk.platform.DialogResult) !void {
+        const completion: *const control_ports.NativeDialog.Completion = @ptrCast(@alignCast(context));
+        const operation = std.mem.readInt(u64, tag[0..8], .little);
+        const converted: control_ports.NativeDialog.Result = switch (result.outcome) {
+            .cancelled => .cancelled,
+            .failed => .failed,
+            .selected => if (result.count != 0) .{ .files = .{ .paths = result.paths, .count = result.count } } else .{ .button = switch (result.button) {
+                .primary => .primary,
+                .secondary => .secondary,
+                .tertiary => .tertiary,
+            } },
+        };
+        completion.result_fn(completion.context, operation, converted);
+    }
+
+    pub fn cancelDialog(context: ?*anyopaque, handle: u64) void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        if (self.native_runtime) |runtime| runtime.cancelDialog(handle);
     }
 
     fn canonicalizeDirectory(
@@ -796,53 +836,6 @@ test "SDK consumption timers preserve producer IDs and explicit failures" {
     try std.testing.expectError(error.RuntimeUnavailable, port.start_timer_fn(port.context, 99, 1, false));
 }
 
-test "SDK consumption file picker keeps multi-selection cancel and Runtime validation" {
-    const Spy = struct {
-        var calls: usize = 0;
-        var mode: enum { selected, cancel, fail } = .selected;
-        fn open(_: ?*anyopaque, options: native_sdk.platform.OpenDialogOptions, output: []u8) anyerror!native_sdk.platform.OpenDialogResult {
-            calls += 1;
-            try std.testing.expect(options.allow_multiple);
-            try std.testing.expectEqualStrings("Images", options.filters[0].name);
-            try std.testing.expectEqualStrings("png", options.filters[0].extensions[0]);
-            switch (mode) {
-                .cancel => return .{ .paths = "", .count = 0 },
-                .fail => return error.InjectedPickerFailure,
-                .selected => {},
-            }
-            const paths = "/first.png\n/second.png";
-            if (output.len < paths.len) return error.NoSpaceLeft;
-            @memcpy(output[0..paths.len], paths);
-            return .{ .paths = output[0..paths.len], .count = 2 };
-        }
-    };
-    Spy.calls = 0;
-    Spy.mode = .selected;
-    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
-    defer harness.destroy(std.testing.allocator);
-    harness.runtime.options.platform.services.show_open_dialog_fn = Spy.open;
-    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    try adapter.start(&harness.runtime);
-    defer adapter.stop(&harness.runtime);
-    const port = adapter.dispatcherPlatform();
-    const options: native_sdk.platform.OpenDialogOptions = .{
-        .allow_multiple = true,
-        .filters = &.{.{ .name = "Images", .extensions = &.{"png"} }},
-    };
-    var output: [128]u8 = undefined;
-    const result = try port.show_open_dialog_fn(port.context, options, &output);
-    try std.testing.expectEqual(@as(usize, 2), result.count);
-    try std.testing.expectEqualStrings("/first.png\n/second.png", result.paths);
-    Spy.mode = .cancel;
-    try std.testing.expectEqual(@as(usize, 0), (try port.show_open_dialog_fn(port.context, options, &output)).count);
-    Spy.mode = .fail;
-    try std.testing.expectError(error.InjectedPickerFailure, port.show_open_dialog_fn(port.context, options, &output));
-    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
-    try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, options, &.{}));
-    try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, .{ .title = "bad\x00title" }, &output));
-    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
-}
-
 test "Output location uses the SDK Runtime reveal boundary and rejects invalid input before the platform" {
     const Spy = struct {
         var calls: usize = 0;
@@ -874,18 +867,22 @@ test "Output location uses the SDK Runtime reveal boundary and rejects invalid i
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }
 
-test "Output Save picker uses SDK Runtime and freezes the selected path for worker publication" {
-    const Spy = struct {
-        var selected: []const u8 = "";
-        var cancelled = false;
-        var calls: usize = 0;
-        fn save(_: ?*anyopaque, options: native_sdk.platform.SaveDialogOptions, buffer: []u8) !?[]const u8 {
-            calls += 1;
-            try std.testing.expectEqualStrings("source.txt", options.default_name);
-            if (cancelled) return null;
-            if (selected.len > buffer.len) return error.NoSpaceLeft;
-            @memcpy(buffer[0..selected.len], selected);
-            return buffer[0..selected.len];
+test "SDK consumption Output Save picker freezes selected path for worker publication" {
+    const Probe = struct {
+        source: control_ports.OutputFileSaveInput,
+        effect: ?control_ports.OwnedOutputSave = null,
+        cancelled: bool = false,
+        fn borrow(raw: *anyopaque, _: u64) !control_ports.OutputFileSaveInput {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.source;
+        }
+        fn complete(raw: *anyopaque, _: u64, result: control_ports.OutputFileSave.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (result) {
+                .selected => |effect| self.effect = effect,
+                .cancelled => self.cancelled = true,
+                .failed => @panic("unexpected Save As failure"),
+            }
         }
     };
     const Worker = struct {
@@ -913,24 +910,29 @@ test "Output Save picker uses SDK Runtime and freezes the selected path for work
     defer std.testing.allocator.free(root);
     const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "selected.txt" });
     defer std.testing.allocator.free(selected);
-    Spy.selected = selected;
-    Spy.cancelled = true;
-    Spy.calls = 0;
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
-    harness.runtime.options.platform.services.show_save_dialog_fn = Spy.save;
+    const app: native_sdk.App = .{ .context = harness, .name = "save-publication", .source = native_sdk.WebViewSource.html("<p>Save</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .app_start);
+    harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     adapter.native_runtime = &harness.runtime;
     const port = adapter.outputFileSave();
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("abc", &hash, .{});
-    const source: control_ports.OutputFileSaveInput = .{ .workspace_root = root, .relative_path = "source.txt", .size_bytes = 3, .sha256 = hash };
-    try std.testing.expect((try port.prepare_fn(port.context, source)) == null);
-    Spy.cancelled = false;
-    var effect = (try port.prepare_fn(port.context, source)).?;
+    var probe: Probe = .{ .source = .{ .io = std.testing.io, .workspace_root = root, .relative_path = "source.txt", .size_bytes = 3, .sha256 = hash } };
+    const completion: control_ports.OutputFileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
+    const cancelled = try port.begin_fn(port.context, 1, 1, "source.txt", &completion);
+    try harness.null_platform.finishDialog(cancelled, .cancelled, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expect(probe.cancelled);
+    try std.testing.expect(probe.effect == null);
+    const chosen = try port.begin_fn(port.context, 2, 1, "source.txt", &completion);
+    try harness.null_platform.finishDialog(chosen, .selected, selected, .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    var effect = probe.effect.?;
     defer effect.deinit();
-    // Native dialog storage is temporary; publication uses the owned selection.
-    Spy.selected = "";
+    // SDK completion storage has been released before worker publication.
     var worker: Worker = .{ .effect = &effect, .operation = .stage };
     try worker.execute();
     const before = try tmp.dir.readFileAlloc(std.testing.io, "selected.txt", std.testing.allocator, .limited(32));
@@ -941,5 +943,116 @@ test "Output Save picker uses SDK Runtime and freezes the selected path for work
     const after = try tmp.dir.readFileAlloc(std.testing.io, "selected.txt", std.testing.allocator, .limited(32));
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings("abc", after);
-    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}
+
+test "SDK consumption async dialogs check capability before request and deliver typed outcomes later" {
+    const Probe = struct {
+        calls: usize = 0,
+        operation: u64 = 0,
+        result: enum { none, files, primary, cancelled, failed } = .none,
+        fn receive(context: *anyopaque, operation: u64, result: control_ports.NativeDialog.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.operation = operation;
+            self.result = switch (result) {
+                .files => .files,
+                .button => .primary,
+                .cancelled => .cancelled,
+                .failed => .failed,
+            };
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const app: native_sdk.App = .{ .context = harness, .name = "async-dialog-test", .source = native_sdk.WebViewSource.html("<p>Dialog</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .app_start);
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    defer adapter.native_runtime = null;
+    var probe: Probe = .{};
+    const completion: control_ports.NativeDialog.Completion = .{ .context = &probe, .result_fn = Probe.receive };
+    try std.testing.expect(!adapter.supportsAsyncDialogs());
+    try std.testing.expectError(error.UnsupportedService, Adapter.requestDialog(&adapter, 1, 1, .{ .open = .{} }, &completion));
+    harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
+    try std.testing.expect(adapter.supportsAsyncDialogs());
+    const port = adapter.dispatcherPlatform();
+    try std.testing.expectError(error.InvalidDialogOptions, port.request_dialog_fn(port.context, 41, 1, .{ .open = .{ .title = "bad\x00title" } }, &completion));
+    const id = try port.request_dialog_fn(port.context, 42, 1, .{ .open = .{ .allow_multiple = true, .filters = &.{.{ .name = "Images", .extensions = &.{"png"} }} } }, &completion);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try harness.null_platform.finishDialog(id, .selected, "/a.txt\n/b.txt", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(@as(u64, 42), probe.operation);
+    try std.testing.expectEqual(.files, probe.result);
+    const message = try port.request_dialog_fn(port.context, 43, 1, .{ .message = .{ .message = "Approve?" } }, &completion);
+    try harness.null_platform.finishDialog(message, .cancelled, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.cancelled, probe.result);
+    const cancelled = try port.request_dialog_fn(port.context, 44, 1, .{ .open = .{} }, &completion);
+    port.cancel_dialog_fn(port.context, cancelled);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(@as(u64, 44), probe.operation);
+    try std.testing.expectEqual(.cancelled, probe.result);
+    const failed = try port.request_dialog_fn(port.context, 45, 1, .{ .message = .{} }, &completion);
+    try harness.null_platform.finishDialog(failed, .failed, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.failed, probe.result);
+    try std.testing.expectEqual(@as(usize, 4), probe.calls);
+    harness.runtime.options.platform.services.cancel_dialog_fn = null;
+    try std.testing.expectError(error.UnsupportedService, port.request_dialog_fn(port.context, 46, 1, .{ .open = .{} }, &completion));
+}
+
+test "SDK consumption Save As borrows the frozen source only during selected completion" {
+    const Probe = struct {
+        borrows: usize = 0,
+        completions: usize = 0,
+        outcome: enum { none, selected, cancelled, failed } = .none,
+        reject_source: bool = false,
+        fn borrow(context: *anyopaque, _: u64) !control_ports.OutputFileSaveInput {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.borrows += 1;
+            if (self.reject_source) return error.UnknownOutput;
+            return .{ .io = std.testing.io, .workspace_root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace", .relative_path = "report.txt", .size_bytes = 42, .sha256 = @splat(2) };
+        }
+        fn complete(context: *anyopaque, _: u64, result: control_ports.OutputFileSave.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.completions += 1;
+            self.outcome = switch (result) {
+                .selected => .selected,
+                .cancelled => .cancelled,
+                .failed => .failed,
+            };
+            if (result == .selected) {
+                var effect = result.selected;
+                effect.deinit();
+            }
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const app: native_sdk.App = .{ .context = harness, .name = "save-dialog-test", .source = native_sdk.WebViewSource.html("<p>Save</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .app_start);
+    harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    defer adapter.native_runtime = null;
+    const port = adapter.outputFileSave();
+    var probe: Probe = .{};
+    const completion: control_ports.OutputFileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
+    const cancelled = try port.begin_fn(port.context, 1, 1, "report.txt", &completion);
+    try std.testing.expectEqual(@as(usize, 0), probe.borrows);
+    try harness.null_platform.finishDialog(cancelled, .cancelled, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.cancelled, probe.outcome);
+    try std.testing.expectEqual(@as(usize, 0), probe.borrows);
+    const selected = try port.begin_fn(port.context, 2, 1, "report.txt", &completion);
+    try harness.null_platform.finishDialog(selected, .selected, if (builtin.os.tag == .windows) "C:\\export\\report.txt" else "/tmp/export/report.txt", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.selected, probe.outcome);
+    try std.testing.expectEqual(@as(usize, 1), probe.borrows);
+    probe.reject_source = true;
+    const stale = try port.begin_fn(port.context, 3, 1, "report.txt", &completion);
+    try harness.null_platform.finishDialog(stale, .selected, "/tmp/export/report.txt", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.failed, probe.outcome);
+    try std.testing.expectEqual(@as(usize, 3), probe.completions);
 }

@@ -10,7 +10,9 @@ pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.Mcp
     return .{
         .context = coordinator,
         .test_fn = testConnection,
-        .approve_fn = approveConnection,
+        .begin_approval_fn = beginApproval,
+        .cancel_approval_fn = cancelApproval,
+        .map_approval_fn = mapApproval,
         .capture_fn = captureSecret,
         .authorize_fn = authorizeOauth,
         .cancel_fn = cancelAuthorization,
@@ -51,13 +53,16 @@ fn outcome(value: mcp_management_coordinator.Outcome) bridge_api.McpHostOutcome 
     };
 }
 
-fn approveConnection(
-    context: *anyopaque,
-    expected_generation: u64,
-    server_id: []const u8,
-) anyerror!bridge_api.McpHostOutcome {
+fn beginApproval(context: *anyopaque, operation: u64, expected: u64, server: []const u8, completion: *const bridge_api.McpApproval.Completion) !bridge_api.McpApproval.Start {
     const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    return outcome(try coordinator.approveConnection(expected_generation, server_id));
+    return coordinator.beginApproval(operation, expected, server, completion);
+}
+fn cancelApproval(context: *anyopaque, handle: u64) void {
+    const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    coordinator.cancelApproval(handle);
+}
+fn mapApproval(_: *anyopaque, value: @import("metawork_product_mcp").contract.ManagementOutcome) bridge_api.McpHostOutcome {
+    return outcome(mcp_management_coordinator.mapManagementOutcome(value));
 }
 
 fn captureSecret(
