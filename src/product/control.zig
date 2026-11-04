@@ -57,6 +57,7 @@ pub const ViewReceiptQuery = runtime_impl.ViewReceiptQuery;
 pub const TestSupport = runtime_impl.TestSupport;
 pub const ChangeNotifier = runtime_impl.ChangeNotifier;
 pub const OutputFileTarget = runtime_impl.OutputFileTarget;
+pub const NativeDialog = runtime_impl.NativeDialog;
 pub const OutputCheckState = runtime_impl.OutputCheckState;
 pub const OutputCheckKind = runtime_impl.OutputCheckKind;
 pub const OutputCheckResult = runtime_impl.OutputCheckResult;

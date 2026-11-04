@@ -310,6 +310,38 @@ pub const ScheduleHost = struct {
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
 
+/// Main-loop native dialog capability. Completion storage belongs to the caller
+/// and must outlive cancellation until the native loop has stopped delivering.
+pub const NativeDialog = struct {
+    pub const Handle = u64;
+    pub const Filter = struct { name: []const u8, extensions: []const []const u8 };
+    pub const Open = struct {
+        title: []const u8 = "",
+        default_path: []const u8 = "",
+        filters: []const Filter = &.{},
+        allow_directories: bool = false,
+        allow_multiple: bool = false,
+    };
+    pub const Save = struct { title: []const u8 = "", default_path: []const u8 = "", default_name: []const u8 = "" };
+    pub const Button = enum { primary, secondary, tertiary };
+    pub const Message = struct {
+        title: []const u8 = "",
+        message: []const u8 = "",
+        informative_text: []const u8 = "",
+        style: enum { info, warning, critical } = .info,
+        primary_button: []const u8 = "OK",
+        secondary_button: []const u8 = "",
+        tertiary_button: []const u8 = "",
+    };
+    pub const Options = union(enum) { open: Open, save: Save, message: Message };
+    pub const Files = struct { paths: []const u8, count: usize };
+    pub const Result = union(enum) { files: Files, button: Button, cancelled, failed };
+    pub const Completion = struct {
+        context: *anyopaque,
+        result_fn: *const fn (*anyopaque, u64, Result) void,
+    };
+};
+
 /// Main-loop effect for a currently authorized, hash-verified Output only.
 pub const OutputFileReveal = struct {
     context: *anyopaque,

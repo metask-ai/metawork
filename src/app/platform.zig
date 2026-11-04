@@ -231,6 +231,8 @@ pub const Adapter = struct {
             .start_timer_fn = startTimer,
             .cancel_timer_fn = cancelTimer,
             .show_open_dialog_fn = showOpenDialog,
+            .request_dialog_fn = requestDialog,
+            .cancel_dialog_fn = cancelDialog,
             .canonicalize_directory_fn = canonicalizeDirectory,
             .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
@@ -474,6 +476,64 @@ pub const Adapter = struct {
     fn cancelTimer(context: ?*anyopaque, timer_id: u64) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         try (self.native_runtime orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
+    }
+
+    pub fn supportsAsyncDialogs(self: *const Adapter) bool {
+        const runtime = self.native_runtime orelse return false;
+        const services_value = runtime.options.platform.services;
+        return services_value.supportsAsyncDialogs() and services_value.cancel_dialog_fn != null and services_value.wake_fn != null;
+    }
+
+    pub fn requestDialog(context: ?*anyopaque, operation: u64, parent: u64, options: control_ports.NativeDialog.Options, completion: *const control_ports.NativeDialog.Completion) anyerror!u64 {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
+        const runtime = self.native_runtime orelse return error.RuntimeUnavailable;
+        if (!self.supportsAsyncDialogs()) return error.UnsupportedService;
+        var tag: [8]u8 = undefined;
+        std.mem.writeInt(u64, &tag, operation, .little);
+        const result: native_sdk.DialogCompletion = .{ .context = @constCast(completion), .tag = &tag, .on_result = dialogResult };
+        switch (options) {
+            .open => |open| {
+                const filters = try std.heap.c_allocator.alloc(native_sdk.platform.FileFilter, open.filters.len);
+                defer std.heap.c_allocator.free(filters);
+                for (open.filters, filters) |input, *output| output.* = .{ .name = input.name, .extensions = input.extensions };
+                return runtime.requestOpenDialog(.{ .title = open.title, .default_path = open.default_path, .filters = filters, .allow_directories = open.allow_directories, .allow_multiple = open.allow_multiple }, parent, result);
+            },
+            .save => |save| return runtime.requestSaveDialog(.{ .title = save.title, .default_path = save.default_path, .default_name = save.default_name }, parent, result),
+            .message => |message| return runtime.requestMessageDialog(.{
+                .title = message.title,
+                .message = message.message,
+                .informative_text = message.informative_text,
+                .style = switch (message.style) {
+                    .info => .info,
+                    .warning => .warning,
+                    .critical => .critical,
+                },
+                .primary_button = message.primary_button,
+                .secondary_button = message.secondary_button,
+                .tertiary_button = message.tertiary_button,
+            }, parent, result),
+        }
+    }
+
+    fn dialogResult(context: *anyopaque, _: *native_sdk.Runtime, tag: []const u8, result: native_sdk.platform.DialogResult) !void {
+        const completion: *const control_ports.NativeDialog.Completion = @ptrCast(@alignCast(context));
+        const operation = std.mem.readInt(u64, tag[0..8], .little);
+        const converted: control_ports.NativeDialog.Result = switch (result.outcome) {
+            .cancelled => .cancelled,
+            .failed => .failed,
+            .selected => if (result.count != 0) .{ .files = .{ .paths = result.paths, .count = result.count } } else .{ .button = switch (result.button) {
+                .primary => .primary,
+                .secondary => .secondary,
+                .tertiary => .tertiary,
+            } },
+        };
+        completion.result_fn(completion.context, operation, converted);
+    }
+
+    pub fn cancelDialog(context: ?*anyopaque, handle: u64) void {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        if (self.native_runtime) |runtime| runtime.cancelDialog(handle);
     }
 
     fn showOpenDialog(
@@ -942,4 +1002,59 @@ test "Output Save picker uses SDK Runtime and freezes the selected path for work
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings("abc", after);
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}
+
+test "SDK consumption async dialogs check capability before request and deliver typed outcomes later" {
+    const Probe = struct {
+        calls: usize = 0,
+        operation: u64 = 0,
+        result: enum { none, files, primary, cancelled, failed } = .none,
+        fn receive(context: *anyopaque, operation: u64, result: control_ports.NativeDialog.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.operation = operation;
+            self.result = switch (result) {
+                .files => .files,
+                .button => .primary,
+                .cancelled => .cancelled,
+                .failed => .failed,
+            };
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    const app: native_sdk.App = .{ .context = harness, .name = "async-dialog-test", .source = native_sdk.WebViewSource.html("<p>Dialog</p>") };
+    try harness.runtime.dispatchPlatformEvent(app, .app_start);
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    defer adapter.native_runtime = null;
+    var probe: Probe = .{};
+    const completion: control_ports.NativeDialog.Completion = .{ .context = &probe, .result_fn = Probe.receive };
+    try std.testing.expect(!adapter.supportsAsyncDialogs());
+    try std.testing.expectError(error.UnsupportedService, Adapter.requestDialog(&adapter, 1, 1, .{ .open = .{} }, &completion));
+    harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
+    try std.testing.expect(adapter.supportsAsyncDialogs());
+    const port = adapter.dispatcherPlatform();
+    const id = try port.request_dialog_fn(port.context, 42, 1, .{ .open = .{ .allow_multiple = true } }, &completion);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try harness.null_platform.finishDialog(id, .selected, "/a.txt\n/b.txt", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(@as(u64, 42), probe.operation);
+    try std.testing.expectEqual(.files, probe.result);
+    const message = try port.request_dialog_fn(port.context, 43, 1, .{ .message = .{ .message = "Approve?" } }, &completion);
+    try harness.null_platform.finishDialog(message, .cancelled, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.cancelled, probe.result);
+    const cancelled = try port.request_dialog_fn(port.context, 44, 1, .{ .open = .{} }, &completion);
+    port.cancel_dialog_fn(port.context, cancelled);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(@as(u64, 44), probe.operation);
+    try std.testing.expectEqual(.cancelled, probe.result);
+    const failed = try port.request_dialog_fn(port.context, 45, 1, .{ .message = .{} }, &completion);
+    try harness.null_platform.finishDialog(failed, .failed, "", .primary);
+    while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+    try std.testing.expectEqual(.failed, probe.result);
+    try std.testing.expectEqual(@as(usize, 4), probe.calls);
+    harness.runtime.options.platform.services.cancel_dialog_fn = null;
+    try std.testing.expectError(error.UnsupportedService, port.request_dialog_fn(port.context, 46, 1, .{ .open = .{} }, &completion));
 }

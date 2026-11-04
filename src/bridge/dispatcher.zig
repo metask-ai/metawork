@@ -51,6 +51,11 @@ pub const WindowChromeControlAction = enum {
     close,
 };
 
+fn unavailableDialog(_: ?*anyopaque, _: u64, _: u64, _: product_control.NativeDialog.Options, _: *const product_control.NativeDialog.Completion) anyerror!u64 {
+    return error.UnsupportedService;
+}
+fn cancelUnavailableDialog(_: ?*anyopaque, _: u64) void {}
+
 pub const Platform = struct {
     attachment_input: enum { native_paths, file_bytes } = .native_paths,
     context: ?*anyopaque,
@@ -68,6 +73,9 @@ pub const Platform = struct {
         native_sdk.platform.OpenDialogOptions,
         []u8,
     ) anyerror!native_sdk.platform.OpenDialogResult,
+    request_dialog_fn: *const fn (?*anyopaque, u64, u64, product_control.NativeDialog.Options, *const product_control.NativeDialog.Completion) anyerror!u64 = unavailableDialog,
+    cancel_dialog_fn: *const fn (?*anyopaque, u64) void = cancelUnavailableDialog,
+
     canonicalize_directory_fn: *const fn (
         ?*anyopaque,
         []const u8,

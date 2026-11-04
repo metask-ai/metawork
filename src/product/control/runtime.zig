@@ -1012,6 +1012,7 @@ fn absoluteReferenceRelativePath(
 }
 
 pub const OutputFileTarget = output_check.Target;
+pub const NativeDialog = control_ports.NativeDialog;
 pub const OutputCheckState = output_check.State;
 pub const OutputCheckKind = output_check.Kind;
 pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState, committed: bool = false };
