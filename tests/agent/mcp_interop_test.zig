@@ -909,6 +909,104 @@ test "canonical MCP ABI rejects a hanging candidate within its transport budget 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, healthy_trace, "\"method\":\"tools/call\""));
 }
 
+test "production MCP budget preserves healthy tool RPC after a candidate exhausts its deadline" {
+    try expectProductionCatalogBudget(false);
+}
+
+test "production MCP budget adds healthy B when an already loaded A hangs with maximum timeout" {
+    try expectProductionCatalogBudget(true);
+}
+
+fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    const trace = try std.fmt.allocPrint(a, "{s}/budget.jsonl", .{root});
+    defer a.free(trace);
+    const a_gate = try std.fmt.allocPrint(a, "{s}/a", .{root});
+    defer a.free(a_gate);
+    const b_gate = try std.fmt.allocPrint(a, "{s}/b", .{root});
+    defer a.free(b_gate);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.armed", .data = "armed" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.release", .data = "release" });
+    var source_a = try HttpFixture.startWithGate("2026-07-28", "json", trace, 2_000, "text", a_gate);
+    defer source_a.deinit();
+    var source_b = try HttpFixture.startWithGate("2026-07-28", "json", trace, 2_000, "text", b_gate);
+    defer source_b.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, a, .{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
+    defer budget.release();
+    var preparation = try prepareHttpFixture(source_a.endpoint, "2026-07-28");
+    defer preparation.deinit();
+    preparation.registry.?.value.servers[0].timeout_ms = std.math.maxInt(u32);
+    var initial = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
+    defer initial.deinit();
+    try budget.begin(1);
+    const initial_result = runtime.applyMcpConfiguration(&initial.input.?) catch |err| {
+        budget.end();
+        return err;
+    };
+    try budget.applied(1);
+    budget.end();
+    try std.testing.expectEqual(.applied, initial_result);
+    const original = switch (try budget.catalog().activate()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer original.deinit();
+    if (hanging_loaded) try tmp.dir.deleteFile(std.testing.io, "a.release");
+    try tmp.dir.deleteFile(std.testing.io, "a.waiting");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.armed", .data = "armed" });
+    if (hanging_loaded) try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.release", .data = "release" });
+    try appendHttpCandidate(&preparation, source_b.endpoint);
+    preparation.registry.?.value.generation = 2;
+    preparation.registry.?.value.servers[1].timeout_ms = std.math.maxInt(u32);
+    preparation.server_states[0] = .disabled;
+    var candidate = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
+    defer candidate.deinit();
+    var input = try runtime.prepareMcpMembership(2, &candidate.input.?, &.{ "deterministic-http", "candidate-http" });
+    defer input.deinit();
+    budget.max_step_ms = 400;
+    try budget.begin(2);
+    defer budget.end();
+    const started = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+    const result = try runtime.applyMcpConfiguration(&input);
+    if (hanging_loaded) {
+        try std.testing.expectEqual(.applied, result);
+        try budget.applied(2);
+        const activation = switch (try runtime.activateMcp()) {
+            .activated => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer activation.deinit();
+        try budget.observe(activation);
+        const selected = try runtime.createMcpAdmissionSelection(activation, &.{ .{ .id = "deterministic-http", .tools = &.{} }, .{ .id = "candidate-http", .tools = &.{"echo"} } });
+        defer if (selected) |value| value.deinit();
+        try std.testing.expectEqual(@as(usize, 1), selected.?.selectedTools().len);
+        try std.testing.expectEqualStrings("candidate-http", selected.?.selectedTools()[0].server_id);
+        const waiting = try tmp.dir.readFileAlloc(std.testing.io, "a.waiting", a, .limited(32));
+        a.free(waiting);
+    } else {
+        try std.testing.expectEqual(.rejected, result);
+        // Keep the management scope expired while actually executing and
+        // restoring a healthy tool. A shared timeout must not poison tools.
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(500), .awake);
+    }
+    try std.testing.expect(std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - started < 3 * std.time.ns_per_s);
+    var probe: RawMcpAdmissionProbe = .{ .api = runtime.api, .runtime = runtime.runtime.?, .workspace = root, .endpoint = if (hanging_loaded) source_b.provider_endpoint else source_a.provider_endpoint, .selector = std.mem.zeroes(wire.McpSelectorV1), .execute_tool = true, .execute_restored_tool = true };
+    defer probe.bytes.bytes.deinit(a);
+    probe.selector.struct_size = @sizeOf(wire.McpSelectorV1);
+    probe.selector.server_binding_identity = agent.mcpBindingIdentity(if (hanging_loaded) "candidate-http" else "deterministic-http");
+    probe.selector.tool_name = sdk.bytesView("echo");
+    try probe.check(true);
+}
+
 test "canonical MCP ABI keeps original Selection usable while a new candidate apply is in flight" {
     try expectMcpAdmissionDuringApply(false);
     try expectMcpAdmissionDuringApply(true);
@@ -2472,7 +2570,11 @@ test "real Product editing a disabled referenced member keeps the applied versio
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .disabled_edit);
 }
 
-const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit, retain_disabled, retain_deleted, revoked_then_deleted, disabled_edit };
+test "real Product keeps B admission when a retained unselected A reaches its earlier TTL" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .unrelated_expiry);
+}
+
+const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit, retain_disabled, retain_deleted, revoked_then_deleted, disabled_edit, unrelated_expiry };
 
 fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpTransportKind) !void {
     try expectMcpProductAdmissionCase(protocol_version, transport, .expiry);
@@ -2733,6 +2835,24 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         }
         try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, restarted_workbench.inspectMcpDesiredConfiguration().?.runtime_alignment);
         try std.testing.expect((try restarted_workbench.prepareMcpConfigurationStep(generation, false)) == null);
+        // Retained membership must still produce a fresh, complete catalog
+        // after Desired removal/edit; its tools remain excluded from new Tasks.
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
+        const previous_generation = mcp.state.activation.?.catalogGeneration();
+        refresh_timer.now_ms = @max(refresh_timer.now_ms, mcp.state.refresh_not_before_ms orelse refresh_timer.now_ms);
+        restarted_workbench.refreshMcpCatalog() catch |err| switch (err) {
+            error.CatalogLoading => try std.testing.expect(mcp.hasRefreshJob() or mcp.state.refresh_pending),
+            else => return err,
+        };
+        if (mcp.state.refresh_pending and !mcp.hasRefreshJob()) restarted_workbench.onMcpRefreshTimer();
+        for (0..2000) |_| {
+            try restarted_workbench.drainAgentEvents();
+            restarted_workbench.syncLifecycle();
+            if (!mcp.hasRefreshJob() and !mcp.state.refresh_pending) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try std.testing.expect(mcp.state.activation != null);
+        try std.testing.expect(mcp.state.activation.?.catalogGeneration() != previous_generation);
         const admission = mcp.selectionForNewTask();
         try std.testing.expect(admission.available);
         try std.testing.expect(admission.selection == null or admission.selection.?.selectedTools().len == 0);
@@ -2772,6 +2892,63 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         try std.testing.expectEqual(@as(usize, 0), restarted_runtime.mcp_servers.expectedServers().len);
         try std.testing.expectError(error.RecoveryUnavailable, mcp.restoreAuthorityForTask(fresh_task_id, original.mcp));
         try std.testing.expect((try mcp.restoreAuthorityForTask(fresh_task_id, null)).selection == null);
+        return;
+    }
+    if (race == .unrelated_expiry) {
+        // Keep both metadata sources healthy. Only A's shorter observation
+        // expires in Product's clock; A is retained for the original Task.
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
+        // The workspace is the repository; fixture files belong in tmp.
+        const fixture_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(fixture_root);
+        const b_trace = try std.fmt.allocPrint(std.testing.allocator, "{s}/b.jsonl", .{fixture_root});
+        defer std.testing.allocator.free(b_trace);
+        const b_gate = try std.fmt.allocPrint(std.testing.allocator, "{s}/healthy-b", .{fixture_root});
+        defer std.testing.allocator.free(b_gate);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "healthy-b.release", .data = "release" });
+        var healthy_b = try HttpFixture.startWithGate("2026-07-28", "json", b_trace, 5_000, "text", b_gate);
+        defer healthy_b.deinit();
+        try std.testing.expectEqual(.saved, try restarted_workbench.createMcpHttpServer(2, .{ .display_name = "Healthy B", .url = healthy_b.endpoint, .negotiation = "modern_only" }));
+        var current = try mcp_configuration.decode(std.testing.allocator, durable_registry.storage[0..durable_registry.len], product_mcp_limits);
+        defer current.deinit();
+        const b_id = current.value.servers[1].id;
+        try std.testing.expectEqual(.saved, try restarted_workbench.setMcpAllowedTools(3, .{ .server_id = b_id, .tools = &.{"echo"} }));
+        try std.testing.expectEqual(.saved, try restarted_workbench.setMcpServerEnabled(4, .{ .server_id = server_id, .enabled = false }));
+        var step = (try restarted_workbench.prepareMcpConfigurationStep(5, false)).?;
+        var step_owned = true;
+        defer if (step_owned) step.deinit();
+        var candidate = try mcp_configuration.prepare(std.testing.allocator, durable_registry.storage[0..durable_registry.len], true, false, .{}, product_mcp_limits);
+        defer candidate.deinit();
+        var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{});
+        defer built.deinit();
+        var input = try restarted_runtime.prepareMcpMembership(5, &built.input.?, step.member_ids);
+        defer input.deinit();
+        try std.testing.expectEqual(.applied, try restarted_runtime.applyMcpConfiguration(&input));
+        const activated = switch (try restarted_runtime.activateMcp()) {
+            .activated => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        if (activated.takeSelection()) |old| old.deinit();
+        const allowlists = try std.testing.allocator.alloc(agent.McpServerAllowlist, step.grants.len);
+        defer std.testing.allocator.free(allowlists);
+        for (step.grants, allowlists) |grant, *allowlist| allowlist.* = .{ .id = grant.id, .tools = grant.tools };
+        const selected = try restarted_runtime.createMcpAdmissionSelection(activated, allowlists);
+        var applied = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &step.preparation)).?;
+        var applied_owned = true;
+        defer if (applied_owned) applied.deinit();
+        try std.testing.expect(restarted_workbench.completeMcpConfigurationApply(5, &step.preparation, &applied, activated, selected, false));
+        step_owned = false;
+        applied_owned = false;
+        refresh_timer.now_ms += 2_500;
+        const mcp = &restarted_workbench.mcp.?;
+        try std.testing.expect(mcp.state.refresh_deadline_ms.? <= refresh_timer.now_ms);
+        try std.testing.expect(mcp.state.expiry_deadline_ms.? > refresh_timer.now_ms);
+        const admission = mcp.selectionForNewTask();
+        try std.testing.expect(admission.available);
+        try std.testing.expectEqual(@as(usize, 1), admission.selection.?.selectedTools().len);
+        try std.testing.expectEqualStrings(b_id, admission.selection.?.selectedTools()[0].server_id);
+        shutdownProduct(&restarted_workbench, restarted_runtime);
+        restarted_product_live = false;
         return;
     }
     if (race == .rate_limit) {

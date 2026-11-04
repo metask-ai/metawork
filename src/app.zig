@@ -135,6 +135,7 @@ const App = struct {
     mcp_credential_store: ?mcp_platform.CredentialStore = null,
     mcp_authorizations: ?mcp_platform.HttpAuthorizations = null,
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
+    mcp_budget: ?*mcp_platform.CatalogBudget = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
     single_instance: ?*app_single_instance.Coordinator = null,
     update_transport: ?update_http.Adapter = null,
@@ -180,7 +181,7 @@ const App = struct {
             .main_thread_id = self.main_thread_id,
         };
         const mcp_management_host = mcp_management_coordinator.platformHost(&self.platform);
-        const mcp_host_environment = mcp_platform.HostEnvironment.fromProcess(self.env_map);
+        var mcp_host_environment = mcp_platform.HostEnvironment.fromProcess(self.env_map);
         const startup_preparation = try mcp_startup.prepare(
             self.mcp_configuration_store,
             if (self.mcp_credential_store) |*store| store else null,
@@ -199,6 +200,8 @@ const App = struct {
             null,
         );
         self.agent_runtime = agent_runtime;
+        self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, agent_runtime);
+        mcp_host_environment.catalog_budget = self.mcp_budget;
         self.mcp_authorizations = .{ .allocator = std.heap.c_allocator };
         // Startup preparation may transiently own resolved credential bytes.
         // The empty Runtime cannot consume them, and Product Control must never
@@ -215,6 +218,7 @@ const App = struct {
             .secret_capture = custom_provider_capability_available,
             .model_test = custom_provider_capability_available,
         };
+        configuration.mcp_catalog = self.mcp_budget.?.catalog();
         configuration.mcp = .{
             .preparation = &preparation,
             .activation = null,
@@ -285,6 +289,7 @@ const App = struct {
             &self.mcp_authorizations.?,
             mcp_oauth_coordinator.platformHost(&self.platform),
         );
+        self.mcp_oauth_refresh.?.catalog_budget = self.mcp_budget;
         self.mcp_oauth_refresh.?.start();
         const account = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
@@ -468,12 +473,15 @@ const App = struct {
                     coordinator.drain();
                 if (self.models_coordinator) |coordinator|
                     coordinator.drain();
-                if (self.mcp_oauth_refresh) |*coordinator|
+                if (self.mcp_oauth_refresh) |*coordinator| {
                     if (!coordinator.drain()) coordinator.reconcileTimer();
+                }
                 if (self.mcp_management) |*coordinator|
                     if (coordinator.drain())
                         if (self.mcp_oauth_refresh) |*refresh|
                             refresh.reconcileTimer();
+                if (self.mcp_oauth_refresh) |*coordinator|
+                    _ = coordinator.runDueMaintenance();
                 self.drainAgentEvents();
                 if (self.control) |control|
                     if (self.dispatcher) |dispatcher| {
@@ -781,6 +789,10 @@ pub fn run(init: std.process.Init) !void {
                 app.mcp_authorizations = null;
             }
             runtime.deinit();
+        }
+        if (app.mcp_budget) |budget| {
+            budget.release();
+            app.mcp_budget = null;
         }
     }
 

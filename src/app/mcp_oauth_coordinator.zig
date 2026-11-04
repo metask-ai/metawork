@@ -204,6 +204,7 @@ const RefreshJob = struct {
 };
 
 pub const Coordinator = struct {
+    catalog_budget: ?*mcp_platform.CatalogBudget = null,
     allocator: std.mem.Allocator,
     io: std.Io,
     control: control_ports.McpOauthPort,
@@ -246,6 +247,17 @@ pub const Coordinator = struct {
         if (self.stopping) return;
         _ = self.drainRuntimeAuthFailures();
         self.armEarliest();
+    }
+
+    /// A completed apply yields here before another candidate. A raw expired
+    /// grant does not hold candidates while the Host's retry floor is pending.
+    pub fn runDueMaintenance(self: *Coordinator) bool {
+        if (self.stopping or self.job != null) return false;
+        const now_ms = self.host.now_unix_ms_fn(self.host.context) orelse return false;
+        if (self.retry_not_before_unix_ms) |not_before| if (now_ms < not_before) return false;
+        const expiry = self.control.nextMcpOauthExpiry() orelse return false;
+        if (expiry.expires_at_unix_ms > now_ms) return false;
+        return self.onTimer();
     }
 
     pub fn onTimer(self: *Coordinator) bool {
@@ -377,7 +389,7 @@ pub const Coordinator = struct {
             .refresh_token = refresh_token,
             .now_unix_ms = now_unix_ms,
             .cancellation = .init(self.io),
-            .deadline = std.Io.Clock.Timestamp.fromNow(self.io, refresh_timeout),
+            .deadline = if (self.catalog_budget) |budget| budget.limitDeadline(std.Io.Clock.Timestamp.fromNow(self.io, refresh_timeout), 30_000) else std.Io.Clock.Timestamp.fromNow(self.io, refresh_timeout),
         };
         binding_owned = false;
         client_secret_owned = false;
@@ -613,7 +625,7 @@ fn refreshDiscoveryCoveredByConsent(
     return true;
 }
 
-test "MCP unchanged coordinator respects Product per-server retry and its global floor" {
+test "MCP OAuth maintenance respects backoff membership and disabled deletion boundaries" {
     const agent = @import("metawork_agent");
     const config = mcp_types.contract;
     const Fixture = struct {
@@ -622,6 +634,7 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
         runtime: ?*mcp_types.Runtime = null,
         attempts: [2]u8 = undefined,
         count: usize = 0,
+        retired_locators: usize = 0,
         fn now(raw: *anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.now_ms;
@@ -648,6 +661,13 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.attempts[self.count] = id[0];
             self.count += 1;
+            // A prerequisite can disappear after the timer selected this
+            // server. Exercise the real, definite pre-effect rejection and
+            // its per-server backoff without entering credential effects.
+            const server = &mcp_types.testing.state(self.runtime.?).management.?.desired.?.value.servers[if (id[0] == 'a') @as(usize, 0) else 1];
+            const reference = server.auth.oauth.?.grant.?.refresh_token_ref;
+            server.auth.oauth.?.grant.?.refresh_token_ref = null;
+            defer server.auth.oauth.?.grant.?.refresh_token_ref = reference;
             return self.runtime.?.beginOauthRefresh(id);
         }
         fn complete(_: *anyopaque, _: config.CompleteRefreshInput, _: mcp_types.McpOauthRuntimeCommit) anyerror!config.ManagementOutcome {
@@ -687,6 +707,14 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
         fn persist(_: ?*anyopaque, _: []const u8) config.PersistenceEffect {
             return .committed;
         }
+        fn deleteCredential(raw: ?*anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.retired_locators += 1;
+            return true;
+        }
+        fn clearJournal(_: ?*anyopaque) config.PersistenceEffect {
+            return .committed;
+        }
         fn fill(_: ?*anyopaque, bytes: *[16]u8) bool {
             @memset(bytes, 1);
             return true;
@@ -694,7 +722,7 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     };
     var fixture = Fixture{};
     const allocator = std.testing.allocator;
-    const limits: config.Limits = .{ .max_servers = 2, .max_tools_per_server = 1, .max_namespace_bytes = 128, .max_credential_locators = 8, .max_runtime_secrets_per_server = 4, .max_runtime_secret_bytes_per_server = 4096 };
+    const limits: config.Limits = .{ .max_servers = 3, .max_tools_per_server = 1, .max_namespace_bytes = 128, .max_credential_locators = 8, .max_runtime_secrets_per_server = 4, .max_runtime_secret_bytes_per_server = 4096 };
     var servers = [_]config.ServerWire{undefined} ** 2;
     var approvals: [2][64]u8 = undefined;
     var consents: [2][64]u8 = undefined;
@@ -714,7 +742,7 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     var buffer: [8192]u8 = undefined;
     var preparation = try config.prepare(allocator, try config.encode(&buffer, desired, limits), true, false, .{ .available = true, .resolve_fn = Fixture.resolve }, limits);
     var manifest = (try config.RuntimeManifest.candidate(allocator, &preparation)).?;
-    const management = try config.ManagementPort.init(allocator, desired, .{ .persistence = .{ .available = true, .commit_registry_fn = Fixture.persist }, .credentials = .{ .available = true }, .identity_generator = .{ .available = true, .fill_fn = Fixture.fill }, .limits = limits, .runtime_manifest = &manifest });
+    const management = try config.ManagementPort.init(allocator, desired, .{ .persistence = .{ .available = true, .commit_journal_fn = Fixture.persist, .commit_registry_fn = Fixture.persist, .clear_journal_fn = Fixture.clearJournal }, .credentials = .{ .context = &fixture, .available = true, .delete_fn = Fixture.deleteCredential }, .identity_generator = .{ .available = true, .fill_fn = Fixture.fill }, .limits = limits, .runtime_manifest = &manifest });
     var runtime = mcp_types.testing.init(allocator, .{
         .executor = .{ .context = &fixture, .enqueue_fn = Fixture.enqueue, .cancel_fn = Fixture.cancel },
         .catalog = .{ .context = &fixture, .activate_fn = Fixture.activate, .create_admission_selection_fn = Fixture.selection, .prepare_restore_selection_fn = Fixture.restore },
@@ -724,9 +752,9 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     }, .{ .preparation = preparation.take(), .activation = null, .activation_failed = false, .management = management, .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } }, .host_capabilities = .{}, .committed = true });
     defer runtime.deinit();
     fixture.runtime = &runtime;
-    // Product rejects credential effects before launch without activation.
-    // Reconciliation still observes the real, empty authorization mapping.
-    var credential_store: mcp_platform.CredentialStore = undefined;
+    // The fixture above rejects before launch. This adapter also rejects a
+    // credential read on this thread if a regression reaches that boundary.
+    var credential_store: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = undefined, .main_thread_id = std.Thread.getCurrentId() ^ 1 };
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = allocator };
     defer authorizations.deinit();
     var coordinator = Coordinator.init(allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credential_store, &authorizations, .{ .context = &fixture, .now_unix_ms_fn = Fixture.now, .arm_fn = Fixture.arm, .cancel_fn = Fixture.cancelTimer, .notify_fn = Fixture.notify });
@@ -735,12 +763,20 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     fixture.now_ms = 33_000;
     _ = coordinator.onTimer();
     try std.testing.expectEqual(@as(?u64, 63_000), fixture.armed);
+    try std.testing.expect(!coordinator.runDueMaintenance());
+    const state = mcp_types.testing.state(&runtime);
+    state.host_capabilities.oauth = true;
+    state.host_capabilities.connection_approval = true;
+    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Unrelated candidate", .url = "https://candidate.example.test/mcp" }));
+    var candidate = (try runtime.prepareConfigurationStep(2, false)).?;
+    defer candidate.deinit();
+    try std.testing.expectEqual(.add, candidate.target.kind);
+    try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
     fixture.now_ms = fixture.armed.?;
     _ = coordinator.onTimer();
     try std.testing.expectEqualStrings("ab", &fixture.attempts);
     try std.testing.expect(coordinator.job == null);
     try std.testing.expectEqual(@as(?u64, 40_000), mcp_types.testing.state(&runtime).management.?.desiredRegistry().?.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
-    const state = mcp_types.testing.state(&runtime);
     const managed = &state.management.?;
     const before = managed.oauth_schedule.eligibleAt("a", 40_000);
     state.configuration_apply_state = .applying;
@@ -749,7 +785,7 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     state.configuration_apply_state = .idle;
     // Exercise the Product clear path used by discovery failure, without a
     // real credential store or network. It must defer only the bound server.
-    var marker = switch (try managed.prepareBeginRefresh(1, .{ .server_id = "a" })) {
+    var marker = switch (try managed.prepareBeginRefresh(managed.inspect().desired_generation.?, .{ .server_id = "a" })) {
         .prepared => |value| value,
         .rejected => return error.TestUnexpectedResult,
     };
@@ -763,6 +799,23 @@ test "MCP unchanged coordinator respects Product per-server retry and its global
     try std.testing.expectEqual(@as(u64, 160_000), after_clear);
     try std.testing.expectEqual(.rejected, try runtime.clearOauthOperation(old_id));
     try std.testing.expectEqual(after_clear, managed.oauth_schedule.eligibleAt("a", 40_000));
+    try std.testing.expectEqual(.saved, try runtime.setServerEnabled(2, .{ .server_id = "b", .enabled = false }));
+    try std.testing.expect((try runtime.beginOauthRefresh("b")) == .rejected);
+    // This policy fixture supplies the live Task lifetime fact. The actual
+    // resource acquisition/deletion path is exercised by real Core tests.
+    state.management.?.runtime_manifest.?.entries[1].task_references = 1;
+    var retained_refresh = switch (try runtime.beginOauthRefresh("b")) {
+        .started => |binding| binding,
+        else => return error.TestUnexpectedResult,
+    };
+    defer retained_refresh.deinit();
+    try std.testing.expectEqualStrings("b", managed.desiredRegistry().?.oauth_operation.?.server_id);
+    try std.testing.expectEqual(.saved, try runtime.clearOauthOperation(retained_refresh.operation_id));
+    try std.testing.expectEqual(.saved, try runtime.removeServer(3, "b"));
+    try std.testing.expectEqual(@as(usize, 2), fixture.retired_locators);
+    try std.testing.expect((try runtime.beginOauthRefresh("b")) == .rejected);
+    try std.testing.expect(managed.desiredRegistry().?.oauth_operation == null);
+    try std.testing.expect(!std.mem.eql(u8, "b", runtime.nextOauthExpiry().?.server_id));
 }
 
 test "MCP OAuth refresh reuses consent only for the same resource and covered scopes" {

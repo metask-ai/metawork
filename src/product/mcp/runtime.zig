@@ -784,6 +784,14 @@ pub const Runtime = struct {
         if (desired.generation != expected_generation or desired.oauth_operation != null)
             return error.McpManagementUnavailable;
         if (retry) management.convergence.retry();
+        if (self.state.refresh_pending and try self.startPendingRefresh()) return error.CatalogLoading;
+        if (self.ports.timer.now()) |now_ms| {
+            if (self.state.refresh_deadline_ms) |deadline| {
+                if (!self.state.refresh_paused and now_ms >= deadline and now_ms >= (self.state.refresh_not_before_ms orelse 0)) {
+                    if (try self.queueRefresh(false, false)) return error.CatalogLoading;
+                }
+            }
+        }
         var members: std.ArrayList(configuration.ServerWire) = .empty;
         defer members.deinit(self.allocator);
         const manifest = if (management.runtime_manifest) |*value| value else return error.McpManagementUnavailable;
@@ -1597,10 +1605,13 @@ pub const Runtime = struct {
         self: *Runtime,
         preparation: *configuration.PreparedOauthOperationState,
     ) Error!state_module.McpOauthOperationBeginOutcome {
+        if (self.state.runtime_uncertain) return .rejected;
         var reduced = try self.admissionForTarget(preparation.target());
         var reduced_owned = true;
         defer if (reduced_owned) reduced.deinit();
-        if (reduced != .ready) return .rejected;
+        // A blocked authority already grants no new MCP access. Requiring a
+        // ready catalog here would deadlock token renewal after catalog/auth
+        // failure; the marker must atomically preserve that reduced state.
         const management = &self.state.management.?;
         switch (try management.commitPreparedOauthOperationState(preparation)) {
             .saved => {
@@ -1637,25 +1648,17 @@ pub const Runtime = struct {
             if (std.mem.eql(u8, operation.server_id, server_id)) return .rejected;
         const management = if (self.state.management) |*value| value else return .rejected;
         const inspection = management.inspect();
-        if (inspection.health != .ready or inspection.runtime_alignment != .current or
-            self.state.activation_failed)
-            return .rejected;
+        if (inspection.health != .ready) return .rejected;
         if (management.desiredRegistry().?.oauth_operation != null) return .rejected;
         var started = false;
         defer if (!started and management.inspect().health == .ready)
             management.oauth_schedule.deferServer(server_id, self.ports.unix_clock.nowMs());
-        const activation = self.state.activation orelse return .rejected;
-        var runtime_loaded = false;
-        for (activation.serverHealth()) |server| {
-            if (!std.mem.eql(u8, server.id, server_id)) continue;
-            runtime_loaded = true;
-            break;
-        }
-        if (!runtime_loaded) return .rejected;
         const desired = management.desiredRegistry() orelse return .rejected;
+        const server = state_module.findMcpServer(desired.servers, server_id) orelse return .rejected;
+        if (!policy.runtimeOauthRefreshEligible(&self.state, server)) return .rejected;
         var preparation = switch (try management.prepareBeginRefresh(
             desired.generation,
-            .{ .server_id = server_id },
+            .{ .server_id = server_id, .retained_member = !server.enabled },
         )) {
             .rejected => return .rejected,
             .prepared => |prepared| prepared,
@@ -1780,7 +1783,7 @@ pub const Runtime = struct {
 
     pub fn nextOauthExpiry(self: *const Runtime) ?state_module.McpOauthExpiry {
         if (self.state.runtime_uncertain) return null;
-        if (self.shutting_down) return null;
+        if (self.shutting_down or self.catalogBoundaryBusy()) return null;
         return policy.nextOauthExpiry(&self.state);
     }
 
@@ -1803,8 +1806,16 @@ pub const Runtime = struct {
             observed_at_ms,
         );
         var ttl_ms: ?u64 = null;
-        for (activation.catalogServers()) |server| if (server.fresh and server.ttl_remaining_ms != 0) {
-            ttl_ms = @min(ttl_ms orelse server.ttl_remaining_ms, server.ttl_remaining_ms);
+        if (self.state.admission == .ready) if (self.state.admission.ready.selection) |selection| {
+            for (selection.selectedTools()) |tool| {
+                const binding = for (activation.serverHealth()) |health| {
+                    if (std.mem.eql(u8, health.id, tool.server_id)) break health.binding_identity;
+                } else continue;
+                for (activation.catalogServers()) |server| {
+                    if (std.mem.eql(u8, &binding, &server.binding_identity) and server.fresh and server.ttl_remaining_ms != 0)
+                        ttl_ms = @min(ttl_ms orelse server.ttl_remaining_ms, server.ttl_remaining_ms);
+                }
+            }
         };
         if (ttl_ms) |ttl|
             self.state.expiry_deadline_ms = std.math.add(u64, observed_at_ms, ttl) catch null;
@@ -2217,10 +2228,12 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         try std.testing.expect(runtime.finishAuthorization("attempt"));
         const current = runtime.state.management.?.desiredRegistry().?;
         try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
-        const deadline = runtime.nextOauthExpiry().?.expires_at_unix_ms;
+        const deadline = runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000);
         try std.testing.expectEqual(@as(u64, 67_750), deadline);
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
         harness.unix_seconds = 80;
-        try std.testing.expectEqual(deadline, runtime.nextOauthExpiry().?.expires_at_unix_ms);
+        try std.testing.expectEqual(deadline, runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000));
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
         try std.testing.expectEqual(@as(?u64, 90_000), current.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
         harness.unix_seconds = 1;
         // Tokens now require real configuration apply; absence cannot pretend loaded.

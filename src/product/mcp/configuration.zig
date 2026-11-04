@@ -584,6 +584,8 @@ pub const BeginCodeExchangeInput = struct {
 
 pub const BeginRefreshInput = struct {
     server_id: []const u8,
+    /// Product has proved a disabled row is still the referenced actual source.
+    retained_member: bool = false,
 };
 
 pub const CompleteRefreshInput = struct {
@@ -1683,7 +1685,7 @@ pub const ManagementPort = struct {
         const oauth = server.auth.oauth orelse return .rejected;
         const consent = oauth.consent orelse return .rejected;
         const grant = oauth.grant orelse return .rejected;
-        if (!server.enabled or !std.mem.eql(u8, oauth.status, "ready") or
+        if ((!server.enabled and !input.retained_member) or !std.mem.eql(u8, oauth.status, "ready") or
             grant.refresh_token_ref == null or
             grant.consent_epoch != consent.epoch or
             grant.token_revision == std.math.maxInt(u64))
@@ -8914,7 +8916,7 @@ test "dynamic registration marker durably binds draft before issued identity" {
     );
 }
 
-test "OAuth refresh rebases unrelated changes and rotates fresh token locators" {
+test "disabled referenced OAuth refresh rebases unrelated changes and rotates fresh token locators" {
     const Harness = struct {
         entropy: u8 = 0,
 
@@ -8945,7 +8947,7 @@ test "OAuth refresh rebases unrelated changes and rotates fresh token locators" 
         .id = "oauth",
         .namespace = "oauth",
         .display_name = "OAuth",
-        .enabled = true,
+        .enabled = false,
         .negotiation = "automatic",
         .timeout_ms = 1000,
         .transport = .{
@@ -9032,8 +9034,10 @@ test "OAuth refresh rebases unrelated changes and rotates fresh token locators" 
         .limits = test_limits,
     });
     defer management.deinit();
+    try std.testing.expect((try management.prepareBeginRefresh(20, .{ .server_id = "oauth" })) == .rejected);
     var begin = switch (try management.prepareBeginRefresh(20, .{
         .server_id = "oauth",
+        .retained_member = true,
     })) {
         .prepared => |prepared| prepared,
         .rejected => return error.TestUnexpectedResult,

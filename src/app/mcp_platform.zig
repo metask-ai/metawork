@@ -11,6 +11,8 @@ const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 const process_compat = @import("metawork_mcp_process_compat");
+const catalog_budget = @import("mcp_catalog_budget.zig");
+pub const CatalogBudget = catalog_budget.Budget;
 
 // Shared by formal connections and disposable test Runtime connections.
 // Core-internal process creation cannot participate in this lock.
@@ -840,6 +842,7 @@ pub const RuntimeBuild = struct {
 };
 
 pub const HostEnvironment = struct {
+    catalog_budget: ?*catalog_budget.Budget = null,
     executable_search_path: ?[]const u8 = null,
     windows_system_root: ?[]const u8 = null,
 
@@ -923,6 +926,13 @@ pub fn buildRuntime(
             allocator.destroy(owner);
             return err;
         };
+        if (host_environment.catalog_budget) |budget| {
+            owner.* = budget.wrap(owner) catch |err| {
+                owner.deinit();
+                allocator.destroy(owner);
+                return err;
+            };
+        }
         if (authorization) |slot| {
             authorization_list.append(allocator, slot) catch |err| {
                 owner.deinit();

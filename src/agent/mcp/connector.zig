@@ -77,6 +77,16 @@ pub const Transport = struct {
         u32,
         Cancellation,
     ) ExchangeOutcome,
+    /// Optional official tools/call route. Existing transports may use
+    /// request_fn for both routes; Application budgets can distinguish them
+    /// without decoding MCP JSON or limiting an unrelated live tool call.
+    tool_request_fn: ?*const fn (
+        *anyopaque,
+        std.mem.Allocator,
+        []const u8,
+        u32,
+        Cancellation,
+    ) ExchangeOutcome = null,
     notify_fn: *const fn (
         *anyopaque,
         []const u8,
@@ -359,7 +369,7 @@ pub const Adapter = struct {
         const cancellation = makeCancellation(raw_cancellation, &bridge) catch
             return wire.MCP_EXCHANGE_FATAL;
         if (cancellation.isCancelled()) return wire.MCP_EXCHANGE_CANCELLED;
-        return switch (self.transport.request_fn(
+        return switch ((self.transport.tool_request_fn orelse self.transport.request_fn)(
             connection.backend,
             self.allocator,
             encoded,

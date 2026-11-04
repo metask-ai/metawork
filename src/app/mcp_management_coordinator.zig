@@ -493,6 +493,7 @@ const ConfigurationApplyJob = struct {
     input: ?agent.McpRuntimeInput,
     authorizations: mcp_platform.HttpAuthorizations,
     allowlists: []agent.McpServerAllowlist,
+    budget: ?*mcp_platform.CatalogBudget = null,
     product_state_installed: bool = false,
     result: ConfigurationApplyResult = .pending,
     finished: std.atomic.Value(bool) = .init(false),
@@ -503,6 +504,11 @@ const ConfigurationApplyJob = struct {
     }
 
     fn run(self: *ConfigurationApplyJob) void {
+        if (self.budget) |budget| budget.begin(self.allowlists.len) catch {
+            self.publish(.failed);
+            return;
+        };
+        defer if (self.budget) |budget| budget.end();
         const input = if (self.input) |*value| value else {
             self.publish(.failed);
             return;
@@ -515,6 +521,10 @@ const ConfigurationApplyJob = struct {
             self.publish(.rejected);
             return;
         }
+        if (self.budget) |budget| budget.applied(self.allowlists.len) catch {
+            self.publish(.{ .applied = .{ .activation = null, .selection = null, .activation_failed = true } });
+            return;
+        };
         const activation_outcome = self.runtime.activateMcp() catch {
             self.publish(.{ .applied = .{
                 .activation = null,
@@ -535,6 +545,11 @@ const ConfigurationApplyJob = struct {
                 .activation_failed = true,
             } }),
             .activated => |activation| {
+                if (self.budget) |budget| budget.observe(activation) catch {
+                    activation.deinit();
+                    self.publish(.{ .applied = .{ .activation = null, .selection = null, .activation_failed = true } });
+                    return;
+                };
                 if (activation.takeSelection()) |startup_selection|
                     startup_selection.deinit();
                 const selection = self.runtime.createMcpAdmissionSelection(
@@ -764,11 +779,15 @@ pub const Coordinator = struct {
             if (state_index != index) state.* = .disabled;
         }
 
+        // A diagnostic Runtime is a separate fault domain and does not
+        // borrow the formal Runtime's serialized catalog budget.
+        var test_environment = self.host_environment;
+        test_environment.catalog_budget = null;
         var runtime_build = mcp_platform.buildRuntime(
             self.io,
             self.allocator,
             &preparation,
-            self.host_environment,
+            test_environment,
         ) catch return .unavailable;
         defer runtime_build.deinit();
         const input = if (runtime_build.input) |*value| value else return .unavailable;
@@ -878,6 +897,7 @@ pub const Coordinator = struct {
             .input = input,
             .authorizations = authorizations,
             .allowlists = allowlists,
+            .budget = self.host_environment.catalog_budget,
         };
         // Ownership has moved even if thread creation fails.
         preparation_owned = false;
@@ -929,7 +949,10 @@ pub const Coordinator = struct {
                 }
                 self.configuration_apply_job = null;
                 apply_job.deinit();
-                changed = true;
+                // Give due maintenance one main-loop opportunity before the
+                // next candidate. Admission already reflects this settled step.
+                self.host.notify();
+                return true;
             }
         }
         if (self.connection_test_job) |test_job| {
@@ -1110,7 +1133,7 @@ pub const Coordinator = struct {
             .transport_override = self.transport_override,
             .input = input,
             .cancellation = .init(self.io),
-            .deadline = flow.deadline,
+            .deadline = if (self.host_environment.catalog_budget != null and (input == .registration or input == .exchange)) self.host_environment.catalog_budget.?.limitDeadline(flow.deadline, 30_000) else flow.deadline,
         };
         input_owned = false;
         errdefer {

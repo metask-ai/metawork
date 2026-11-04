@@ -182,8 +182,8 @@ pub fn buildOauthRefreshBinding(
     const scopes = try owned.alloc([]const u8, consent.scopes.len);
     for (consent.scopes, scopes) |scope, *owned_scope|
         owned_scope.* = try owned.dupe(u8, scope);
-    return .{
-        .arena = arena,
+    var result: mcp_state.McpOauthRefreshBinding = .{
+        .arena = undefined,
         .operation_id = try owned.dupe(u8, operation.id),
         .server_id = try owned.dupe(u8, operation.server_id),
         .endpoint = try owned.dupe(u8, server.transport.url.?),
@@ -203,6 +203,8 @@ pub fn buildOauthRefreshBinding(
         .consent_epoch = operation.consent_epoch,
         .token_revision = operation.token_revision.?,
     };
+    result.arena = arena;
+    return result;
 }
 
 fn refreshToolsForServer(
@@ -331,6 +333,17 @@ pub fn serverOperationBusy(
     return std.mem.eql(u8, operation.server_id, server_id);
 }
 
+pub fn runtimeOauthRefreshEligible(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    if (!mcp_configuration.serverRuntimeAuthorizationReady(server)) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    const manifest = management.runtime_manifest orelse return false;
+    for (manifest.entries) |entry| {
+        if (!std.mem.eql(u8, entry.id, server.id) or entry.state != .loaded) continue;
+        return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server)) and (server.enabled or entry.task_references != 0);
+    }
+    return false;
+}
+
 pub fn nextOauthExpiry(
     mcp: *const mcp_state.McpProductState,
 ) ?mcp_state.McpOauthExpiry {
@@ -342,7 +355,7 @@ pub fn nextOauthExpiry(
     for (registry.servers) |server| {
         if (mcp.authorization_operation) |operation|
             if (std.mem.eql(u8, operation.server_id, server.id)) continue;
-        if (!serverAdmittedByDesiredState(server)) continue;
+        if (!runtimeOauthRefreshEligible(mcp, server)) continue;
         const oauth = server.auth.oauth orelse continue;
         const grant = oauth.grant orelse continue;
         if (grant.refresh_token_ref == null) continue;
@@ -547,9 +560,35 @@ test "browser authorization excludes only its server from OAuth refresh selectio
     management_owned = false;
     defer state.deinit();
 
+    state.management.?.runtime_manifest = actual: {
+        const Entry = @typeInfo(@FieldType(mcp_configuration.RuntimeManifest, "entries")).pointer.child;
+        const entries = try std.testing.allocator.alloc(Entry, servers.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (entries[0..initialized]) |entry| std.testing.allocator.free(entry.id);
+            std.testing.allocator.free(entries);
+        }
+        for (servers, entries) |server, *entry| {
+            entry.* = .{ .id = try std.testing.allocator.dupe(u8, server.id), .state = .{ .loaded = mcp_configuration.runtimeDescriptorFingerprint(server) } };
+            initialized += 1;
+        }
+        break :actual .{ .allocator = std.testing.allocator, .entries = entries };
+    };
     const expiry = nextOauthExpiry(&state).?;
     try std.testing.expectEqualStrings("refreshable", expiry.server_id);
     try std.testing.expectEqual(@as(u64, 200), expiry.expires_at_unix_ms);
+    const current = state.management.?.desired.?.value.servers;
+    current[1].enabled = false;
+    try std.testing.expect(nextOauthExpiry(&state) == null);
+    state.management.?.runtime_manifest.?.entries[1].task_references = 1;
+    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state).?.server_id);
+    try std.testing.expectEqual(@as(usize, 0), serverToolsForAdmission(state.management.?.desiredRegistry().?, current[1]).len);
+    current[1].timeout_ms += 1;
+    try std.testing.expect(nextOauthExpiry(&state) == null);
+    current[1].timeout_ms -= 1;
+    // A referenced actual member has no refresh route after Desired deletion.
+    state.management.?.desired.?.value.servers = current[0..1];
+    try std.testing.expect(nextOauthExpiry(&state) == null);
 }
 
 test "OAuth operation remains excluded from every rebuilt Admission target" {

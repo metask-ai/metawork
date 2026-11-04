@@ -294,13 +294,13 @@ Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事�
 
 MCP mutation 先提交 canonical Desired；Product Control 再以最后已确认的 Runtime Manifest 为起点，每步加入、替换或移除一个目标，构造完整成员集合。Application coordinator 只执行该步 preparation、Agent declarative apply 与正式 Activation；Product Control 逐步接纳 Manifest、Activation 与按当前授权派生的 Admission Authority，不等待整轮结束。Agent 复用未变化成员的 connector owner，不为每步复制整组执行资源。已有 Session 保持创建时的 authority 上限，由 Core 按实际来源和目录重新评估，不热替换其 Selection。
 
-registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。正式拒绝只记录对应目标本次未接管，并保留仍可证明有效的旧 Runtime/catalog authority；新准入仍须按当前已提交授权、来源版本与原 deadline 过滤，不能恢复旧权限或重置 TTL。无法信任的 ABI/report 必须停止后续 MCP effect、关闭相应准入，并保留 Core 可能持有的资源直到安全释放；不能把未确认的 descriptor 标记为 loaded。已应用但 Activation 失败时保留接管事实，以既有有界目录刷新恢复 authority，不重新应用已确认的成员。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。
+registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。正式拒绝只记录对应目标本次未接管，并保留仍可证明有效的旧 Runtime/catalog authority；新准入仍须按当前已提交授权、来源版本与原 deadline 过滤，不能恢复旧权限或重置 TTL。无法信任的 ABI/report 必须停止后续 MCP effect、关闭相应准入，并保留 Core 可能持有的资源直到安全释放；不能把未确认的 descriptor 标记为 loaded。已应用但 Activation 失败时保留接管事实，以既有有界目录刷新恢复 authority，不重新应用已确认的成员。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。 Application 对正式 apply 及后续 Activation 使用同一个有界绝对 transport 预算，并按实际成员分配额度，使已加载成员后来挂起也不能无界占住串行边界；独立 catalog 维护及持有 marker 的 OAuth 单步也有界。预算依据尚有效的 freshness facts 收紧，不改写 TTL；官方 tool execution 回调保留独立执行 timeout，不能借管理预算切断健康工具调用。每步结算后让维护获得一次调度机会，目录退避及 OAuth Host 全局时间下限期间仍可推进候选，不因一个已到期但尚不能调度的维护项永远阻塞收敛。
 
 `runtimeAlignment = current` 表示目标已处理且结果已接纳，不表示全部服务健康。逐目标结果绑定来源版本；无关 Desired generation 或成员增加不重开失败。相关成员移除、替换可以在本轮结束后重开，单轮每个候选最多尝试一次；显式应用重试可重开失败结果，目录刷新不隐式重试未加入的来源。结果存储必须在 effect 前准备，后续失败不能抹掉此前已确认的接管。
 
 Task 在 Session 创建前取得进程内 MCP 引用，引用只拥有原工具 cap、来源版本与当前显式授权上限，不拥有凭据；创建失败、null authority 降级或 prepared rollback 必须释放引用。Task 的 Session 关闭、释放、恢复或模型切换不释放引用，只有 Task 删除明确提交后才释放；删除失败或结果未知必须保留。引用计数按实际来源版本计算，不得阻止 enabled 来源替换。
 
-Disable/Delete 排除该来源的新 Task authority；有 Task 引用时保留实际成员，最后引用释放后自动收敛移除。disabled Edit 只更新 Desired，已有引用继续使用已应用版本，重新启用后才尝试替换。恢复按该 Task 原 cap、checkpoint、当前显式撤权、可信来源和仍有效的 catalog 取交集；不以其他来源的 pending/删除状态作全局拒绝。Delete 保留删除前最后提交的工具授权上限，不能复活先前撤销项；enabled 来源变化仍须在关闭原 Session 前拒绝旧来源恢复。原本 null/空 authority 保持 null，进程引用不写入持久化格式，也不在冷启动重建已删除来源。
+Disable/Delete 排除该来源的新 Task authority；有 Task 引用时保留实际成员，最后引用释放后自动收敛移除。disabled Edit 只更新 Desired，已有引用继续使用已应用版本，重新启用后才尝试替换。恢复按该 Task 原 cap、checkpoint、当前显式撤权、可信来源和仍有效的 catalog 取交集；不以其他来源的 pending/删除状态作全局拒绝。Delete 保留删除前最后提交的工具授权上限，不能复活先前撤销项；enabled 来源变化仍须在关闭原 Session 前拒绝旧来源恢复。原本 null/空 authority 保持 null，进程引用不写入持久化格式，也不在冷启动重建已删除来源。 OAuth 续期必须证明 Desired 仍存在、有效授权与实际来源版本一致；disabled 成员还必须有 Task 引用。Delete 不续期，按现有事务立即退休凭据，已有执行副本只使用现存 access token 到自然到期。目录不可用不应与 OAuth 续期互相等待：能够证明成员及授权资格时，可先持久提交 blocked/reduced Admission 后开始操作；不能证明已收缩授权、准备失败或接管结果未知时不产生外部 effect。
 
 
 credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。

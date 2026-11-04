@@ -412,6 +412,7 @@ pub const Configuration = struct {
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
     mcp_refresh_timer: McpRefreshTimer = .{},
+    mcp_catalog: ?product_mcp.Catalog = null,
     schedule_persistence: SchedulePersistence = .{},
     task_persistence: TaskPersistence = .{},
     checkpoint_store: CheckpointStoreConfiguration = .{},
@@ -891,14 +892,14 @@ fn mcpTimerPort(timer: McpRefreshTimer) mcp_ports.Timer {
 
 fn productMcpPorts(
     executor: *executor_impl.Executor,
-    runtime: *lifecycle.Runtime,
+    catalog: mcp_ports.Catalog,
     timer: McpRefreshTimer,
     notifier: ChangeNotifier,
     clock: ScheduleTimer,
 ) mcp_ports.Ports {
     return .{
         .executor = mcpExecutorPort(executor),
-        .catalog = mcpCatalogPort(runtime),
+        .catalog = catalog,
         .timer = mcpTimerPort(timer),
         .notifier = mcpNotifierPort(notifier),
         .unix_clock = .{ .enabled = clock.enabled, .context = clock.context, .now_seconds_fn = clock.now_unix_seconds },
@@ -1772,7 +1773,7 @@ pub const Runtime = struct {
             control.mcp = startup.takeRuntime(
                 productMcpPorts(
                     mcp_executor.?,
-                    agent_runtime,
+                    configuration.mcp_catalog orelse mcpCatalogPort(agent_runtime),
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
                     configuration.schedule_timer,
@@ -20147,7 +20148,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         control.allocator,
         productMcpPorts(
             control.executor,
-            control.agent_runtime,
+            mcpCatalogPort(control.agent_runtime),
             .{},
             .{},
             .{},
