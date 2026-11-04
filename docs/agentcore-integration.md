@@ -435,7 +435,7 @@ flowchart LR
 | `usage`                         | pump 逐项保留；Renderer projection 根据 AgentCore 事件语义累计或替换                      |
 | diagnostics                     | 按明确配置采样                                                                            |
 | tool start/result               | 不得静默丢失                                                                              |
-| `file_changes`                  | 正常有界事件逐项保留；只有已确认该顶层类型的容量/尺寸失败可降级并设置 `file_changes_lost` |
+| `file_changes`                  | 正常队列拥塞时背压等待；只有已确认该顶层类型的无法接纳尺寸或 owned copy 失败可降级并设置 `file_changes_lost` |
 | UI request/response state       | 不得静默丢失                                                                              |
 | run/error/cancel/terminal state | 不得静默丢失                                                                              |
 
@@ -445,7 +445,7 @@ flowchart LR
 
 Application 将 Agent 消费通知接入既有 RequiredWake，沿用非阻塞 request、pending 合并与交付；每轮预算耗尽仍有事件时请求后续 wake。通知 unavailable 表示消费路径关闭，解除队列等待并按既有控制路径请求取消，合法 `on_event` 返回 `EVENT_CONTINUE`；匹配 abort 可从 callback 调用。不要另建周期重试或通过 callback fatal 退出。RequiredWake 对底层通知合同违约的原失败处理保持不变。正文记录政策由 Product 合同拥有，本节不授权静默丢弃 text_chunk。
 
-`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 有界单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode 容量不足或 pump admission 容量不足可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在与 Host 相同的总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
+`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 有界单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode/copy 容量不足，或单事件超过整个可用队列字节容量时，可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；正常 count/bytes 拥塞与其他事件一样背压等待，不能把主线程同步提交造成的暂时饱和视为丢失理由。malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在与 Host 相同的总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
 
 按 Session 公平轮转，单一高输出 Session 不得饿死其他 Session。控制容量不能被文本增量占满。
 

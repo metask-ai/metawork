@@ -2978,12 +2978,7 @@ pub const Session = struct {
             .allocator = self.agent_runtime.allocator,
         };
         const event_kind = std.meta.activeTag(parsed.value.known);
-        const admission: event_pump.Error!void = if (self.event_delivery_stopped.load(.acquire))
-            error.ConsumerStopped
-        else if (is_file_changes)
-            self.agent_runtime.events.enqueue(envelope)
-        else
-            self.agent_runtime.events.enqueueWaiting(envelope, &self.event_delivery_stopped);
+        const admission: event_pump.Error!void = self.agent_runtime.events.enqueueWaiting(envelope, &self.event_delivery_stopped);
         admission catch |err| {
             envelope.deinit();
             if (err == error.ConsumerStopped) {
@@ -2991,13 +2986,7 @@ pub const Session = struct {
                 if (is_file_changes) self.file_changes_lost.store(true, .release);
                 return wire.EVENT_CONTINUE;
             }
-            if (is_file_changes and switch (err) {
-                error.GlobalCapacity,
-                error.SessionCapacity,
-                error.SessionSlotCapacity,
-                => true,
-                else => false,
-            }) {
+            if (is_file_changes and err == error.EventTooLarge) {
                 self.file_changes_lost.store(true, .release);
                 return wire.EVENT_CONTINUE;
             }

@@ -3696,79 +3696,85 @@ test "typed Core events are deep-copied into a bounded routed sink" {
 }
 
 test "saturated event queue waits beyond the old deadline and resumes without poison" {
-    fake_core.reset();
-    fake_core.setNextPlan(.event_callback);
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 1,
-        .event_capacity = 1,
-        .per_session_event_capacity = 1,
-        .control_reserved_capacity = 0,
-        .per_session_control_reserved_capacity = 0,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
+    for ([_]Plan{ .event_callback, .file_changes_callback }) |plan| {
+        fake_core.reset();
+        fake_core.setNextPlan(plan);
+        const runtime = try createTestComposition(.{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_sessions = 1,
+            .event_capacity = 1,
+            .per_session_event_capacity = 1,
+            .control_reserved_capacity = 0,
+            .per_session_control_reserved_capacity = 0,
+        });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        const session = try openSession(runtime);
+        const first_run = try submitSession(session, "retain first event");
+        try session.waitRun(first_run);
+        var first_terminal = takeTestTerminal(session, first_run);
+        defer first_terminal.deinit();
+        const second_run = try submitSession(session, "wait for consumer");
+        try session.waitForState(.running);
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(150), .awake);
+        try std.testing.expectEqual(lifecycle.SessionState.running, session.snapshot().state);
+        var first = runtime.takeEvent().?;
+        first.deinit();
+        try session.waitRun(second_run);
+        var terminal = takeTestTerminal(session, second_run);
+        defer terminal.deinit();
+        try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+        try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, terminal.session_disposition_at_completion);
+        try std.testing.expect(!terminal.event_delivery_lost);
+        try std.testing.expect(!terminal.file_changes_lost);
+        try std.testing.expect(terminal.termination_signal == null);
+        var second = runtime.takeEvent().?;
+        defer second.deinit();
+        try std.testing.expectEqual(second_run, second.run_id);
+        try closeSession(session, .session_close);
     }
-    const session = try openSession(runtime);
-    const first_run = try submitSession(session, "retain first event");
-    try session.waitRun(first_run);
-    var first_terminal = takeTestTerminal(session, first_run);
-    defer first_terminal.deinit();
-    const second_run = try submitSession(session, "wait for consumer");
-    try session.waitForState(.running);
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(150), .awake);
-    try std.testing.expectEqual(lifecycle.SessionState.running, session.snapshot().state);
-    var first = runtime.takeEvent().?;
-    first.deinit();
-    try session.waitRun(second_run);
-    var terminal = takeTestTerminal(session, second_run);
-    defer terminal.deinit();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
-    try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, terminal.session_disposition_at_completion);
-    try std.testing.expect(!terminal.event_delivery_lost);
-    try std.testing.expect(terminal.termination_signal == null);
-    var second = runtime.takeEvent().?;
-    defer second.deinit();
-    try std.testing.expectEqual(second_run, second.run_id);
-    try closeSession(session, .session_close);
 }
 
 test "close wakes a saturated event callback without fatal or poison" {
-    fake_core.reset();
-    fake_core.setNextPlan(.event_callback);
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 1,
-        .event_capacity = 1,
-        .per_session_event_capacity = 1,
-        .control_reserved_capacity = 0,
-        .per_session_control_reserved_capacity = 0,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
+    for ([_]Plan{ .event_callback, .file_changes_callback }) |plan| {
+        fake_core.reset();
+        fake_core.setNextPlan(plan);
+        const runtime = try createTestComposition(.{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_sessions = 1,
+            .event_capacity = 1,
+            .per_session_event_capacity = 1,
+            .control_reserved_capacity = 0,
+            .per_session_control_reserved_capacity = 0,
+        });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        const session = try openSession(runtime);
+        const first_run = try submitSession(session, "retain first event");
+        try session.waitRun(first_run);
+        var first_terminal = takeTestTerminal(session, first_run);
+        defer first_terminal.deinit();
+        const second_run = try submitSession(session, "close while waiting for consumer");
+        try session.waitForState(.running);
+        try closeSession(session, .session_close);
+        var terminal = takeTestTerminal(session, second_run);
+        defer terminal.deinit();
+        try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+        try std.testing.expect(terminal.event_delivery_lost);
+        try std.testing.expectEqual(plan == .file_changes_callback, terminal.file_changes_lost);
+        try std.testing.expect(terminal.first_callback_rejection == null);
+        try std.testing.expectEqual(lifecycle.SessionState.closed, session.snapshot().state);
+        var retained = runtime.takeEvent().?;
+        defer retained.deinit();
+        try std.testing.expectEqual(first_run, retained.run_id);
+        try std.testing.expect(runtime.takeEvent() == null);
     }
-    const session = try openSession(runtime);
-    const first_run = try submitSession(session, "retain first event");
-    try session.waitRun(first_run);
-    var first_terminal = takeTestTerminal(session, first_run);
-    defer first_terminal.deinit();
-    const second_run = try submitSession(session, "close while waiting for consumer");
-    try session.waitForState(.running);
-    try closeSession(session, .session_close);
-    var terminal = takeTestTerminal(session, second_run);
-    defer terminal.deinit();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
-    try std.testing.expect(terminal.event_delivery_lost);
-    try std.testing.expect(terminal.first_callback_rejection == null);
-    try std.testing.expectEqual(lifecycle.SessionState.closed, session.snapshot().state);
-    var retained = runtime.takeEvent().?;
-    defer retained.deinit();
-    try std.testing.expectEqual(first_run, retained.run_id);
-    try std.testing.expect(runtime.takeEvent() == null);
 }
 
 test "close returns a matched generated image through the terminal tail when its event cannot enqueue" {
@@ -3851,80 +3857,73 @@ test "close returns a matched generated image through the terminal tail when its
 }
 
 test "ordinary Stop leaves the saturated event callback waiting for consumption" {
-    fake_core.reset();
-    fake_core.setNextPlan(.event_callback);
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 1,
-        .event_capacity = 1,
-        .per_session_event_capacity = 1,
-        .control_reserved_capacity = 0,
-        .per_session_control_reserved_capacity = 0,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
+    for ([_]Plan{ .event_callback, .file_changes_callback }) |plan| {
+        fake_core.reset();
+        fake_core.setNextPlan(plan);
+        const runtime = try createTestComposition(.{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_sessions = 1,
+            .event_capacity = 1,
+            .per_session_event_capacity = 1,
+            .control_reserved_capacity = 0,
+            .per_session_control_reserved_capacity = 0,
+        });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        const session = try openSession(runtime);
+        const first_run = try submitSession(session, "retain first event");
+        try session.waitRun(first_run);
+        var first_terminal = takeTestTerminal(session, first_run);
+        defer first_terminal.deinit();
+        const second_run = try submitSession(session, "stop while consumer is active");
+        try session.waitForState(.running);
+        try cancelSession(session, second_run, .user_cancel);
+        var first = runtime.takeEvent().?;
+        first.deinit();
+        try session.waitRun(second_run);
+        var terminal = takeTestTerminal(session, second_run);
+        defer terminal.deinit();
+        try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+        try std.testing.expect(!terminal.event_delivery_lost);
+        try std.testing.expect(!terminal.file_changes_lost);
+        var second = runtime.takeEvent().?;
+        defer second.deinit();
+        try std.testing.expectEqual(second_run, second.run_id);
+        try closeSession(session, .session_close);
     }
-    const session = try openSession(runtime);
-    const first_run = try submitSession(session, "retain first event");
-    try session.waitRun(first_run);
-    var first_terminal = takeTestTerminal(session, first_run);
-    defer first_terminal.deinit();
-    const second_run = try submitSession(session, "stop while consumer is active");
-    try session.waitForState(.running);
-    try cancelSession(session, second_run, .user_cancel);
-    var first = runtime.takeEvent().?;
-    first.deinit();
-    try session.waitRun(second_run);
-    var terminal = takeTestTerminal(session, second_run);
-    defer terminal.deinit();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
-    try std.testing.expect(!terminal.event_delivery_lost);
-    var second = runtime.takeEvent().?;
-    defer second.deinit();
-    try std.testing.expectEqual(second_run, second.run_id);
-    try closeSession(session, .session_close);
 }
 
-test "file changes capacity rejection degrades and preserves the original Run result" {
+test "file changes that cannot fit the entire queue degrade without waiting" {
     fake_core.reset();
     fake_core.setNextPlan(.file_changes_callback);
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
+    const runtime = try fixture.createTestRuntime(.{
         .max_sessions = 1,
-        .event_capacity = 1,
-        .per_session_event_capacity = 1,
-        .control_reserved_capacity = 0,
-        .per_session_control_reserved_capacity = 0,
+        .event_bytes = 128,
+        .per_session_event_bytes = 128,
+        .control_reserved_bytes = 0,
+        .per_session_control_reserved_bytes = 0,
     });
     defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
     }
     const session = try openSession(runtime);
-    const first_run = try submitSession(session, "retain first file changes event");
-    try session.waitRun(first_run);
-    var first_terminal = takeTestTerminal(session, first_run);
-    defer first_terminal.deinit();
-    try std.testing.expect(!first_terminal.file_changes_lost);
-
-    const second_run = try submitSession(session, "degrade rejected file changes event");
-    try session.waitRun(second_run);
-    var second_terminal = takeTestTerminal(session, second_run);
-    defer second_terminal.deinit();
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), second_terminal.raw_status_code);
-    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), second_terminal.stop_reason);
-    try std.testing.expect(second_terminal.termination_signal == null);
-    try std.testing.expect(second_terminal.file_changes_lost);
-    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
-
-    var retained = runtime.takeEvent() orelse return error.ExpectedOwnedEvent;
-    try std.testing.expectEqual(first_run, retained.run_id);
-    retained.deinit();
+    const id = try session.prepareRun(.{ .text = "supplemental event exceeds the entire usable byte budget" });
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    run.deinit();
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), terminal.stop_reason);
+    try std.testing.expect(terminal.termination_signal == null);
+    try std.testing.expect(terminal.file_changes_lost);
+    try std.testing.expect(terminal.first_callback_rejection == null);
+    try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, terminal.session_disposition_at_completion);
     try std.testing.expect(runtime.takeEvent() == null);
-    try closeSession(session, .session_close);
+    try session.close(.session_close);
 }
 
 test "UI request validates identity and close wakes a suspended callback" {
