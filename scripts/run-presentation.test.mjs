@@ -10,7 +10,13 @@ import {
 } from "../frontend/src/features/tasks/run-presentation.ts";
 
 function terminal(outcome, cause = null) {
-  return { outcome, cause, diagnosticDisposition: "absent", modelError: null };
+  return {
+    outcome,
+    cause,
+    diagnosticDisposition: "absent",
+    recordingIncomplete: false,
+    modelError: null,
+  };
 }
 
 test("elapsed time uses the snapshot receipt rather than component mount or event count", () => {
@@ -199,6 +205,25 @@ test("successful final response retains Tool evidence without a duplicate notice
   assert.equal(presentation.processVisible, true);
   assert.equal(presentation.processCanCollapse, true);
   assert.equal(presentation.showTerminalNotice, false);
+});
+
+test("a completed Run with a recording gap keeps a visible notice without becoming failed", () => {
+  const value = run({
+    phase: "completed",
+    activity: null,
+    terminal: { ...terminal("completed"), recordingIncomplete: true },
+    output: {
+      commentary: [],
+      response: "Done",
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  assert.equal(deriveRunPresentation(value).showTerminalNotice, true);
+  assert.equal(value.terminal.outcome, "completed");
+  assert.equal(value.output.responseKind, "final");
 });
 
 test("failure, missing response, and partial response keep truthful terminal treatment", () => {

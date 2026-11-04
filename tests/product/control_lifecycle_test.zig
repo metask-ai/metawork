@@ -22,6 +22,33 @@ const installControlExecutionGeneration = fixture.installProductControlExecution
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
 
+test "Agent drain shares one event budget across both terminal observations" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .max_events_per_drain = 2,
+        .max_event_drain_ns = std.math.maxInt(u64),
+    }, productControlConfiguration());
+    defer control.deinit();
+    // Valid decoded events for an absent Task still exercise the complete
+    // drain/catch path. No execution or producer can change these counts.
+    for (0..5) |_| try runtime.events.enqueue(try fixture.pumpEnvelope(
+        1,
+        1,
+        "{\"text_chunk\":\"queued\"}",
+    ));
+    try std.testing.expectError(error.UnknownTask, control.drainAgentEvents());
+    try std.testing.expectEqual(@as(usize, 3), runtime.pendingEventCount(1));
+    try std.testing.expectError(error.UnknownTask, control.drainAgentEvents());
+    try std.testing.expectEqual(@as(usize, 1), runtime.pendingEventCount(1));
+    try std.testing.expectError(error.UnknownTask, control.drainAgentEvents());
+    try std.testing.expect(!runtime.hasPendingEvents());
+}
+
 test "only confirmed interactive Task choices remember a preference without replacing execution" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
@@ -94,6 +121,69 @@ test "ordinary Task creation does not retry MCP errors on null Selection or gene
         const task = try control.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&control));
         try std.testing.expectEqual(@as(u64, 1), task);
         try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+    }
+}
+
+test "recording gaps continue execution while later protocol or Host failures remain fatal" {
+    const Failure = enum { none, protocol, receipt, allocation };
+    inline for (std.meta.tags(Failure)) |failure| {
+        const scenario = try ReviewScenario.initForInput(.controlled);
+        defer scenario.deinit();
+        defer fake_core.releaseControlled();
+        const control = &scenario.control;
+        const task = control.task_runtime.find(scenario.task_id).?;
+        const run = task_state.findRun(task.durable.runs, task.runtime.active_run_id).?;
+        const route = task.runtime.routeId();
+        for (0..run.tools.len + 2) |index| {
+            var storage: [256]u8 = undefined;
+            const encoded = try std.fmt.bufPrint(&storage, "{{\"tool_start\":{{\"id\":\"retained-{d}\",\"name\":\"Read\",\"input\":\"file\"}}}}", .{index});
+            try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, encoded));
+            try control.drainAgentEvents();
+        }
+        try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        try std.testing.expect(!run.event_pipeline_failed);
+        try std.testing.expect(run.first_event_rejection == null);
+        try std.testing.expect(task_state.productTerminalFacts(run) == null);
+        switch (failure) {
+            .none => {},
+            .protocol => {
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":999,\"turn\":999,\"group\":999,\"disposition\":\"final\",\"bytes\":1}}"));
+                try std.testing.expectError(error.InvalidOutputSegment, control.drainAgentEvents());
+                try std.testing.expectEqual(error.InvalidOutputSegment, run.first_event_rejection.?.failure);
+            },
+            .receipt => {
+                var envelope = try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"not a delivery\"}}");
+                envelope.delivered_file = std.mem.zeroes(lifecycle.FileDeliveryReceipt);
+                try scenario.runtime.events.enqueue(envelope);
+                try std.testing.expectError(error.InvalidDeliveryReceipt, control.drainAgentEvents());
+                try std.testing.expectEqual(error.InvalidDeliveryReceipt, run.first_event_rejection.?.failure);
+            },
+            .allocation => {
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"new progress text\"}}"));
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+                const allocator = control.allocator;
+                control.allocator = failing.allocator();
+                defer control.allocator = allocator;
+                try std.testing.expectError(error.OutOfMemory, control.drainAgentEvents());
+                try std.testing.expectEqual(error.OutOfMemory, run.first_event_rejection.?.failure);
+            },
+        }
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        const terminal = task_state.productTerminalFacts(run).?;
+        switch (failure) {
+            .none => try std.testing.expectEqual(.completed, terminal.outcome),
+            .protocol => {
+                try std.testing.expectEqual(.dependency_contract_failure, terminal.outcome);
+                try std.testing.expectEqual(.dependency_contract_failure, run.event_projection_failure.?);
+                try std.testing.expect(!task_state.recordEventProjectionFailure(run));
+            },
+            .receipt, .allocation => {
+                try std.testing.expect(run.event_pipeline_failed);
+                try std.testing.expectEqual(.failed, terminal.outcome);
+                try std.testing.expectEqual(.event_pipeline_failure, terminal.cause.?);
+            },
+        }
     }
 }
 
@@ -7925,6 +8015,7 @@ fn expectWorkerFailureCoverage(compact_operation: bool) !void {
             false,
             false,
             null,
+            false,
         ));
         try std.testing.expect(terminal.exclude_on_product_terminal);
     }
@@ -10394,35 +10485,38 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
 }
 
 test "active input continues exactly once after normal completion and never repeats adopted input" {
-    for ([_]bool{ false, true }) |adopt| {
-        const scenario = try ReviewScenario.initForInput(.controlled);
-        defer scenario.deinit();
-        fake_core.adopt_input_before_receipt = adopt;
-        fake_core.expected_run_text = "new constraint fixture-secret";
-        const task = scenario.control.task_runtime.find(scenario.task_id).?;
-        const id = task.runtime.active_run_id;
-        const epoch = task.durable.binding_epoch;
-        const response = try scenario.control.testSendInput("input-1", scenario.task_id, epoch, .{ .run = id }, .{ .text = "new constraint fixture-secret" });
-        try std.testing.expectEqual(.submitted, response.outcome);
-        try std.testing.expectEqual(@as(?u64, id), response.run_id);
-        try std.testing.expectEqual(@as(?u32, 1), response.sequence);
-        try std.testing.expectEqualStrings("new constraint fixture-secret", task.durable.runs[0].?.additional_inputs[0].?.raw_text.?);
-        try std.testing.expectEqual(@as(usize, "new constraint fixture-secret".len), scenario.control.task_runtime.pending_input_bytes);
-        try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.additional_inputs[0].?.text, "fixture-secret") == null);
-        fake_core.releaseControlled();
-        try settleInputScenario(scenario);
-        const history = &task.durable.runs[0].?.additional_inputs[0].?;
-        try std.testing.expect(history.raw_text == null);
-        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
-        try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
-        try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .transferred, history.state);
-        try std.testing.expectEqual(adopt, history.order != null);
-        try std.testing.expectEqual(if (adopt) @as(?u64, null) else task.durable.runs[1].?.id, history.transferred_to_run_id);
-        if (!adopt) try std.testing.expect(fake_core.run_text_matches);
-        const late = try scenario.control.testSendInput("input-late", scenario.task_id, epoch, .{ .run = id }, .{ .text = "do not launch again" });
-        try std.testing.expectEqual(.rejected, late.outcome);
-        for (0..5) |_| scenario.control.syncLifecycle();
-        try std.testing.expectEqual(@as(usize, if (adopt) 1 else 2), fake_core.run_calls);
+    for ([_]bool{ false, true }) |gap| {
+        for ([_]bool{ false, true }) |adopt| {
+            const scenario = try ReviewScenario.initForInput(.controlled);
+            defer scenario.deinit();
+            fake_core.adopt_input_before_receipt = adopt;
+            fake_core.expected_run_text = "new constraint fixture-secret";
+            const task = scenario.control.task_runtime.find(scenario.task_id).?;
+            const id = task.runtime.active_run_id;
+            const epoch = task.durable.binding_epoch;
+            const response = try scenario.control.testSendInput("input-1", scenario.task_id, epoch, .{ .run = id }, .{ .text = "new constraint fixture-secret" });
+            try std.testing.expectEqual(.submitted, response.outcome);
+            try std.testing.expectEqual(@as(?u64, id), response.run_id);
+            try std.testing.expectEqual(@as(?u32, 1), response.sequence);
+            try std.testing.expectEqualStrings("new constraint fixture-secret", task.durable.runs[0].?.additional_inputs[0].?.raw_text.?);
+            try std.testing.expectEqual(@as(usize, "new constraint fixture-secret".len), scenario.control.task_runtime.pending_input_bytes);
+            try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.additional_inputs[0].?.text, "fixture-secret") == null);
+            if (gap) _ = task_state.recordEventProjectionFailure(&task.durable.runs[0].?);
+            fake_core.releaseControlled();
+            try settleInputScenario(scenario);
+            const history = &task.durable.runs[0].?.additional_inputs[0].?;
+            try std.testing.expect(history.raw_text == null);
+            try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+            try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
+            try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .transferred, history.state);
+            try std.testing.expectEqual(adopt, history.order != null);
+            try std.testing.expectEqual(if (adopt) @as(?u64, null) else task.durable.runs[1].?.id, history.transferred_to_run_id);
+            if (!adopt) try std.testing.expect(fake_core.run_text_matches);
+            const late = try scenario.control.testSendInput("input-late", scenario.task_id, epoch, .{ .run = id }, .{ .text = "do not launch again" });
+            try std.testing.expectEqual(.rejected, late.outcome);
+            for (0..5) |_| scenario.control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, if (adopt) 1 else 2), fake_core.run_calls);
+        }
     }
 }
 

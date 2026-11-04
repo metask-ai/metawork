@@ -156,7 +156,7 @@ Agent Session 的公开回答入口只有 choice-only `respondPermission`。调�
 
 当前 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Product Control 保存新 Task 默认审批模式，Task 捕获其 effective profile 与自动评审事实，每个 Run 保存 provenance。人工审批与自动评审都映射 `approval_required → accept_edits + unrestricted`，完全访问映射 `full_access → full_access + unrestricted`；自动评审仅改变 Host 回答当前 callback 的方式，`auto` 和 `dont_ask` 等其他 Core mode 不是 MetaWork 产品档位。Agent 接受 fresh create、按已提交 profile 的 restore，以及 Product 在同一 attachment 静止后明确请求的官方 Session mode mutation；它不拥有默认值、产品模式选择、持久化或 UI。人工与自动评审之间只改变 Host 委托，不调用 Core mutator；跨 profile 使用官方 SDK `update_permission_mode`，不能以规则、Session shadow 或目标 profile restore 模拟。Agent 在互斥区间验证 idle、无 callback/Core call/abort 引用与完整 Session identity，并比较前后 typed description 的 mode 和 policy generation：真正改变必须推进 generation，相同 mode 必须保持 generation；Core 明确拒绝、预算拒绝与 poisoned/未知状态分别返回 typed disposition，不推断成功或静默降级。变更撤销 Session grants，不允许以反向 mutation 假装恢复原授权；Product 的 checkpoint/metadata 事务与旧基线恢复由[Product 架构](product-architecture.md#22-workspace-与-task-admission)拥有。`full_access` callback 不进入 Host 自动评审，保留核心保护的原处理方式。
 
-Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer wake 在有界重试后仍不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
+Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer required wake 已关闭而不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
 
 PermissionProfile 切换只通过官方 mutator；report、describe、policy generation 与实际权限 effect 的验证责任及平台差异见[验证规范](validation.md)，不从旧 artifact 的结果推导当前版本行为。
 
@@ -168,11 +168,11 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
 
-当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
+当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配后标为待交付；owning event 成功入队后才移除 Agent 槽。消费者关闭导致未入队时，已合法匹配的引用通过有界 TerminalResult 尾部交接，下一 Run 不继承槽位。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
 `DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
 
-Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才一次性消费该回执，以独立 sideband 交给 Product 的成果登记入口；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
+Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才标为待交付，以独立 sideband 交给 Product 的成果登记入口；入队成功后才移除，关闭时未入队的匹配回执通过有界 TerminalResult 尾部交接；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。Product 先登记可信回执，再处理可降级的 Tool 详情。未匹配的槽不能仅因文件存在或 Run 终态而登记；队列和终态尾部按可信 identity 去重，生图同时保留 Tool 关联。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
 
@@ -381,7 +381,7 @@ Product 对精确 Bash input 的 command/description 和前台 `metacodes.bash-r
 
 event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；Application 使用原子 pending gate 将重复 Native `services.wake()` 合并为 `already_pending`，并在调用 Product Control 固定 drain 前清 gate，避免 producer 与 consumer 交错时丢 wake。Agent 对 `unavailable` 按 composition 提供的 retry interval 和 deadline 同步重试；deadline 耗尽后 callback 才返回 fatal 并记录 typed `event_consumer_notification_failure`。失败不会撤销已经完成的 pump ownership transfer，事件仍由 pump 负责释放或交给 canonical consumer。
 
-callback 返回后的 Product Task event application failure 仍由 Product Control 按 Run identity 请求 Agent 终止，并使用不含 Product Control 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。如果 Agent terminal 已先发布，Product Control 还必须独立保存 projection failure 产品事实，在 event drain 后把 Run 暴露为 `event_pipeline_failure` 并禁止 continuation，不能把已经太晚的 termination request 当作唯一收口。Renderer response、revision、snapshot 和 connection/generation failure 则形成 typed transport report，由 Product Control policy 决定 reject/retry/detach。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 不得杀死后台 Run。
+callback 返回后的 Product 事件核算必须先于有界内容保留。普通展示槽、过程记录和输出保留容量不足只使记录不完整，不请求 Agent 终止或覆盖真实执行结果；完整事件的 segment 字节、状态与输入采纳仍按原事实核算。真实协议违约必须覆盖先前的容量缺口并请求终止；allocator failure、非法可信回执及其他非容量 Host 失败也必须终止，不得伪装成可忽略缺口。Product 在 terminal drain 后独立发布记录完整性与真实 outcome；其有界保留不改变 Core 执行、checkpoint 或已发生的 Workspace effects。
 
 AgentCore tool event 的 raw `id` 只在 Product Task 应用当前 event 时用于计算固定长度 SHA-256 correlation key；raw `id` 不保存在产品历史。后续 progress/result 使用同一 digest 关联 Tool record。callback-scoped projection 以 Run 内唯一 activity order 生成稳定且不敏感的产品 tool `id`；`name`、input、progress 和 content 在进入 canonical projection 前统一清理。该 digest 不进入 Renderer wire，也不是第二个产品 tool identity。Renderer decoder 必须拒绝同一 Run 内重复的产品 tool `id` 或 activity order。
 
@@ -397,7 +397,7 @@ Core 活动依据的可信度独立于上下文、retry 详情等通用 observat
 
 executing_tools 的数量只取同一有效 `run_state.in_flight_tools` 集合，空集合按未知数量处理。它表示尚未闭合的工具调用尝试，不保证实际并发、已 dispatch、权限通过或尚未在预取路径完成；Tool record 的 start/progress/result、历史记录数量及内容不得覆盖这个集合或 Core phase。retry_notice 只丰富当前 retrying phase 的有界详情，不能独立建立重试阶段；有效 phase 离开 retrying 或进入新 turn 后详情失效。压缩结果只更新 Conversation observation，不能替代 Core 的 phase 退出边界。
 
-`thinking_chunk` 正文属于 private reasoning，Product Task state 不把它写入 Assistant、Snapshot 或 Task persistence。`text_chunk` 正文写入当前 open output segment；正式 macOS 路径中没有 begin 的裸 text、重复/跳跃 index、output-segment turn/group 或 bytes 不匹配均为 dependency contract failure。`assistant`、open segment 与 continued group 使用同一个 per-Run byte budget，credential 清理继续只重扫未决后缀；`discarded` 原位清除，`continued` 只合并同 group，`commentary/final/partial` 关闭 group 前先完成所有 fallible reserve，再原子进入 canonical assistant。每个非空 closed commentary group 额外提交一个有界累计 byte end；这只保留产品叙事边界，不复制 raw AgentCore index/turn/group 或事件时间线。Run terminal publication acquire 后，Application 只安排 main-loop调用；`Product Control.drainAgentEvents()` 在第一次 drain 后观察 terminal、再完整排空一次 Agent event pump，最后调用 Product Task state 同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion。若此时仍有 open segment 或 continued group，Product 清除 provisional bytes并把 Run 收口为 `dependency_contract_failure`。raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口；Agent 的 terminal phase observation 在该窗口只投影为 `finalizing`，不能抢先形成产品终态。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态只存在于 Product Task aggregate，不形成第二份 terminal 或 assistant 内容；Product Control 保留事件泵、提交与 revision 编排，并以 callback-scoped capability 提供 bounded projection 与 credential 清洗。
+`thinking_chunk` 正文属于 private reasoning，Product Task state 不把它写入 Assistant、Snapshot 或 Task persistence。`text_chunk` 正文写入当前 open output segment；正式 macOS 路径中没有 begin 的裸 text、重复/跳跃 index、output-segment turn/group 或 bytes 不匹配均为 dependency contract failure。`assistant`、open segment 与 continued group 使用同一个 per-Run byte budget，credential 清理继续只重扫未决后缀；`discarded` 原位清除，`continued` 只合并同 group，`commentary/final/partial` 关闭 group 前先完成所有 fallible reserve，再原子进入 canonical assistant。每个非空 closed commentary group 额外提交一个有界累计 byte end；这只保留产品叙事边界，不复制 raw AgentCore index/turn/group 或事件时间线。Run terminal publication acquire 后，Application 只安排 main-loop调用；`Product Control.drainAgentEvents()` 在事件数和墙钟预算内消费，并观察 terminal publication；只有 terminal 对应 Session 的待消费数为零且取出事件处理完毕后，才调用 Product Task state 同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion。Run 与 compact 均采用此按 Session 的屏障，不等待其他 Session 停止产出；同一 Session 的下一项操作须等待当前操作事件收口。预算耗尽返回主循环并请求后续 wake；生产者静止后的 shutdown 可重复有界 pass 处理有限尾部，资源释放仍须等待尾部收口。若此时仍有 open segment 或 continued group，Product 清除 provisional bytes并把 Run 收口为 `dependency_contract_failure`。raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口；Agent 的 terminal phase observation 在该窗口只投影为 `finalizing`，不能抢先形成产品终态。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态只存在于 Product Task aggregate，不形成第二份 terminal 或 assistant 内容；Product Control 保留事件泵、提交与 revision 编排，并以 callback-scoped capability 提供 bounded projection 与 credential 清洗。
 
 Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；Application 先关闭 ingress，用 callback lease 计数断言 quiescence，再依次收口 Product Control 与 Agent 并 detach Product Control。Bridge retained JSON/batch 不借用 Product Control memory，因此在 Product Control deinit 后独立释放。
 
@@ -420,11 +420,11 @@ flowchart LR
 
 ### 队列预算
 
-事件泵同时约束 global/per-Session count 与 bytes、单事件大小、control reserve 和每次 pump 的 Session/event budget；精确容量由实现和测试拥有。
+事件泵同时约束 global/per-Session count 与 bytes、单事件大小、control reserve 和每次主循环消费的事件数/墙钟预算；两个 terminal 观察之间的消费共用一次预算，跨 Session 保持公平。时间预算在事件处理边界检查，不打断单次同步提交；精确容量由实现和测试拥有。
 
-默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界、公平调度和 deadline。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
+默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界和公平调度。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
 
-单事件尺寸超限映射为独立的 Product `event_payload_too_large`，队列准入容量不足继续映射为 `queue_capacity_failure`；Renderer 必须区分这两种原因，不将其描述为磁盘或工作台存储已满。
+单事件尺寸超限继续映射为独立的 Product `event_payload_too_large`；事件泵临时饱和采用可取消背压，不再生成 `queue_capacity_failure`。后者仍可表达执行队列等既有准入失败，Renderer 不将这些原因描述为磁盘或工作台存储已满。
 
 ### 过载语义
 
@@ -435,13 +435,17 @@ flowchart LR
 | `usage`                         | pump 逐项保留；Renderer projection 根据 AgentCore 事件语义累计或替换                      |
 | diagnostics                     | 按明确配置采样                                                                            |
 | tool start/result               | 不得静默丢失                                                                              |
-| `file_changes`                  | 正常有界事件逐项保留；只有已确认该顶层类型的容量/尺寸失败可降级并设置 `file_changes_lost` |
+| `file_changes`                  | 正常队列拥塞时背压等待；只有已确认该顶层类型的无法接纳尺寸或 owned copy 失败可降级并设置 `file_changes_lost` |
 | UI request/response state       | 不得静默丢失                                                                              |
 | run/error/cancel/terminal state | 不得静默丢失                                                                              |
 
-当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
+正常消费期间，关键事件在队列饱和时等待空间，不能因消费耗时返回 fatal；等待不持有阻止消费、abort 或 close 推进的 Session 锁。普通 Stop 保持消费，不主动制造缺口。超过整个可用队列字节容量的单事件无法靠等待接纳，仍须明确拒绝，不能永久挂起。
 
-`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 有界单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode 容量不足或 pump admission 容量不足可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在与 Host 相同的总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
+消费者停止推进的 close/shutdown 必须在 join 前设置精确操作范围内粘性的停止等待状态并唤醒 callback；合法但未入队的事件标记本地缺口并返回 `EVENT_CONTINUE`，后续事件不重新等待，真实身份或协议违约仍拒绝。当前活动 Run 在 closing 中的合法事件仍完成接受校验，不能仅因 closing 返回 fatal。缺口沿有界 TerminalResult/terminal publication 交接，不依赖向饱和队列补写事件；已入队的所有权保持不变，新操作不继承旧状态。
+
+Application 将 Agent 消费通知接入既有 RequiredWake，沿用非阻塞 request、pending 合并与交付；每轮预算耗尽仍有事件时请求后续 wake。通知 unavailable 表示消费路径关闭，解除队列等待并按既有控制路径请求取消，合法 `on_event` 返回 `EVENT_CONTINUE`；匹配 abort 可从 callback 调用。不要另建周期重试或通过 callback fatal 退出。RequiredWake 对底层通知合同违约的原失败处理保持不变。正文记录政策由 Product 合同拥有，本节不授权静默丢弃 text_chunk。
+
+`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 有界单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode/copy 容量不足，或单事件超过整个可用队列字节容量时，可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；正常 count/bytes 拥塞与其他事件一样背压等待，不能把主线程同步提交造成的暂时饱和视为丢失理由。malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在与 Host 相同的总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
 
 按 Session 公平轮转，单一高输出 Session 不得饿死其他 Session。控制容量不能被文本增量占满。
 
@@ -469,13 +473,15 @@ call ABI
 | StopReason                    | 当前 Host 状态                                                                                 |
 | ----------------------------- | ---------------------------------------------------------------------------------------------- |
 | `end_turn`                    | completed                                                                                      |
-| `max_turns`                   | stopped / awaiting_user                                                                        |
+| `max_turns`                   | stopped / Product cause `resource_limit`                                                                        |
 | `aborted`                     | `TerminalResult.termination_signal` 由 Product Control 映射为 cancelled / interrupted / failed |
 | `tool_error`                  | failed / Product cause `tool_failure`                                                          |
 | `api_error`                   | failed / Product cause `provider_failure`                                                      |
-| `tool_loop`                   | stopped / awaiting_user                                                                        |
+| `tool_loop`                   | stopped / Product cause `tool_failure`                                                                        |
 | `checkpoint_budget_exhausted` | stopped / resource_limit                                                                       |
 | `checkpoint_resource_limit`   | stopped / resource_limit                                                                       |
+
+Run admission 使用 SDK 的 `MAX_TURNS_V1`，不另设产品回合阈值；它是依赖执行边界，不是用户对话次数额度。受控停止后 Task 可等待新的用户意图，但 Run 保持 stopped，不因此产生同步 `waiting_ui` 请求。
 
 每种 operation 按官方合同决定 result 的可读字段，不能从全局 status enum 推断合法性；已定义 Run 返回状态上的两个 input counts 均须验证。未知 status、其他 operation 的 status、未知 enum/flag 或跨字段矛盾均按 dependency contract failure 收口。
 

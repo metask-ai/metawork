@@ -1649,6 +1649,7 @@ pub const RestoreProjection = struct {
         value: []const u8,
         max: usize,
     ) ProjectionError![]u8,
+    copy_receipt_fn: *const fn (*anyopaque, []const u8, usize) ProjectionError![]u8,
     alloc_fn: *const fn (
         context: *anyopaque,
         capacity: usize,
@@ -1670,6 +1671,18 @@ pub const RestoreProjection = struct {
 
     fn copy(self: RestoreProjection, value: []const u8, max: usize) ProjectionError![]u8 {
         return self.copy_fn(self.context, value, max);
+    }
+
+    fn copyReceipt(self: RestoreProjection, value: []const u8, max: usize) ProjectionError![]u8 {
+        return self.copy_receipt_fn(self.context, value, max);
+    }
+
+    fn copyReference(self: RestoreProjection, receipt: bool, value: []const u8, max: usize) ProjectionError![]u8 {
+        return if (receipt) self.copyReceipt(value, max) else self.copy(value, max);
+    }
+
+    fn freeReference(self: RestoreProjection, receipt: bool, value: []u8) void {
+        if (receipt) self.allocator.free(value) else self.free(value);
     }
 
     fn alloc(self: RestoreProjection, capacity: usize) ProjectionError![]u8 {
@@ -1705,6 +1718,7 @@ pub fn validateRestorableTask(allocator: std.mem.Allocator, value: TaskWire, lim
         .allocator = restore.allocator,
         .limits = limits,
         .copy_fn = Restore.copy,
+        .copy_receipt_fn = Restore.copy,
         .alloc_fn = Restore.alloc,
         .append_text_fn = Restore.append,
         .free_fn = Restore.free,
@@ -2095,9 +2109,9 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
     }
     validateOutputs(wire.outputs) catch return error.TaskStoreCorrupt;
     var outputs: [agent.max_file_deliveries_per_run]?task_state.OutputRecord = @splat(null);
-    errdefer for (outputs) |entry| if (entry) |output| projection.free(output.locator);
+    errdefer for (outputs) |entry| if (entry) |output| projection.allocator.free(output.locator);
     for (wire.outputs, 0..) |output, index| {
-        const locator = try projection.copy(output.locator, agent.FileDeliveryReceipt.max_path_bytes);
+        const locator = try projection.copyReceipt(output.locator, agent.FileDeliveryReceipt.max_path_bytes);
         outputs[index] = .{
             .id = outputIdentity(16, output.id) catch unreachable,
             .locator = locator,
@@ -2309,10 +2323,14 @@ fn restoreRunInput(
 }
 
 fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_state.ToolView {
-    const id = try projection.copy(wire.id, projection.limits.max_tool_field_bytes);
-    errdefer projection.free(id);
-    const name = try projection.copy(wire.name, projection.limits.max_tool_field_bytes);
-    errdefer projection.free(name);
+    const receipt_metadata = if (wire.file_refs) |refs| generated: {
+        for (refs) |reference| if (reference.generated_image) break :generated true;
+        break :generated false;
+    } else false;
+    const id = try projection.copyReference(receipt_metadata, wire.id, projection.limits.max_tool_field_bytes);
+    errdefer projection.freeReference(receipt_metadata, id);
+    const name = try projection.copyReference(receipt_metadata, wire.name, projection.limits.max_tool_field_bytes);
+    errdefer projection.freeReference(receipt_metadata, name);
     const input = try projection.copy(wire.input, projection.limits.max_tool_field_bytes);
     errdefer projection.free(input);
     const progress = try projection.copy(wire.progress, projection.limits.max_tool_field_bytes);
@@ -2337,6 +2355,11 @@ fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_
         for (references, 0..) |reference, index|
             file_refs[index] = try restoreFileReference(projection, reference);
     }
+    var redacted = wire.redacted or !std.mem.eql(u8, id, wire.id) or !std.mem.eql(u8, name, wire.name);
+    if (wire.file_refs) |refs| for (refs, 0..) |reference, index| {
+        inline for (.{ "id", "title", "display_path", "kind", "locator" }) |field|
+            redacted = redacted or !std.mem.eql(u8, @field(file_refs[index].?, field), @field(reference, field));
+    };
     return .{
         .route_digest = [_]u8{0} ** task_state.tool_route_digest_bytes,
         .id = id,
@@ -2352,7 +2375,8 @@ fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_
         .input_truncated = wire.input_truncated,
         .progress_truncated = wire.progress_truncated,
         .content_truncated = wire.content_truncated,
-        .redacted = wire.redacted,
+        .redacted = redacted,
+        .receipt_metadata = receipt_metadata,
     };
 }
 
@@ -2376,18 +2400,20 @@ fn restoreFileReference(
             .end = .{ .line = range.end.line, .column = range.end.column },
         } else null,
     };
-    reference.id = try projection.copy(wire.id, projection.limits.max_file_ref_field_bytes);
-    errdefer projection.free(reference.id);
-    reference.title = try projection.copy(wire.title, projection.limits.max_file_ref_field_bytes);
-    errdefer projection.free(reference.title);
-    reference.display_path = try projection.copy(
+    reference.id = try projection.copyReference(wire.generated_image, wire.id, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.freeReference(wire.generated_image, reference.id);
+    reference.title = try projection.copyReference(wire.generated_image, wire.title, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.freeReference(wire.generated_image, reference.title);
+    reference.display_path = try projection.copyReference(
+        wire.generated_image,
         wire.display_path,
         projection.limits.max_file_ref_field_bytes,
     );
-    errdefer projection.free(reference.display_path);
-    reference.kind = try projection.copy(wire.kind, projection.limits.max_file_ref_field_bytes);
-    errdefer projection.free(reference.kind);
-    reference.locator = try projection.copy(
+    errdefer projection.freeReference(wire.generated_image, reference.display_path);
+    reference.kind = try projection.copyReference(wire.generated_image, wire.kind, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.freeReference(wire.generated_image, reference.kind);
+    reference.locator = try projection.copyReference(
+        wire.generated_image,
         wire.locator,
         projection.limits.max_file_ref_field_bytes,
     );
@@ -2569,11 +2595,11 @@ fn deinitRestoredFileReference(
     projection: RestoreProjection,
     reference: *task_state.FileReferenceView,
 ) void {
-    projection.free(reference.id);
-    projection.free(reference.title);
-    projection.free(reference.display_path);
-    projection.free(reference.kind);
-    projection.free(reference.locator);
+    projection.freeReference(reference.generated_image, reference.id);
+    projection.freeReference(reference.generated_image, reference.title);
+    projection.freeReference(reference.generated_image, reference.display_path);
+    projection.freeReference(reference.generated_image, reference.kind);
+    projection.freeReference(reference.generated_image, reference.locator);
     reference.* = undefined;
 }
 
@@ -2588,8 +2614,8 @@ fn deinitRestoredFileChange(
 }
 
 fn deinitRestoredTool(projection: RestoreProjection, tool: *task_state.ToolView) void {
-    projection.free(tool.id);
-    projection.free(tool.name);
+    projection.freeReference(tool.receipt_metadata, tool.id);
+    projection.freeReference(tool.receipt_metadata, tool.name);
     projection.free(tool.input);
     projection.free(tool.progress);
     projection.free(tool.content);
@@ -2636,7 +2662,7 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
         deinitRestoredFileChange(projection, change);
     }
     projection.allocator.free(run.file_changes);
-    for (run.outputs) |entry| if (entry) |output| projection.free(output.locator);
+    for (run.outputs) |entry| if (entry) |output| projection.allocator.free(output.locator);
     projection.allocator.free(run.commentary_ends);
     deinitRestoredRunInput(projection, &run.input);
     for (run.additional_inputs) |entry| if (entry) |record| {
@@ -3535,12 +3561,15 @@ fn validatePresentation(task: TaskWire, limits: Limits) !void {
         for (run.additional_inputs) |input| {
             if (input.submission) |record| try validatePresentationItem(task, record.presentation_state, record.presentation_order, record.after_output_count, limits, &seen);
         }
+        var generated_images: usize = 0;
         for (run.tools) |tool| if (tool.file_refs) |refs| {
             for (refs) |ref| {
                 if (!ref.generated_image) {
                     if (ref.presentation_anchor != null) return error.Invalid;
                     continue;
                 }
+                generated_images += 1;
+                if (generated_images > agent.image_generation_limits.sends_per_run) return error.Invalid;
                 try validatePresentationItem(task, ref.presentation_state, if (ref.presentation_anchor) |a| a.presentation_order else null, if (ref.presentation_anchor) |a| a.after_output_count else 0, limits, &seen);
             }
         };
@@ -3759,8 +3788,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             if (task.completion_seen_run_id != null and
                 task.completion_seen_run_id.? == run.id and
                 run.outcome != null and
-                std.mem.eql(u8, run.outcome.?, "completed") and
-                run.event_projection_failure == null)
+                std.mem.eql(u8, run.outcome.?, "completed"))
                 completion_seen_valid = true;
             if (run.file_change_observation) |observation|
                 if (std.mem.eql(u8, observation, "collecting"))
@@ -5087,8 +5115,14 @@ test "task store rejects states that would violate the product contract" {
     runs[0].event_projection_failure = null;
 
     tasks[0].completion_seen_run_id = 1;
+    runs[0].event_projection_failure = "consumer_rejected";
+    try validate(&state, testLimits());
     runs[0].event_projection_failure = "dependency_contract_failure";
+    runs[0].phase = "failed";
+    runs[0].outcome = "dependency_contract_failure";
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].phase = "completed";
+    runs[0].outcome = "completed";
     tasks[0].completion_seen_run_id = 0;
     runs[0].event_projection_failure = null;
 
@@ -5817,7 +5851,7 @@ const RestoreTestMemory = struct {
     fn reserve(_: *anyopaque, _: usize) error{ProjectionCapacity}!void {}
     fn release(_: *anyopaque, _: usize) void {}
     fn projection(self: *@This()) RestoreProjection {
-        return .{ .context = self, .allocator = self.allocator, .limits = testLimits(), .copy_fn = copy, .alloc_fn = alloc, .append_text_fn = append, .free_fn = free, .free_text_fn = freeText, .reserve_bytes_fn = reserve, .release_bytes_fn = release };
+        return .{ .context = self, .allocator = self.allocator, .limits = testLimits(), .copy_fn = copy, .copy_receipt_fn = copy, .alloc_fn = alloc, .append_text_fn = append, .free_fn = free, .free_text_fn = freeText, .reserve_bytes_fn = reserve, .release_bytes_fn = release };
     }
 };
 

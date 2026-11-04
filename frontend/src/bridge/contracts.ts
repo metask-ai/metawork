@@ -718,6 +718,7 @@ export type RunModelError = {
   recovery: (typeof modelErrorRecoveries)[number];
 };
 export type RunTerminal = {
+  recordingIncomplete: boolean;
   outcome: RunOutcome;
   cause: RunCause | null;
   diagnosticDisposition: "absent" | "withheld";

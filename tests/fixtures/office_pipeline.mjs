@@ -44,6 +44,10 @@ function start() {
   ];
 }
 function command() {
+  if (["long-run", "slow-stop"].includes(mode))
+    return process.platform === "win32"
+      ? `[Console]::Write('round-${requests}')`
+      : `printf 'round-${requests}'`;
   if (mode === "nonzero")
     return process.platform === "win32"
       ? "[IO.File]::WriteAllText('operation.txt', 'controlled-exit-7'); [Console]::Write([IO.File]::ReadAllText('operation.txt')); exit 7"
@@ -230,7 +234,22 @@ const server = createServer(async (request, response) => {
       response.on("close", () => clearTimeout(timer));
       return;
     }
-    if (results.length) {
+    if (["long-run", "slow-stop"].includes(mode)) {
+      if (requests > 1) {
+        if (results.length !== 1 || results[0].is_error)
+          throw Error("missing long-run tool result");
+        const result = JSON.parse(results[0].content);
+        if (result.exit_code !== 0 || result.stdout !== `round-${requests - 1}`)
+          throw Error("long-run tool result mismatch");
+      }
+      const lastRequest = mode === "slow-stop" ? 501 : 41;
+      if (requests === lastRequest) {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        return response.end(protocolTextSse("anthropic", "Long run completed."));
+      }
+      if (requests > lastRequest) throw Error("unexpected long-run replay");
+    }
+    if (results.length && !["long-run", "slow-stop"].includes(mode)) {
       const failed = ["nonzero", "missing-environment", "stale-entry", "unreachable-preparation", "deny"].includes(mode);
       const result = results.at(-1);
       if (mode === "deny") {

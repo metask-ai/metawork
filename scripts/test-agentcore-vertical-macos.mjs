@@ -1036,7 +1036,10 @@ desktopVertical: try {
       created: officeTask,
       workspaceRoot: canonicalWorkspace,
       fixture: join(root, "tests/fixtures/office/sample.docx"),
-      invoke: invokeBridge,
+      invoke: (command, payload) =>
+        command === "metawork.tasks.run"
+          ? invokePreparedRun(payload)
+          : invokeBridge(command, payload),
       snapshot,
       poll,
       provider,

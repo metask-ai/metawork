@@ -98,6 +98,30 @@ fn configureProvider(control: *control_api.Runtime, endpoint: []const u8) !void 
     try std.testing.expect(control.custom_providers.rememberPreference(.{ .source_id = id, .model_id = model }).accepted);
 }
 
+// Test-only latency injection around the existing real history writer.
+const SlowHistory = struct {
+    inner: *f.TypedHistory,
+    enabled: std.atomic.Value(bool) = .init(false),
+    max_commit_ns: std.atomic.Value(u64) = .init(0),
+
+    fn commit(raw: ?*anyopaque, candidate: *task_api.history.Candidate) task_api.history.Commit {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        const started = std.Io.Timestamp.now(std.testing.io, .awake);
+        const slow = self.enabled.load(.acquire);
+        if (slow) std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch return .failed;
+        const result = self.inner.capability().commit(candidate);
+        if (slow) _ = self.max_commit_ns.fetchMax(@intCast(started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds), .monotonic);
+        return result;
+    }
+    fn resolve(raw: ?*anyopaque, token: task_api.history.CommitToken) task_api.history.Commit {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        return self.inner.capability().resolveCommit(token);
+    }
+    fn capability(self: *@This()) task_api.history.Capability {
+        return .{ .context = self, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve };
+    }
+};
+
 fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8) !void {
     const task = control.task_runtime.find(task_id).?;
     var answered: ?u64 = null;
@@ -122,12 +146,32 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 return;
             }
             if (std.mem.eql(u8, mode, "consumer-starvation")) {
-                try std.testing.expect(terminal.phase == .failed);
-                const diagnostic = run.terminal_diagnostic[0..state.terminalPayload(run).?.diagnostic_len];
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "boundary=event_pump reason=queue_rejected") != null);
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "error=DeadlineExceeded") != null);
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, agent.core_manifest_sha256) != null);
+                try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
                 try std.testing.expect(run.event_stream_finalized);
+                try std.testing.expect(run.first_event_rejection == null);
+                try std.testing.expect(run.terminal_drain_rejection == null);
+                try std.testing.expectEqual(@as(usize, 256), std.mem.count(u8, run.assistant.list.items, "Synthetic stream chunk. "));
+                try std.testing.expectEqual(state.AssistantOutputKind.final, run.assistant_output_kind.?);
+                try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
+                return;
+            }
+            if (std.mem.eql(u8, mode, "long-run")) {
+                try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
+                try std.testing.expect(run.event_stream_finalized);
+                try std.testing.expectEqual(state.EventProjectionFailure.consumer_rejected, run.event_projection_failure.?);
+                try std.testing.expect(run.first_event_rejection == null);
+                try std.testing.expect(run.terminal_drain_rejection == null);
+                try std.testing.expect(run.open_output_segment == null);
+                try std.testing.expect(std.mem.endsWith(u8, run.assistant.list.items, "Long run completed."));
+                try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
+                return;
+            }
+            if (std.mem.eql(u8, mode, "slow-stop")) {
+                try std.testing.expectEqual(task_api.RunOutcome.cancelled, terminal.outcome);
+                try std.testing.expectEqual(state.RunCause.user_cancel, terminal.cause.?);
+                try std.testing.expect(run.event_stream_finalized);
+                try std.testing.expect(!state.terminalPayload(run).?.event_delivery_lost);
+                try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
                 return;
             }
             if (std.mem.eql(u8, mode, "fixture-error")) {
@@ -197,11 +241,12 @@ fn qualify(mode: []const u8) !void {
     defer history.deinit();
     var typed_history: f.TypedHistory = .{ .file_store = &history };
     defer typed_history.deinit();
+    var slow_history: SlowHistory = .{ .inner = &typed_history };
     var checkpoints = try task_api.checkpoint_store.FileStore.init(std.testing.io, root);
     defer checkpoints.deinit();
     var configuration = f.productControlConfiguration();
     configuration.directories.canonical_user_home = root;
-    configuration.task_persistence = typed_history.capability();
+    configuration.task_persistence = if (std.mem.eql(u8, mode, "slow-stop")) slow_history.capability() else typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
@@ -209,21 +254,21 @@ fn qualify(mode: []const u8) !void {
         .max_tasks = 1,
         .max_workspaces = 1,
         .max_runs_per_task = 3,
-        .max_tools_per_run = 4,
+        .max_tools_per_run = if (std.mem.eql(u8, mode, "long-run")) 32 else 4,
     }, configuration);
     defer control.deinit();
     try control.startCustomProviders(root, vault.capability());
     defer control.stopCustomProviders();
     try configureProvider(&control, provider.endpoint);
-    const task_id = try control.createTask(.{ .workspace_root = root, .trust = .explicitly_trusted, .approval_mode = .manual }, try control_api.TestSupport.fixtureModelSelection(&control));
+    const task_id = try control.createTask(.{ .workspace_root = root, .trust = .explicitly_trusted, .approval_mode = if (std.mem.eql(u8, mode, "slow-stop")) .full_access else .manual }, try control_api.TestSupport.fixtureModelSelection(&control));
     const repetitions: usize = if (std.mem.eql(u8, mode, "multi-run")) 2 else 1;
     for (0..repetitions) |_| {
         const id = try f.runPreparedTask(&control, task_id, .{ .text = "Run the synthetic Office pipeline operation." });
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             // Deliberately withhold the sole Product consumer while actual Core
             // receives a bounded legal stream. Keep all production queue limits
-            // and deadlines unchanged. This models an occupied Native loop; it
-            // does not assert that a particular OS dialog was exercised here.
+            // unchanged. This models an occupied Native loop, not an actual
+            // OS dialog. Resume after the former fatal deadline has passed.
             var ready = false;
             for (0..5000) |_| {
                 if (temporary.dir.statFile(std.testing.io, "starvation-ready", .{})) |_| {
@@ -234,6 +279,27 @@ fn qualify(mode: []const u8) !void {
             }
             try std.testing.expect(ready);
             try std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
+            const task = control.task_runtime.find(task_id).?;
+            try std.testing.expect(runtime.pendingEventCount(task.runtime.routeId()) != 0);
+            try std.testing.expect(state.terminalPayload(state.findRun(task.durable.runs, id).?) == null);
+        }
+        var stop_started: ?std.Io.Timestamp = null;
+        if (std.mem.eql(u8, mode, "slow-stop")) {
+            const task = control.task_runtime.find(task_id).?;
+            for (0..10000) |_| {
+                if (runtime.pendingEventCount(task.runtime.routeId()) >= 100) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(runtime.pendingEventCount(task.runtime.routeId()) >= 100);
+            slow_history.enabled.store(true, .release);
+            const started = std.Io.Timestamp.now(std.testing.io, .awake);
+            try control.drainAgentEvents();
+            const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds;
+            try std.testing.expect(elapsed < std.time.ns_per_s);
+            try std.testing.expect(runtime.pendingEventCount(task.runtime.routeId()) != 0);
+            stop_started = std.Io.Timestamp.now(std.testing.io, .awake);
+            try control.cancel(task_id, id);
+            std.debug.print("slow-stop drain_ns={d} max_commit_ns={d} pending_after_stop={d}\n", .{ elapsed, slow_history.max_commit_ns.load(.monotonic), runtime.pendingEventCount(task.runtime.routeId()) });
         }
         finish(&control, task_id, id, mode) catch |err| {
             const trace = temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(2 * 1024 * 1024)) catch return err;
@@ -245,6 +311,11 @@ fn qualify(mode: []const u8) !void {
             }
             return err;
         };
+        if (stop_started) |started| {
+            const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds;
+            std.debug.print("slow-stop terminal_ns={d}\n", .{elapsed});
+            try std.testing.expect(elapsed < 10 * std.time.ns_per_s);
+        }
     }
     if (std.mem.eql(u8, mode, "callback-budget")) {
         // The first actual Core event exceeds the deliberately tiny fixture
@@ -267,11 +338,19 @@ fn qualify(mode: []const u8) !void {
             try std.testing.expect(std.mem.indexOf(u8, trace, message) != null);
         }
         if (std.mem.eql(u8, mode, "unreachable-preparation")) try std.testing.expect(std.mem.indexOf(u8, trace, "preparation-cleanup") != null);
+        if (std.mem.eql(u8, mode, "long-run")) {
+            try std.testing.expectEqual(@as(usize, 41), std.mem.count(u8, trace, "\"kind\":\"request\""));
+            const saved = (try history.loadAlloc(std.testing.allocator)).?;
+            defer std.testing.allocator.free(saved);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "Long run completed.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "consumer_rejected") != null);
+        }
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
             defer std.testing.allocator.free(saved);
-            try std.testing.expect(std.mem.indexOf(u8, saved, "boundary=event_pump reason=queue_rejected") != null);
-            try std.testing.expect(std.mem.indexOf(u8, saved, "error=DeadlineExceeded") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "Synthetic stream chunk.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "queue_capacity_failure") == null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "event_pipeline_failure") == null);
         }
     }
     if (std.mem.eql(u8, mode, "deny")) try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "denied.txt", .{}));
@@ -302,7 +381,7 @@ test "Office canonical Product executor retains real callback rejection identity
     try qualify("callback-budget");
 }
 
-test "Office canonical stream preserves queue rejection when the sole consumer is withheld" {
+test "Office canonical stream survives consumer backpressure and retains the full response" {
     try qualify("consumer-starvation");
 }
 
@@ -399,4 +478,12 @@ test "Skill resource context reads a managed import through tool and typed input
         try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
         try std.testing.expect(std.mem.indexOf(u8, trace, "skill-resource-read") != null);
     }
+}
+
+test "canonical single Run passes 16 turns and 32 Tool records without replay" {
+    try qualify("long-run");
+}
+
+test "canonical saturated stream and slow history return to the main loop for Stop" {
+    try qualify("slow-stop");
 }

@@ -28,7 +28,7 @@ pub const Error = error{
     SessionCapacity,
     SessionSlotCapacity,
     SequenceExhausted,
-    DeadlineExceeded,
+    ConsumerStopped,
 };
 
 pub const Stats = struct {
@@ -95,44 +95,37 @@ pub const EventPump = struct {
         return self.enqueueLocked(envelope);
     }
 
-    pub fn enqueueWithDeadline(
+    pub fn enqueueWaiting(
         self: *EventPump,
         envelope: OwnedCoreEvent,
-        timeout: std.Io.Duration,
+        stopped: *const std.atomic.Value(bool),
     ) Error!void {
-        if (timeout.nanoseconds <= 0) return error.DeadlineExceeded;
         self.mutex.lockUncancelable(self.io);
-        self.enqueueLocked(envelope) catch |initial_error| {
-            if (!isCapacityError(initial_error)) {
-                self.mutex.unlock(self.io);
-                return initial_error;
-            }
-            self.mutex.unlock(self.io);
+        defer self.mutex.unlock(self.io);
+        while (true) {
+            if (stopped.load(.acquire)) return error.ConsumerStopped;
+            // Waiting can only resolve occupancy, not a single envelope that
+            // exceeds the queue's entire usable byte capacity.
+            const data = classify(envelope.event.value) == .data;
+            const global_bytes = self.limits.global_bytes -
+                (if (data) self.limits.global_control_reserved_bytes else @as(usize, 0));
+            const session_bytes = self.limits.per_session_bytes -
+                (if (data) self.limits.per_session_control_reserved_bytes else @as(usize, 0));
+            if (envelope.ownedBytes() > @min(global_bytes, session_bytes)) return error.EventTooLarge;
+            self.enqueueLocked(envelope) catch |err| {
+                if (!isCapacityError(err)) return err;
+                self.condition.waitUncancelable(self.io, &self.mutex);
+                continue;
+            };
+            return;
+        }
+    }
 
-            var expired = false;
-            var timer = self.io.async(expireEnqueue, .{ self, &expired, timeout });
-            self.mutex.lockUncancelable(self.io);
-            while (true) {
-                self.enqueueLocked(envelope) catch |err| {
-                    if (!isCapacityError(err)) {
-                        self.mutex.unlock(self.io);
-                        cancelTimer(self.io, &timer);
-                        return err;
-                    }
-                    if (expired) {
-                        self.mutex.unlock(self.io);
-                        cancelTimer(self.io, &timer);
-                        return error.DeadlineExceeded;
-                    }
-                    self.condition.waitUncancelable(self.io, &self.mutex);
-                    continue;
-                };
-                self.mutex.unlock(self.io);
-                cancelTimer(self.io, &timer);
-                return;
-            }
-        };
-        self.mutex.unlock(self.io);
+    pub fn stopWaiting(self: *EventPump, stopped: *std.atomic.Value(bool)) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        stopped.store(true, .release);
+        self.condition.broadcast(self.io);
     }
 
     pub fn takeFair(self: *EventPump) ?OwnedCoreEvent {
@@ -159,6 +152,17 @@ pub const EventPump = struct {
             .data_count = self.data_count,
             .data_bytes = self.data_bytes,
         };
+    }
+
+    /// The caller must observe producer quiescence before using zero as a
+    /// terminal barrier. Other Sessions do not participate in that barrier.
+    pub fn pendingForSession(self: *EventPump, session_id: u64) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.sessions) |usage| {
+            if (usage.session_id == session_id) return usage.count;
+        }
+        return 0;
     }
 
     pub fn deinit(self: *EventPump) void {
@@ -208,14 +212,6 @@ pub const EventPump = struct {
             usage.data_count += 1;
             usage.data_bytes += envelope.ownedBytes();
         }
-    }
-
-    fn expireEnqueue(self: *EventPump, expired: *bool, timeout: std.Io.Duration) std.Io.Cancelable!void {
-        try self.io.sleep(timeout, .awake);
-        self.mutex.lockUncancelable(self.io);
-        expired.* = true;
-        self.condition.broadcast(self.io);
-        self.mutex.unlock(self.io);
     }
 
     fn findOrReserveSession(self: *EventPump, session_id: u64) ?*SessionUsage {
@@ -306,14 +302,8 @@ fn isCapacityError(err: Error) bool {
         error.InvalidIdentity,
         error.EventTooLarge,
         error.SequenceExhausted,
-        error.DeadlineExceeded,
+        error.ConsumerStopped,
         => false,
-    };
-}
-
-fn cancelTimer(io: std.Io, timer: anytype) void {
-    timer.cancel(io) catch |err| switch (err) {
-        error.Canceled => {},
     };
 }
 

@@ -282,6 +282,7 @@ test("Composer recalls only the current Task's saved text after remount and page
         outcome: "completed",
         cause: null,
         diagnosticDisposition: "absent",
+        recordingIncomplete: false,
         modelError: null,
       },
       input: { kind: "text", text, redacted: false },

@@ -2637,8 +2637,13 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
           "cause",
           "diagnosticDisposition",
           "modelError",
+          "recordingIncomplete",
         ]);
         const result = {
+          recordingIncomplete: booleanValue(
+            terminalItem.recordingIncomplete,
+            `${path}.recordingIncomplete`,
+          ),
           outcome: enumValue(
             terminalItem.outcome,
             `${path}.outcome`,

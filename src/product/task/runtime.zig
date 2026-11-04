@@ -167,6 +167,9 @@ pub const TextProjection = struct {
         []const []const u8,
         usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText,
+    /// Trusted receipt metadata is bounded by its own fixed slots/fields, not
+    /// by the lossy display-text budget. The Host still sanitizes every copy.
+    project_receipt_fn: *const fn (*anyopaque, []const u8, usize, []const []const u8) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText,
     discard_candidate_fn: *const fn (*anyopaque, []u8) void,
     discard_previous_fn: *const fn (*anyopaque, []u8) void,
     restore_previous_fn: *const fn (*anyopaque, usize) void,
@@ -182,6 +185,10 @@ pub const TextProjection = struct {
         reclaimable: usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText {
         return self.project_fn(self.context, value, max, sensitive, reclaimable);
+    }
+
+    fn projectReceipt(self: TextProjection, value: []const u8, max: usize, sensitive: []const []const u8) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText {
+        return self.project_receipt_fn(self.context, value, max, sensitive);
     }
 
     fn discardCandidate(self: TextProjection, value: []u8) void {
@@ -370,6 +377,16 @@ pub const RunClock = struct {
             value
         else
             null;
+    }
+};
+
+/// Borrowed queue observation after terminal publication. Never retained.
+pub const EventDrainStatus = struct {
+    context: *anyopaque,
+    pending_fn: *const fn (*anyopaque, u64) usize,
+
+    pub fn pending(self: EventDrainStatus, route_id: u64) usize {
+        return self.pending_fn(self.context, route_id);
     }
 };
 
@@ -788,6 +805,7 @@ pub const PreparedRun = struct {
                 false,
                 true,
                 null,
+                false,
             );
             run_record.terminal_observed = true;
             task_state.freezeRunElapsedMs(run_record, self.effects.run_clock.now());
@@ -4079,6 +4097,7 @@ pub const Runtime = struct {
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
             .record_output_fn = recordEventOutput,
+            .retain_generated_image_fn = retainEventGeneratedImage,
             .record_file_changes_fn = recordEventFileChanges,
         };
         const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
@@ -4107,6 +4126,31 @@ pub const Runtime = struct {
                 .task_id = task.durable.id,
             } },
         };
+    }
+
+    /// Main loop only, after terminal acquisition and this Session's queue
+    /// barrier. A worker never writes these facts into the durable aggregate.
+    pub fn adoptTerminalReceipts(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!bool {
+        const task = self.findByRouteId(route_id) orelse return false;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
+        if (!run.terminal_event_drain_marked or task_state.terminalPayload(run) == null) return false;
+        const execution = run.execution orelse return false;
+        var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
+        var changed = false;
+        defer if (changed) run.noteProjectionChange();
+        for (&execution.terminal_receipts.delivered_files) |*entry| if (entry.*) |*receipt| {
+            try recordEventOutput(&context, run, receipt);
+            entry.* = null;
+            changed = true;
+        };
+        for (&execution.terminal_receipts.generated_images) |*entry| if (entry.*) |*image| {
+            const tool = try retainGeneratedImage(&context, run, image.tool_route_digest, image.receipt.pathView(), task.durable.id);
+            tool.state = .completed;
+            tool.is_error = false;
+            entry.* = null;
+            changed = true;
+        };
+        return changed;
     }
 
     pub fn completeFileChangeArtifact(
@@ -4223,6 +4267,14 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn recordEventPipelineFailure(self: *Runtime, route_id: u64, run_id: u64) bool {
+        const task = self.findByRouteId(route_id) orelse return false;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
+        if (!task_state.recordEventPipelineFailure(run)) return false;
+        task.durable.recent_order = self.takeRecentOrder();
+        return true;
+    }
+
     pub fn recordDependencyContractFailure(
         self: *Runtime,
         route_id: u64,
@@ -4264,7 +4316,12 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
-                if (compact.terminal_publication.load(.acquire) == .published) compact.event_drain_marked = true;
+                if (!compact.event_stream_finalized and !compact.event_drain_marked and
+                    compact.terminal_publication.load(.acquire) == .published)
+                {
+                    compact.event_drain_marked = true;
+                    changed = true;
+                }
             };
             changed = task_state.markTerminalRunsBeforeEventDrain(task) or changed;
         }
@@ -4273,14 +4330,19 @@ pub const Runtime = struct {
 
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         self: *Runtime,
+        events: EventDrainStatus,
         finished_at_ms: ?u64,
         finished_at_unix_ms: ?u64,
     ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
+            if (events.pending(task.runtime.routeId()) != 0) continue;
             for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
-                if (compact.event_drain_marked) compact.event_stream_finalized = true;
+                if (compact.event_drain_marked and !compact.event_stream_finalized) {
+                    compact.event_stream_finalized = true;
+                    changed = true;
+                }
             };
             if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(
                 task,
@@ -4623,6 +4685,14 @@ pub const Runtime = struct {
                 self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
             }
         }
+    }
+
+    pub fn stopEventDelivery(self: *Runtime) void {
+        for (self.tasks) |entry| if (entry) |task| switch (task.runtime.attachment) {
+            .attached => |*attached| attached.binding.stopEventDelivery(),
+            // A close worker stops its Session before entering any wait.
+            .closing, .detached => {},
+        };
     }
 
     pub fn prepareShutdown(
@@ -5706,7 +5776,6 @@ pub const Runtime = struct {
             run.terminal_observed = true;
             const eligible = terminal.outcome == .completed and
                 terminal.session_disposition_at_completion == .reusable and
-                run.event_projection_failure == null and
                 run.completed_input_counts != null and
                 !run.input_continuation_cancelled and !run.input_continuation_attempted;
             var pending = false;
@@ -7092,11 +7161,10 @@ fn recordEventOutput(
         } else if (empty == null) empty = entry;
     }
     const slot = empty orelse return error.ToolCapacity;
-    const path = try context.effects.text.project(
+    const path = try context.effects.text.projectReceipt(
         receipt.pathView(),
         agent.FileDeliveryReceipt.max_path_bytes,
         run.redactionSecrets(),
-        0,
     );
     slot.* = .{
         .id = receipt.id,
@@ -7105,6 +7173,69 @@ fn recordEventOutput(
         .sha256 = receipt.sha256,
         .redacted = path.redacted or path.truncated,
     };
+}
+
+fn discardEventTool(context: *EventContext, tool: *task_state.ToolView) void {
+    discardReferenceText(context, tool.receipt_metadata, tool.id);
+    discardReferenceText(context, tool.receipt_metadata, tool.name);
+    inline for (.{ "input", "progress", "content" }) |field|
+        context.effects.text.discardCandidate(@field(tool, field));
+    clearEventFileReferences(context, tool);
+    if (tool.file_refs) |refs| context.runtime.allocator.free(refs);
+}
+
+fn retainEventGeneratedImage(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64) task_state.EventProjectionError!*task_state.ToolView {
+    const context: *EventContext = @ptrCast(@alignCast(raw_context));
+    return retainGeneratedImage(context, run, toolRouteDigest(id), path, task_id);
+}
+
+fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64) task_state.EventProjectionError!*task_state.ToolView {
+    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = "image" }};
+    if (findToolByRouteDigest(run.tools, digest)) |tool| {
+        try replaceToolFileReferences(context, tool, &generated, true, run.initial_credentials[0], task_id, run.generation);
+        if (!tool.receipt_metadata) {
+            // Existing owned identity moves from display accounting to the
+            // already bounded trusted metadata owner, without copying it.
+            context.effects.text.releaseBytes(tool.id.len + tool.name.len);
+            tool.receipt_metadata = true;
+        }
+        return tool;
+    }
+    const slot = findEmptyTool(run.tools) orelse available: {
+        for (run.tools, 0..) |entry, index| if (entry) |tool| {
+            if (tool.receipt_metadata) continue;
+            discardEventTool(context, &run.tools[index].?);
+            run.tools[index] = null;
+            _ = task_state.recordEventProjectionFailure(run);
+            break :available index;
+        };
+        return error.ToolCapacity;
+    };
+    var storage: [task_state.tool_product_id_capacity]u8 = undefined;
+    const id = std.fmt.bufPrint(&storage, "tool-{d}", .{run.next_activity_order}) catch unreachable;
+    const owned_id = try context.effects.text.projectReceipt(id, storage.len, &.{});
+    errdefer context.runtime.allocator.free(owned_id.value);
+    const name = try context.effects.text.projectReceipt("GenerateImage", context.effects.max_tool_field_bytes, run.redactionSecrets());
+    errdefer context.runtime.allocator.free(name.value);
+    var candidate = task_state.ToolView{
+        .route_digest = digest,
+        .id = owned_id.value,
+        .name = name.value,
+        .order = takeActivityOrder(run),
+        .input = &.{},
+        .progress = &.{},
+        .content = &.{},
+        .state = .completed,
+        .receipt_metadata = true,
+        .redacted = name.redacted,
+    };
+    errdefer {
+        clearEventFileReferences(context, &candidate);
+        if (candidate.file_refs) |refs| context.runtime.allocator.free(refs);
+    }
+    try replaceToolFileReferences(context, &candidate, &generated, true, run.initial_credentials[0], task_id, run.generation);
+    run.tools[slot] = candidate;
+    return &run.tools[slot].?;
 }
 
 fn replaceEventFileReferences(
@@ -7128,15 +7259,31 @@ fn replaceEventFileReferences(
         result.file_refs
     else
         null;
+    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = envelope.generated_image_path orelse "" }, .title = "", .kind = "image" }};
+    const values = if (envelope.generated_image_path != null) &generated else refs orelse &.{};
+    return replaceToolFileReferences(context, tool, values, envelope.generated_image_path != null, credential, task_id, run_generation);
+}
+
+const CoreKnownEvent = @FieldType(@FieldType(@FieldType(agent.OwnedCoreEvent, "event"), "value"), "known");
+const CoreToolResult = @FieldType(CoreKnownEvent, "tool_result");
+const CoreFileReference = std.meta.Child(std.meta.Child(@FieldType(CoreToolResult, "file_refs")));
+
+fn projectReferenceText(context: *EventContext, receipt: bool, value: []const u8, max: usize, sensitive: []const []const u8, reclaimable: usize) task_state.EventProjectionError!ProjectedText {
+    if (receipt) return context.effects.text.projectReceipt(value, max, sensitive);
+    return context.effects.text.project(value, max, sensitive, reclaimable);
+}
+
+fn discardReferenceText(context: *EventContext, receipt: bool, value: []u8) void {
+    if (receipt) context.runtime.allocator.free(value) else context.effects.text.discardCandidate(value);
+}
+
+fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView, values: []const CoreFileReference, generated_image: bool, credential: []const u8, task_id: u64, run_generation: u64) task_state.EventProjectionError!void {
     var candidate = tool.*;
     candidate.file_refs = null;
     errdefer {
         clearEventFileReferences(context, &candidate);
         if (candidate.file_refs) |allocated| context.runtime.allocator.free(allocated);
     }
-    const CoreFileReference = std.meta.Child(@TypeOf(refs.?));
-    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = envelope.generated_image_path orelse "" }, .title = "", .kind = "image" }};
-    const values = if (envelope.generated_image_path != null) &generated else refs orelse &.{};
     if (values.len > context.effects.max_file_refs_per_tool)
         return error.ToolCapacity;
     if (candidate.file_refs == null) {
@@ -7170,7 +7317,7 @@ fn replaceEventFileReferences(
             index + 1,
         );
         var owned = task_state.FileReferenceView{
-            .generated_image = envelope.generated_image_path != null,
+            .generated_image = generated_image,
             .id = undefined,
             .title = undefined,
             .display_path = undefined,
@@ -7188,15 +7335,17 @@ fn replaceEventFileReferences(
         var kind_live = false;
         var locator_live = false;
         errdefer {
-            if (id_live) context.effects.text.discardCandidate(owned.id);
-            if (title_live) context.effects.text.discardCandidate(owned.title);
-            if (display_live) context.effects.text.discardCandidate(owned.display_path);
-            if (kind_live) context.effects.text.discardCandidate(owned.kind);
-            if (locator_live) context.effects.text.discardCandidate(owned.locator);
+            if (id_live) discardReferenceText(context, generated_image, owned.id);
+            if (title_live) discardReferenceText(context, generated_image, owned.title);
+            if (display_live) discardReferenceText(context, generated_image, owned.display_path);
+            if (kind_live) discardReferenceText(context, generated_image, owned.kind);
+            if (locator_live) discardReferenceText(context, generated_image, owned.locator);
         }
-        owned.id = (try context.effects.text.project(id, id.len, &.{}, 0)).value;
+        owned.id = (try projectReferenceText(context, generated_image, id, id.len, &.{}, 0)).value;
         id_live = true;
-        const title = try context.effects.text.project(
+        const title = try projectReferenceText(
+            context,
+            generated_image,
             reference.title,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -7210,7 +7359,9 @@ fn replaceEventFileReferences(
             reference.title
         else
             "file";
-        const display = try context.effects.text.project(
+        const display = try projectReferenceText(
+            context,
+            generated_image,
             display_source,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -7218,7 +7369,9 @@ fn replaceEventFileReferences(
         );
         owned.display_path = display.value;
         display_live = true;
-        const kind = try context.effects.text.project(
+        const kind = try projectReferenceText(
+            context,
+            generated_image,
             reference.kind,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -7226,7 +7379,9 @@ fn replaceEventFileReferences(
         );
         owned.kind = kind.value;
         kind_live = true;
-        owned.locator = (try context.effects.text.project(
+        owned.locator = (try projectReferenceText(
+            context,
+            generated_image,
             locator,
             context.effects.max_file_ref_field_bytes,
             &.{},
@@ -7268,11 +7423,11 @@ fn clearEventFileReferences(context: *EventContext, tool: *task_state.ToolView) 
     const refs = tool.file_refs orelse return;
     for (refs) |*entry| {
         if (entry.*) |*reference| {
-            context.effects.text.discardCandidate(reference.id);
-            context.effects.text.discardCandidate(reference.title);
-            context.effects.text.discardCandidate(reference.display_path);
-            context.effects.text.discardCandidate(reference.kind);
-            context.effects.text.discardCandidate(reference.locator);
+            discardReferenceText(context, reference.generated_image, reference.id);
+            discardReferenceText(context, reference.generated_image, reference.title);
+            discardReferenceText(context, reference.generated_image, reference.display_path);
+            discardReferenceText(context, reference.generated_image, reference.kind);
+            discardReferenceText(context, reference.generated_image, reference.locator);
         }
         entry.* = null;
     }
@@ -7535,11 +7690,7 @@ fn findEmptyTool(entries: []?task_state.ToolView) ?usize {
     return null;
 }
 
-fn toolRouteDigest(id: []const u8) [task_state.tool_route_digest_bytes]u8 {
-    var digest: [task_state.tool_route_digest_bytes]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
-    return digest;
-}
+const toolRouteDigest = agent.toolRouteDigest;
 
 fn findToolByRouteDigest(
     tools: []?task_state.ToolView,
@@ -7750,16 +7901,20 @@ fn releaseTrackedText(
     value.* = .{};
 }
 
+fn releaseReferenceSlice(self: *Runtime, effects: ReleaseEffects, receipt: bool, value: []u8) void {
+    if (receipt) self.allocator.free(value) else releaseProjectedSlice(self, effects, value);
+}
+
 fn deinitFileReference(
     self: *Runtime,
     effects: ReleaseEffects,
     reference: *task_state.FileReferenceView,
 ) void {
-    releaseProjectedSlice(self, effects, reference.id);
-    releaseProjectedSlice(self, effects, reference.title);
-    releaseProjectedSlice(self, effects, reference.display_path);
-    releaseProjectedSlice(self, effects, reference.kind);
-    releaseProjectedSlice(self, effects, reference.locator);
+    releaseReferenceSlice(self, effects, reference.generated_image, reference.id);
+    releaseReferenceSlice(self, effects, reference.generated_image, reference.title);
+    releaseReferenceSlice(self, effects, reference.generated_image, reference.display_path);
+    releaseReferenceSlice(self, effects, reference.generated_image, reference.kind);
+    releaseReferenceSlice(self, effects, reference.generated_image, reference.locator);
     reference.* = undefined;
 }
 
@@ -7780,8 +7935,8 @@ fn deinitTool(
     effects: ReleaseEffects,
     tool: *task_state.ToolView,
 ) void {
-    releaseProjectedSlice(self, effects, tool.id);
-    releaseProjectedSlice(self, effects, tool.name);
+    releaseReferenceSlice(self, effects, tool.receipt_metadata, tool.id);
+    releaseReferenceSlice(self, effects, tool.receipt_metadata, tool.name);
     releaseProjectedSlice(self, effects, tool.input);
     releaseProjectedSlice(self, effects, tool.progress);
     releaseProjectedSlice(self, effects, tool.content);
@@ -9188,7 +9343,7 @@ fn deinitRun(
         deinitFileChange(self, effects, change);
     if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
     for (run.outputs) |entry| if (entry) |output|
-        releaseProjectedSlice(self, effects, output.locator);
+        self.allocator.free(output.locator);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     self.discardInputPayloads(run);
@@ -9391,7 +9546,21 @@ test "Task model retired credential waits for Compact return and the canonical e
     try std.testing.expect(runtime.retiredCredential(1) == null);
     _ = runtime.markTerminalRunsBeforeEventDrain();
     try std.testing.expect(runtime.retiredCredential(1) == null);
-    _ = runtime.finalizeMarkedTerminalRunsAfterEventDrain(null, null);
+    var pending: usize = 1;
+    const drain: EventDrainStatus = .{
+        .context = &pending,
+        .pending_fn = struct {
+            fn count(context: *anyopaque, _: u64) usize {
+                const value: *usize = @ptrCast(@alignCast(context));
+                return value.*;
+            }
+        }.count,
+    };
+    _ = runtime.finalizeMarkedTerminalRunsAfterEventDrain(drain, null, null);
+    try std.testing.expect(!compacts[0].?.event_stream_finalized);
+    try std.testing.expect(runtime.retiredCredential(1) == null);
+    pending = 0;
+    _ = runtime.finalizeMarkedTerminalRunsAfterEventDrain(drain, null, null);
     try std.testing.expectEqualStrings("synthetic-old-key", runtime.retiredCredential(1).?);
     runtime.releaseRetiredCredential(1);
     try std.testing.expectEqual(@as(usize, 0), compacts[0].?.redaction_secret.len);
@@ -9932,6 +10101,13 @@ const InputTestProjection = struct {
         self.charged -= value.len;
         self.allocator.free(value);
     }
+    fn projectReceipt(context: *anyopaque, value: []const u8, max: usize, sensitive: []const []const u8) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText {
+        const self = from(context);
+        const buffer = try self.allocator.alloc(u8, @min(value.len, max));
+        defer self.allocator.free(buffer);
+        const projected = task_execution.projectSanitized(buffer, value, sensitive);
+        return .{ .value = try self.allocator.dupe(u8, buffer[0..projected.len]), .truncated = projected.truncated, .redacted = projected.redacted };
+    }
     fn reserve(context: *anyopaque, bytes: usize) error{ProjectionCapacity}!void {
         from(context).charged += bytes;
     }
@@ -9956,7 +10132,7 @@ const InputTestProjection = struct {
     }
     fn effects(self: *InputTestProjection) OperationEffects {
         return .{
-            .text = .{ .context = self, .project_fn = project, .discard_candidate_fn = discard, .discard_previous_fn = discard, .restore_previous_fn = restore, .allocate_capacity_fn = allocate, .reserve_bytes_fn = reserve, .release_bytes_fn = release },
+            .text = .{ .context = self, .project_fn = project, .project_receipt_fn = projectReceipt, .discard_candidate_fn = discard, .discard_previous_fn = discard, .restore_previous_fn = restore, .allocate_capacity_fn = allocate, .reserve_bytes_fn = reserve, .release_bytes_fn = release },
             .release = .{ .context = self, .redact_all_fn = redact, .release_projection_bytes_fn = release, .prepare_credential_release_fn = prepareRelease },
             .executor = undefined,
             .worker = undefined,

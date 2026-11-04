@@ -197,6 +197,32 @@ pub const SubmittedInputs = struct {
     }
 };
 
+pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+pub fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
+    var digest: [tool_route_digest_bytes]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
+    return digest;
+}
+
+/// Only exact successful tool-result matches may enter this bounded tail.
+/// A route digest retains tool identity without copying raw tool text.
+pub const TerminalReceipts = struct {
+    const delivery = @import("agent_file_delivery");
+    const images = @import("../image_generation.zig");
+    pub const GeneratedImage = struct {
+        tool_route_digest: [tool_route_digest_bytes]u8,
+        receipt: images.Receipt,
+    };
+    delivered_files: [delivery.max_receipts_per_run]?delivery.Receipt = @splat(null),
+    generated_images: [images.production_limits.sends_per_run]?GeneratedImage = @splat(null),
+
+    pub fn isEmpty(self: *const TerminalReceipts) bool {
+        for (self.delivered_files) |entry| if (entry != null) return false;
+        for (self.generated_images) |entry| if (entry != null) return false;
+        return true;
+    }
+};
+
 /// Immutable Agent-owned facts for exactly one begun Run. The caller must copy
 /// the bounded diagnostic into its admission-reserved Run record, then deinit
 /// this value. `session_disposition_at_completion` is a completion-time
@@ -216,6 +242,9 @@ pub const TerminalResult = struct {
     /// Supplemental typed file-change observations were dropped locally.
     /// This fact never changes the Agent terminal outcome.
     file_changes_lost: bool = false,
+    /// Validated events omitted after the consumer stopped, not a Core failure.
+    event_delivery_lost: bool = false,
+    receipts: TerminalReceipts = .{},
     failure: ?TerminalFailure,
     session_disposition_at_completion: SessionDisposition,
     durable_budget: ?DurableBudgetObservation = null,
@@ -295,25 +324,6 @@ pub const EventReadyNotifier = struct {
     pub fn notify(self: EventReadyNotifier) EventReadyNotification {
         return self.notify_fn(self.context);
     }
-
-    pub fn notifyWithRetry(
-        self: EventReadyNotifier,
-        io: std.Io,
-        retry_interval: std.Io.Duration,
-        timeout: std.Io.Duration,
-    ) EventReadyNotification {
-        std.debug.assert(retry_interval.nanoseconds > 0);
-        std.debug.assert(timeout.nanoseconds > 0);
-        var waited: i96 = 0;
-        while (true) {
-            const result = self.notify();
-            if (result != .unavailable) return result;
-            if (waited >= timeout.nanoseconds) return .unavailable;
-            const sleep_ns = @min(retry_interval.nanoseconds, timeout.nanoseconds - waited);
-            io.sleep(.fromNanoseconds(sleep_ns), .awake) catch return .unavailable;
-            waited += sleep_ns;
-        }
-    }
 };
 
 pub const PermissionMode = enum {
@@ -349,47 +359,4 @@ test "EventReadyNotifier preserves scheduled, coalesced, and unavailable outcome
         harness.result = result;
         try std.testing.expectEqual(result, notifier.notify());
     }
-}
-
-test "EventReadyNotifier retries unavailable without losing terminal outcomes" {
-    const Harness = struct {
-        unavailable_before_success: usize,
-        calls: usize = 0,
-
-        fn notify(context: ?*anyopaque) EventReadyNotification {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.calls += 1;
-            if (self.calls <= self.unavailable_before_success) return .unavailable;
-            return .already_pending;
-        }
-    };
-    var recovering = Harness{ .unavailable_before_success = 2 };
-    const recovering_notifier = EventReadyNotifier{
-        .context = &recovering,
-        .notify_fn = Harness.notify,
-    };
-    try std.testing.expectEqual(
-        EventReadyNotification.already_pending,
-        recovering_notifier.notifyWithRetry(
-            std.testing.io,
-            .fromNanoseconds(1),
-            .fromNanoseconds(3),
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 3), recovering.calls);
-
-    var unavailable = Harness{ .unavailable_before_success = std.math.maxInt(usize) };
-    const unavailable_notifier = EventReadyNotifier{
-        .context = &unavailable,
-        .notify_fn = Harness.notify,
-    };
-    try std.testing.expectEqual(
-        EventReadyNotification.unavailable,
-        unavailable_notifier.notifyWithRetry(
-            std.testing.io,
-            .fromNanoseconds(1),
-            .fromNanoseconds(2),
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 3), unavailable.calls);
 }

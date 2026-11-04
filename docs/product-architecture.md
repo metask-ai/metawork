@@ -479,6 +479,11 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 ### 4.3 `workbench-history.store`
 
+可信成果元数据和可省略的展示详情分开保留。交付回执与 Host 生图引用受既有每 Run 数量、路径及字段长度、历史存储和 Bridge 块边界约束，复制仍经过同一 Host 全量凭据清洗；它们不消耗可淘汰的普通文本详情额度，也不建立新的全局预留或准入机制。生图引用归属于不可淘汰的最小 Tool 记录，必要时省略普通 Tool 行；Tool 名称和产品身份的运行时计费标记不进入持久化格式，冷恢复由可信生图引用重建同一所有权。allocator failure 仍是 Host 失败，不伪装成普通容量缺口。
+
+Agent worker 只在预留的 Run execution owner 中写入有界回执尾部，并随 terminal release publication 交给主线程。主线程在该 Session 队列消费完后，按稳定身份去重并接纳回执，再发布 Product 终态；worker 不直接修改 durable Task。其槽位、路径及原 Tool 关联不依赖展示事件队列，Task 删除与 Run retirement 遵循同一静止和释放屏障。
+
+
 `<MetaWork data dir>/workbench/workbench-history.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
 
 Run 模型错误作为可空 typed 附属值与该 Run 的终态在同一历史事务保存；保留安全文本、执行来源、typed 分类、请求重试事实及上游/Host 清洗截断事实。旧 SQL 和首次导入的旧 Run 缺少该值时恢复为 null，不从诊断文本重建。恢复只重建观察，不执行登录、支付、请求或工具；当前操作资格不得从历史错误继承。字段继续参与 SQL、只读/保留 payload 和候选的统一 credential 检查与再清洗，实际清洗须保留 Host redacted 事实。持久化通过追加迁移扩展已发布身份，不改写既有迁移。

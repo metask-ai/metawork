@@ -68,6 +68,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     InvalidDeliveryReceipt,
     InvalidOutputSegment,
     InvalidInputAdoption,
+    InvalidUsage,
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
@@ -133,6 +134,11 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
 const default_attachment_file_bytes: usize = 100_000_000;
 const default_attachment_count: usize = product_attachment.max_files_per_message;
 
+fn pendingAgentEvents(context: *anyopaque, session_id: u64) usize {
+    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    return runtime.pendingEventCount(session_id);
+}
+
 pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
     return switch (err) {
         error.RunChanged => .run_changed,
@@ -192,6 +198,8 @@ pub fn persistenceLimits(limits: Limits, max_workspaces: usize) task_persistence
 pub const Limits = struct {
     worker_count: usize = 4,
     queue_capacity: usize = 16,
+    max_events_per_drain: usize = 64,
+    max_event_drain_ns: u64 = 8 * std.time.ns_per_ms,
     max_tasks: usize = 50,
     max_workspaces: usize = 16,
     max_scheduled_tasks: usize = 16,
@@ -1407,6 +1415,7 @@ pub const Runtime = struct {
         configuration: Configuration,
     ) Error!Runtime {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
+            limits.max_events_per_drain == 0 or limits.max_event_drain_ns == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
             limits.max_skill_assets == 0 or
@@ -6066,42 +6075,46 @@ pub const Runtime = struct {
     /// depend on Executor liveness, and must run before Agent Runtime deinit.
     pub fn drainAgentEvents(self: *Runtime) Error!void {
         var first_projection_error: ?Error = null;
-        self.drainAgentEventPass(&first_projection_error);
-        // Terminal publication happens after the synchronous AgentCore Run
-        // returns, so its acquire observes all callback event enqueues. Drain
-        // once more after that observation before exposing product terminal
-        // state and the final assistant suffix; otherwise a queued callback
-        // could lose the race to lifecycle publication or a snapshot.
+        var remaining = self.limits.max_events_per_drain;
+        const started = std.Io.Timestamp.now(self.io, .awake);
+        self.drainAgentEventPass(&first_projection_error, &remaining, started);
+        // Acquire terminal before observing its Session queue. A bounded pass
+        // may leave a suffix; finalization checks that Session independently.
         self.markTerminalRunsBeforeEventDrain();
-        self.drainAgentEventPass(&first_projection_error);
+        self.drainAgentEventPass(&first_projection_error, &remaining, started);
         self.finalizeMarkedTerminalRunsAfterEventDrain();
         // Agent readiness is a Product lifecycle wake, not a Renderer wake.
         // Reconcile even when no Renderer is connected so background Runs can
         // request termination and Schedules can consume their terminal facts.
         self.syncLifecycle();
+        if (!self.shutting_down and self.agent_runtime.hasPendingEvents())
+            _ = self.agent_runtime.notifyEventConsumer();
         if (first_projection_error) |err| return err;
     }
 
     fn drainAgentEventPass(
         self: *Runtime,
         first_projection_error: *?Error,
+        remaining: *usize,
+        started: std.Io.Timestamp,
     ) void {
-        while (self.agent_runtime.takeEvent()) |value| {
+        while (remaining.* != 0) {
+            if (started.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds >=
+                self.limits.max_event_drain_ns) return;
+            const value = self.agent_runtime.takeEvent() orelse return;
+            remaining.* -= 1;
             var envelope = value;
             defer envelope.deinit();
             self.applyEvent(&envelope) catch |err| {
-                if (first_projection_error.* == null)
-                    first_projection_error.* = err;
-                if (err == error.InvalidOutputSegment or err == error.InvalidInputAdoption)
-                    self.recordDependencyContractFailure(
-                        envelope.session_id,
-                        envelope.run_id,
-                    )
-                else
-                    self.recordEventProjectionFailure(
-                        envelope.session_id,
-                        envelope.run_id,
-                    );
+                switch (err) {
+                    error.ProjectionCapacity, error.ToolCapacity => {
+                        self.recordEventProjectionFailure(envelope.session_id, envelope.run_id);
+                        continue;
+                    },
+                    error.InvalidOutputSegment, error.InvalidInputAdoption, error.InvalidUsage => self.recordDependencyContractFailure(envelope.session_id, envelope.run_id),
+                    else => self.recordEventPipelineFailure(envelope.session_id, envelope.run_id),
+                }
+                if (first_projection_error.* == null) first_projection_error.* = err;
                 self.agent_runtime.requestRunTermination(
                     envelope.session_id,
                     envelope.run_id,
@@ -6111,24 +6124,28 @@ pub const Runtime = struct {
         }
     }
 
+    fn taskEventEffects(self: *Runtime) task_runtime.EventEffects {
+        return .{
+            .text = self.taskRuntimeTextProjection(),
+            .file_change_diff = .{
+                .context = self,
+                .enqueue_fn = enqueueFileChangeDiff,
+            },
+            .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
+            .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
+            .max_tool_field_bytes = self.limits.max_tool_field_bytes,
+            .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
+            .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
+            .max_file_changes_per_run = self.limits.max_file_changes_per_run,
+            .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
+            .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
+        };
+    }
+
     pub fn applyEvent(self: *Runtime, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
         const outcome = self.task_runtime.applyEvent(
             envelope,
-            .{
-                .text = self.taskRuntimeTextProjection(),
-                .file_change_diff = .{
-                    .context = self,
-                    .enqueue_fn = enqueueFileChangeDiff,
-                },
-                .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
-                .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
-                .max_tool_field_bytes = self.limits.max_tool_field_bytes,
-                .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
-                .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
-                .max_file_changes_per_run = self.limits.max_file_changes_per_run,
-                .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
-                .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
-            },
+            self.taskEventEffects(),
         ) catch |err| {
             if (self.task_runtime.takeEventRejectionDiagnostic(envelope.session_id, envelope.run_id)) |rejection|
                 std.log.warn("task.event_rejection session_id={d} run_id={d} core_manifest_sha256={s} facts={any}", .{
@@ -6179,6 +6196,12 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
+    fn recordEventPipelineFailure(self: *Runtime, route_id: u64, run_id: u64) void {
+        if (!self.task_runtime.recordEventPipelineFailure(route_id, run_id)) return;
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
     fn recordDependencyContractFailure(
         self: *Runtime,
         route_id: u64,
@@ -6189,9 +6212,7 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    /// Marks terminal Runs before Runtime performs one more complete Agent
-    /// event-pump drain. The acquire in `terminalPayload` observes every
-    /// callback enqueue that happened before Run completion.
+    /// Acquire terminal publication before checking the owning Session queue.
     fn markTerminalRunsBeforeEventDrain(self: *Runtime) void {
         self.scrubPublishedTerminalData();
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
@@ -6714,13 +6735,39 @@ pub const Runtime = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    /// Commits the final assistant suffix only after Runtime has drained the
-    /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
+    /// Commits the final suffix only after the owning Session has drained.
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) void {
+        self.finalizeTerminalRunsAfterDrain(.{
+            .context = self.agent_runtime,
+            .pending_fn = pendingAgentEvents,
+        });
+    }
+
+    fn finalizeTerminalRunsAfterDrain(self: *Runtime, events: task_runtime.EventDrainStatus) void {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (events.pending(task.runtime.routeId()) != 0) continue;
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (!run.terminal_event_drain_marked) continue;
+                const execution = run.execution orelse continue;
+                if (execution.terminal_receipts.isEmpty()) continue;
+                const changed = self.task_runtime.adoptTerminalReceipts(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| failed: {
+                    switch (err) {
+                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
+                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
+                    }
+                    // No borrowed receipt or Agent pointer outlives this fact.
+                    // Physical allocation failures retain the real Host failure.
+                    execution.terminal_receipts = .{};
+                    break :failed true;
+                };
+                if (changed) self.encoded_views.invalidateEvent(task.durable.id, run.id);
+            };
+        };
         const finished_at_ms = self.run_clock.now();
         const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
+            events,
             finished_at_ms,
             finished_at_unix_ms,
         );
@@ -7677,6 +7724,7 @@ pub const Runtime = struct {
             .context = self,
             .cancel_fn = cancelApprovalRuntimeExecutor,
         });
+        self.task_runtime.stopEventDelivery();
         if (self.mcp_executor) |lane| lane.shutdown();
         self.executor.shutdown();
         self.approval_executor.shutdown();
@@ -7692,7 +7740,10 @@ pub const Runtime = struct {
         // The joined Run may have published its terminal and checkpoint only
         // after the last UI-loop drain. Finish the canonical event barrier
         // before settling checkpoint transactions.
-        self.drainAgentEvents() catch {};
+        while (true) {
+            self.drainAgentEvents() catch {};
+            if (!self.agent_runtime.hasPendingEvents()) break;
+        }
         self.settleCheckpointTransactionsForShutdown();
         self.task_runtime.excludePendingConversationTailAfterShutdown();
         self.commitTaskStateNoFail();
@@ -8408,6 +8459,7 @@ pub const Runtime = struct {
             .allocator = self.allocator,
             .limits = self.taskPersistenceLimits(),
             .copy_fn = copyRestoredTaskText,
+            .copy_receipt_fn = copyRestoredReceiptText,
             .alloc_fn = allocRestoredTaskText,
             .append_text_fn = appendRestoredTaskText,
             .free_fn = freeRestoredTaskText,
@@ -8424,6 +8476,11 @@ pub const Runtime = struct {
     ) task_persistence.ProjectionError![]u8 {
         const self: *Runtime = @ptrCast(@alignCast(context));
         return self.copyBounded(value, max) catch |err| return @errorCast(err);
+    }
+
+    fn copyRestoredReceiptText(context: *anyopaque, value: []const u8, max: usize) task_persistence.ProjectionError![]u8 {
+        const projected = try projectTaskReceiptText(context, value, max, &.{});
+        return projected.value;
     }
 
     fn allocRestoredTaskText(
@@ -8681,6 +8738,12 @@ pub const Runtime = struct {
         };
     }
 
+    fn projectTaskReceiptText(context: *anyopaque, value: []const u8, max: usize, sensitive: []const []const u8) (std.mem.Allocator.Error || error{ProjectionCapacity})!task_runtime.ProjectedText {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const projected = self.copySanitizedText(value, max, sensitive, .receipt) catch |err| return @errorCast(err);
+        return .{ .value = projected.value, .truncated = projected.truncated, .redacted = projected.redacted };
+    }
+
     fn freeTaskRuntimeText(context: *anyopaque, value: []u8) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.freeTracked(value);
@@ -8724,6 +8787,7 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .project_fn = projectTaskRuntimeText,
+            .project_receipt_fn = projectTaskReceiptText,
             .discard_candidate_fn = freeTaskRuntimeText,
             .discard_previous_fn = discardPreviousTaskRuntimeText,
             .restore_previous_fn = restorePreviousTaskRuntimeText,
@@ -9716,6 +9780,11 @@ pub const Runtime = struct {
         max: usize,
         credentials: []const []const u8,
     ) Error!ProjectedCopy {
+        return self.copySanitizedText(value, max, credentials, .display);
+    }
+
+    const TextRetention = enum { display, receipt };
+    fn copySanitizedText(self: *Runtime, value: []const u8, max: usize, credentials: []const []const u8, retention: TextRetention) Error!ProjectedCopy {
         // Synchronous main-thread preparation may borrow these values. Include
         // every live owner, so another Task's old token is sanitized before it
         // becomes product history, including matches across the truncation edge.
@@ -9744,7 +9813,10 @@ pub const Runtime = struct {
             known.values.items,
         );
         return .{
-            .value = try self.copyBounded(scratch[0..result.len], max),
+            .value = switch (retention) {
+                .display => try self.copyBounded(scratch[0..result.len], max),
+                .receipt => try self.allocator.dupe(u8, scratch[0..result.len]),
+            },
             .truncated = result.truncated,
             .redacted = result.redacted,
         };
@@ -12348,8 +12420,46 @@ fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) life
 
 fn finalizeTestTerminalEvents(control: *Runtime) void {
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(control);
     control.syncLifecycle();
+}
+
+fn finalizeTestTerminalDrain(control: *Runtime) void {
+    // These aggregate fixtures have no Agent or callback producer. Supply the
+    // empty-queue fact without touching the deliberately absent Agent Runtime.
+    control.finalizeTerminalRunsAfterDrain(.{
+        .context = control,
+        .pending_fn = struct {
+            fn count(_: *anyopaque, _: u64) usize {
+                return 0;
+            }
+        }.count,
+    });
+}
+
+test "terminal Run waits for its Session queue before publishing completion" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.find(3).?;
+    const run = &task.durable.runs[0].?;
+    _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+    control.markTerminalRunsBeforeEventDrain();
+    var pending: usize = 1;
+    const events: task_runtime.EventDrainStatus = .{
+        .context = &pending,
+        .pending_fn = struct {
+            fn count(context: *anyopaque, _: u64) usize {
+                return @as(*usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.count,
+    };
+    control.finalizeTerminalRunsAfterDrain(events);
+    try std.testing.expect(!run.event_stream_finalized);
+    try std.testing.expect(run.finished_at_unix_ms == null);
+    pending = 0;
+    control.finalizeTerminalRunsAfterDrain(events);
+    try std.testing.expect(run.event_stream_finalized);
+    try std.testing.expectEqual(task_test_state.RunOutcome.completed, task_test_state.productTerminalFacts(run).?.outcome);
 }
 
 test "Workspace containment accepts platform roots and rejects path prefixes" {
@@ -16270,7 +16380,7 @@ test "output segment byte mismatch fails the dependency protocol" {
     try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
     try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expectEqual(@as(u64, 2), run.terminal_drain_rejection.?.open.?.bytes);
     try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
     try std.testing.expectEqual(RunOutcome.dependency_contract_failure, productTerminalFacts(run).?.outcome);
@@ -16278,7 +16388,7 @@ test "output segment byte mismatch fails the dependency protocol" {
     try std.testing.expect(run.event_rejection_reported and run.drain_rejection_reported);
 }
 
-test "commentary boundary capacity fails before canonical output mutation" {
+test "commentary capacity omits the group and closes protocol accounting" {
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_commentary_segments_per_run = 1;
@@ -16303,14 +16413,16 @@ test "commentary boundary capacity fails before canonical output mutation" {
         "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"commentary\",\"bytes\":6}}",
     );
     defer close.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&close));
+    try control.applyEvent(&close);
     try std.testing.expectEqualStrings("first", run.assistant.list.items);
     try std.testing.expectEqualSlices(u64, &.{5}, run.commentary_ends[0..run.commentary_count]);
-    try std.testing.expectEqualStrings("second", run.output_segment.list.items);
-    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
+    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+    try std.testing.expectEqual(@as(u64, 2), run.next_output_segment_index);
 }
 
-test "output segment close is atomic when the destination reserve fails" {
+test "output reserve capacity closes the segment and marks an incomplete response" {
     var control = try testRuntime();
     defer control.deinit();
     const task = control.task_runtime.tasks[0].?;
@@ -16335,12 +16447,13 @@ test "output segment close is atomic when the destination reserve fails" {
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":6}}",
     );
     defer end.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&end));
-    try std.testing.expect(run.open_output_segment != null);
-    try std.testing.expectEqual(@as(u64, 0), run.next_output_segment_index);
-    try std.testing.expectEqualStrings("answer", run.output_segment.list.items);
+    try control.applyEvent(&end);
+    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expectEqual(@as(u64, 1), run.next_output_segment_index);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
-    try std.testing.expect(run.assistant_output_kind == null);
+    try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
+    try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
 }
 
 test "assistant output budget is aggregate across committed and open segments" {
@@ -16364,11 +16477,41 @@ test "assistant output budget is aggregate across committed and open segments" {
     }
     var overflow = try testEnvelope(route, run.id, "{\"text_chunk\":\"five!\"}");
     defer overflow.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try control.applyEvent(&overflow);
     try std.testing.expectEqualStrings("four", run.assistant.list.items);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expect(run.open_output_segment != null);
-    try std.testing.expectEqual(@as(u64, 0), run.open_output_segment.?.bytes);
+    try std.testing.expectEqual(@as(u64, 5), run.open_output_segment.?.bytes);
+    var end = try testEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":5}}");
+    defer end.deinit();
+    try control.applyEvent(&end);
+    try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
+    try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+    try std.testing.expect(run.open_output_segment == null);
+}
+
+test "discarded oversized provisional text does not mark a committed recording gap" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_assistant_message_bytes = 4;
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"oversized discarded attempt\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"discarded\",\"bytes\":27}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":0}}",
+        "{\"text_chunk\":\"done\"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":0,\"disposition\":\"final\",\"bytes\":4}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("done", run.assistant.list.items);
+    try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+    try std.testing.expect(run.event_projection_failure == null);
 }
 
 test "partial output stays provisional until the segment is classified" {
@@ -17568,7 +17711,7 @@ test "model error projection matches the shared Renderer fixture after Host cred
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     run.terminal_payload.model_error = storage;
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     detachTaskForTest(&control, task);
     var bytes: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&bytes);
@@ -19233,7 +19376,7 @@ test "completed terminal drain closes collecting file change observation" {
         false,
     ));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
     try std.testing.expectEqual(@as(?u64, 12_000), run.elapsed_ms);
     try std.testing.expectEqual(@as(?u64, clock.unix_ms), run.finished_at_unix_ms);
@@ -19277,7 +19420,8 @@ test "file observation closure agrees after event drain and delayed artifact com
         .{ .already_incomplete = true, .expected = .incomplete },
         .{ .running_tool = true, .expected = .incomplete },
         .{ .cause = null, .expected = .incomplete },
-        .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .consumer_rejected, .expected = .incomplete },
+        .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .consumer_rejected },
+        .{ .cause = .event_pipeline_failure, .expected = .incomplete },
         .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .dependency_contract_failure, .expected = .incomplete },
     };
     for (cases) |case| {
@@ -19304,7 +19448,7 @@ test "file observation closure agrees after event drain and delayed artifact com
             run.event_projection_failure = case.projection_failure;
             try std.testing.expect(commitTerminal(run, case.phase, case.outcome, case.cause, .reusable, "", false));
             control.markTerminalRunsBeforeEventDrain();
-            control.finalizeMarkedTerminalRunsAfterEventDrain();
+            finalizeTestTerminalDrain(&control);
             if (delayed_artifact) {
                 if (!case.already_incomplete)
                     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
@@ -19332,7 +19476,7 @@ test "failed file artifact remains incomplete after a model failure" {
     run.pending_file_change_artifacts = 1;
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expect(control.task_runtime.completeFileChangeArtifact(3, run.generation, run.file_changes[0].?.order, null, false));
     try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
 }
@@ -19352,7 +19496,7 @@ test "terminal persistence degrades pending file change observation without muta
         false,
     ));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     control.task_runtime.tasks[0].?.runtime.active_operation = .none;
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.collecting,
@@ -19722,7 +19866,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
         "\"pendingUi\":null",
     ) != null);
     const revision_before_finalization = control.revision;
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expectEqual(
         @as(u64, @intCast(assistant.committed_len)),
@@ -19750,7 +19894,10 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     );
 }
 
-test "projection failure after Agent terminal becomes a product failure" {
+test "projection gap preserves completion, continuation and completion-seen persistence" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence = TestTaskPersistence{ .storage = storage };
     var control = try testRuntime();
     defer control.deinit();
     const events = [_][]const u8{
@@ -19787,8 +19934,8 @@ test "projection failure after Agent terminal becomes a product failure" {
     // that the canonical event stream could not be represented completely.
     try std.testing.expectEqual(RunOutcome.completed, terminalPayload(run).?.outcome);
     const product = productTerminalFacts(run).?;
-    try std.testing.expectEqual(RunOutcome.failed, product.outcome);
-    try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
+    try std.testing.expectEqual(RunOutcome.completed, product.outcome);
+    try std.testing.expect(product.cause == null);
     // Continuation stays with the Session disposition; the projection loss is
     // a Run-level product fact only.
     try std.testing.expect(control.task_runtime.continuationAvailable(
@@ -19796,16 +19943,26 @@ test "projection failure after Agent terminal becomes a product failure" {
         control.taskRuntimeProjectionEffects(),
     ));
 
+    try std.testing.expect(control.task_runtime.markCompletionSeen(3, run.id));
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.workspace_root, "/tmp/metawork-test", control.limits.max_workspace_bytes);
+    try control.commitTaskState();
+    var restored = try task_persistence.decode(std.testing.allocator, storage[0..persistence.len], control.taskPersistenceLimits());
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(?u64, 7), restored.value.tasks[0].completion_seen_run_id);
+    try std.testing.expectEqualStrings("completed", restored.value.tasks[0].runs[0].outcome.?);
+    try std.testing.expectEqualStrings("consumer_rejected", restored.value.tasks[0].runs[0].event_projection_failure.?);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"recordingIncomplete\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":true") != null);
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -19813,7 +19970,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
         try std.testing.expect(commitTerminal(run, .failed, .failed, std.meta.stringToEnum(RunCause, expected.cause).?, .reusable, "", false));
         control.markTerminalRunsBeforeEventDrain();
-        control.finalizeMarkedTerminalRunsAfterEventDrain();
+        finalizeTestTerminalDrain(&control);
         detachTaskForTest(&control, control.task_runtime.tasks[0].?);
         var storage: [96 * 1024]u8 = undefined;
         const snapshot = try control.writeAggregateFixture(&storage);
@@ -19857,7 +20014,7 @@ test "event drain barrier atomically publishes terminal product state" {
 
     const revision_before_finalization = control.revision;
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expect(control.revision > revision_before_finalization);
     run.commentary_count = 1;
     run.commentary_ends[0] = @intCast(run.assistant.committed_len);
@@ -19871,7 +20028,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }
@@ -20041,7 +20198,7 @@ test "Runtime rejects cross-session routes and usage overflow" {
     try control.applyEvent(&maximum);
     var overflow = try testEnvelope(3, 7, "{\"usage\":{\"input_tokens\":1}}");
     defer overflow.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try std.testing.expectError(error.InvalidUsage, control.applyEvent(&overflow));
 }
 
 test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up" {
@@ -21919,7 +22076,7 @@ test "Outputs require trusted delivery sideband and reject conflicting or excess
     try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
     try std.testing.expectEqual(@as(u64, 42), run.outputs[0].?.size_bytes);
     const admitted_bytes = control.projection_bytes;
-    try std.testing.expectEqual(baseline_bytes + "成果/final.docx".len, admitted_bytes);
+    try std.testing.expectEqual(baseline_bytes, admitted_bytes);
     try control.applyEvent(&envelope);
     try std.testing.expectEqual(admitted_bytes, control.projection_bytes);
     try std.testing.expect(run.outputs[1] == null);
@@ -21940,6 +22097,112 @@ test "Outputs require trusted delivery sideband and reject conflicting or excess
     try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&wrong_tool));
 }
 
+test "terminal receipt tail is adopted before completion and deduplicates queued delivery" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const receipt = try lifecycle.FileDeliveryReceipt.init(@splat(7), "outputs/tail.docx", 17, @splat(8));
+    var queued = try testEnvelope(task.runtime.routeId(), run.id, "{\"tool_result\":{\"id\":\"queued-delivery\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified\",\"is_error\":false}}");
+    defer queued.deinit();
+    queued.delivered_file = receipt;
+    try control.applyEvent(&queued);
+    try std.testing.expect(run.execution != null);
+    run.execution.?.terminal_receipts.delivered_files[0] = receipt;
+    run.execution.?.terminal_receipts.generated_images[0] = .{
+        .tool_route_digest = lifecycle.toolRouteDigest("tail-generated"),
+        .receipt = try lifecycle.ImageGenerationReceipt.init("generated-images/tail.png", 32, .png),
+    };
+    _ = task_test_state.recordEventProjectionFailure(run);
+    control.limits.max_projection_bytes = control.projection_bytes;
+    try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+    control.markTerminalRunsBeforeEventDrain();
+    try std.testing.expect(!task_test_state.finalizeMarkedTerminalRunsAfterEventDrain(task, null, null));
+    try std.testing.expect(!run.event_stream_finalized);
+    finalizeTestTerminalDrain(&control);
+    try std.testing.expect(run.execution.?.terminal_receipts.isEmpty());
+    try std.testing.expect(run.event_stream_finalized);
+    try std.testing.expectEqual(.completed, productTerminalFacts(run).?.outcome);
+    try std.testing.expectEqualStrings(receipt.pathView(), run.outputs[0].?.locator);
+    try std.testing.expect(run.outputs[1] == null);
+    const image_tool = for (run.tools) |entry| {
+        if (entry) |tool| if (tool.receipt_metadata) break tool;
+    } else return error.MissingGeneratedImage;
+    try std.testing.expectEqualStrings("generated-images/tail.png", image_tool.file_refs.?[0].?.locator);
+    const order = task.durable.next_presentation_order;
+    finalizeTestTerminalDrain(&control);
+    try std.testing.expectEqual(order, task.durable.next_presentation_order);
+    try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
+}
+
+test "trusted delivery and image metadata survive full Tool and display capacity" {
+    for ([_]bool{ false, true }) |generated| {
+        var storage: [256 * 1024]u8 = undefined;
+        var history = TestTaskPersistence{ .storage = &storage };
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+        defer control.deinit();
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        for ([_][]const u8{
+            "{\"tool_start\":{\"id\":\"one\",\"name\":\"Read\",\"input\":\"first file\"}}",
+            "{\"tool_start\":{\"id\":\"two\",\"name\":\"Read\",\"input\":\"second file\"}}",
+        }) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        _ = task_test_state.recordEventProjectionFailure(run);
+        var snapshot: [96 * 1024]u8 = undefined;
+        _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id });
+        const key = Runtime.viewKey(.{ .task_id = task.durable.id }, .taskPage);
+        try std.testing.expect(control.encoded_views.get(key) != null);
+        const commits = history.commits;
+        const revision = control.revision;
+        control.limits.max_projection_bytes = control.projection_bytes;
+        var result = try testEnvelope(task.runtime.routeId(), run.id, if (generated)
+            "{\"tool_result\":{\"id\":\"image\",\"name\":\"GenerateImage\",\"input\":\"optional generation parameters exceed remaining display capacity\",\"content\":\"\",\"is_error\":false}}"
+        else
+            "{\"tool_result\":{\"id\":\"delivery\",\"name\":\"DeliverFile\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
+        defer result.deinit();
+        if (generated) {
+            result.generated_image_path = try std.testing.allocator.dupe(u8, "generated-images/kept.png");
+            try control.applyEvent(&result);
+            const protected = for (run.tools) |entry| {
+                if (entry) |tool| if (tool.receipt_metadata) break tool;
+            } else return error.MissingGeneratedImage;
+            try std.testing.expectEqualStrings("generated-images/kept.png", protected.file_refs.?[0].?.locator);
+            try std.testing.expect(protected.file_refs.?[0].?.generated_image);
+            try std.testing.expectEqual(@as(usize, 0), protected.input.len);
+            try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        } else {
+            result.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "outputs/kept.docx", 12, @splat(4));
+            try control.applyEvent(&result);
+            try std.testing.expectEqualStrings("outputs/kept.docx", run.outputs[0].?.locator);
+        }
+        try std.testing.expectEqual(commits + 1, history.commits);
+        try std.testing.expectEqual(revision + 1, control.revision);
+        try std.testing.expect(control.encoded_views.get(key) == null);
+        try std.testing.expect(control.task_persistence_health == .ready);
+        try std.testing.expect(run.first_event_rejection == null);
+        var saved = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
+        defer saved.deinit();
+        const wire_run = saved.value.tasks[0].runs[0];
+        if (generated) {
+            const reference = found: {
+                for (wire_run.tools) |tool| if (tool.file_refs) |refs| {
+                    for (refs) |ref| if (ref.generated_image) break :found ref;
+                };
+                return error.MissingSavedGeneratedImage;
+            };
+            try std.testing.expectEqualStrings("generated-images/kept.png", reference.locator);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), wire_run.outputs.len);
+            try std.testing.expectEqualStrings("outputs/kept.docx", wire_run.outputs[0].locator);
+        }
+        try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
+    }
+}
+
 test "Outputs persist through real history restore and sanitized locators lose file authority" {
     var storage: [256 * 1024]u8 = undefined;
     var history = TestTaskPersistence{ .storage = &storage };
@@ -21954,6 +22217,10 @@ test "Outputs persist through real history restore and sanitized locators lose f
         try control.applyEvent(&envelope);
         const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
         try std.testing.expect(run.outputs[1].?.redacted);
+        var image = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"image-receipt\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
+        defer image.deinit();
+        image.generated_image_path = try std.testing.allocator.dupe(u8, "generated-images/restored.png");
+        try control.applyEvent(&image);
         try TestSupport.commitTaskHistory(&control);
         try std.testing.expect(history.len > 0);
         try std.testing.expect(std.mem.indexOf(u8, storage[0..history.len], "SECRET-KEY") == null);
@@ -21972,6 +22239,11 @@ test "Outputs persist through real history restore and sanitized locators lose f
     try std.testing.expect(run.outputs[1].?.redacted);
     try std.testing.expectEqualStrings("", run.outputs[1].?.locator);
     try std.testing.expect(run.outputs[2] == null);
+    const image = for (run.tools) |entry| {
+        if (entry) |tool| if (tool.receipt_metadata) break tool;
+    } else return error.MissingGeneratedImage;
+    try std.testing.expect(image.file_refs.?[0].?.generated_image);
+    try std.testing.expectEqualStrings("generated-images/restored.png", image.file_refs.?[0].?.locator);
 }
 
 test "late credential discovery revokes Output locators in current and durable projections" {

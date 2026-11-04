@@ -287,7 +287,7 @@ fn writeTerminal(writer: *std.Io.Writer, text: TextProjection, run: *const task_
     if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"diagnosticDisposition\":\"{s}\",\"modelError\":", .{@tagName(terminal.diagnostic_disposition)}) catch return error.SnapshotTooLarge;
     try writeModelError(writer, text, task_state.terminalPayload(run).?.model_error, terminal.cause);
-    writer.writeByte('}') catch return error.SnapshotTooLarge;
+    writer.print(",\"recordingIncomplete\":{}}}", .{run.event_projection_failure != null}) catch return error.SnapshotTooLarge;
 }
 
 pub fn writeRunManifest(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {

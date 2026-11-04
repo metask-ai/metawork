@@ -56,8 +56,6 @@ fn canonicalArchiveFile(io: std.Io, path: []const u8) ![]u8 {
 
 const pending_ui_json_capacity = 256 * 1024;
 const terminal_diagnostic_capacity = 512;
-const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
-const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 // 16 concurrent executions: workers spend their lives blocked on network
 // or on an indefinite UI wait, so the bound is about parallel model
 // conversations, not CPU. Sized so approval-blocked runs cannot easily
@@ -576,8 +574,6 @@ fn createAgentRuntime(
         .max_ui_request_bytes = pending_ui_json_capacity,
         .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
         .event_ready_notifier = notifier,
-        .event_ready_retry_interval = agent_event_retry_interval,
-        .event_ready_timeout = agent_event_notification_timeout,
     });
 }
 
@@ -597,7 +593,7 @@ pub fn run(init: std.process.Init) !void {
     app.platform.setProductDeliveryTrace(app.automation.productDeliveryTraceEnabled());
     app.agent_events.bindWake(.{
         .context = &app.platform,
-        .notify_fn = app_platform.Adapter.notifyMainLoop,
+        .notify_fn = app_platform.Adapter.notifyAgentEvents,
     });
     defer app.automation.deinit();
     const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {

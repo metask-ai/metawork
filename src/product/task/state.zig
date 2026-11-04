@@ -17,7 +17,7 @@ const execution_credentials = @import("product_task_execution_binding").credenti
 pub const automatic_title_result_capacity: usize = 512;
 pub const ui_record_detail_capacity: usize = 512;
 pub const permission_summary_field_capacity: usize = 128;
-pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+pub const tool_route_digest_bytes = agent.tool_route_digest_bytes;
 pub const tool_product_id_capacity = "tool-".len + 20;
 pub const file_change_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const file_change_product_id_capacity = "change-".len + (20 * 3) + 2;
@@ -377,6 +377,8 @@ pub const ToolView = struct {
     content_truncated: bool = false,
     redacted: bool = false,
     file_refs: ?[]?FileReferenceView = null,
+    /// Runtime accounting; cold restoration derives this from trusted images.
+    receipt_metadata: bool = false,
 };
 
 pub const UsageView = struct {
@@ -431,6 +433,7 @@ pub const TerminalPayload = struct {
     diagnostic_truncated: bool = false,
     diagnostic_redacted: bool = false,
     model_error: ?*RunModelError = null,
+    event_delivery_lost: bool = false,
 };
 
 pub const CompactTerminalPayload = struct {
@@ -877,6 +880,9 @@ pub const RunExecution = struct {
     run_control: agent.RunControl = undefined,
     checkpoint_export_context: CheckpointExportContext = undefined,
     automatic_title: AutomaticTitle = .{},
+    /// Worker writes before terminal publication; the main loop consumes the
+    /// bounded trusted tail before finalization, without borrowing Agent state.
+    terminal_receipts: agent.TerminalReceipts = .{},
 };
 
 pub const RunRecord = struct {
@@ -944,6 +950,8 @@ pub const RunRecord = struct {
     output_segment_protocol_seen: bool = false,
     output_segment_redacted: bool = false,
     output_continued_redacted: bool = false,
+    output_segment_incomplete: bool = false,
+    output_continued_incomplete: bool = false,
     /// Product classification over the sanitized canonical assistant text.
     /// Commentary boundaries partition bytes before `assistant_output_start`;
     /// the suffix is the final or partial answer.
@@ -978,6 +986,9 @@ pub const RunRecord = struct {
     terminal_event_drain_marked: bool = false,
     event_stream_finalized: bool = false,
     event_projection_failure: ?EventProjectionFailure = null,
+    /// Host failure is distinct from a bounded recording gap; the derived
+    /// terminal outcome/cause uses the existing history contract.
+    event_pipeline_failed: bool = false,
     first_event_rejection: ?EventRejection = null,
     event_rejection_reported: bool = false,
     terminal_drain_rejection: ?OutputProtocolObservation = null,
@@ -1312,21 +1323,19 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
     const diagnostic_disposition: TerminalDiagnosticDisposition = if (terminal.diagnostic_len == 0 and
         !terminal.diagnostic_truncated and
         !terminal.diagnostic_redacted) .absent else .withheld;
-    if (run.event_projection_failure) |failure| return switch (failure) {
-        .consumer_rejected => .{
-            .phase = .failed,
-            .outcome = .failed,
-            .cause = .event_pipeline_failure,
-            .diagnostic_disposition = diagnostic_disposition,
-            .session_disposition_at_completion = terminal.session_disposition_at_completion,
-        },
-        .dependency_contract_failure => .{
-            .phase = .failed,
-            .outcome = .dependency_contract_failure,
-            .cause = .dependency_contract_failure,
-            .diagnostic_disposition = diagnostic_disposition,
-            .session_disposition_at_completion = terminal.session_disposition_at_completion,
-        },
+    if (run.event_projection_failure == .dependency_contract_failure) return .{
+        .phase = .failed,
+        .outcome = .dependency_contract_failure,
+        .cause = .dependency_contract_failure,
+        .diagnostic_disposition = diagnostic_disposition,
+        .session_disposition_at_completion = terminal.session_disposition_at_completion,
+    };
+    if (run.event_pipeline_failed) return .{
+        .phase = .failed,
+        .outcome = .failed,
+        .cause = .event_pipeline_failure,
+        .diagnostic_disposition = diagnostic_disposition,
+        .session_disposition_at_completion = terminal.session_disposition_at_completion,
     };
     return .{
         .phase = terminal.phase,
@@ -1451,7 +1460,8 @@ fn degradeCoreActivity(run: *RunRecord) EventApplication {
 }
 
 fn checkCoreToolCount(run: *RunRecord) void {
-    if (run.agent_phase == null or run.core_activity_degraded) return;
+    if (run.agent_phase == null or run.core_activity_degraded or
+        run.event_projection_failure == .consumer_rejected) return;
     var running: usize = 0;
     for (run.tools) |entry| if (entry) |tool| {
         if (tool.state == .running) running += 1;
@@ -1543,7 +1553,8 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (run.event_stream_finalized or run.terminal_event_drain_marked) continue;
-        if (terminalPayload(run) == null) continue;
+        const terminal = terminalPayload(run) orelse continue;
+        if (terminal.event_delivery_lost) _ = recordEventProjectionFailure(run);
         run.model_activity = .none;
         run.terminal_event_drain_marked = true;
         changed = true;
@@ -1561,16 +1572,18 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         const run = &(entry.* orelse continue);
         if (!run.terminal_event_drain_marked) continue;
         std.debug.assert(terminalPayload(run) != null);
+        if (run.execution) |execution| if (!execution.terminal_receipts.isEmpty()) continue;
         run.terminal_event_drain_marked = false;
         if (run.open_output_segment != null or
             run.output_continued_group != null or
             run.output_segment.list.items.len != 0 or
             run.output_continued.list.items.len != 0)
         {
-            if (run.terminal_drain_rejection == null)
-                run.terminal_drain_rejection = OutputProtocolObservation.capture(run);
-            if (run.event_projection_failure == null)
-                run.event_projection_failure = .dependency_contract_failure;
+            if (!terminalPayload(run).?.event_delivery_lost) {
+                if (run.terminal_drain_rejection == null)
+                    run.terminal_drain_rejection = OutputProtocolObservation.capture(run);
+                _ = recordDependencyContractFailure(run);
+            }
             run.open_output_segment = null;
             run.output_continued_group = null;
             run.output_retry_group = null;
@@ -1614,9 +1627,17 @@ pub fn recordEventProjectionFailure(run: *RunRecord) bool {
 }
 
 pub fn recordDependencyContractFailure(run: *RunRecord) bool {
-    if (run.event_projection_failure != null) return false;
+    if (run.event_projection_failure == .dependency_contract_failure) return false;
     run.noteProjectionChange();
     run.event_projection_failure = .dependency_contract_failure;
+    return true;
+}
+
+pub fn recordEventPipelineFailure(run: *RunRecord) bool {
+    if (run.event_pipeline_failed) return false;
+    run.noteProjectionChange();
+    run.event_pipeline_failed = true;
+    _ = recordEventProjectionFailure(run);
     return true;
 }
 
@@ -1629,6 +1650,7 @@ pub const EventApplyError = EventProjectionError || error{
     NoSuchRun,
     InvalidOutputSegment,
     InvalidInputAdoption,
+    InvalidUsage,
 };
 
 pub const TextProjectionResult = struct {
@@ -1641,6 +1663,7 @@ pub const TextProjectionResult = struct {
 /// performs memory mechanics and never retains Task, Run, or Agent values.
 pub const EventProjection = struct {
     context: *anyopaque,
+    retain_generated_image_fn: *const fn (*anyopaque, *RunRecord, []const u8, []const u8, u64) EventProjectionError!*ToolView,
     record_output_fn: ?*const fn (*anyopaque, *RunRecord, *const agent.FileDeliveryReceipt) EventProjectionError!void = null,
     max_assistant_message_bytes: usize,
     max_commentary_segments_per_run: usize,
@@ -1873,7 +1896,9 @@ pub fn applyEvent(
     if (run.event_stream_finalized) return .late_terminal;
     const expected_output = OutputProtocolObservation.capture(run);
     errdefer |failure| {
-        if (run.first_event_rejection == null) {
+        if (failure != error.ProjectionCapacity and failure != error.ToolCapacity and
+            run.first_event_rejection == null)
+        {
             const known = switch (envelope.event.value) {
                 .known => |event| event,
                 .unknown => null,
@@ -1936,13 +1961,20 @@ pub fn applyEvent(
                     std.math.cast(u64, text.len) orelse
                         return error.InvalidOutputSegment,
                 ) catch return error.InvalidOutputSegment;
-                if (try appendNewOutput(
-                    projection,
-                    run,
-                    &run.output_segment,
-                    text,
-                )) run.output_segment_redacted = true;
                 open.bytes = next_bytes;
+                if (!run.output_segment_incomplete and !run.output_continued_incomplete) {
+                    const redacted = appendNewOutput(projection, run, &run.output_segment, text) catch |err| switch (err) {
+                        error.ProjectionCapacity => lost: {
+                            run.output_segment_incomplete = true;
+                            break :lost false;
+                        },
+                        else => {
+                            run.output_segment_incomplete = true;
+                            return @as(EventApplyError!EventApplication, err);
+                        },
+                    };
+                    run.output_segment_redacted = run.output_segment_redacted or redacted;
+                }
             } else if (builtin.is_test) {
                 // Legacy fixtures exercise unrelated event behavior without
                 // constructing the output framing now guaranteed by the
@@ -1993,39 +2025,14 @@ pub fn applyEvent(
             if (envelope.delivered_file != null and
                 (result.is_error or !std.mem.eql(u8, result.name, agent.FileDeliveryReceipt.tool_name)))
                 return error.InvalidDeliveryReceipt;
-            const tool = try projection.findOrCreateTool(
-                run,
-                result.id,
-                result.name,
-                result.input,
-            );
-            const input = try projection.replaceText(
-                &tool.input,
-                result.input,
-                run.initial_credentials[0],
-            );
-            const content = try projection.replaceText(
-                &tool.content,
-                imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
-                run.initial_credentials[0],
-            );
-            tool.input_truncated = input.truncated;
-            tool.content_truncated = content.truncated;
-            tool.redacted = tool.redacted or input.redacted or content.redacted;
-            tool.is_error = result.is_error;
-            tool.elapsed_ms = result.elapsed_ms;
-            tool.state = if (result.is_error) .failed else .completed;
-            try projection.replaceFileReferences(
-                tool,
-                envelope,
-                run.initial_credentials[0],
-                task.durable.id,
-                run.generation,
-            );
             if (envelope.delivered_file) |*receipt| {
                 const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
                 try record(projection.context, run, receipt);
             }
+            projectToolResultDetails(task.durable.id, run, envelope, projection) catch |failure| switch (failure) {
+                error.ProjectionCapacity, error.ToolCapacity => _ = recordEventProjectionFailure(run),
+                else => return @as(EventApplyError!EventApplication, failure),
+            };
             checkCoreToolCount(run);
             durable_boundary = true;
         },
@@ -2168,27 +2175,44 @@ pub fn applyEvent(
                 open.group != segment.group or
                 open.bytes != segment.bytes)
                 return error.InvalidOutputSegment;
+            var retention_failure: ?EventProjectionError = null;
+            defer {
+                run.open_output_segment = null;
+                run.next_output_segment_index = @as(u64, segment.index) + 1;
+            }
             switch (segment.disposition) {
                 .discarded => {
                     clearTrackedText(&run.output_segment);
                     run.output_segment_redacted = false;
+                    run.output_segment_incomplete = false;
                     run.output_retry_group = segment.group;
                 },
                 .continued => {
                     if (run.output_continued_group) |group|
                         if (group != segment.group)
                             return error.InvalidOutputSegment;
-                    if (run.output_segment.list.items.len != 0) {
-                        run.output_continued_redacted = (try projection.appendGroup(
+                    if (run.output_segment.list.items.len != 0 and !run.output_continued_incomplete) {
+                        run.output_continued_redacted = (projection.appendGroup(
                             &run.output_continued,
                             run.output_segment.list.items,
                             &.{},
                             run.initial_credentials[0],
-                        )) or run.output_segment_redacted or
-                            run.output_continued_redacted;
+                        ) catch |err| switch (err) {
+                            error.ProjectionCapacity => lost: {
+                                run.output_continued_incomplete = true;
+                                break :lost false;
+                            },
+                            else => failed: {
+                                retention_failure = err;
+                                run.output_continued_incomplete = true;
+                                break :failed false;
+                            },
+                        }) or run.output_segment_redacted or run.output_continued_redacted;
                     }
                     clearTrackedText(&run.output_segment);
                     run.output_segment_redacted = false;
+                    run.output_continued_incomplete = run.output_continued_incomplete or run.output_segment_incomplete;
+                    run.output_segment_incomplete = false;
                     run.output_continued_group = segment.group;
                     run.output_retry_group = null;
                 },
@@ -2199,14 +2223,39 @@ pub fn applyEvent(
                     if (segment.disposition == .commentary and group_non_empty and
                         (run.commentary_count >= projection.max_commentary_segments_per_run or
                             run.commentary_count >= run.commentary_ends.len))
-                        return error.ProjectionCapacity;
-                    run.assistant_redacted = (try projection.appendGroup(
+                    {
+                        _ = recordEventProjectionFailure(run);
+                        clearTrackedText(&run.output_continued);
+                        clearTrackedText(&run.output_segment);
+                        run.output_continued_group = null;
+                        run.output_retry_group = null;
+                        run.output_continued_redacted = false;
+                        run.output_segment_redacted = false;
+                        run.output_continued_incomplete = false;
+                        run.output_segment_incomplete = false;
+                        durable_boundary = true;
+                        return .{ .applied = .{ .durable_boundary = durable_boundary } };
+                    }
+                    var incomplete = run.output_continued_incomplete or run.output_segment_incomplete;
+                    run.assistant_redacted = (projection.appendGroup(
                         &run.assistant,
                         run.output_continued.list.items,
                         run.output_segment.list.items,
                         run.initial_credentials[0],
-                    )) or run.output_continued_redacted or
-                        run.output_segment_redacted or run.assistant_redacted;
+                    ) catch |err| switch (err) {
+                        error.ProjectionCapacity => lost: {
+                            incomplete = true;
+                            break :lost false;
+                        },
+                        else => failed: {
+                            retention_failure = err;
+                            incomplete = true;
+                            break :failed false;
+                        },
+                    }) or run.output_continued_redacted or run.output_segment_redacted or run.assistant_redacted;
+                    if (incomplete) _ = recordEventProjectionFailure(run);
+                    run.output_segment_incomplete = false;
+                    run.output_continued_incomplete = false;
                     clearTrackedText(&run.output_continued);
                     clearTrackedText(&run.output_segment);
                     run.output_continued_group = null;
@@ -2223,7 +2272,7 @@ pub fn applyEvent(
                             }
                         },
                         .final => {
-                            run.assistant_output_kind = .final;
+                            run.assistant_output_kind = if (incomplete) .partial else .final;
                             run.assistant_output_start = output_start;
                         },
                         .partial => {
@@ -2235,8 +2284,7 @@ pub fn applyEvent(
                     durable_boundary = true;
                 },
             }
-            run.open_output_segment = null;
-            run.next_output_segment_index = @as(u64, segment.index) + 1;
+            if (retention_failure) |failure| return @as(EventApplyError!EventApplication, failure);
         },
         .stream_done => {
             const previous = currentActivity(run);
@@ -2245,6 +2293,35 @@ pub fn applyEvent(
         },
     }
     return .{ .applied = .{ .durable_boundary = durable_boundary } };
+}
+
+// Trusted receipts are accepted by applyEvent before these optional details.
+// A detail capacity gap must still publish and persist this tool_result.
+fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agent.OwnedCoreEvent, projection: EventProjection) EventProjectionError!void {
+    const result = envelope.event.value.known.tool_result;
+    const tool = if (envelope.generated_image_path) |path|
+        try projection.retain_generated_image_fn(projection.context, run, result.id, path, task_id)
+    else
+        try projection.findOrCreateTool(run, result.id, result.name, result.input);
+    tool.is_error = result.is_error;
+    tool.elapsed_ms = result.elapsed_ms;
+    tool.state = if (result.is_error) .failed else .completed;
+    const input = try projection.replaceText(
+        &tool.input,
+        result.input,
+        run.initial_credentials[0],
+    );
+    tool.input_truncated = input.truncated;
+    tool.redacted = tool.redacted or input.redacted;
+    const content = try projection.replaceText(
+        &tool.content,
+        imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
+        run.initial_credentials[0],
+    );
+    tool.content_truncated = content.truncated;
+    tool.redacted = tool.redacted or content.redacted;
+    if (envelope.generated_image_path == null and !tool.receipt_metadata)
+        try projection.replaceFileReferences(tool, envelope, run.initial_credentials[0], task_id, run.generation);
 }
 
 fn clearTrackedText(target: *TrackedText) void {
@@ -2304,11 +2381,7 @@ fn findUiRecordByAgentRequestId(
     return null;
 }
 
-fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
-    var digest: [tool_route_digest_bytes]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
-    return digest;
-}
+const toolRouteDigest = agent.toolRouteDigest;
 
 fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
     const digest = toolRouteDigest(id);
@@ -2317,8 +2390,8 @@ fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
     return null;
 }
 
-fn addU64(left: u64, right: u64) EventProjectionError!u64 {
-    return std.math.add(u64, left, right) catch error.ProjectionCapacity;
+fn addU64(left: u64, right: u64) EventApplyError!u64 {
+    return std.math.add(u64, left, right) catch error.InvalidUsage;
 }
 
 fn validContextWarning(warning: anytype) bool {
@@ -2638,70 +2711,75 @@ test "event drain advances the final commentary boundary with the committed suff
     );
 }
 
-test "event drain fails closed when an output segment remains unresolved" {
-    var commentary_ends: [0]u64 = .{};
-    var runs = [_]?RunRecord{.{
-        .id = 7,
-        .generation = 1,
-        .execution_generation = 1,
-        .execution_protocol = .anthropic_messages,
-        .execution_model = "model",
-        .permission_profile = .approval_required,
-        .permission_interaction = .interactive,
-        .input = .{ .text = .{ .value = @constCast("prompt") } },
-        .commentary_ends = &commentary_ends,
-        .tools = &.{},
-        .terminal_diagnostic = @constCast(""),
-        .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
-        .output_segment_protocol_seen = true,
-    }};
-    var compacts: [0]?CompactRecord = .{};
-    var ui_history: [0]?UiRecord = .{};
-    var task = Task{
-        .durable = .{
-            .id = 3,
-            .recent_order = 1,
+test "event drain distinguishes local missing events from genuine unresolved segments" {
+    for ([_]bool{ false, true }) |local_gap| {
+        var commentary_ends: [0]u64 = .{};
+        var runs = [_]?RunRecord{.{
+            .id = 7,
+            .generation = 1,
             .execution_generation = 1,
             .execution_protocol = .anthropic_messages,
-            .execution_model = @constCast("model"),
+            .execution_model = "model",
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
-            .workspace_id = 2,
-            .workspace_root = @constCast("root"),
-            .title = @constCast("title"),
-            .runs = &runs,
-            .compacts = &compacts,
-            .ui_history = &ui_history,
-        },
-        .runtime = .{},
-    };
-    const run = &task.durable.runs[0].?;
-    try run.output_segment.list.appendSlice(std.testing.allocator, "draft");
-    defer run.output_segment.list.deinit(std.testing.allocator);
-    run.terminal_payload = .{
-        .exclude_on_product_terminal = false,
-        .phase = .completed,
-        .outcome = .completed,
-        .cause = null,
-        .session_disposition_at_completion = .reusable,
-    };
-    run.terminal_publication.store(.published, .release);
+            .input = .{ .text = .{ .value = @constCast("prompt") } },
+            .commentary_ends = &commentary_ends,
+            .tools = &.{},
+            .terminal_diagnostic = @constCast(""),
+            .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
+            .output_segment_protocol_seen = true,
+        }};
+        var compacts: [0]?CompactRecord = .{};
+        var ui_history: [0]?UiRecord = .{};
+        var task = Task{
+            .durable = .{
+                .id = 3,
+                .recent_order = 1,
+                .execution_generation = 1,
+                .execution_protocol = .anthropic_messages,
+                .execution_model = @constCast("model"),
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
+                .workspace_id = 2,
+                .workspace_root = @constCast("root"),
+                .title = @constCast("title"),
+                .runs = &runs,
+                .compacts = &compacts,
+                .ui_history = &ui_history,
+            },
+            .runtime = .{},
+        };
+        const run = &task.durable.runs[0].?;
+        try run.output_segment.list.appendSlice(std.testing.allocator, "draft");
+        defer run.output_segment.list.deinit(std.testing.allocator);
+        run.terminal_payload = .{
+            .exclude_on_product_terminal = false,
+            .phase = .completed,
+            .outcome = .completed,
+            .cause = null,
+            .session_disposition_at_completion = .reusable,
+        };
+        run.terminal_payload.event_delivery_lost = local_gap;
+        run.terminal_publication.store(.published, .release);
 
-    try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
-        &task,
-        null,
-        null,
-    ));
-    try std.testing.expectEqual(
-        EventProjectionFailure.dependency_contract_failure,
-        run.event_projection_failure.?,
-    );
-    try std.testing.expectEqual(
-        RunOutcome.dependency_contract_failure,
-        productTerminalFacts(run).?.outcome,
-    );
-    try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
-    try std.testing.expectEqual(@as(u64, 5), run.terminal_drain_rejection.?.open.?.bytes);
-    try std.testing.expect(run.first_event_rejection == null);
+        try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+        try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
+            &task,
+            null,
+            null,
+        ));
+        try std.testing.expectEqual(
+            if (local_gap) EventProjectionFailure.consumer_rejected else EventProjectionFailure.dependency_contract_failure,
+            run.event_projection_failure.?,
+        );
+        try std.testing.expectEqual(
+            if (local_gap) RunOutcome.completed else RunOutcome.dependency_contract_failure,
+            productTerminalFacts(run).?.outcome,
+        );
+        try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
+        if (local_gap) {
+            try std.testing.expect(run.terminal_drain_rejection == null);
+        } else try std.testing.expectEqual(@as(u64, 5), run.terminal_drain_rejection.?.open.?.bytes);
+        try std.testing.expect(run.first_event_rejection == null);
+    }
 }

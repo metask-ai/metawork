@@ -106,13 +106,15 @@ pub fn textChunk(event: sdk.DecodedCoreEvent) ![]const u8 {
 pub const PumpEnqueueContext = struct {
     pump: *event_pump.EventPump,
     envelope: event_pump.OwnedCoreEvent,
-    timeout: std.Io.Duration,
+    stopped: std.atomic.Value(bool) = .init(false),
+    finished: std.atomic.Value(bool) = .init(false),
     succeeded: bool = false,
     failure: ?event_pump.Error = null,
 };
 
 pub fn enqueuePumpOnThread(context: *PumpEnqueueContext) void {
-    context.pump.enqueueWithDeadline(context.envelope, context.timeout) catch |err| {
+    defer context.finished.store(true, .release);
+    context.pump.enqueueWaiting(context.envelope, &context.stopped) catch |err| {
         context.failure = err;
         return;
     };
@@ -2170,8 +2172,14 @@ pub fn sessionRunInput(
             accepted = emitModelError(session, handle, run_id, plan);
         if (accepted and plan == .model_error_identity_failed)
             accepted = emitInputEvent(session, handle, run_id + 1, "{\"text_chunk\":\"wrong Run\"}");
-        if (accepted and plan == .model_error_callback_failed)
-            accepted = emitInputEvent(session, handle, run_id, "{\"text_chunk\":\"fills the bounded pump\"}");
+        if (accepted and plan == .model_error_callback_failed) {
+            // A callback failure after a captured model error must be real;
+            // a full queue now waits instead of manufacturing that failure.
+            const text = [_]u8{'x'} ** 8192;
+            var oversized: [8256]u8 = undefined;
+            const event = std.fmt.bufPrint(&oversized, "{{\"text_chunk\":\"{s}\"}}", .{text}) catch unreachable;
+            accepted = emitInputEvent(session, handle, run_id, event);
+        }
         if (!accepted) {
             session.lock();
             session.running = false;
@@ -3134,11 +3142,8 @@ pub const TestCompositionLimits = struct {
     control_reserved_capacity: ?usize = null,
     per_session_control_reserved_capacity: ?usize = null,
     max_event_bytes: ?usize = null,
-    event_enqueue_timeout: ?std.Io.Duration = null,
     max_ui_response_bytes: ?usize = null,
     event_ready_notifier: ?lifecycle.EventReadyNotifier = null,
-    event_ready_retry_interval: ?std.Io.Duration = null,
-    event_ready_timeout: ?std.Io.Duration = null,
 
     pub fn hostLimits(self: @This()) lifecycle.Limits {
         var limits = lifecycle.Limits{ .max_sessions = self.max_sessions };
@@ -3149,11 +3154,8 @@ pub const TestCompositionLimits = struct {
         if (self.per_session_control_reserved_capacity) |value|
             limits.per_session_control_reserved_capacity = value;
         if (self.max_event_bytes) |value| limits.max_event_bytes = value;
-        if (self.event_enqueue_timeout) |value| limits.event_enqueue_timeout = value;
         if (self.max_ui_response_bytes) |value| limits.max_ui_response_bytes = value;
         limits.event_ready_notifier = self.event_ready_notifier;
-        if (self.event_ready_retry_interval) |value| limits.event_ready_retry_interval = value;
-        if (self.event_ready_timeout) |value| limits.event_ready_timeout = value;
         return limits;
     }
 };

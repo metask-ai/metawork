@@ -130,6 +130,9 @@ pub const TerminalFailure = session_control.TerminalFailure;
 pub const SessionDisposition = session_control.SessionDisposition;
 pub const DurableBudgetObservation = session_control.DurableBudgetObservation;
 pub const TerminalResult = session_control.TerminalResult;
+pub const TerminalReceipts = session_control.TerminalReceipts;
+pub const tool_route_digest_bytes = session_control.tool_route_digest_bytes;
+pub const toolRouteDigest = session_control.toolRouteDigest;
 pub const ModelError = session_control.ModelError;
 pub const CallbackRejection = session_control.CallbackRejection;
 pub const CoreEventKind = session_control.CoreEventKind;
@@ -531,13 +534,10 @@ pub const Limits = struct {
     per_session_control_reserved_capacity: usize = 16,
     per_session_control_reserved_bytes: usize = 512 * 1024,
     max_event_bytes: usize = default_event_limits.max_event_bytes,
-    event_enqueue_timeout: std.Io.Duration = .fromMilliseconds(100),
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
     max_terminal_diagnostic_bytes: usize = 512,
     event_ready_notifier: ?EventReadyNotifier = null,
-    event_ready_retry_interval: std.Io.Duration = .fromMilliseconds(5),
-    event_ready_timeout: std.Io.Duration = .fromMilliseconds(50),
 };
 
 pub const SessionSnapshot = struct {
@@ -655,10 +655,12 @@ pub const Session = struct {
     run_image: ?RunImage = null,
     image_sends: usize = 0,
     image_receipts: [image_generation.production_limits.sends_per_run]?image_generation.Receipt = @splat(null),
+    matched_image_receipts: [image_generation.production_limits.sends_per_run]?[tool_route_digest_bytes]u8 = @splat(null),
     image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
     run_delivery: ?FileDeliveryInput = null,
     delivery_attempts: usize = 0,
     delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
+    matched_delivery_receipts: [deliver_file.max_receipts_per_run]bool = @splat(false),
     delivery_calls: [deliver_file.max_active_calls]?*std.atomic.Value(bool) = @splat(null),
     id: u64,
     provider_id: []u8,
@@ -708,6 +710,8 @@ pub const Session = struct {
     raw_abort_status_code: ?u32 = null,
     dependency_contract_failure: bool = false,
     file_changes_lost: std.atomic.Value(bool) = .init(false),
+    event_delivery_stopped: std.atomic.Value(bool) = .init(false),
+    event_delivery_lost: std.atomic.Value(bool) = .init(false),
     permission_interaction: PermissionInteraction = .interactive,
     shell_policy: ShellPolicy = .disabled,
     permission_stop_requested: bool = false,
@@ -834,9 +838,11 @@ pub const Session = struct {
         image.* = null;
         self.image_sends = 0;
         @memset(&self.image_receipts, null);
+        @memset(&self.matched_image_receipts, null);
         self.run_delivery = delivery;
         self.delivery_attempts = 0;
         @memset(&self.delivery_receipts, null);
+        @memset(&self.matched_delivery_receipts, false);
         self.input_ready = false;
         self.input_window_started = false;
         self.submitted_inputs = .{};
@@ -861,6 +867,8 @@ pub const Session = struct {
         self.raw_abort_status_code = null;
         self.dependency_contract_failure = false;
         self.file_changes_lost.store(false, .release);
+        self.event_delivery_stopped.store(false, .release);
+        self.event_delivery_lost.store(false, .release);
         self.permission_stop_requested = false;
         self.cancel_requested = false;
         self.state = .queued;
@@ -1938,6 +1946,16 @@ pub const Session = struct {
         if (!self.run_done) setTerminationSignalLocked(self, signal);
     }
 
+    pub fn stopEventDelivery(self: *Session) void {
+        self.lock();
+        self.event_delivery_stopped.store(true, .release);
+        const callbacks = self.active_callback_refs != 0;
+        self.unlock();
+        // A new callback sees the sticky state before waiting. Only existing
+        // callback owners can already be asleep on the queue condition.
+        if (callbacks) self.agent_runtime.events.stopWaiting(&self.event_delivery_stopped);
+    }
+
     pub fn close(self: *Session, interruption: ExternalInterruption) Error!void {
         self.lock();
         if (self.state == .closed) {
@@ -1968,6 +1986,7 @@ pub const Session = struct {
         const run_id = self.active_run_id;
         const compact_id = self.active_compact_id;
         self.state = .closing;
+        self.event_delivery_stopped.store(true, .release);
         const signal: TerminationSignal = .{ .interrupted = interruption };
         if (compact_active) {
             if (!self.compact_done) {
@@ -1984,6 +2003,10 @@ pub const Session = struct {
         }
         self.broadcast();
         self.unlock();
+
+        // Closing admission first prevents a concurrent prepare from resetting
+        // the sticky exit state between installation and the callback join.
+        self.stopEventDelivery();
 
         if (should_abort_now) {
             if (compact_active) self.abortCompact(compact_id) else self.abortRun(run_id, signal);
@@ -2087,7 +2110,7 @@ pub const Session = struct {
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
-        options.max_turns = 16;
+        options.max_turns = wire.MAX_TURNS_V1;
         // Core samples the process date and timezone at Run admission.
         // Skill Runs carry no date block under the same SYSTEM policy.
         options.time_context_code = wire.TIME_CONTEXT_SYSTEM;
@@ -2455,6 +2478,8 @@ pub const Session = struct {
             .termination_signal = self.termination_signal,
             .first_callback_rejection = self.first_callback_rejection,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
+            .event_delivery_lost = self.event_delivery_lost.load(.acquire),
+            .receipts = self.takeTerminalReceiptsLocked(),
             .failure = final_failure,
             .model_error = if (final_failure == .dependency_contract) null else observed_model_error,
             .session_disposition_at_completion = self.dispositionLocked(),
@@ -2531,7 +2556,7 @@ pub const Session = struct {
             const matches = candidate.raw != null and candidate.raw.? == identity.session;
             candidate.unlock();
             if (matches) {
-                if (candidate.retainCoreCallback(raw_run) != null) retained = candidate;
+                if (candidate.retainCoreCallback(raw_run, false) != null) retained = candidate;
                 break;
             }
         }
@@ -2749,7 +2774,10 @@ pub const Session = struct {
         return .{ .failed = .capacity };
     }
 
-    fn takeDeliveredFile(self: *Session, event: sdk.DecodedCoreEvent) ?FileDeliveryReceipt {
+    const MatchedDelivery = struct { slot: usize, receipt: FileDeliveryReceipt };
+    const MatchedImage = struct { slot: usize, path: []u8 };
+
+    fn matchDeliveredFile(self: *Session, event: sdk.DecodedCoreEvent) ?MatchedDelivery {
         const result = switch (event) {
             .known => |value| switch (value) {
                 .tool_result => |value_result| value_result,
@@ -2760,18 +2788,19 @@ pub const Session = struct {
         if (result.is_error or !std.mem.eql(u8, result.name, deliver_file.name)) return null;
         self.lock();
         defer self.unlock();
-        for (&self.delivery_receipts) |*entry| {
-            const receipt = entry.* orelse continue;
+        for (self.delivery_receipts, 0..) |entry, index| {
+            if (self.matched_delivery_receipts[index]) continue;
+            const receipt = entry orelse continue;
             var buffer: [deliver_file.result_bytes]u8 = undefined;
             const expected = deliver_file.result(&buffer, .{ .verified = receipt }) catch unreachable;
             if (!std.mem.eql(u8, expected, result.content)) continue;
-            entry.* = null;
-            return receipt;
+            self.matched_delivery_receipts[index] = true;
+            return .{ .slot = index, .receipt = receipt };
         }
         return null;
     }
 
-    fn takeGeneratedImagePath(self: *Session, event: sdk.DecodedCoreEvent) !?[]u8 {
+    fn matchGeneratedImage(self: *Session, event: sdk.DecodedCoreEvent) !?MatchedImage {
         const result = switch (event) {
             .known => |value| switch (value) {
                 .tool_result => |result| result,
@@ -2782,16 +2811,49 @@ pub const Session = struct {
         if (result.is_error or !std.mem.eql(u8, result.name, generate_image.name)) return null;
         self.lock();
         defer self.unlock();
-        for (&self.image_receipts) |*slot| {
-            const receipt = slot.* orelse continue;
+        for (self.image_receipts, 0..) |slot, index| {
+            if (self.matched_image_receipts[index] != null) continue;
+            const receipt = slot orelse continue;
             var buffer: [4096]u8 = undefined;
             const expected = generate_image.result(&buffer, .{ .saved = receipt }) catch unreachable;
             if (!std.mem.eql(u8, result.content, expected)) continue;
+            self.matched_image_receipts[index] = toolRouteDigest(result.id);
             const path = try self.agent_runtime.allocator.dupe(u8, receipt.pathView());
-            slot.* = null;
-            return path;
+            return .{ .slot = index, .path = path };
         }
         return null;
+    }
+
+    fn acknowledgeReceipts(self: *Session, delivery: ?usize, image: ?usize) void {
+        self.lock();
+        defer self.unlock();
+        if (delivery) |index| {
+            std.debug.assert(self.matched_delivery_receipts[index]);
+            self.delivery_receipts[index] = null;
+            self.matched_delivery_receipts[index] = false;
+        }
+        if (image) |index| {
+            std.debug.assert(self.matched_image_receipts[index] != null);
+            self.image_receipts[index] = null;
+            self.matched_image_receipts[index] = null;
+        }
+    }
+
+    fn takeTerminalReceiptsLocked(self: *Session) TerminalReceipts {
+        var receipts: TerminalReceipts = .{};
+        for (&self.delivery_receipts, 0..) |*entry, index| {
+            if (!self.matched_delivery_receipts[index]) continue;
+            receipts.delivered_files[index] = entry.*;
+            entry.* = null;
+            self.matched_delivery_receipts[index] = false;
+        }
+        for (&self.image_receipts, 0..) |*entry, index| {
+            const digest = self.matched_image_receipts[index] orelse continue;
+            receipts.generated_images[index] = .{ .tool_route_digest = digest, .receipt = entry.*.? };
+            entry.* = null;
+            self.matched_image_receipts[index] = null;
+        }
+        return receipts;
     }
 
     pub fn onEvent(
@@ -2800,7 +2862,7 @@ pub const Session = struct {
         event_json: wire.BytesViewV1,
     ) callconv(.c) u32 {
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
-        const run_id = self.retainCoreCallback(raw_run) orelse return wire.EVENT_FATAL;
+        const run_id = self.retainCoreCallback(raw_run, true) orelse return wire.EVENT_FATAL;
         defer self.releaseCoreCallback();
         const encoded = sdk.borrowedBytes(event_json) catch {
             self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .invalid_bytes });
@@ -2897,16 +2959,17 @@ pub const Session = struct {
             self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = kind, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
-        const generated_image_path = self.takeGeneratedImagePath(parsed.value) catch {
+        const generated_image = self.matchGeneratedImage(parsed.value) catch {
             self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len });
             self.agent_runtime.allocator.free(owned_json);
             parsed.deinit();
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.EVENT_FATAL;
         };
+        const delivered_file = self.matchDeliveredFile(parsed.value);
         var envelope = OwnedCoreEvent{
-            .generated_image_path = generated_image_path,
-            .delivered_file = self.takeDeliveredFile(parsed.value),
+            .generated_image_path = if (generated_image) |image| image.path else null,
+            .delivered_file = if (delivered_file) |delivery| delivery.receipt else null,
             .session_id = self.id,
             .run_id = run_id,
             .encoded_bytes = encoded.len,
@@ -2915,16 +2978,15 @@ pub const Session = struct {
             .allocator = self.agent_runtime.allocator,
         };
         const event_kind = std.meta.activeTag(parsed.value.known);
-        self.agent_runtime.events.enqueueWithDeadline(envelope, self.agent_runtime.event_enqueue_timeout) catch |err| {
+        const admission: event_pump.Error!void = self.agent_runtime.events.enqueueWaiting(envelope, &self.event_delivery_stopped);
+        admission catch |err| {
             envelope.deinit();
-            if (is_file_changes and switch (err) {
-                error.GlobalCapacity,
-                error.SessionCapacity,
-                error.SessionSlotCapacity,
-                error.DeadlineExceeded,
-                => true,
-                else => false,
-            }) {
+            if (err == error.ConsumerStopped) {
+                self.event_delivery_lost.store(true, .release);
+                if (is_file_changes) self.file_changes_lost.store(true, .release);
+                return wire.EVENT_CONTINUE;
+            }
+            if (is_file_changes and err == error.EventTooLarge) {
                 self.file_changes_lost.store(true, .release);
                 return wire.EVENT_CONTINUE;
             }
@@ -2937,19 +2999,21 @@ pub const Session = struct {
                 error.SessionCapacity,
                 error.SessionSlotCapacity,
                 error.SequenceExhausted,
-                error.DeadlineExceeded,
                 => .capacity,
+                error.ConsumerStopped => unreachable,
             } });
             self.recordCallbackRejection(.{ .boundary = .event_pump, .reason = .queue_rejected, .event = event_kind, .failure = err, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
+        // The consumer may already have released the envelope. Only captured
+        // slot identities are used after successful ownership transfer.
+        self.acknowledgeReceipts(if (delivered_file) |delivery| delivery.slot else null, if (generated_image) |image| image.slot else null);
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
-            self.recordCallbackRejection(.{ .boundary = .notifier, .reason = .consumer_unavailable, .event = event_kind, .encoded_bytes = encoded.len });
-            self.recordTerminationSignal(.{
-                .event_consumer_notification_failure = .unavailable,
-            });
-            return wire.EVENT_FATAL;
+            self.stopEventDelivery();
+            // Matching abort is explicitly allowed from a Core callback.
+            // A close already in progress owns its own abort and join.
+            self.requestTermination(run_id, .{ .interrupted = .session_close }) catch {};
         }
         return wire.EVENT_CONTINUE;
     }
@@ -2967,7 +3031,7 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        const callback_run_id = self.retainCoreCallback(raw_run) orelse return wire.UI_FATAL;
+        const callback_run_id = self.retainCoreCallback(raw_run, false) orelse return wire.UI_FATAL;
         defer self.releaseCoreCallback();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
@@ -3135,6 +3199,7 @@ pub const Session = struct {
     fn retainCoreCallback(
         self: *Session,
         raw_run: ?*const wire.RunContextV1,
+        allow_closing: bool,
     ) ?u64 {
         const run = sdk.validateRunContext(raw_run) catch {
             self.recordCallbackRejection(.{ .boundary = .admission, .reason = .invalid_context });
@@ -3143,7 +3208,7 @@ pub const Session = struct {
         };
         self.lock();
         defer self.unlock();
-        if (self.state == .closing or self.state == .closed) return null;
+        if (self.state == .closed or (self.state == .closing and !allow_closing)) return null;
         if (self.raw == null or run.session != self.raw.? or
             !self.run_started or !self.core_call_in_progress or
             run.run_id != self.active_run_id)
@@ -3627,49 +3692,67 @@ test "generated image attestation requires one matching committed Host receipt" 
     session.agent_runtime = &runtime;
     session.mutex = .init;
     session.image_receipts = @splat(null);
+    session.matched_image_receipts = @splat(null);
     const receipt = try image_generation.Receipt.init("generated-images/real.jpg", 123, .jpeg);
     var buffer: [4096]u8 = undefined;
     const content = try generate_image.result(&buffer, .{ .saved = receipt });
     var event: sdk.DecodedCoreEvent = .{ .known = .{ .tool_result = .{ .id = "call", .name = generate_image.name, .input = "{}", .content = content, .is_error = false } } };
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     session.image_receipts[0] = receipt;
     event.known.tool_result.name = "Read";
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     event.known.tool_result.name = generate_image.name;
     event.known.tool_result.is_error = true;
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     event.known.tool_result.is_error = false;
     event.known.tool_result.content = "{\"status\":\"saved\",\"path\":\"generated-images/forged.jpg\"}";
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
     event.known.tool_result.content = content;
-    const path = (try session.takeGeneratedImagePath(event)).?;
+    const matched = (try session.matchGeneratedImage(event)).?;
+    const path = matched.path;
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings(receipt.pathView(), path);
-    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    try std.testing.expect((try session.matchGeneratedImage(event)) == null);
+    try std.testing.expect(session.image_receipts[0] != null);
+    session.image_receipts[1] = try image_generation.Receipt.init("generated-images/unmatched.jpg", 9, .jpeg);
+    const tail = session.takeTerminalReceiptsLocked();
+    try std.testing.expectEqualSlices(u8, &toolRouteDigest("call"), &tail.generated_images[0].?.tool_route_digest);
+    try std.testing.expectEqualStrings(receipt.pathView(), tail.generated_images[0].?.receipt.pathView());
+    try std.testing.expect(tail.generated_images[1] == null);
+    try std.testing.expect(session.takeTerminalReceiptsLocked().isEmpty());
+    try std.testing.expect(session.image_receipts[1] != null);
 }
 
-test "delivery attestation consumes only the exact successful Host receipt once" {
+test "delivery attestation claims only the exact successful Host receipt once" {
     var runtime: Runtime = undefined;
     runtime.io = std.testing.io;
     var session: Session = undefined;
     session.agent_runtime = &runtime;
     session.mutex = .init;
     session.delivery_receipts = @splat(null);
+    session.matched_delivery_receipts = @splat(false);
     const receipt = try FileDeliveryReceipt.init(@splat(1), "outputs/final.docx", 123, @splat(2));
     var buffer: [deliver_file.result_bytes]u8 = undefined;
     const content = try deliver_file.result(&buffer, .{ .verified = receipt });
     var event: sdk.DecodedCoreEvent = .{ .known = .{ .tool_result = .{ .id = "call", .name = deliver_file.name, .input = "{}", .content = content, .is_error = false } } };
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     session.delivery_receipts[0] = receipt;
     event.known.tool_result.name = "Read";
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.name = deliver_file.name;
     event.known.tool_result.is_error = true;
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.is_error = false;
     event.known.tool_result.content = "forged receipt";
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.content = content;
-    try std.testing.expectEqualStrings(receipt.pathView(), session.takeDeliveredFile(event).?.pathView());
-    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    try std.testing.expectEqualStrings(receipt.pathView(), session.matchDeliveredFile(event).?.receipt.pathView());
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
+    try std.testing.expect(session.delivery_receipts[0] != null);
+    session.delivery_receipts[1] = try FileDeliveryReceipt.init(@splat(3), "outputs/unmatched.docx", 9, @splat(4));
+    const tail = session.takeTerminalReceiptsLocked();
+    try std.testing.expectEqualStrings(receipt.pathView(), tail.delivered_files[0].?.pathView());
+    try std.testing.expect(tail.delivered_files[1] == null);
+    try std.testing.expect(session.takeTerminalReceiptsLocked().isEmpty());
+    try std.testing.expect(session.delivery_receipts[1] != null);
 }

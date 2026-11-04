@@ -143,7 +143,13 @@ function terminal(
   cause = null,
   diagnosticDisposition = "absent",
 ) {
-  return { outcome, cause, diagnosticDisposition, modelError: null };
+  return {
+    outcome,
+    cause,
+    diagnosticDisposition,
+    recordingIncomplete: false,
+    modelError: null,
+  };
 }
 
 function run(overrides = {}) {

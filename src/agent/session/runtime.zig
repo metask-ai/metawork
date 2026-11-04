@@ -78,13 +78,10 @@ pub const Runtime = struct {
     max_prompt_bytes: usize,
     multimodal_input_budget: multimodal.Budget,
     max_event_bytes: usize,
-    event_enqueue_timeout: std.Io.Duration,
     max_ui_request_bytes: usize,
     max_ui_response_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
     event_ready_notifier: ?EventReadyNotifier,
-    event_ready_retry_interval: std.Io.Duration,
-    event_ready_timeout: std.Io.Duration,
     events: event_pump.EventPump,
     sessions_mutex: std.Io.Mutex = .init,
     shutdown_condition: std.Io.Condition = .init,
@@ -144,11 +141,8 @@ pub const Runtime = struct {
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.max_multimodal_input_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
-            limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
-            limits.max_ui_response_bytes == 0 or limits.max_terminal_diagnostic_bytes == 0 or
-            limits.event_ready_retry_interval.nanoseconds <= 0 or
-            limits.event_ready_timeout.nanoseconds <= 0 or
-            limits.event_ready_retry_interval.nanoseconds > limits.event_ready_timeout.nanoseconds)
+            limits.max_ui_request_bytes == 0 or
+            limits.max_ui_response_bytes == 0 or limits.max_terminal_diagnostic_bytes == 0)
             return error.InvalidLimits;
         if (image_test) |options| if (!options.limits.validate()) return error.InvalidLimits;
         const mcp_owner_id = try allocateMcpOwnerId();
@@ -241,13 +235,10 @@ pub const Runtime = struct {
             .max_prompt_bytes = limits.max_prompt_bytes,
             .multimodal_input_budget = .{ .limit = limits.max_multimodal_input_bytes },
             .max_event_bytes = limits.max_event_bytes,
-            .event_enqueue_timeout = limits.event_enqueue_timeout,
             .max_ui_request_bytes = limits.max_ui_request_bytes,
             .max_ui_response_bytes = limits.max_ui_response_bytes,
             .max_terminal_diagnostic_bytes = limits.max_terminal_diagnostic_bytes,
             .event_ready_notifier = limits.event_ready_notifier,
-            .event_ready_retry_interval = limits.event_ready_retry_interval,
-            .event_ready_timeout = limits.event_ready_timeout,
             .events = events,
             .sessions = sessions,
             .session_reservations = session_reservations,
@@ -1360,7 +1351,16 @@ pub const Runtime = struct {
         self.sessions_mutex.unlock(self.io);
     }
 
+    /// Called before a consumer-owned join stops draining. It does not
+    /// destroy Session handles or replace their cancellation fences.
+    pub fn stopEventDelivery(self: *Runtime) void {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        for (self.sessions) |entry| if (entry) |session| session.stopEventDelivery();
+    }
+
     pub fn shutdown(self: *Runtime) Error!void {
+        self.stopEventDelivery();
         self.sessions_mutex.lockUncancelable(self.io);
         var waited = false;
         while (self.shutdown_running) {
@@ -1452,13 +1452,17 @@ pub const Runtime = struct {
         return self.events.takeFair();
     }
 
+    pub fn pendingEventCount(self: *Runtime, session_id: u64) usize {
+        return self.events.pendingForSession(session_id);
+    }
+
+    pub fn hasPendingEvents(self: *Runtime) bool {
+        return self.events.stats().count != 0;
+    }
+
     pub fn notifyEventConsumer(self: *Runtime) EventReadyNotification {
         const notifier = self.event_ready_notifier orelse return .scheduled;
-        return notifier.notifyWithRetry(
-            self.io,
-            self.event_ready_retry_interval,
-            self.event_ready_timeout,
-        );
+        return notifier.notify();
     }
 
     pub fn requestWake(self: *Runtime) bool {
