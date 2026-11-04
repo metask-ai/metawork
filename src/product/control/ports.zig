@@ -351,14 +351,22 @@ pub const OutputFileReveal = struct {
 /// Callback-scoped source identity. The Application copies this and the picker
 /// selection into an owned effect before returning; no Product pointer escapes.
 pub const OutputFileSaveInput = struct {
+    io: std.Io,
     workspace_root: []const u8,
     relative_path: []const u8,
     size_bytes: u64,
     sha256: [32]u8,
 };
 pub const OutputFileSave = struct {
+    pub const Result = union(enum) { selected: OwnedOutputSave, cancelled, failed: anyerror };
+    pub const Completion = struct {
+        context: *anyopaque,
+        borrow_source_fn: *const fn (*anyopaque, u64) anyerror!OutputFileSaveInput,
+        complete_fn: *const fn (*anyopaque, u64, Result) void,
+    };
     context: *anyopaque,
-    prepare_fn: *const fn (*anyopaque, OutputFileSaveInput) anyerror!?OwnedOutputSave,
+    begin_fn: *const fn (*anyopaque, u64, u64, []const u8, *const Completion) anyerror!u64,
+    cancel_fn: *const fn (*anyopaque, u64) void,
 };
 /// Owned exception to the borrowed coordination ports above. Stage, publish
 /// and discard run only on the worker; release runs after quiescence on main.

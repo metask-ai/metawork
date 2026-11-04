@@ -1013,6 +1013,9 @@ fn absoluteReferenceRelativePath(
 
 pub const OutputFileTarget = output_check.Target;
 pub const NativeDialog = control_ports.NativeDialog;
+pub const OutputSavePort = control_ports.OutputFileSave;
+pub const OutputSaveInput = control_ports.OutputFileSaveInput;
+pub const OutputCancel = enum { pending_cancelled, job_cancelling, committed, not_found };
 pub const OutputCheckState = output_check.State;
 pub const OutputCheckKind = output_check.Kind;
 pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState, committed: bool = false };
@@ -1387,6 +1390,7 @@ pub const Runtime = struct {
     output_checks: output_check.Lane = .{},
     output_file_reveal: ?control_ports.OutputFileReveal = null,
     output_file_save: ?control_ports.OutputFileSave = null,
+    pending_output_saves: [output_check.max_in_flight]?struct { id: u64, target: OutputFileTarget } = @splat(null),
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1856,7 +1860,7 @@ pub const Runtime = struct {
         return reference;
     }
 
-    pub const OutputCheckAdmission = union(enum) { queued, immediate: OutputCheckState };
+    pub const OutputCheckAdmission = union(enum) { choosing, queued, immediate: OutputCheckState };
 
     pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8, kind: OutputCheckKind) OutputCheckAdmission {
         if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
@@ -1864,12 +1868,24 @@ pub const Runtime = struct {
             return .{ .immediate = outputCheckAuthorityState(err) };
         var target_owned = true;
         defer if (target_owned) target.deinit();
-        var work: output_check.Work = if (kind == .save) save: {
-            const preparation = self.output_file_save orelse return .{ .immediate = .unavailable };
-            const owned = preparation.prepare_fn(preparation.context, .{ .workspace_root = target.workspace_root, .relative_path = target.relative_path, .size_bytes = target.size_bytes, .sha256 = target.sha256 }) catch |err|
-                return .{ .immediate = if (err == error.UnsupportedService or err == error.RuntimeUnavailable) .unavailable else .save_failed };
-            break :save .{ .save = owned orelse return .{ .immediate = .cancelled } };
-        } else inspect: {
+        if (kind == .save) {
+            if (self.output_file_save == null) return .{ .immediate = .unavailable };
+            var total: usize = 0;
+            for (self.pending_output_saves) |pending| if (pending != null) {
+                total += 1;
+            };
+            for (self.output_checks.jobs) |job| if (job != null) {
+                total += 1;
+            };
+            if (total >= output_check.max_in_flight) return .{ .immediate = .busy };
+            for (&self.pending_output_saves) |*slot| if (slot.* == null) {
+                slot.* = .{ .id = completion_id, .target = target };
+                target_owned = false;
+                return .choosing;
+            };
+            return .{ .immediate = .busy };
+        }
+        var work: output_check.Work = inspect: {
             const preparation = self.file_delivery_preparation orelse return .{ .immediate = .unavailable };
             const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
             break :inspect .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
@@ -1888,8 +1904,65 @@ pub const Runtime = struct {
         return .queued;
     }
 
-    pub fn cancelOutputCheck(self: *Runtime, completion_id: u64) bool {
-        return self.output_checks.cancel(completion_id);
+    pub fn requestOutputSave(self: *Runtime, id: u64, parent: u64, completion: *const OutputSavePort.Completion) !u64 {
+        const source = try self.borrowOutputSaveSource(id);
+        const port = self.output_file_save orelse return error.UnsupportedService;
+        return port.begin_fn(port.context, id, parent, std.fs.path.basename(source.relative_path), completion);
+    }
+
+    pub fn cancelOutputDialog(self: *Runtime, handle: u64) void {
+        if (self.output_file_save) |port| port.cancel_fn(port.context, handle);
+    }
+
+    pub fn borrowOutputSaveSource(self: *Runtime, id: u64) !control_ports.OutputFileSaveInput {
+        for (&self.pending_output_saves) |*slot| if (slot.*) |*pending| {
+            if (pending.id != id) continue;
+            try self.revalidateOutputFileTarget(&pending.target);
+            return .{ .io = self.io, .workspace_root = pending.target.workspace_root, .relative_path = pending.target.relative_path, .size_bytes = pending.target.size_bytes, .sha256 = pending.target.sha256 };
+        };
+        return error.UnknownOutput;
+    }
+
+    pub fn completeOutputSave(self: *Runtime, id: u64, result: OutputSavePort.Result) OutputCheckAdmission {
+        var effect_owned = result == .selected;
+        defer if (effect_owned) {
+            var effect = result.selected;
+            effect.deinit();
+        };
+        for (&self.pending_output_saves) |*slot| if (slot.*) |pending| {
+            if (pending.id != id) continue;
+            var target = pending.target;
+            slot.* = null;
+            var target_owned = true;
+            defer if (target_owned) target.deinit();
+            switch (result) {
+                .cancelled => return .{ .immediate = .cancelled },
+                .failed => |err| return .{ .immediate = switch (err) {
+                    error.UnsupportedService, error.RuntimeUnavailable => .unavailable,
+                    error.UnknownOutput, error.RestrictedOutput, error.StaleSecurityEpoch, error.ExecutorShuttingDown => outputCheckAuthorityState(err),
+                    else => .save_failed,
+                } },
+                .selected => {},
+            }
+            self.revalidateOutputFileTarget(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
+            self.output_checks.begin(self.io, self.allocator, .{ .context = self.change_notifier.context, .wake_fn = self.change_notifier.wake }, id, .save, target, .{ .save = result.selected }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+            target_owned = false;
+            effect_owned = false;
+            return .queued;
+        };
+        return .{ .immediate = .cancelled };
+    }
+
+    pub fn cancelOutputCheck(self: *Runtime, completion_id: u64) OutputCancel {
+        for (&self.pending_output_saves) |*slot| if (slot.*) |pending| {
+            if (pending.id != completion_id) continue;
+            var target = pending.target;
+            slot.* = null;
+            target.deinit();
+            return .pending_cancelled;
+        };
+        if (self.output_checks.publicationCommitted(completion_id)) return .committed;
+        return if (self.output_checks.cancel(completion_id)) .job_cancelling else .not_found;
     }
 
     pub fn hasOutputChecks(self: *const Runtime) bool {
@@ -1932,6 +2005,11 @@ pub const Runtime = struct {
     }
 
     pub fn shutdownOutputChecks(self: *Runtime) void {
+        for (&self.pending_output_saves) |*slot| if (slot.*) |pending| {
+            var target = pending.target;
+            slot.* = null;
+            target.deinit();
+        };
         self.output_checks.shutdown();
     }
 
@@ -7507,6 +7585,7 @@ pub const Runtime = struct {
         self.custom_providers.deinit();
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
+        self.shutdownOutputChecks();
         self.output_checks.deinit();
         self.executor.deinit();
         self.approval_executor.deinit();
@@ -22122,9 +22201,9 @@ test "Output check cancellation bounds active and queued work without retaining 
     try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
     try std.testing.expectEqual(OutputCheckState.busy, control.beginOutputCheck(3, 3, 7, @splat(3), .check).immediate);
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
-    try std.testing.expect(control.cancelOutputCheck(2));
-    try std.testing.expect(control.cancelOutputCheck(1));
-    try std.testing.expect(!control.cancelOutputCheck(3));
+    try std.testing.expectEqual(OutputCancel.job_cancelling, control.cancelOutputCheck(2));
+    try std.testing.expectEqual(OutputCancel.job_cancelling, control.cancelOutputCheck(1));
+    try std.testing.expectEqual(OutputCancel.not_found, control.cancelOutputCheck(3));
     try harness.drainAll(&control);
     try std.testing.expectEqual(@as(usize, 2), harness.count);
     for (harness.results[0..harness.count]) |result| try std.testing.expectEqual(OutputCheckState.cancelled, result.?.state);
@@ -22217,6 +22296,8 @@ const OutputSaveHarness = struct {
     discarded: std.atomic.Value(usize) = .init(0),
     releases: usize = 0,
     picker_cancel: bool = false,
+    completion: ?*const OutputSavePort.Completion = null,
+    operation: u64 = 0,
     publish_error: bool = false,
     fn prepare(context: *anyopaque, input: control_ports.OutputFileSaveInput) !?control_ports.OwnedOutputSave {
         const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
@@ -22250,7 +22331,28 @@ const OutputSaveHarness = struct {
         self.releases += 1;
     }
     fn bind(self: *OutputSaveHarness, control: *Runtime) void {
-        control.setOutputFileSave(.{ .context = self, .prepare_fn = prepare });
+        control.setOutputFileSave(.{ .context = self, .begin_fn = request, .cancel_fn = cancel });
+    }
+    fn request(context: *anyopaque, id: u64, _: u64, _: []const u8, completion: *const OutputSavePort.Completion) !u64 {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        self.completion = completion;
+        self.operation = id;
+        return id;
+    }
+    pub fn finish(self: *OutputSaveHarness) !void {
+        const completion = self.completion orelse return error.NoPendingDialog;
+        self.completion = null;
+        const source = try completion.borrow_source_fn(completion.context, self.operation);
+        const effect = try prepare(self, source);
+        completion.complete_fn(completion.context, self.operation, if (effect) |owned| .{ .selected = owned } else .cancelled);
+    }
+    fn cancel(_: *anyopaque, _: u64) void {}
+    fn begin(self: *OutputSaveHarness, control: *Runtime, id: u64) !Runtime.OutputCheckAdmission {
+        const admission = control.beginOutputCheck(id, 3, 7, @splat(3), .save);
+        if (admission != .choosing) return admission;
+        const source = try control.borrowOutputSaveSource(id);
+        const effect = try prepare(self, source);
+        return control.completeOutputSave(id, if (effect) |owned| .{ .selected = owned } else .cancelled);
     }
     fn waitApproval(control: *Runtime) !void {
         for (0..5000) |_| {
@@ -22261,6 +22363,29 @@ const OutputSaveHarness = struct {
     }
 };
 
+test "Save As pending dialog cancellation and failed choice release frozen targets without jobs" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save.bind(&control);
+    for (1..65) |id| {
+        try std.testing.expect(control.beginOutputCheck(id, 3, 7, @splat(3), .save) == .choosing);
+        try std.testing.expect(!control.hasOutputChecks());
+        if (id % 3 == 0) {
+            try std.testing.expectEqual(OutputCancel.pending_cancelled, control.cancelOutputCheck(id));
+        } else {
+            const outcome = control.completeOutputSave(id, if (id % 3 == 1) .cancelled else .{ .failed = error.DialogFailed });
+            try std.testing.expectEqual(if (id % 3 == 1) OutputCheckState.cancelled else OutputCheckState.save_failed, outcome.immediate);
+        }
+        for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
+        try std.testing.expectEqual(OutputCancel.not_found, control.cancelOutputCheck(id));
+    }
+    try std.testing.expect(control.beginOutputCheck(100, 3, 7, @splat(3), .save) == .choosing);
+    control.shutdownOutputChecks();
+    for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
+}
+
 test "Save As waits for current publication authority and discards staged bytes when revoked" {
     var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
@@ -22268,7 +22393,7 @@ test "Save As waits for current publication authority and discards staged bytes 
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .save) == .queued);
+    try std.testing.expect((try save.begin(&control, 1)) == .queued);
     try OutputSaveHarness.waitApproval(&control);
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
@@ -22278,7 +22403,7 @@ test "Save As waits for current publication authority and discards staged bytes 
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), save.releases);
     product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .save) == .queued);
+    try std.testing.expect((try save.begin(&control, 2)) == .queued);
     try OutputSaveHarness.waitApproval(&control);
     requester.requester_active = false;
     try requester.drainAll(&control);
@@ -22296,7 +22421,7 @@ test "Save As accepted publication refuses late cancellation and reports its act
     defer save.publishing_blocked.store(false, .release);
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .save) == .queued);
+    try std.testing.expect((try save.begin(&control, 1)) == .queued);
     try OutputSaveHarness.waitApproval(&control);
     control.drainOutputChecks(requester.sink());
     for (0..5000) |_| {
@@ -22304,7 +22429,7 @@ test "Save As accepted publication refuses late cancellation and reports its act
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestTimeout;
     try std.testing.expect(control.outputPublicationCommitted(1));
-    try std.testing.expect(!control.cancelOutputCheck(1));
+    try std.testing.expectEqual(OutputCancel.committed, control.cancelOutputCheck(1));
     control.learnProjectionCredential("changed-after-save-commit");
     requester.requester_active = false;
     save.publishing_blocked.store(false, .release);
@@ -22324,16 +22449,16 @@ test "Save As picker cancellation deadline and shutdown preserve the pre-publica
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
     save.picker_cancel = true;
-    try std.testing.expectEqual(OutputCheckState.cancelled, control.beginOutputCheck(1, 3, 7, @splat(3), .save).immediate);
+    try std.testing.expectEqual(OutputCheckState.cancelled, (try save.begin(&control, 1)).immediate);
     try std.testing.expect(!control.hasOutputChecks());
     save.picker_cancel = false;
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .save) == .queued);
+    try std.testing.expect((try save.begin(&control, 2)) == .queued);
     try OutputSaveHarness.waitApproval(&control);
     control.output_checks.decide(control.output_checks.awaitingPublication().?, .timed_out);
     try requester.drainAll(&control);
     try std.testing.expectEqual(OutputCheckState.timed_out, requester.results[0].?.state);
     try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
-    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .save) == .queued);
+    try std.testing.expect((try save.begin(&control, 3)) == .queued);
     try OutputSaveHarness.waitApproval(&control);
     control.shutdownOutputChecks();
     try requester.drainAll(&control);

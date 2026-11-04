@@ -243,6 +243,7 @@ pub const Dispatcher = struct {
         request_id_len: usize = 0,
     };
     const OutputInFlight = struct {
+        dialog_handle: u64 = 0,
         completion_id: u64,
         generation: u64,
         operation_id: u64,
@@ -323,6 +324,7 @@ pub const Dispatcher = struct {
     preview_timer_armed: bool = false,
     output_timer_armed: bool = false,
     output_in_flight: [2]?OutputInFlight = @splat(null),
+    output_save_completion: product_control.OutputSavePort.Completion = undefined,
     output_high_water: u64 = 0,
     next_output_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
@@ -1094,12 +1096,73 @@ pub const Dispatcher = struct {
         self.next_output_completion_id += 1;
         vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
         @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
-        switch (control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value)) {
+        self.adoptOutputAdmission(completion, control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value));
+    }
+
+    fn adoptOutputAdmission(self: *Dispatcher, id: u64, admission: product_control.Runtime.OutputCheckAdmission) void {
+        const control = self.control orelse return;
+        switch (admission) {
+            .choosing => {
+                const slot = self.outputSlot(id) orelse {
+                    _ = control.cancelOutputCheck(id);
+                    return;
+                };
+                self.output_save_completion = .{ .context = self, .borrow_source_fn = borrowOutputSave, .complete_fn = outputSaveCompleted };
+                slot.dialog_handle = control.requestOutputSave(id, slot.window_id, &self.output_save_completion) catch |err| {
+                    outputSaveCompleted(self, id, .{ .failed = err });
+                    return;
+                };
+            },
             .queued => {
-                if (vacant.* == null or vacant.*.?.cancelled) _ = control.cancelOutputCheck(completion);
+                if (!outputRequestActive(self, id)) self.cancelOutputOperation(id);
                 self.updateOutputTimer();
             },
-            .immediate => |state| self.completeOutputAction(.{ .completion_id = completion, .state = state }),
+            .immediate => |state| self.completeOutputAction(.{ .completion_id = id, .state = state }),
+        }
+    }
+    fn outputSlot(self: *Dispatcher, id: u64) ?*OutputInFlight {
+        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+            if (slot.completion_id == id) return slot;
+        };
+        return null;
+    }
+    fn borrowOutputSave(context: *anyopaque, id: u64) !@import("metawork_product_control").OutputSaveInput {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        if (!outputRequestActive(self, id)) return error.UnknownOutput;
+        return (try self.requireProductControl()).borrowOutputSaveSource(id);
+    }
+    fn outputSaveCompleted(context: *anyopaque, id: u64, result: product_control.OutputSavePort.Result) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        const slot = self.outputSlot(id) orelse {
+            if (result == .selected) {
+                var effect = result.selected;
+                effect.deinit();
+            }
+            return;
+        };
+        slot.dialog_handle = 0;
+        if (self.control) |control| self.adoptOutputAdmission(id, control.completeOutputSave(id, result)) else {
+            if (result == .selected) {
+                var effect = result.selected;
+                effect.deinit();
+            }
+            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+        }
+    }
+    fn cancelOutputOperation(self: *Dispatcher, id: u64) void {
+        const slot = self.outputSlot(id) orelse return;
+        const control = self.control orelse {
+            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+            return;
+        };
+        const outcome = control.cancelOutputCheck(id);
+        if (outcome == .committed) return;
+        slot.cancelled = true;
+        if (outcome == .pending_cancelled or outcome == .not_found) {
+            const handle = slot.dialog_handle;
+            slot.dialog_handle = 0;
+            control.cancelOutputDialog(handle);
+            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
         }
     }
 
@@ -1150,13 +1213,12 @@ pub const Dispatcher = struct {
         const operation = parsed.value.operationId.value;
         try self.requireOutputConnection(invocation, generation, operation);
         var cancelled = false;
-        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+        for (self.output_in_flight) |entry| if (entry) |slot| {
             if (slot.generation != generation or slot.operation_id != operation or slot.window_id != invocation.source.window_id) continue;
             if (self.control) |control| {
                 if (control.outputPublicationCommitted(slot.completion_id)) break;
-                _ = control.cancelOutputCheck(slot.completion_id);
             }
-            slot.cancelled = true;
+            self.cancelOutputOperation(slot.completion_id);
             cancelled = true;
             break;
         };
@@ -1178,9 +1240,8 @@ pub const Dispatcher = struct {
     }
 
     fn cancelOutputConnection(self: *Dispatcher) void {
-        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
-            slot.cancelled = true;
-            if (self.control) |control| _ = control.cancelOutputCheck(slot.completion_id);
+        for (self.output_in_flight) |entry| if (entry) |slot| {
+            self.cancelOutputOperation(slot.completion_id);
         };
     }
 
@@ -1188,6 +1249,7 @@ pub const Dispatcher = struct {
         if (self.output_timer_armed) self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
         self.output_timer_armed = false;
         for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+            if (self.control) |control| if (slot.dialog_handle != 0) control.cancelOutputDialog(slot.dialog_handle);
             entry.* = null;
             respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
         };
@@ -8385,6 +8447,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     const save_request = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("request").?, .{});
     defer std.testing.allocator.free(save_request);
     try capture.invoke(native, save_request, 3);
+    try save_effect.finish();
     for (0..5000) |_| {
         _ = boundary.onTimer(output_timer_id);
         if (save_effect.publish_entered.load(.acquire)) break;
@@ -8405,11 +8468,34 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expectEqualStrings(expected_save, actual_save);
     try std.testing.expectEqual(@as(usize, 1), save_effect.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), save_effect.releases);
-    const fourth = "{\"generation\":\"1\",\"operationId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    // Every no-job terminal must release both the Product target and Bridge
+    // slot immediately, including Cancel in the system panel itself.
+    for (6..38) |operation| {
+        var request_buffer: [512]u8 = undefined;
+        const pending_request = try std.fmt.bufPrint(&request_buffer, "{{\"generation\":\"1\",\"operationId\":\"{d}\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"save\"}}", .{operation});
+        const before = capture.count;
+        try capture.invoke(native, pending_request, 3);
+        try std.testing.expectEqual(before, capture.count);
+        const receiver = save_effect.completion.?;
+        const pending_id = save_effect.operation;
+        if (operation % 3 == 0) {
+            receiver.complete_fn(receiver.context, pending_id, .cancelled);
+        } else if (operation % 3 == 1) {
+            receiver.complete_fn(receiver.context, pending_id, .{ .failed = error.DialogFailed });
+        } else {
+            boundary.cancelOutputOperation(pending_id);
+        }
+        try std.testing.expectEqual(before + 1, capture.count);
+        for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
+        for (boundary.output_in_flight) |entry| try std.testing.expect(entry == null);
+        receiver.complete_fn(receiver.context, pending_id, .cancelled);
+        try std.testing.expectEqual(before + 1, capture.count);
+    }
+    const fourth = "{\"generation\":\"1\",\"operationId\":\"38\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
     effect.blocked.store(true, .release);
     try capture.invoke(native, fourth, 3);
     boundary.breakConnection();
-    try capture.wait(control, &boundary, 7);
+    try capture.wait(control, &boundary, 39);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());
