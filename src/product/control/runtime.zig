@@ -133,6 +133,11 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
 const default_attachment_file_bytes: usize = 100_000_000;
 const default_attachment_count: usize = product_attachment.max_files_per_message;
 
+fn pendingAgentEvents(context: *anyopaque, session_id: u64) usize {
+    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    return runtime.pendingEventCount(session_id);
+}
+
 pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
     return switch (err) {
         error.RunChanged => .run_changed,
@@ -192,6 +197,8 @@ pub fn persistenceLimits(limits: Limits, max_workspaces: usize) task_persistence
 pub const Limits = struct {
     worker_count: usize = 4,
     queue_capacity: usize = 16,
+    max_events_per_drain: usize = 64,
+    max_event_drain_ns: u64 = 8 * std.time.ns_per_ms,
     max_tasks: usize = 50,
     max_workspaces: usize = 16,
     max_scheduled_tasks: usize = 16,
@@ -1407,6 +1414,7 @@ pub const Runtime = struct {
         configuration: Configuration,
     ) Error!Runtime {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
+            limits.max_events_per_drain == 0 or limits.max_event_drain_ns == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
             limits.max_skill_assets == 0 or
@@ -6066,27 +6074,34 @@ pub const Runtime = struct {
     /// depend on Executor liveness, and must run before Agent Runtime deinit.
     pub fn drainAgentEvents(self: *Runtime) Error!void {
         var first_projection_error: ?Error = null;
-        self.drainAgentEventPass(&first_projection_error);
-        // Terminal publication happens after the synchronous AgentCore Run
-        // returns, so its acquire observes all callback event enqueues. Drain
-        // once more after that observation before exposing product terminal
-        // state and the final assistant suffix; otherwise a queued callback
-        // could lose the race to lifecycle publication or a snapshot.
+        var remaining = self.limits.max_events_per_drain;
+        const started = std.Io.Timestamp.now(self.io, .awake);
+        self.drainAgentEventPass(&first_projection_error, &remaining, started);
+        // Acquire terminal before observing its Session queue. A bounded pass
+        // may leave a suffix; finalization checks that Session independently.
         self.markTerminalRunsBeforeEventDrain();
-        self.drainAgentEventPass(&first_projection_error);
+        self.drainAgentEventPass(&first_projection_error, &remaining, started);
         self.finalizeMarkedTerminalRunsAfterEventDrain();
         // Agent readiness is a Product lifecycle wake, not a Renderer wake.
         // Reconcile even when no Renderer is connected so background Runs can
         // request termination and Schedules can consume their terminal facts.
         self.syncLifecycle();
+        if (!self.shutting_down and self.agent_runtime.hasPendingEvents())
+            _ = self.agent_runtime.notifyEventConsumer();
         if (first_projection_error) |err| return err;
     }
 
     fn drainAgentEventPass(
         self: *Runtime,
         first_projection_error: *?Error,
+        remaining: *usize,
+        started: std.Io.Timestamp,
     ) void {
-        while (self.agent_runtime.takeEvent()) |value| {
+        while (remaining.* != 0) {
+            if (started.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds >=
+                self.limits.max_event_drain_ns) return;
+            const value = self.agent_runtime.takeEvent() orelse return;
+            remaining.* -= 1;
             var envelope = value;
             defer envelope.deinit();
             self.applyEvent(&envelope) catch |err| {
@@ -6189,9 +6204,7 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    /// Marks terminal Runs before Runtime performs one more complete Agent
-    /// event-pump drain. The acquire in `terminalPayload` observes every
-    /// callback enqueue that happened before Run completion.
+    /// Acquire terminal publication before checking the owning Session queue.
     fn markTerminalRunsBeforeEventDrain(self: *Runtime) void {
         self.scrubPublishedTerminalData();
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
@@ -6714,13 +6727,20 @@ pub const Runtime = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    /// Commits the final assistant suffix only after Runtime has drained the
-    /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
+    /// Commits the final suffix only after the owning Session has drained.
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) void {
+        self.finalizeTerminalRunsAfterDrain(.{
+            .context = self.agent_runtime,
+            .pending_fn = pendingAgentEvents,
+        });
+    }
+
+    fn finalizeTerminalRunsAfterDrain(self: *Runtime, events: task_runtime.EventDrainStatus) void {
         const finished_at_ms = self.run_clock.now();
         const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
+            events,
             finished_at_ms,
             finished_at_unix_ms,
         );
@@ -7692,7 +7712,10 @@ pub const Runtime = struct {
         // The joined Run may have published its terminal and checkpoint only
         // after the last UI-loop drain. Finish the canonical event barrier
         // before settling checkpoint transactions.
-        self.drainAgentEvents() catch {};
+        while (true) {
+            self.drainAgentEvents() catch {};
+            if (!self.agent_runtime.hasPendingEvents()) break;
+        }
         self.settleCheckpointTransactionsForShutdown();
         self.task_runtime.excludePendingConversationTailAfterShutdown();
         self.commitTaskStateNoFail();
@@ -12348,8 +12371,46 @@ fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) life
 
 fn finalizeTestTerminalEvents(control: *Runtime) void {
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(control);
     control.syncLifecycle();
+}
+
+fn finalizeTestTerminalDrain(control: *Runtime) void {
+    // These aggregate fixtures have no Agent or callback producer. Supply the
+    // empty-queue fact without touching the deliberately absent Agent Runtime.
+    control.finalizeTerminalRunsAfterDrain(.{
+        .context = control,
+        .pending_fn = struct {
+            fn count(_: *anyopaque, _: u64) usize {
+                return 0;
+            }
+        }.count,
+    });
+}
+
+test "terminal Run waits for its Session queue before publishing completion" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.find(3).?;
+    const run = &task.durable.runs[0].?;
+    _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+    control.markTerminalRunsBeforeEventDrain();
+    var pending: usize = 1;
+    const events: task_runtime.EventDrainStatus = .{
+        .context = &pending,
+        .pending_fn = struct {
+            fn count(context: *anyopaque, _: u64) usize {
+                return @as(*usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.count,
+    };
+    control.finalizeTerminalRunsAfterDrain(events);
+    try std.testing.expect(!run.event_stream_finalized);
+    try std.testing.expect(run.finished_at_unix_ms == null);
+    pending = 0;
+    control.finalizeTerminalRunsAfterDrain(events);
+    try std.testing.expect(run.event_stream_finalized);
+    try std.testing.expectEqual(task_test_state.RunOutcome.completed, task_test_state.productTerminalFacts(run).?.outcome);
 }
 
 test "Workspace containment accepts platform roots and rejects path prefixes" {
@@ -16270,7 +16331,7 @@ test "output segment byte mismatch fails the dependency protocol" {
     try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
     try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expectEqual(@as(u64, 2), run.terminal_drain_rejection.?.open.?.bytes);
     try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
     try std.testing.expectEqual(RunOutcome.dependency_contract_failure, productTerminalFacts(run).?.outcome);
@@ -17568,7 +17629,7 @@ test "model error projection matches the shared Renderer fixture after Host cred
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     run.terminal_payload.model_error = storage;
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     detachTaskForTest(&control, task);
     var bytes: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&bytes);
@@ -19233,7 +19294,7 @@ test "completed terminal drain closes collecting file change observation" {
         false,
     ));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
     try std.testing.expectEqual(@as(?u64, 12_000), run.elapsed_ms);
     try std.testing.expectEqual(@as(?u64, clock.unix_ms), run.finished_at_unix_ms);
@@ -19304,7 +19365,7 @@ test "file observation closure agrees after event drain and delayed artifact com
             run.event_projection_failure = case.projection_failure;
             try std.testing.expect(commitTerminal(run, case.phase, case.outcome, case.cause, .reusable, "", false));
             control.markTerminalRunsBeforeEventDrain();
-            control.finalizeMarkedTerminalRunsAfterEventDrain();
+            finalizeTestTerminalDrain(&control);
             if (delayed_artifact) {
                 if (!case.already_incomplete)
                     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
@@ -19332,7 +19393,7 @@ test "failed file artifact remains incomplete after a model failure" {
     run.pending_file_change_artifacts = 1;
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expect(control.task_runtime.completeFileChangeArtifact(3, run.generation, run.file_changes[0].?.order, null, false));
     try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
 }
@@ -19352,7 +19413,7 @@ test "terminal persistence degrades pending file change observation without muta
         false,
     ));
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     control.task_runtime.tasks[0].?.runtime.active_operation = .none;
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.collecting,
@@ -19722,7 +19783,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
         "\"pendingUi\":null",
     ) != null);
     const revision_before_finalization = control.revision;
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expectEqual(
         @as(u64, @intCast(assistant.committed_len)),
@@ -19813,7 +19874,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
         try std.testing.expect(commitTerminal(run, .failed, .failed, std.meta.stringToEnum(RunCause, expected.cause).?, .reusable, "", false));
         control.markTerminalRunsBeforeEventDrain();
-        control.finalizeMarkedTerminalRunsAfterEventDrain();
+        finalizeTestTerminalDrain(&control);
         detachTaskForTest(&control, control.task_runtime.tasks[0].?);
         var storage: [96 * 1024]u8 = undefined;
         const snapshot = try control.writeAggregateFixture(&storage);
@@ -19857,7 +19918,7 @@ test "event drain barrier atomically publishes terminal product state" {
 
     const revision_before_finalization = control.revision;
     control.markTerminalRunsBeforeEventDrain();
-    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    finalizeTestTerminalDrain(&control);
     try std.testing.expect(control.revision > revision_before_finalization);
     run.commentary_count = 1;
     run.commentary_ends[0] = @intCast(run.assistant.committed_len);

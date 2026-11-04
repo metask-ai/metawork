@@ -22,6 +22,33 @@ const installControlExecutionGeneration = fixture.installProductControlExecution
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
 
+test "Agent drain shares one event budget across both terminal observations" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .max_events_per_drain = 2,
+        .max_event_drain_ns = std.math.maxInt(u64),
+    }, productControlConfiguration());
+    defer control.deinit();
+    // Valid decoded events for an absent Task still exercise the complete
+    // drain/catch path. No execution or producer can change these counts.
+    for (0..5) |_| try runtime.events.enqueue(try fixture.pumpEnvelope(
+        1,
+        1,
+        "{\"text_chunk\":\"queued\"}",
+    ));
+    try std.testing.expectError(error.UnknownTask, control.drainAgentEvents());
+    try std.testing.expectEqual(@as(usize, 3), runtime.pendingEventCount(1));
+    try std.testing.expectError(error.UnknownTask, control.drainAgentEvents());
+    try std.testing.expectEqual(@as(usize, 1), runtime.pendingEventCount(1));
+    try std.testing.expectError(error.UnknownTask, control.drainAgentEvents());
+    try std.testing.expect(!runtime.hasPendingEvents());
+}
+
 test "only confirmed interactive Task choices remember a preference without replacing execution" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });

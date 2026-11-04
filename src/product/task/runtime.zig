@@ -373,6 +373,16 @@ pub const RunClock = struct {
     }
 };
 
+/// Borrowed queue observation after terminal publication. Never retained.
+pub const EventDrainStatus = struct {
+    context: *anyopaque,
+    pending_fn: *const fn (*anyopaque, u64) usize,
+
+    fn pending(self: EventDrainStatus, route_id: u64) usize {
+        return self.pending_fn(self.context, route_id);
+    }
+};
+
 pub const OperationEffects = struct {
     /// Main-thread borrowed view used only while accepting a Skill selection.
     input_catalog: ?product_skill.catalog.CatalogProjection = null,
@@ -4264,7 +4274,12 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
-                if (compact.terminal_publication.load(.acquire) == .published) compact.event_drain_marked = true;
+                if (!compact.event_stream_finalized and !compact.event_drain_marked and
+                    compact.terminal_publication.load(.acquire) == .published)
+                {
+                    compact.event_drain_marked = true;
+                    changed = true;
+                }
             };
             changed = task_state.markTerminalRunsBeforeEventDrain(task) or changed;
         }
@@ -4273,14 +4288,19 @@ pub const Runtime = struct {
 
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         self: *Runtime,
+        events: EventDrainStatus,
         finished_at_ms: ?u64,
         finished_at_unix_ms: ?u64,
     ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
+            if (events.pending(task.runtime.routeId()) != 0) continue;
             for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
-                if (compact.event_drain_marked) compact.event_stream_finalized = true;
+                if (compact.event_drain_marked and !compact.event_stream_finalized) {
+                    compact.event_stream_finalized = true;
+                    changed = true;
+                }
             };
             if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(
                 task,
@@ -9391,7 +9411,21 @@ test "Task model retired credential waits for Compact return and the canonical e
     try std.testing.expect(runtime.retiredCredential(1) == null);
     _ = runtime.markTerminalRunsBeforeEventDrain();
     try std.testing.expect(runtime.retiredCredential(1) == null);
-    _ = runtime.finalizeMarkedTerminalRunsAfterEventDrain(null, null);
+    var pending: usize = 1;
+    const drain: EventDrainStatus = .{
+        .context = &pending,
+        .pending_fn = struct {
+            fn count(context: *anyopaque, _: u64) usize {
+                const value: *usize = @ptrCast(@alignCast(context));
+                return value.*;
+            }
+        }.count,
+    };
+    _ = runtime.finalizeMarkedTerminalRunsAfterEventDrain(drain, null, null);
+    try std.testing.expect(!compacts[0].?.event_stream_finalized);
+    try std.testing.expect(runtime.retiredCredential(1) == null);
+    pending = 0;
+    _ = runtime.finalizeMarkedTerminalRunsAfterEventDrain(drain, null, null);
     try std.testing.expectEqualStrings("synthetic-old-key", runtime.retiredCredential(1).?);
     runtime.releaseRetiredCredential(1);
     try std.testing.expectEqual(@as(usize, 0), compacts[0].?.redaction_secret.len);

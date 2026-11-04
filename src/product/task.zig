@@ -62,6 +62,7 @@ pub const DeletionEffects = runtime.DeletionEffects;
 pub const OperationEffects = runtime.OperationEffects;
 pub const WorkspaceOrderEffect = runtime.WorkspaceOrderEffect;
 pub const RunClock = runtime.RunClock;
+pub const EventDrainStatus = runtime.EventDrainStatus;
 pub const ReleaseEffects = runtime.ReleaseEffects;
 pub const RecoveryAuthorityQuery = runtime.RecoveryAuthorityQuery;
 pub const RestoreCapabilities = runtime.RestoreCapabilities;

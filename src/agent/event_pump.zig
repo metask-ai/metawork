@@ -161,6 +161,17 @@ pub const EventPump = struct {
         };
     }
 
+    /// The caller must observe producer quiescence before using zero as a
+    /// terminal barrier. Other Sessions do not participate in that barrier.
+    pub fn pendingForSession(self: *EventPump, session_id: u64) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.sessions) |usage| {
+            if (usage.session_id == session_id) return usage.count;
+        }
+        return 0;
+    }
+
     pub fn deinit(self: *EventPump) void {
         std.debug.assert(self.count <= self.entries.len);
         for (self.entries) |*entry| if (entry.*) |*value| value.envelope.deinit();

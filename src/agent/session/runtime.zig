@@ -1452,6 +1452,14 @@ pub const Runtime = struct {
         return self.events.takeFair();
     }
 
+    pub fn pendingEventCount(self: *Runtime, session_id: u64) usize {
+        return self.events.pendingForSession(session_id);
+    }
+
+    pub fn hasPendingEvents(self: *Runtime) bool {
+        return self.events.stats().count != 0;
+    }
+
     pub fn notifyEventConsumer(self: *Runtime) EventReadyNotification {
         const notifier = self.event_ready_notifier orelse return .scheduled;
         return notifier.notifyWithRetry(

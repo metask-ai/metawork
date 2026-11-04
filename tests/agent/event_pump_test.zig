@@ -23,6 +23,9 @@ test "event pump preserves per-Session order with round-robin fairness" {
     try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"one\"}"));
     try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"two\"}"));
     try pump.enqueue(try pumpEnvelope(2, 1, "{\"text_chunk\":\"other\"}"));
+    try std.testing.expectEqual(@as(usize, 2), pump.pendingForSession(1));
+    try std.testing.expectEqual(@as(usize, 1), pump.pendingForSession(2));
+    try std.testing.expectEqual(@as(usize, 0), pump.pendingForSession(3));
 
     var first = pump.takeFair().?;
     defer first.deinit();
@@ -37,6 +40,8 @@ test "event pump preserves per-Session order with round-robin fairness" {
     try std.testing.expectEqual(@as(u64, 1), third.session_id);
     try std.testing.expectEqualStrings("two", try textChunk(third.event.value));
     try std.testing.expectEqual(@as(usize, 0), pump.stats().count);
+    try std.testing.expectEqual(@as(usize, 0), pump.pendingForSession(1));
+    try std.testing.expectEqual(@as(usize, 0), pump.pendingForSession(2));
 }
 
 test "event pump data cannot consume reserved control capacity" {
