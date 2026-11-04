@@ -172,28 +172,8 @@ fn retainedMemberCount(mcp: *const mcp_state.McpProductState) usize {
 fn applyFailureCount(mcp: *const mcp_state.McpProductState) usize {
     if (mcp.runtime_uncertain) return 0;
     const management = if (mcp.management) |*value| value else return 0;
-    const desired = management.desiredRegistry() orelse return 0;
-    var count: usize = 0;
-    for (management.convergence.results.items) |result| {
-        if (result.outcome == .pending or !management.convergence.handled(result.target)) continue;
-        var found = false;
-        for (desired.servers) |server| {
-            if (!std.mem.eql(u8, result.target.id(), server.id)) continue;
-            found = true;
-            const status = serverApplyStatus(mcp, server);
-            if (status == .rejected or status == .failed) count += 1;
-            break;
-        }
-        if (!found and result.target.kind == .remove) {
-            const target = mcp_configuration.RuntimeApplyTarget.init(result.target.id(), null, .remove);
-            if (!std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint)) continue;
-            if (actualEntry(mcp, result.target.id())) |entry|
-                if (entry.state == .loaded and entry.task_references == 0) {
-                    count += 1;
-                };
-        }
-    }
-    return count;
+    const manifest = if (management.runtime_manifest) |*value| value else return 0;
+    return manifest.failureCount(management.desiredRegistry(), management.limits, &management.convergence);
 }
 
 fn sameRuntimeDescriptor(loaded: mcp_configuration.ServerWire, desired: mcp_configuration.ServerWire) bool {

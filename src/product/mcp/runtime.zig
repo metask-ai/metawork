@@ -196,6 +196,7 @@ pub const Runtime = struct {
     fn installCommittedDesired(self: *Runtime, admission: McpAdmissionAuthority) void {
         self.observeOauthTime();
         policy.installCommittedDesiredState(&self.state, &self.state.management.?, admission);
+        self.finishConvergence();
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -850,13 +851,21 @@ pub const Runtime = struct {
     }
 
     fn finishConvergence(self: *Runtime) void {
+        if (self.shutting_down or self.state.configuration_apply_state == .applying or self.state.runtime_uncertain) return;
         const management = if (self.state.management) |*value| value else return;
+        if (management.inspect().health != .ready) return;
         const manifest = if (management.runtime_manifest) |*value| value else return;
-        if (self.state.runtime_uncertain or self.state.activation_failed) return;
-        if (manifest.nextStep(management.desiredRegistry(), management.limits, &management.convergence) != null) return;
-        for (manifest.entries) |entry| if (entry.state == .loaded) return;
+        const apply_state: McpConfigurationApplyState = if (manifest.failureCount(management.desiredRegistry(), management.limits, &management.convergence) != 0) .failed else .idle;
+        if (self.state.configuration_apply_state != apply_state) {
+            self.state.configuration_apply_state = apply_state;
+            self.markChanged();
+        }
         if (self.state.admission == .blocked and self.state.admission.blocked == .pending_restart) {
-            policy.replaceAdmission(&self.state, .{ .ready = .{ .selection = null, .catalog_generation = null } });
+            if (manifest.nextStep(management.desiredRegistry(), management.limits, &management.convergence) != null) return;
+            const desired = management.desiredRegistry() orelse return;
+            const admission: McpAdmissionAuthority = self.admissionForTarget(desired) catch .{ .blocked = .activation_unavailable };
+            policy.replaceAdmission(&self.state, admission);
+            self.updateAdmissionDeadline();
             self.markChanged();
         }
     }
@@ -938,6 +947,7 @@ pub const Runtime = struct {
         }
         self.state.connection_test = null;
         self.updateRefreshDeadline();
+        self.finishConvergence();
         if (activation_failed and !self.shutting_down)
             _ = self.queueRefresh(false, false) catch self.armRefreshRetry();
         self.releaseBoundary();
@@ -948,6 +958,7 @@ pub const Runtime = struct {
         if (self.state.configuration_apply_state != .applying) return false;
         const management = if (self.state.management) |*value| value else return false;
         if (management.inspect().desired_generation != expected_generation) return false;
+        const targeted = self.state.apply_target != null;
         if (self.state.apply_target) |target| {
             if (reason != .unknown) management.convergence.reject(target, if (reason == .rejected) .rejected else .failed);
         }
@@ -966,7 +977,7 @@ pub const Runtime = struct {
         } else {
             self.expireAdmission();
         }
-        self.finishConvergence();
+        if (targeted) self.finishConvergence();
         self.releaseBoundary();
         return true;
     }
@@ -1223,8 +1234,7 @@ pub const Runtime = struct {
             allowlist.* = .{ .id = server.id, .tools = tools };
         }
         if (!matched_source) {
-            for (target.servers) |server|
-                if (configuration.runtimeLoadEligible(server, management.limits)) return .{ .blocked = .pending_restart };
+            if (management.runtimeAlignmentFor(target) == .restart_required) return .{ .blocked = .pending_restart };
         }
         return .{ .ready = .{
             .selection = try self.ports.catalog.createAdmissionSelection(activation, allowlists),
@@ -2893,5 +2903,71 @@ test "Product MCP composition capacity failure is processed and does not starve 
     try std.testing.expect((try runtime.prepareConfigurationStep(2, .automatic)) == null);
     try std.testing.expectEqual(configuration.RuntimeAlignment.current, runtime.state.management.?.inspect().runtime_alignment);
     for (runtime.state.management.?.runtime_manifest.?.entries) |entry| try std.testing.expectEqual(@as(u32, 1), entry.task_references);
+    try std.testing.expect(harness.queued == null);
+}
+
+test "Product MCP obsolete add failures clear after disable or delete without another apply" {
+    for ([_]bool{ false, true }) |remove| {
+        var effects = OauthTestEffects{};
+        var harness = TestHarness{};
+        var runtime = try effects.coldRuntime(&harness, "consent_required");
+        defer runtime.deinit();
+        try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Unavailable", .url = "https://unavailable.example.test/mcp" }));
+        var step = (try runtime.prepareConfigurationStep(2, .automatic)).?;
+        defer step.deinit();
+        const id = step.target.id();
+        try std.testing.expect(runtime.failConfigurationApply(2, .rejected));
+        try std.testing.expectEqual(.failed, runtime.state.configuration_apply_state);
+        try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+        try std.testing.expect(runtime.state.admission == .ready);
+        const outcome = if (remove) try runtime.removeServer(2, id) else try runtime.setServerEnabled(2, .{ .server_id = id, .enabled = false });
+        try std.testing.expectEqual(.saved, outcome);
+        try std.testing.expectEqual(.idle, runtime.state.configuration_apply_state);
+        try std.testing.expect((try runtime.prepareConfigurationStep(3, .retry_all)) == null);
+        try std.testing.expectEqual(.idle, runtime.state.configuration_apply_state);
+        try std.testing.expect(harness.queued == null);
+    }
+}
+
+test "Product MCP later apply success preserves another current target failure" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, try runtime.createHttpServer(2, .{ .display_name = "Second", .url = "https://second.example.test/mcp" }));
+    var first = (try runtime.prepareConfigurationStep(3, .automatic)).?;
+    defer first.deinit();
+    try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
+    var second = (try runtime.prepareConfigurationStep(3, .automatic)).?;
+    defer second.deinit();
+    var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &second.preparation)).?;
+    try std.testing.expect(runtime.completeConfigurationApply(3, &second.preparation, &manifest, null, null, false));
+    second.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+    try std.testing.expectEqual(.failed, runtime.state.configuration_apply_state);
+    const management = &runtime.state.management.?;
+    try std.testing.expectEqual(@as(usize, 1), management.runtime_manifest.?.failureCount(management.desiredRegistry(), management.limits, &management.convergence));
+}
+
+test "Product MCP rejected replacement settles admission without waiting for catalog refresh" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Original", .url = "https://original.example.test/mcp" }));
+    var original = (try runtime.prepareConfigurationStep(2, .automatic)).?;
+    defer original.deinit();
+    var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &original.preparation)).?;
+    try std.testing.expect(runtime.completeConfigurationApply(2, &original.preparation, &manifest, null, null, false));
+    original.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+    try std.testing.expectEqual(.saved, try runtime.updateHttpConnection(2, .{ .server_id = original.target.id(), .display_name = "Changed", .url = "https://bad.example.test/mcp", .header_names = &.{}, .auth_mode = .none, .negotiation = "automatic", .timeout_ms = 1000 }));
+    try std.testing.expectEqual(.pending_restart, runtime.state.admission.blocked);
+    var replacement = (try runtime.prepareConfigurationStep(3, .automatic)).?;
+    defer replacement.deinit();
+    try std.testing.expectEqual(.replace, replacement.target.kind);
+    try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
+    try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+    try std.testing.expectEqual(.activation_unavailable, runtime.state.admission.blocked);
+    try std.testing.expectEqual(.failed, runtime.state.configuration_apply_state);
     try std.testing.expect(harness.queued == null);
 }

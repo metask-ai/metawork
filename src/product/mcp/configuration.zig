@@ -2777,6 +2777,18 @@ pub const RuntimeManifest = struct {
 
     pub const Plan = struct { target: RuntimeApplyTarget, next_round: bool = false };
 
+    /// Count only failed attempts that still describe actual membership work.
+    /// This also keeps failed removals visible after their Desired row is gone.
+    pub fn failureCount(self: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits, convergence: *const RuntimeConvergence) usize {
+        var count: usize = 0;
+        for (convergence.results.items) |result| {
+            if (result.outcome == .pending or !convergence.handled(result.target)) continue;
+            const target = self.targetFor(result.target.id(), desired, limits) orelse continue;
+            if (std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint)) count += 1;
+        }
+        return count;
+    }
+
     /// The sole membership policy. A waiting/unloadable Desired is not work;
     /// retained membership and admission authorization are independent facts.
     pub fn targetFor(self: *const RuntimeManifest, id: []const u8, desired: ?RegistryWire, limits: Limits) ?RuntimeApplyTarget {
