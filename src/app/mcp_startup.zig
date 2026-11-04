@@ -353,7 +353,7 @@ test "MCP startup classifies registry and journal together without deleting quar
         defer tmp.cleanup();
         const lock = try tmp.dir.createFile(std.testing.io, "fixture.lock", .{ .read = true, .truncate = false });
         defer lock.close(std.testing.io);
-        var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+        var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock, .quarantine_move = mcp_platform.quarantineMove() };
         if (case.registry) |bytes| {
             if (bytes.len == 0) {
                 const file = try tmp.dir.createFile(std.testing.io, mcp_configuration.file_name, .{});
@@ -404,7 +404,7 @@ test "MCP startup does not turn read failure into empty configuration" {
     const lock = try tmp.dir.createFile(std.testing.io, "fixture.lock", .{ .read = true, .truncate = false });
     defer lock.close(std.testing.io);
     try tmp.dir.createDir(std.testing.io, mcp_configuration.file_name, .default_dir);
-    var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock, .quarantine_move = mcp_platform.quarantineMove() };
     var restored = try prepare(&store, null);
     defer restored.preparation.deinit();
     try std.testing.expectEqual(mcp_configuration.PreparationState{ .unavailable = .read_failed }, restored.preparation.state);
@@ -418,7 +418,7 @@ test "MCP startup keeps the supported schema one migration policy" {
     defer tmp.cleanup();
     const lock = try tmp.dir.createFile(std.testing.io, "fixture.lock", .{ .read = true, .truncate = false });
     defer lock.close(std.testing.io);
-    var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+    var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock, .quarantine_move = mcp_platform.quarantineMove() };
     try store.commit("{\"schema_version\":1,\"generation\":7,\"servers\":[]}");
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
@@ -439,10 +439,10 @@ test "MCP startup keeps quarantine write failure and unknown outcome unavailable
         var base: std.Io = undefined;
         var unknown: bool = false;
         var fail_sync: bool = false;
-        fn preserve(raw: ?*anyopaque, old: std.Io.Dir, old_name: []const u8, new: std.Io.Dir, new_name: []const u8) std.Io.Dir.RenamePreserveError!void {
-            if (std.mem.eql(u8, new_name, mcp_configuration.transaction_file_name) and !unknown) return error.AccessDenied;
-            try base.vtable.dirRenamePreserve(raw, old, old_name, new, new_name);
-            if (std.mem.eql(u8, new_name, mcp_configuration.transaction_file_name)) fail_sync = true;
+        fn move(io: std.Io, old: std.Io.Dir, new: std.Io.Dir, request: mcp_configuration.QuarantineMove.Request) mcp_configuration.FileStoreError!void {
+            if (request == .journal and !unknown) return error.WriteFailed;
+            try mcp_platform.quarantineMove().move(io, old, new, request);
+            if (request == .journal) fail_sync = true;
         }
         fn sync(raw: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
             if (fail_sync) {
@@ -457,7 +457,7 @@ test "MCP startup keeps quarantine write failure and unknown outcome unavailable
         defer tmp.cleanup();
         const lock = try tmp.dir.createFile(std.testing.io, "fixture.lock", .{ .read = true, .truncate = false });
         defer lock.close(std.testing.io);
-        var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
+        var store: mcp_configuration.FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock, .quarantine_move = mcp_platform.quarantineMove() };
         try store.commit("broken registry");
         try store.commitTransaction("broken journal");
         const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
@@ -467,7 +467,7 @@ test "MCP startup keeps quarantine write failure and unknown outcome unavailable
         Probe.unknown = unknown;
         Probe.fail_sync = false;
         var vtable = std.testing.io.vtable.*;
-        vtable.dirRenamePreserve = Probe.preserve;
+        store.quarantine_move = .{ .move_fn = Probe.move };
         vtable.fileSync = Probe.sync;
         store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
         var failed = try prepare(&store, &credentials);
@@ -476,6 +476,7 @@ test "MCP startup keeps quarantine write failure and unknown outcome unavailable
         try std.testing.expectEqual(if (unknown) mcp_configuration.StoreHealth.outcome_unknown else .recovery_required, failed.management_health);
         try std.testing.expectEqual(if (unknown) mcp_configuration.RecoveryDiagnostic.quarantine_outcome_unknown else .quarantine_failed, failed.preparation.recovery_diagnostic);
         store.io = std.testing.io;
+        store.quarantine_move = mcp_platform.quarantineMove();
         var recovered = try prepare(&store, &credentials);
         defer recovered.preparation.deinit();
         try std.testing.expectEqual(mcp_configuration.StoreHealth.ready, recovered.management_health);

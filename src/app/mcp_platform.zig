@@ -11,6 +11,7 @@ const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 const process_compat = @import("metawork_mcp_process_compat");
+const quarantine_compat = @import("metawork_mcp_quarantine_compat");
 const catalog_budget = @import("mcp_catalog_budget.zig");
 pub const CatalogBudget = catalog_budget.Budget;
 
@@ -26,6 +27,21 @@ const max_custom_headers: usize = 128;
 const stdio_io_buffer_bytes: usize = 4096;
 const max_stdio_argv_count: usize = 129;
 const max_stdio_argv_bytes: usize = 64 * 1024;
+
+pub fn quarantineMove() mcp_configuration.QuarantineMove {
+    return .{ .move_fn = moveQuarantine };
+}
+
+fn moveQuarantine(io: std.Io, source: std.Io.Dir, target: std.Io.Dir, request: mcp_configuration.QuarantineMove.Request) mcp_configuration.FileStoreError!void {
+    var storage: [25]u8 = undefined;
+    const source_name = request.sourceName();
+    const target_name = request.targetName(&storage);
+    if (builtin.os.tag == .macos) {
+        quarantine_compat.move(io, source, source_name, target, target_name) catch return error.WriteFailed;
+    } else {
+        source.renamePreserve(source_name, target, target_name, io) catch return error.WriteFailed;
+    }
+}
 
 pub const CredentialStore = struct {
     io: std.Io,

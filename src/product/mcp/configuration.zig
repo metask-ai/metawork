@@ -4798,10 +4798,49 @@ const QuarantineIntent = struct {
     journal_hash: [32]u8,
 };
 
+/// Product chooses the move; Application owns the atomic, non-replacing effect.
+/// Directory handles are borrowed only for the synchronous call.
+pub const QuarantineMove = struct {
+    pub const Request = union(enum) {
+        registry,
+        journal,
+        finish: struct { scope: QuarantineScope, nonce: [8]u8 },
+
+        pub fn sourceName(self: Request) []const u8 {
+            return switch (self) {
+                .registry => file_name,
+                .journal => transaction_file_name,
+                .finish => |value| value.scope.pendingName(),
+            };
+        }
+
+        pub fn targetName(self: Request, storage: *[25]u8) []const u8 {
+            return switch (self) {
+                .registry => file_name,
+                .journal => transaction_file_name,
+                .finish => |value| std.fmt.bufPrint(storage, "finished-{s}", .{std.fmt.bytesToHex(value.nonce, .lower)}) catch unreachable,
+            };
+        }
+    };
+
+    move_fn: ?*const fn (std.Io, std.Io.Dir, std.Io.Dir, Request) FileStoreError!void = null,
+
+    pub fn move(self: QuarantineMove, io: std.Io, source: std.Io.Dir, target: std.Io.Dir, request: Request) FileStoreError!void {
+        const effect = self.move_fn orelse return error.WriteFailed;
+        try effect(io, source, target, request);
+    }
+};
+
+pub const testing = if (builtin.is_test) struct {
+    pub const quarantine_directory_name = quarantine_directory;
+    pub const limits = test_limits;
+} else struct {};
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
     lock_file: std.Io.File,
+    quarantine_move: QuarantineMove = .{},
 
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
         if (!std.fs.path.isAbsolute(absolute_directory))
@@ -4933,6 +4972,7 @@ pub const FileStore = struct {
     }
 
     pub fn quarantine(self: *FileStore, allocator: std.mem.Allocator, scope: QuarantineScope, empty_registry: []const u8) FileStoreError!void {
+        if (self.quarantine_move.move_fn == null) return error.WriteFailed;
         // A read/size failure is not corrupt data. Do not start isolation if
         // the companion journal cannot be read within its own bound.
         const journal = try self.loadTransactionAlloc(allocator);
@@ -4984,6 +5024,7 @@ pub const FileStore = struct {
     }
 
     fn finishQuarantine(self: *FileStore, allocator: std.mem.Allocator, root: std.Io.Dir, scope: QuarantineScope, empty_registry: []const u8) FileStoreError!void {
+        if (self.quarantine_move.move_fn == null) return error.WriteFailed;
         const pending = root.openDir(self.io, scope.pendingName(), .{ .follow_symlinks = false }) catch return error.ReadFailed;
         defer pending.close(self.io);
         const intent = (try self.quarantineIntent(pending)) orelse return error.ReadFailed;
@@ -5004,9 +5045,10 @@ pub const FileStore = struct {
         }
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
-        var storage: [64]u8 = undefined;
-        const finished = std.fmt.bufPrint(&storage, "finished-{s}", .{std.fmt.bytesToHex(random, .lower)}) catch unreachable;
-        root.renamePreserve(scope.pendingName(), root, finished, self.io) catch return error.WriteFailed;
+        const request: QuarantineMove.Request = .{ .finish = .{ .scope = scope, .nonce = random } };
+        var storage: [25]u8 = undefined;
+        const finished = request.targetName(&storage);
+        try self.quarantine_move.move(self.io, root, root, request);
         var path_storage: [80]u8 = undefined;
         const intent_path = std.fmt.bufPrint(&path_storage, "{s}/intent", .{finished}) catch unreachable;
         if (!self.syncCommitDir(root, intent_path)) return error.PersistenceOutcomeUnknown;
@@ -5039,7 +5081,7 @@ pub const FileStore = struct {
 
     fn isolateFile(self: *FileStore, pending: std.Io.Dir, name: []const u8, expected_hash: ?[32]u8, state: IsolationFile) FileStoreError!void {
         if (state == .absent) return;
-        if (state == .active) self.dir.renamePreserve(name, pending, name, self.io) catch return error.WriteFailed;
+        if (state == .active) try self.quarantine_move.move(self.io, self.dir, pending, if (std.mem.eql(u8, name, file_name)) .registry else .journal);
         if (!std.mem.eql(u8, &(try self.hashFile(pending, name)), &expected_hash.?)) return error.WriteFailed;
         const moved = pending.openFile(self.io, name, .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.PersistenceOutcomeUnknown;
         defer moved.close(self.io);
@@ -5652,195 +5694,6 @@ test "journal cleanup checks current references before any credential deletion" 
         try std.testing.expect(try store.recoverPendingCredentialTransaction(std.testing.allocator, registry, capability, test_limits));
         try std.testing.expectEqual(@as(usize, 1), cleanup.count);
     }
-}
-
-test "quarantine resumes before and after each rename and preserves exact companion bytes" {
-    const Probe = struct {
-        var base: std.Io = undefined;
-        var count: usize = 0;
-        var fail_at: usize = 0;
-        var after: bool = false;
-        fn rename(raw: ?*anyopaque, old: std.Io.Dir, old_name: []const u8, new: std.Io.Dir, new_name: []const u8) std.Io.Dir.RenameError!void {
-            count += 1;
-            if (count == fail_at and !after) return error.AccessDenied;
-            try base.vtable.dirRename(raw, old, old_name, new, new_name);
-            if (count == fail_at and after) return error.AccessDenied;
-        }
-        fn preserve(raw: ?*anyopaque, old: std.Io.Dir, old_name: []const u8, new: std.Io.Dir, new_name: []const u8) std.Io.Dir.RenamePreserveError!void {
-            count += 1;
-            if (count == fail_at and !after) return error.AccessDenied;
-            try base.vtable.dirRenamePreserve(raw, old, old_name, new, new_name);
-            if (count == fail_at and after) return error.AccessDenied;
-        }
-        fn expectBytes(dir: std.Io.Dir, name: []const u8, expected: []const u8) !void {
-            var file = try dir.openFile(std.testing.io, name, .{ .follow_symlinks = false });
-            defer file.close(std.testing.io);
-            if (builtin.os.tag == .windows) file.flags.nonblocking = true;
-            var bytes: [256]u8 = undefined;
-            try std.testing.expectEqual(expected.len, try file.length(std.testing.io));
-            const length = try file.readPositionalAll(std.testing.io, bytes[0..expected.len], 0);
-            try std.testing.expectEqualStrings(expected, bytes[0..length]);
-        }
-    };
-    const broken = "{ broken registry\r\n exact bytes\x00";
-    const journal = "{ companion journal\r\n exact bytes }";
-    var empty_storage: [256]u8 = undefined;
-    const empty = try encode(&empty_storage, .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &.{} }, test_limits);
-    for ([_]bool{ false, true }) |after| {
-        for (1..6) |index| {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{ .read = true, .truncate = false });
-            defer lock.close(std.testing.io);
-            var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
-            try store.commit(broken);
-            try store.commitTransaction(journal);
-            Probe.base = std.testing.io;
-            Probe.count = 0;
-            Probe.fail_at = index;
-            Probe.after = after;
-            var vtable = std.testing.io.vtable.*;
-            vtable.dirRename = Probe.rename;
-            vtable.dirRenamePreserve = Probe.preserve;
-            store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-            try std.testing.expectError(error.WriteFailed, store.quarantine(std.testing.allocator, .registry, empty));
-            store.io = std.testing.io;
-            // Recreate all recovery decisions from disk, with no in-memory phase.
-            if (!(try store.resumeQuarantine(std.testing.allocator, empty))) {
-                const canonical = (try store.loadAlloc(std.testing.allocator)).?;
-                defer std.testing.allocator.free(canonical);
-                if (!std.mem.eql(u8, canonical, empty)) try store.quarantine(std.testing.allocator, .registry, empty);
-            }
-            try Probe.expectBytes(tmp.dir, file_name, empty);
-            try std.testing.expectEqual(@as(?[]u8, null), try store.loadTransactionAlloc(std.testing.allocator));
-            try std.testing.expect(!(try store.resumeQuarantine(std.testing.allocator, empty)));
-            const root = try tmp.dir.openDir(std.testing.io, quarantine_directory, .{ .iterate = true, .follow_symlinks = false });
-            defer root.close(std.testing.io);
-            var iterator = root.iterate();
-            var found = false;
-            while (try iterator.next(std.testing.io)) |entry| {
-                if (!std.mem.startsWith(u8, entry.name, "finished-")) continue;
-                try std.testing.expect(!found);
-                found = true;
-                const record = try root.openDir(std.testing.io, entry.name, .{ .follow_symlinks = false });
-                defer record.close(std.testing.io);
-                try Probe.expectBytes(record, file_name, broken);
-                try Probe.expectBytes(record, transaction_file_name, journal);
-            }
-            try std.testing.expect(found);
-        }
-    }
-}
-
-test "quarantine retries a moved journal durability barrier before touching registry" {
-    const Probe = struct {
-        var base: std.Io = undefined;
-        var fail_sync: bool = false;
-        var journal_sync: bool = false;
-        fn open(raw: ?*anyopaque, dir: std.Io.Dir, name: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
-            const file = try base.vtable.dirOpenFile(raw, dir, name, options);
-            if (options.mode == .read_write) journal_sync = std.mem.eql(u8, name, transaction_file_name);
-            return file;
-        }
-        fn preserve(raw: ?*anyopaque, old: std.Io.Dir, old_name: []const u8, new: std.Io.Dir, new_name: []const u8) std.Io.Dir.RenamePreserveError!void {
-            try base.vtable.dirRenamePreserve(raw, old, old_name, new, new_name);
-            if (std.mem.eql(u8, new_name, transaction_file_name)) fail_sync = true;
-        }
-        fn sync(raw: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
-            if (fail_sync and journal_sync) {
-                fail_sync = false;
-                return error.InputOutput;
-            }
-            return base.vtable.fileSync(raw, file);
-        }
-    };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{ .read = true, .truncate = false });
-    defer lock.close(std.testing.io);
-    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
-    try store.commit("broken");
-    try store.commitTransaction("journal");
-    var empty_storage: [256]u8 = undefined;
-    const empty = try encode(&empty_storage, .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &.{} }, test_limits);
-    Probe.base = std.testing.io;
-    var vtable = std.testing.io.vtable.*;
-    vtable.dirRenamePreserve = Probe.preserve;
-    vtable.fileSync = Probe.sync;
-    vtable.dirOpenFile = Probe.open;
-    store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    try std.testing.expectError(error.PersistenceOutcomeUnknown, store.quarantine(std.testing.allocator, .registry, empty));
-    Probe.fail_sync = true;
-    try std.testing.expectError(error.PersistenceOutcomeUnknown, store.resumeQuarantine(std.testing.allocator, empty));
-    const unchanged = (try store.loadAlloc(std.testing.allocator)).?;
-    defer std.testing.allocator.free(unchanged);
-    try std.testing.expectEqualStrings("broken", unchanged);
-    store.io = std.testing.io;
-    try std.testing.expect(try store.resumeQuarantine(std.testing.allocator, empty));
-}
-
-test "pending quarantine cannot take over replacement canonical files" {
-    const Probe = struct {
-        var base: std.Io = undefined;
-        fn rename(raw: ?*anyopaque, old: std.Io.Dir, old_name: []const u8, new: std.Io.Dir, new_name: []const u8) std.Io.Dir.RenameError!void {
-            try base.vtable.dirRename(raw, old, old_name, new, new_name);
-            if (std.mem.eql(u8, new_name, "intent")) return error.AccessDenied;
-        }
-    };
-    var empty_storage: [256]u8 = undefined;
-    const empty = try encode(&empty_storage, .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &.{} }, test_limits);
-    for ([_]bool{ false, true }) |replace_journal| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{ .read = true, .truncate = false });
-        defer lock.close(std.testing.io);
-        var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
-        try store.commit("original registry");
-        try store.commitTransaction("original journal");
-        Probe.base = std.testing.io;
-        var vtable = std.testing.io.vtable.*;
-        vtable.dirRename = Probe.rename;
-        store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        try std.testing.expectError(error.WriteFailed, store.quarantine(std.testing.allocator, .registry, empty));
-        store.io = std.testing.io;
-        if (replace_journal) try store.commitTransaction("replacement journal") else try store.commit(empty);
-        try std.testing.expectError(error.WriteFailed, store.resumeQuarantine(std.testing.allocator, empty));
-        const registry = (try store.loadAlloc(std.testing.allocator)).?;
-        defer std.testing.allocator.free(registry);
-        const journal = (try store.loadTransactionAlloc(std.testing.allocator)).?;
-        defer std.testing.allocator.free(journal);
-        try std.testing.expectEqualStrings(if (replace_journal) "original registry" else empty, registry);
-        try std.testing.expectEqualStrings(if (replace_journal) "replacement journal" else "original journal", journal);
-    }
-}
-
-test "quarantine resumes a registry move when no companion journal existed" {
-    const Probe = struct {
-        var base: std.Io = undefined;
-        fn preserve(raw: ?*anyopaque, old: std.Io.Dir, old_name: []const u8, new: std.Io.Dir, new_name: []const u8) std.Io.Dir.RenamePreserveError!void {
-            try base.vtable.dirRenamePreserve(raw, old, old_name, new, new_name);
-            if (std.mem.eql(u8, new_name, file_name)) return error.AccessDenied;
-        }
-    };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const lock = try tmp.dir.createFile(std.testing.io, lock_file_name, .{ .read = true, .truncate = false });
-    defer lock.close(std.testing.io);
-    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir, .lock_file = lock };
-    try store.commit("broken registry without journal");
-    var empty_storage: [256]u8 = undefined;
-    const empty = try encode(&empty_storage, .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &.{} }, test_limits);
-    Probe.base = std.testing.io;
-    var vtable = std.testing.io.vtable.*;
-    vtable.dirRenamePreserve = Probe.preserve;
-    store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    try std.testing.expectError(error.WriteFailed, store.quarantine(std.testing.allocator, .registry, empty));
-    store.io = std.testing.io;
-    try std.testing.expect(try store.resumeQuarantine(std.testing.allocator, empty));
-    const canonical = (try store.loadAlloc(std.testing.allocator)).?;
-    defer std.testing.allocator.free(canonical);
-    try std.testing.expectEqualStrings(empty, canonical);
-    try std.testing.expect((try store.loadTransactionAlloc(std.testing.allocator)) == null);
 }
 
 test "mutation plan rotates a fresh locator without retiring a shared reference" {

@@ -2,6 +2,7 @@ const std = @import("std");
 const product_control = @import("metawork_product_control");
 const schedule_persistence = @import("product_schedule_persistence");
 const mcp_configuration = @import("metawork_product_mcp").contract;
+const mcp_platform = @import("metawork_mcp_platform");
 const skill_enablement = @import("metawork_product_skill").enablement;
 const skill_management = @import("metawork_product_skill").management;
 const skill_sources = @import("metawork_product_skill").sources;
@@ -50,6 +51,7 @@ pub const Stores = struct {
             io,
             paths.mcpDir(),
         ) catch null;
+        if (self.mcp_configuration) |*store| store.quarantine_move = mcp_platform.quarantineMove();
 
         self.task = history_store.Store.init(io, allocator, paths.workbenchDir()) catch null;
         self.task_restore_failed = self.task == null;

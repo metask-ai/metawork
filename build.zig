@@ -207,7 +207,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-mcp-envelope", "Run bounded MCP routing tests").dependOn(&envelope_tests.step);
     addMcpRuntimeTests(b, test_modules, bundle.link_libc);
     addMcpCatalogTests(b, test_modules, bundle.link_libc);
-    addMcpConfigurationTests(b, test_modules, bundle.link_libc);
+    artifacts.tests.step.dependOn(addMcpConfigurationTests(b, test_modules, bundle.link_libc));
     addProductMcpStateTests(b, test_modules, bundle.link_libc);
     addProductMcpPolicyTests(b, test_modules, bundle.link_libc);
     addProductMcpViewTests(b, test_modules, bundle.link_libc);
@@ -975,7 +975,7 @@ fn addMcpConfigurationTests(
     b: *std.Build,
     modules: WiredModules,
     link_libc: bool,
-) void {
+) *std.Build.Step {
     const step = b.step(
         "test-mcp-configuration",
         "Run Product MCP registry and preparation tests",
@@ -986,6 +986,17 @@ fn addMcpConfigurationTests(
         .root_module = modules.product_mcp_configuration,
     });
     step.dependOn(&b.addRunArtifact(tests).step);
+    const quarantine_cases = b.createModule(.{
+        .root_source_file = b.path("tests/integration/mcp_quarantine_test.zig"),
+        .target = modules.app.resolved_target,
+        .optimize = modules.app.optimize,
+        .link_libc = link_libc,
+    });
+    quarantine_cases.addImport("mcp_configuration", modules.product_mcp_configuration);
+    quarantine_cases.addImport("mcp_platform", modules.mcp_platform);
+    const quarantine_run = b.addRunArtifact(b.addTest(.{ .name = "metawork-mcp-quarantine", .root_module = quarantine_cases }));
+    step.dependOn(&quarantine_run.step);
+    return &quarantine_run.step;
 }
 
 fn addProductMcpStateTests(
@@ -2352,6 +2363,13 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     mcp_platform.addImport("metawork_mcp_process_compat", mcp_process_compat);
+    const mcp_quarantine_compat = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/mcp_quarantine.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    mcp_platform.addImport("metawork_mcp_quarantine_compat", mcp_quarantine_compat);
     const mcp_platform_test_options = b.addOptions();
     mcp_platform_test_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for MCP process fixtures"));
     mcp_platform.addOptions("mcp_platform_test_options", mcp_platform_test_options);
