@@ -2677,6 +2677,7 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/app_single_instance/macos.zig";
   const officePublish = "src/native_sdk_compat/office_resource_publish.zig";
   const mcpProcess = "src/native_sdk_compat/mcp_process.zig";
+  const mcpQuarantine = "src/native_sdk_compat/mcp_quarantine.zig";
   assert.deepEqual(externSymbols(read(mcpProcess), ["kernel32"]), [
     "AssignProcessToJobObject",
     "CreateJobObjectW",
@@ -2694,6 +2695,25 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /CreateProcess|CreatePipe|ReadFile|WriteFile/,
   );
   assert.deepEqual(externSymbols(read(officePublish), ["c"]), ["renameatx_np"]);
+  assert.deepEqual(externSymbols(read(mcpQuarantine), ["c"]), ["renameatx_np"]);
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("metawork_mcp_quarantine_compat")'),
+    ),
+    ["src/app/mcp_platform.zig"],
+  );
+  assert.doesNotMatch(
+    read(mcpQuarantine),
+    /@import\("(?:native_sdk|metawork_product_mcp)"\)|\.rename\(|\.hardLink\(|\.copyFile\(/,
+  );
+  assert.match(
+    read("src/app/stores.zig"),
+    /store\.quarantine_move = mcp_platform\.quarantineMove\(\)/,
+  );
+  assert.doesNotMatch(
+    read("src/product/mcp/configuration.zig"),
+    /renameatx_np|renamePreserve\(|metawork_mcp_quarantine_compat/,
+  );
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes('@import("metawork_office_resource_publish_compat")'),

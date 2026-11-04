@@ -11,6 +11,7 @@ const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 const process_compat = @import("metawork_mcp_process_compat");
+const quarantine_compat = @import("metawork_mcp_quarantine_compat");
 const catalog_budget = @import("mcp_catalog_budget.zig");
 pub const CatalogBudget = catalog_budget.Budget;
 
@@ -26,6 +27,21 @@ const max_custom_headers: usize = 128;
 const stdio_io_buffer_bytes: usize = 4096;
 const max_stdio_argv_count: usize = 129;
 const max_stdio_argv_bytes: usize = 64 * 1024;
+
+pub fn quarantineMove() mcp_configuration.QuarantineMove {
+    return .{ .move_fn = moveQuarantine };
+}
+
+fn moveQuarantine(io: std.Io, source: std.Io.Dir, target: std.Io.Dir, request: mcp_configuration.QuarantineMove.Request) mcp_configuration.FileStoreError!void {
+    var storage: [25]u8 = undefined;
+    const source_name = request.sourceName();
+    const target_name = request.targetName(&storage);
+    if (builtin.os.tag == .macos) {
+        quarantine_compat.move(io, source, source_name, target, target_name) catch return error.WriteFailed;
+    } else {
+        source.renamePreserve(source_name, target, target_name, io) catch return error.WriteFailed;
+    }
+}
 
 pub const CredentialStore = struct {
     io: std.Io,
@@ -2200,16 +2216,21 @@ test "OAuth HTTP authorization exact acknowledgement retains a newer failure" {
 
 test "MCP platform owns stdio process pipes and stderr drain" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+    const response_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
     const script =
         \\printf 'discarded-secret' >&2
-        \\while IFS= read -r line; do printf '%s\n' "$line"; done
+        \\while IFS= read -r line; do
+        \\  [ "$line" = "$1" ] || exit 1
+        \\  printf '%s\n' "$2"
+        \\done
     ;
     var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();
     var owner = try createStdioTransportOwner(
         std.testing.io,
         std.testing.allocator,
-        &.{ "/bin/sh", "-c", script },
+        &.{ "/bin/sh", "-c", script, "mcp-stdio-fixture", request_bytes, response_bytes },
         .inherit,
         &environment,
     );
@@ -2226,7 +2247,6 @@ test "MCP platform owns stdio process pipes and stderr drain" {
     };
     var connection_open = true;
     defer if (connection_open) transport.close_fn(connection);
-    const request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1}";
     const response = switch (transport.request_fn(
         connection,
         std.testing.allocator,
@@ -2239,23 +2259,27 @@ test "MCP platform owns stdio process pipes and stderr drain" {
     };
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 0), response.http_status);
-    try std.testing.expectEqualStrings(request_bytes, response.body);
+    try std.testing.expectEqualStrings(response_bytes, response.body);
     transport.close_fn(connection);
     connection_open = false;
 }
 
 test "MCP platform closes stdio after a normal child exit" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}";
+    const response_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
+    const script =
+        \\IFS= read -r line || exit 1
+        \\[ "$line" = "$1" ] || exit 1
+        \\printf '%s\n' "$2"
+        \\exit 0
+    ;
     var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();
     var owner = try createStdioTransportOwner(
         std.testing.io,
         std.testing.allocator,
-        &.{
-            "/bin/sh",
-            "-c",
-            "IFS= read -r line; printf '%s\\n' \"$line\"; exit 0",
-        },
+        &.{ "/bin/sh", "-c", script, "mcp-stdio-fixture", request_bytes, response_bytes },
         .inherit,
         &environment,
     );
@@ -2275,7 +2299,7 @@ test "MCP platform closes stdio after a normal child exit" {
     const response = switch (transport.request_fn(
         connection,
         std.testing.allocator,
-        "{}",
+        request_bytes,
         1000,
         .{},
     )) {
@@ -2284,7 +2308,7 @@ test "MCP platform closes stdio after a normal child exit" {
     };
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 0), response.http_status);
-    try std.testing.expectEqualStrings("{}", response.body);
+    try std.testing.expectEqualStrings(response_bytes, response.body);
     std.Io.Timeout.sleep(.{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(20),
         .clock = .awake,
