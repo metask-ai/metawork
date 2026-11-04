@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-11-04
+
+### Added
+
+- Composer 支持在当前 Task 中使用上下方向键召回已确认接收的普通文本输入，并在重启后复用仍保留的历史。
+
+### Changed
+
+- 账号、连接、模型、Workspace、Task 和定时任务的操作反馈改为绑定各自业务上下文，避免无关状态变化覆盖当前结果。
+- New task 必须显式选择模型；最近确认的选择仅作为新任务起始偏好，既有 Task 和定时任务继续使用各自保存的执行目标。
+- Composer 统一普通文本与 Skill 参数的输入法安全提交规则；运行中按两次 `Escape` 才请求停止，鼠标点击仍可直接停止。
+- 每条用户消息最多接收 8 个附件，超量批次在复制前整体拒绝，并与共享暂存容量分开计算。
+- 文件选择、另存为、MCP 确认和 OAuth 授权改为可取消的异步原生对话框；Native SDK 升级至 `0.11.0-fork.5`。
+- MCP 连接器按运行成员共享并持续收敛配置，增量应用、超时、HTTP 流恢复和无效启动记录隔离使用统一生命周期。
+- AgentCore 切换至官方 `0.13.0` / ABI revision 26，并刷新 Windows 与 macOS 的 x86_64/ARM64 bundles。
+
+### Fixed
+
+- 修复事件队列或展示容量压力可能污染 Session、改写真实 Run 结果或丢失工具回执与文件变更完整性的问题。
+- 修复 MCP OAuth grant 恢复、认证拒绝、过期准入和应用失败可能无法正确收口或恢复的问题。
+
 ## [0.2.9] - 2026-11-01
 
 ### Added
@@ -494,7 +515,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.9...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/metask-ai/metawork/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/metask-ai/metawork/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/metask-ai/metawork/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/metask-ai/metawork/compare/v0.2.6...v0.2.7
