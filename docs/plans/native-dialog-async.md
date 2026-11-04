@@ -1,6 +1,6 @@
 # 原生对话框异步重构方案
 
-状态：方案已评审通过，待实施。本次整理合并重复说明，保留已确认的范围、接口与收口要求；不声明实现或平台验收完成。本文不是 decision record，不替代领域真源。
+状态：代码已实施，平台证据见 [E-MACOS-DIALOG-ASYNC-20261104](../evidence/native-dialog-async-macos-20261104.json)。Windows、隐藏窗口 OAuth consent 及证据列出的专项仍未验收；正式 Native 图的既有失败另行保留，未声明全图通过。本文不是 decision record，不替代领域真源。
 
 日期：2026-11-04。源码分析基线：`f52470ed1e7c1663114de654cf1de9f9b4edfa94`；Native SDK：`0.11.0-fork.5`。实施前重新核对实际工作树、依赖和受影响调用点。
 

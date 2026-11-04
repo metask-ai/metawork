@@ -5,9 +5,16 @@ const automation_api = @import("metawork_automation");
 
 pub const Adapter = struct {
     runtime: automation_api.Runtime,
+    real_native_dialogs: bool = false,
 
     pub fn init(env_map: *std.process.Environ.Map) Adapter {
-        return .{ .runtime = automation_api.Runtime.init(env_map) };
+        return .{
+            .runtime = automation_api.Runtime.init(env_map),
+            .real_native_dialogs = if (automation_api.enabled)
+                std.mem.eql(u8, env_map.get("METAWORK_AUTOMATION_NATIVE_DIALOGS") orelse "", "1")
+            else
+                false,
+        };
     }
 
     pub fn deinit(self: *Adapter) void {
@@ -74,7 +81,9 @@ pub const Adapter = struct {
 
     fn activeCallback(context: ?*anyopaque) bool {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return self.bridgeHarnessActive();
+        // Keep the automation transport and fixture model, but exercise the
+        // actual picker instead of feeding injected selections to Bridge.
+        return self.bridgeHarnessActive() and !self.real_native_dialogs;
     }
 
     fn workspaceRootCallback(context: ?*anyopaque) ?[]const u8 {

@@ -3,7 +3,7 @@ import { readProbeProductState } from "./probe-product-state.mjs";
 import { readFixtureCheckpoint } from "./test-support/checkpoint-history.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
@@ -42,6 +42,7 @@ import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
 import { runMcpLifecycleVertical } from "./mcp-lifecycle-vertical.mjs";
+import { runNativeDialogsVertical } from "./native-dialogs-vertical.mjs";
 import { runScheduledTasksVertical } from "./scheduled-tasks-vertical.mjs";
 import {
   runOutputDeliveryVertical,
@@ -180,6 +181,7 @@ const officeNamespace = JSON.parse(
 ).namespace.split("/");
 const builtinOfficeOnly = process.env.METAWORK_BUILTIN_OFFICE_ONLY === "1";
 
+const nativeDialogsOnly = process.env.METAWORK_NATIVE_DIALOGS_ONLY === "1";
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
@@ -509,6 +511,22 @@ startApplication();
 
 desktopVertical: try {
   await waitForBridge();
+  if (nativeDialogsOnly) {
+    await runNativeDialogsVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      toolSse,
+      workspaceRoot: canonicalWorkspace,
+      fixturePath,
+      evidenceDir: path.join(root, ".zig-cache", "native-dialog-desktop"),
+      automate,
+      stop: () => stopApplication("native dialog shutdown"),
+    });
+    break desktopVertical;
+  }
   if (process.env.METAWORK_MODEL_ERROR_ONLY === "1") {
     if (chromeProbePort === null)
       throw new Error(
@@ -2247,6 +2265,7 @@ function startApplication() {
       ...appEnvironment,
       ...isolatedPlatformEnv,
       METAWORK_AUTOMATION: "1",
+      ...(nativeDialogsOnly ? { METAWORK_AUTOMATION_NATIVE_DIALOGS: "1" } : {}),
       METAWORK_AUTOMATION_WORKSPACE: canonicalWorkspace,
       METAWORK_AUTOMATION_ATTACHMENTS: [
         attachmentPngPath,
@@ -2761,6 +2780,11 @@ async function invokePreparedRun(payload) {
 }
 
 async function invokeBridge(command, payload) {
+  const responseTimeoutMs = nativeDialogsOnly
+    ? command.startsWith("metawork.workbench.snapshot")
+      ? 1500
+      : 180_000
+    : commandTimeoutMs;
   if (chromeProbePort !== null) {
     const webview = await connectTestWebView(chromeProbePort, {
       requestTimeoutMs: commandTimeoutMs,
@@ -2774,19 +2798,29 @@ async function invokeBridge(command, payload) {
   // macOS keeps the SDK automation path. Windows uses the real Renderer
   // request Promise because unrelated page responses share one SDK artifact.
   const id = `agentcore-vertical-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // The native-dialog scope observes the SDK single response file before a
+  // focus/chrome response can replace it. This bounded busy observation is
+  // test-only and does not measure application CPU or input performance.
   let stopResponseWatch = false;
   const responseWatch = (async () => {
-    const deadline = Date.now() + commandTimeoutMs;
+    const deadline = Date.now() + responseTimeoutMs;
     while (!stopResponseWatch && Date.now() < deadline) {
       try {
         const latest = JSON.parse(
-          await readFile(join(automationDir, "bridge-response.txt"), "utf8"),
+          nativeDialogsOnly
+            ? readFileSync(join(automationDir, "bridge-response.txt"), "utf8")
+            : await readFile(
+                join(automationDir, "bridge-response.txt"),
+                "utf8",
+              ),
         );
         if (latest.id === id) return latest;
       } catch {
         // The artifact is atomically replaced and may not exist between runs.
       }
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      await new Promise((resolve) =>
+        nativeDialogsOnly ? setImmediate(resolve) : setTimeout(resolve, 1),
+      );
     }
     return null;
   })();
@@ -3048,7 +3082,7 @@ function isOpaqueRevision(value) {
 async function automate(...args) {
   return execFileAsync(process.execPath, [native, "automate", ...args], {
     cwd: appCwd,
-    timeout: commandTimeoutMs,
+    timeout: nativeDialogsOnly ? 180_000 : commandTimeoutMs,
     maxBuffer: 1024 * 1024,
   });
 }
