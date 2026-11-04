@@ -2652,6 +2652,50 @@ test "refresh of a new consent retains the referenced old descriptor and retries
     try std.testing.expectEqual(.replace, retry.target.kind);
 }
 
+test "ready OAuth re-login cancellation preserves grant only before confirmed consent" {
+    for ([_]bool{ false, true }) |replace_pending| for ([_]bool{ false, true }) |confirmed| {
+        var effects = OauthTestEffects{};
+        var harness = TestHarness{};
+        var runtime = try testGrantedOauthRuntime(&effects, &harness, true, 90_000);
+        defer runtime.deinit();
+        var generation: u64 = 3;
+        if (replace_pending) {
+            var initial = (try runtime.prepareConfigurationStep(generation, .automatic)).?;
+            defer initial.deinit();
+            var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &initial.preparation)).?;
+            try std.testing.expect(runtime.completeConfigurationApply(generation, &initial.preparation, &manifest, null, null, false));
+            initial.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+            const current = runtime.state.management.?.desiredRegistry().?.servers[0];
+            try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(generation, .{ .server_id = "oauth", .display_name = "OAuth", .negotiation = current.negotiation, .timeout_ms = current.timeout_ms + 1, .url = "https://mcp.example.test/mcp", .client = .{ .pre_registered = .{ .client_id = current.auth.oauth.?.registration.client_id.?, .token_endpoint_auth_method = "none" } } }));
+            generation += 1;
+        }
+        var rejected = (try runtime.prepareConfigurationStep(generation, .automatic)).?;
+        defer rejected.deinit();
+        try std.testing.expect(runtime.failConfigurationApply(generation, .rejected));
+        var start = (try runtime.beginAuthorization(generation, "oauth", "ready-relogin")).?;
+        defer start.deinit();
+        try std.testing.expect(runtime.advanceAuthorization("ready-relogin", .awaiting_consent));
+        const retired_before = effects.deleted;
+        if (confirmed) {
+            try std.testing.expect((try runtime.authorizeOauth(.{ .attempt_id = 2, .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" })) == .ready);
+            generation += 1;
+        }
+        try std.testing.expect(runtime.finishAuthorization("ready-relogin"));
+        const oauth = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+        try std.testing.expectEqualStrings(if (confirmed) "awaiting_tokens" else "ready", oauth.status);
+        try std.testing.expectEqual(!confirmed, oauth.grant != null);
+        if (confirmed) try std.testing.expect(effects.deleted > retired_before) else try std.testing.expectEqual(retired_before, effects.deleted);
+        try std.testing.expect(runtime.canBeginAuthorization(generation, "oauth"));
+        const pending = try runtime.prepareConfigurationStep(generation, .automatic);
+        if (pending) |value| {
+            var step = value;
+            defer step.deinit();
+            try std.testing.expect(confirmed and replace_pending);
+            try std.testing.expectEqual(.remove, step.target.kind);
+        } else try std.testing.expect(!confirmed or !replace_pending);
+    };
+}
+
 test "Product MCP manual recovery distinguishes HTTP auth refusal from network failure and stops new-token loops" {
     for ([_]bool{ false, true }) |has_expiry| for ([_]bool{ false, true }) |http_rejection| {
         var effects = OauthTestEffects{};
