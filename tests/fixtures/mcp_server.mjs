@@ -53,6 +53,18 @@ function startHttp() {
     request.on("end", () => {
       try {
         if (bytes > 1024 * 1024) throw new Error("request too large");
+        if (options.expectedBearer) {
+          const matched =
+            request.headers.authorization ===
+            `Bearer ${options.expectedBearer}`;
+          trace({ transport: "http", direction: "authorization", matched });
+          if (!matched) {
+            response
+              .writeHead(401, { "Content-Type": "application/json" })
+              .end('{"error":"unauthorized"}');
+            return;
+          }
+        }
         if (
           options.framing === "ping" &&
           request.method === "DELETE" &&
@@ -732,6 +744,7 @@ function parseOptions(args) {
   let ttlMs = 60_000;
   let resultKind = "text";
   let refreshGate = null;
+  let expectedBearer = null;
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
       case "--protocol":
@@ -761,6 +774,9 @@ function parseOptions(args) {
       case "--refresh-gate":
         refreshGate = args[(index += 1)] ?? null;
         break;
+      case "--expected-bearer":
+        expectedBearer = args[(index += 1)] ?? null;
+        break;
       default:
         throw new Error(`unknown MCP fixture option: ${args[index]}`);
     }
@@ -788,5 +804,6 @@ function parseOptions(args) {
     ttlMs,
     resultKind,
     refreshGate,
+    expectedBearer,
   };
 }

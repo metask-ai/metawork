@@ -87,6 +87,10 @@ const HttpFixture = struct {
     }
 
     fn startWithDelay(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32) !HttpFixture {
+        return startWithBearer(protocol_version, framing, trace_path, ttl_ms, result_kind, gate_path, delay_ms, "");
+    }
+
+    fn startWithBearer(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32, bearer: []const u8) !HttpFixture {
         var delay_storage: [32]u8 = undefined;
         const delay = try std.fmt.bufPrint(&delay_storage, "{d}", .{delay_ms});
         var ttl_storage: [32]u8 = undefined;
@@ -110,6 +114,8 @@ const HttpFixture = struct {
             gate_path,
             "--delay-ms",
             delay,
+            "--expected-bearer",
+            bearer,
         };
         var child = try std.process.spawn(std.testing.io, .{
             .argv = &arguments,
@@ -3985,4 +3991,154 @@ test "production candidate budget admits a slow healthy source beside four exist
     try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&input));
     try std.testing.expect(std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - start > 2000 * std.time.ns_per_ms);
     budget.applied();
+}
+
+test "real Core connects a restored expired grant only with committed new bearer and discovers tools" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    var trace_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const trace_path = try std.fmt.bufPrint(&trace_buffer, "{s}/oauth-new-bearer.jsonl", .{root_buffer[0..root_len]});
+    var fixture = try HttpFixture.startWithBearer("2026-07-28", "json", trace_path, 60_000, "text", "", 0, "new-access-token");
+    defer fixture.deinit();
+    const Store = struct {
+        durable: DurableRegistry,
+        seconds: u64 = 80,
+        new_locator: [64]u8 = undefined,
+        new_locator_len: usize = 0,
+        new_secret: [64]u8 = undefined,
+        new_secret_len: usize = 0,
+        old_retired: bool = false,
+        fn now(raw: ?*anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return self.seconds;
+        }
+        fn probe(raw: ?*anyopaque, locator: []const u8) mcp_configuration.CredentialPresence {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return if (self.secret(locator) != null) .present else .missing;
+        }
+        fn secret(self: *@This(), locator: []const u8) ?[]const u8 {
+            if (std.mem.eql(u8, locator, "oauth/refresh")) return "refresh-token";
+            if (!self.old_retired and std.mem.eql(u8, locator, "oauth/access")) return "expired-access-token";
+            if (self.new_locator_len != 0 and std.mem.eql(u8, locator, self.new_locator[0..self.new_locator_len])) return self.new_secret[0..self.new_secret_len];
+            return null;
+        }
+        fn create(raw: ?*anyopaque, locator: []const u8, value: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (locator.len > self.new_locator.len or value.len > self.new_secret.len) return false;
+            @memcpy(self.new_locator[0..locator.len], locator);
+            self.new_locator_len = locator.len;
+            @memcpy(self.new_secret[0..value.len], value);
+            self.new_secret_len = value.len;
+            return true;
+        }
+        fn delete(raw: ?*anyopaque, locator: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (std.mem.eql(u8, locator, "oauth/access")) self.old_retired = true;
+            return true;
+        }
+        fn resolve(raw: ?*anyopaque, allocator: std.mem.Allocator, locator: []const u8) mcp_configuration.CredentialResolution {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const value = self.secret(locator) orelse return .missing;
+            return .{ .value = allocator.dupe(u8, value) catch return .out_of_memory };
+        }
+        fn resolver(self: *@This()) mcp_configuration.CredentialResolver {
+            return .{ .available = true, .context = self, .resolve_fn = resolve };
+        }
+        const Owner = struct { control: product_control.Runtime, core: *agent.Runtime };
+        fn restore(self: *@This()) !Owner {
+            const allocator = std.testing.allocator;
+            var preparation = try mcp_configuration.prepare(allocator, self.durable.storage[0..self.durable.len], true, false, self.resolver(), product_mcp_limits);
+            errdefer preparation.deinit();
+            var empty = try mcp_configuration.prepare(allocator, null, true, false, .{}, product_mcp_limits);
+            defer empty.deinit();
+            var manifest = (try mcp_configuration.RuntimeManifest.candidate(allocator, &empty)).?;
+            errdefer manifest.deinit();
+            const core = try agent.Runtime.init(std.testing.io, allocator, .{ .max_sessions = 1 });
+            errdefer {
+                core.shutdown() catch unreachable;
+                core.deinit();
+            }
+            var management = managementConfiguration(&self.durable, &manifest);
+            management.locator_generator = .{ .available = true, .context = &self.durable, .fill_fn = DurableRegistry.fillIdentity };
+            management.credentials = .{ .available = true, .context = self, .probe_fn = probe, .create_fn = create, .delete_fn = delete };
+            return .{ .core = core, .control = try product_control.Runtime.init(allocator, std.testing.io, core, .{ .worker_count = 1, .queue_capacity = 4 }, .{
+                .schedule_timer = .{ .enabled = true, .context = self, .now_unix_seconds = now },
+                .mcp = .{ .preparation = &preparation, .management = management, .host_capabilities = .{ .oauth = true, .connection_approval = true } },
+            }) };
+        }
+        fn commit(_: *anyopaque) void {}
+    };
+    var durable_bytes: [8192]u8 = undefined;
+    var store: Store = .{ .durable = .{ .storage = &durable_bytes } };
+    // Loopback HTTP qualifies actual bearer consumption by Core. The token
+    // response is a fixture; production HTTPS/token endpoint policy is unchanged.
+    var seed = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
+    defer seed.deinit();
+    const server = &seed.registry.?.value.servers[0];
+    server.auth = .{ .kind = "oauth", .oauth = .{
+        .status = "ready",
+        .registration = .{ .kind = "pre_registered", .issuer = "https://issuer.example.test", .client_id = "fixture-client", .token_endpoint_auth_method = "none", .client_credential_revision = 1, .client_secret_ref = null },
+        .consent = .{ .epoch = 1, .fingerprint = "", .resource = fixture.endpoint, .issuer = "https://issuer.example.test", .scopes = &.{}, .redirect_uri = "http://127.0.0.1:43123/auth/callback", .client_credential_revision = 1 },
+        .grant = .{ .consent_epoch = 1, .token_revision = 1, .access_token_ref = "oauth/access", .refresh_token_ref = "oauth/refresh", .expires_at_unix_ms = 90_000 },
+    } };
+    var approval = mcp_configuration.connectionFingerprint(server.*);
+    server.connection_approval = .{ .fingerprint = &approval };
+    var consent = mcp_configuration.oauthConsentFingerprint(server.*, server.auth.oauth.?.consent.?).?;
+    server.auth.oauth.?.consent.?.fingerprint = &consent;
+    const encoded = try mcp_configuration.encode(&durable_bytes, seed.registry.?.value, product_mcp_limits);
+    store.durable.len = encoded.len;
+    // Destroy both Product and canonical Core, preserve only the serialized
+    // registry and credential owner, then advance time while they are closed.
+    var previous = try store.restore();
+    shutdownProduct(&previous.control, previous.core);
+    store.seconds = 100;
+    var owner = try store.restore();
+    defer shutdownProduct(&owner.control, owner.core);
+    try std.testing.expect((try owner.control.prepareMcpConfigurationStep(1, .automatic)) == null);
+    try std.testing.expect(owner.control.inspectMcpDesiredConfiguration().?.authorization_recovery_pending);
+    var binding = (try owner.control.beginMcpOauthRefresh("deterministic-http")).started;
+    defer binding.deinit();
+    try std.testing.expect(!binding.runtime_loaded);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "oauth-new-bearer.jsonl", .{}));
+    var new_token = "new-access-token".*;
+    try std.testing.expectEqual(.saved, try owner.control.completeMcpOauthRefresh(.{ .operation_id = binding.operation_id, .server_id = "deterministic-http", .access_token = &new_token, .expires_at_unix_ms = 999_000 }, .{ .context = &store, .commit_fn = Store.commit }));
+    try std.testing.expect(store.old_retired);
+    var step = (try owner.control.prepareMcpConfigurationStep(2, .automatic)).?;
+    defer step.deinit();
+    try std.testing.expectEqual(.add, step.target.kind);
+    var candidate_bytes: [8192]u8 = undefined;
+    const candidate_json = try mcp_configuration.encode(&candidate_bytes, step.preparation.registry.?.value, product_mcp_limits);
+    var credentials = try mcp_configuration.prepare(a, candidate_json, true, false, store.resolver(), product_mcp_limits);
+    defer credentials.deinit();
+    var build = try mcp_platform.buildRuntime(std.testing.io, a, &credentials, .{});
+    defer build.deinit();
+    var input = try owner.core.prepareMcpMembership(2, &build.input.?, step.member_ids);
+    defer input.deinit();
+    try std.testing.expectEqual(.applied, try owner.core.applyMcpConfiguration(&input));
+    var applied_manifest = (try mcp_configuration.RuntimeManifest.candidate(a, &step.preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) applied_manifest.deinit();
+    const activation = switch (try owner.core.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var activation_owned = true;
+    defer if (activation_owned) activation.deinit();
+    try std.testing.expectEqual(.ready, activation.state());
+    try std.testing.expectEqualStrings("echo", activation.catalogTools()[0].name);
+    const selection = activation.takeSelection();
+    try std.testing.expect(owner.control.completeMcpConfigurationApply(2, &step.preparation, &applied_manifest, activation, selection, false));
+    step.preparation = .{ .allocator = a, .state = .empty };
+    manifest_owned = false;
+    activation_owned = false;
+    const trace = try tmp.dir.readFileAlloc(std.testing.io, "oauth-new-bearer.jsonl", a, .limited(1024 * 1024));
+    defer a.free(trace);
+    try std.testing.expect(std.mem.count(u8, trace, "\"direction\":\"authorization\",\"matched\":true") >= 3);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"matched\":false") == null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"method\":\"tools/list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "new-access-token") == null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "expired-access-token") == null);
 }

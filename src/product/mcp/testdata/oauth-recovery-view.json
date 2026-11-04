@@ -1,0 +1,22 @@
+{
+  "untried": {
+    "authorizationStatus": "ready",
+    "applyStatus": "pending",
+    "canAuthorize": false
+  },
+  "waiting": {
+    "authorizationStatus": "ready",
+    "applyStatus": "waiting_auth",
+    "canAuthorize": false
+  },
+  "refreshing": {
+    "authorizationStatus": "refreshing",
+    "applyStatus": "waiting_auth",
+    "canAuthorize": false
+  },
+  "failed": {
+    "authorizationStatus": "ready",
+    "applyStatus": "rejected",
+    "canAuthorize": true
+  }
+}

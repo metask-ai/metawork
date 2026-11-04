@@ -719,6 +719,7 @@ pub const ManagementInspection = struct {
     desired_generation: ?u64,
     runtime_alignment: RuntimeAlignment,
     server_count: usize,
+    authorization_recovery_pending: bool = false,
 };
 
 /// The attempted target is independent of the global Desired generation.
@@ -728,12 +729,14 @@ pub const RuntimeApplyTarget = struct {
     id_len: usize,
     fingerprint: [32]u8,
     kind: enum { add, replace, remove },
+    oauth: bool = false,
 
     pub fn init(id_value: []const u8, server: ?ServerWire, kind: @FieldType(RuntimeApplyTarget, "kind")) RuntimeApplyTarget {
         std.debug.assert(id_value.len <= 128);
         var value: RuntimeApplyTarget = .{ .id_len = id_value.len, .fingerprint = @splat(0), .kind = kind };
         @memcpy(value.id_storage[0..id_value.len], id_value);
         if (server) |target| {
+            value.oauth = std.mem.eql(u8, target.auth.kind, "oauth");
             var hash = Sha256.init(.{});
             hashField(&hash, "metawork.mcp.apply-target/v1");
             hashField(&hash, &runtimeDescriptorFingerprint(target));
@@ -755,7 +758,8 @@ pub const RuntimeApplyFailure = enum { preparation, rejected, unknown };
 pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server: []const u8 };
 
 /// Product's attempt ledger. Membership growth never invalidates failures;
-/// removal/replacement can reopen them after the current round finishes.
+/// removal/replacement can reopen ordinary failures after the current round.
+/// OAuth failures stay bound until explicit retry or that target changes.
 pub const RuntimeConvergence = struct {
     pub const Outcome = enum { pending, waiting_auth, rejected, failed, capacity };
     const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome, http_auth_rejected: bool = false };
@@ -788,6 +792,19 @@ pub const RuntimeConvergence = struct {
         return false;
     }
 
+    pub fn discardObsolete(self: *RuntimeConvergence, manifest: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits) void {
+        var index: usize = 0;
+        while (index < self.results.items.len) {
+            const result = self.results.items[index];
+            const current = manifest.targetFor(result.target.id(), desired, limits);
+            if (current == null or current.?.kind != result.target.kind or
+                !std.mem.eql(u8, &current.?.fingerprint, &result.target.fingerprint))
+            {
+                _ = self.results.swapRemove(index);
+            } else index += 1;
+        }
+    }
+
     pub fn recordHttpAuthRejection(self: *RuntimeConvergence, allocator: std.mem.Allocator, target: RuntimeApplyTarget) std.mem.Allocator.Error!void {
         for (self.results.items) |*result| if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) {
             result.http_auth_rejected = true;
@@ -806,7 +823,7 @@ pub const RuntimeConvergence = struct {
         for (self.results.items) |result| {
             if (!std.mem.eql(u8, result.target.id(), target.id()) or
                 !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
-            if (result.outcome == .waiting_auth) return true;
+            if (holdsBinding(result)) return true;
             return result.outcome != .pending and (result.epoch == self.epoch or (!next_round and result.round == self.round));
         }
         return false;
@@ -847,12 +864,17 @@ pub const RuntimeConvergence = struct {
 
     pub fn nextRound(self: *RuntimeConvergence) bool {
         for (self.results.items) |result| {
-            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending and result.outcome != .waiting_auth) {
+            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending and !holdsBinding(result)) {
                 self.round +|= 1;
                 return true;
             }
         }
         return false;
+    }
+
+    fn holdsBinding(result: Result) bool {
+        return result.outcome == .waiting_auth or
+            (result.target.oauth and (result.outcome == .rejected or result.outcome == .failed));
     }
 
     pub fn retry(self: *RuntimeConvergence) void {

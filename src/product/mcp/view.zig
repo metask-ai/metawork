@@ -5,11 +5,12 @@
 const std = @import("std");
 const mcp_configuration = @import("product_mcp_configuration");
 const mcp_state = @import("product_mcp_state");
+const policy = @import("product_mcp_policy");
 
 pub const Error = error{SnapshotTooLarge};
 
 const McpAvailability = enum { unavailable, ready, degraded };
-const McpApplyStatus = enum { current, pending, applying, rejected, failed, unknown };
+const McpApplyStatus = enum { current, pending, waiting_auth, applying, rejected, failed, unknown };
 const McpRuntimeStatus = enum {
     not_loaded,
     ready,
@@ -135,7 +136,7 @@ fn serverApplyStatus(mcp: *const mcp_state.McpProductState, server: mcp_configur
         if (!std.mem.eql(u8, result.target.id(), server.id) or !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
         return switch (result.outcome) {
             .pending => .applying,
-            .waiting_auth => .current,
+            .waiting_auth => .waiting_auth,
             .rejected => .rejected,
             .failed, .capacity => .failed,
         };
@@ -361,6 +362,8 @@ fn mcpAuthorizationStatus(
             "capability_unavailable";
     }
     if (mcpAuthorizationInProgress(mcp, server.id)) return "authorizing";
+    if (management.desiredRegistry()) |registry| if (registry.oauth_operation) |operation|
+        if (std.mem.eql(u8, operation.kind, "refresh") and std.mem.eql(u8, operation.server_id, server.id)) return "refreshing";
     const oauth = server.auth.oauth orelse return "capability_unavailable";
     if (std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null)
         return "ready";
@@ -615,7 +618,7 @@ pub fn writeProjection(
             connection_safe,
             projected_auth_mode,
         );
-        writer.print(",\"approvalStatus\":\"{s}\",\"authorizationStatus\":\"{s}\",\"desiredEnabled\":{},\"runtimeStatus\":\"{s}\",\"newTaskAccess\":\"{s}\",\"safeDiagnostic\":", .{
+        writer.print(",\"approvalStatus\":\"{s}\",\"authorizationStatus\":\"{s}\",\"canAuthorize\":{},\"desiredEnabled\":{},\"runtimeStatus\":\"{s}\",\"newTaskAccess\":\"{s}\",\"safeDiagnostic\":", .{
             if (!connection_safe or server.connection_approval == null)
                 "unapproved"
             else
@@ -624,12 +627,15 @@ pub fn writeProjection(
                 mcpAuthorizationStatus(mcp, management, server)
             else
                 "not_required",
+            connection_safe and policy.canAuthorizeServer(mcp, input.refresh_job_active, server),
             server.enabled,
             @tagName(status),
             mcpNewTaskAccess(mcp, server.id),
         }) catch return error.SnapshotTooLarge;
         try input.text.writeJson(writer, if (mcp.runtime_uncertain)
             "Runtime configuration outcome is unknown. Restart the application."
+        else if (serverApplyStatus(mcp, server) == .waiting_auth)
+            "Authorization recovery is pending. The connection will retry automatically."
         else if (serverCapacityBlocked(mcp, server))
             "MCP connection capacity is full. Close unused tasks, then retry the connection."
         else if (mcp.refresh_schedule_failed)
@@ -639,7 +645,7 @@ pub fn writeProjection(
         else if (mcp.admission == .ready and !mcp.admissionFresh())
             "Tool catalog expired"
         else switch (status) {
-            .not_loaded => if (mcp.configuration_apply_state == .failed)
+            .not_loaded => if (serverApplyStatus(mcp, server) == .failed or serverApplyStatus(mcp, server) == .rejected)
                 "Configuration changes were not applied. Retry the connection."
             else if (mcp.activation_failed)
                 "Tool catalog is unavailable. Select Refresh to retry."

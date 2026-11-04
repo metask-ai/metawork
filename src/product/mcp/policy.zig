@@ -361,6 +361,52 @@ pub fn runtimeOauthLoaded(mcp: *const mcp_state.McpProductState, server: mcp_con
     return false;
 }
 
+pub fn canAuthorizeServer(mcp: *const mcp_state.McpProductState, refresh_job_active: bool, server: mcp_configuration.ServerWire) bool {
+    if (mcp.runtime_uncertain or refresh_job_active or
+        mcp.authorization_operation != null or mcp.configuration_apply_state == .applying) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    if (management.inspect().health != .ready) return false;
+    const registry = management.desiredRegistry() orelse return false;
+    if (registry.oauth_operation != null) return false;
+    const oauth = server.auth.oauth orelse return false;
+    if (server.connection_approval == null or
+        mcp_configuration.serverProblem(server, management.limits) != null or
+        !std.mem.eql(u8, server.transport.kind, "streamable_http") or
+        !std.mem.eql(u8, server.auth.kind, "oauth") or
+        !(std.mem.eql(u8, oauth.status, "client_registration_required") or
+            std.mem.eql(u8, oauth.status, "consent_required") or
+            std.mem.eql(u8, oauth.status, "awaiting_tokens") or
+            std.mem.eql(u8, oauth.status, "reauth_required") or
+            (std.mem.eql(u8, oauth.status, "ready") and failedOauthCandidate(mcp, server))))
+        return false;
+    if (oauth.registration.client_id != null) {
+        const method = oauth.registration.token_endpoint_auth_method orelse return false;
+        if (!std.mem.eql(u8, method, "none") and
+            oauth.registration.client_secret_ref == null)
+            return false;
+    }
+    return true;
+}
+
+fn failedOauthCandidate(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    if (!server.enabled or runtimeOauthLoaded(mcp, server)) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    const manifest = management.runtime_manifest orelse return false;
+    const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return false;
+    return management.convergence.failedTarget(target);
+}
+
+pub fn authorizationRecoveryPending(mcp: *const mcp_state.McpProductState) bool {
+    const management = if (mcp.management) |*value| value else return false;
+    const manifest = management.runtime_manifest orelse return false;
+    for (management.convergence.results.items) |result| {
+        if (result.outcome != .waiting_auth) continue;
+        const target = manifest.targetFor(result.target.id(), management.desiredRegistry(), management.limits) orelse continue;
+        if (std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint) and management.convergence.handled(target)) return true;
+    }
+    return false;
+}
+
 pub fn nextOauthExpiry(
     mcp: *const mcp_state.McpProductState,
     now_unix_ms: ?u64,

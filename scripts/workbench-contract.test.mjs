@@ -1606,6 +1606,7 @@ test("MCP management is capability-gated and identity checked", () => {
         },
         approvalStatus: "approved",
         authorizationStatus: "ready",
+        canAuthorize: false,
         desiredEnabled: true,
         runtimeStatus: "ready",
         newTaskAccess: "available",
@@ -1641,6 +1642,7 @@ test("MCP management is capability-gated and identity checked", () => {
         },
         approvalStatus: "approved",
         authorizationStatus: "reauth_required",
+        canAuthorize: true,
         desiredEnabled: true,
         runtimeStatus: "needs_authentication",
         newTaskAccess: "unavailable",
@@ -1748,6 +1750,31 @@ test("MCP management is capability-gated and identity checked", () => {
   assert.throws(() => decodeWorkbenchSnapshot(failed), /failure count/);
   failed.mcp.applyFailureCount = 1;
   assert.deepEqual(decodeWorkbenchSnapshot(failed), failed);
+  const recoveryProjections = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/mcp/testdata/oauth-recovery-view.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  for (const projection of Object.values(recoveryProjections)) {
+    const recovering = clone(withMcp);
+    const server = recovering.mcp.servers[1];
+    Object.assign(server, projection, {
+      runtimeStatus: "not_loaded",
+      newTaskAccess: "unavailable",
+      tools: [],
+    });
+    recovering.mcp.applyFailureCount =
+      projection.applyStatus === "rejected" ? 1 : 0;
+    assert.deepEqual(decodeWorkbenchSnapshot(recovering), recovering);
+    delete server.canAuthorize;
+    assert.throws(() => decodeWorkbenchSnapshot(recovering), /canAuthorize/);
+    server.canAuthorize = "yes";
+    assert.throws(() => decodeWorkbenchSnapshot(recovering), /canAuthorize/);
+  }
   const applying = clone(withMcp);
   applying.mcp.configurationApply = "applying";
   for (const server of applying.mcp.servers) server.applyStatus = "applying";

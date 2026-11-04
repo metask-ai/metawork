@@ -2101,6 +2101,7 @@ fn wireAgentCore(
     });
     product_mcp_view.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp_view.addImport("product_mcp_state", product_mcp_state);
+    product_mcp_view.addImport("product_mcp_policy", product_mcp_policy);
     const product_mcp_ports = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/ports.zig"),
         .target = target,

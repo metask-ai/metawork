@@ -398,7 +398,9 @@ pub const Runtime = struct {
         self: *const Runtime,
     ) ?configuration.ManagementInspection {
         const management = if (self.state.management) |*value| value else return null;
-        return management.inspect();
+        var inspection = management.inspect();
+        inspection.authorization_recovery_pending = policy.authorizationRecoveryPending(&self.state);
+        return inspection;
     }
 
     pub fn writeDesiredConfiguration(
@@ -881,6 +883,7 @@ pub const Runtime = struct {
         const management = if (self.state.management) |*value| value else return;
         if (management.inspect().health != .ready) return;
         const manifest = if (management.runtime_manifest) |*value| value else return;
+        management.convergence.discardObsolete(manifest, management.desiredRegistry(), management.limits);
         const apply_state: McpConfigurationApplyState = if (manifest.failureCount(management.desiredRegistry(), management.limits, &management.convergence) != 0) .failed else .idle;
         if (self.state.configuration_apply_state != apply_state) {
             self.state.configuration_apply_state = apply_state;
@@ -1447,43 +1450,12 @@ pub const Runtime = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) bool {
-        if (self.shutting_down or self.refresh_job != null or
-            self.state.authorization_operation != null or
-            self.state.configuration_apply_state == .applying)
-            return false;
+        if (self.shutting_down) return false;
         const management = if (self.state.management) |*value| value else return false;
-        if (!policy.expectedGenerationMatches(management, expected_generation) or
-            management.inspect().health != .ready)
-            return false;
+        if (!policy.expectedGenerationMatches(management, expected_generation)) return false;
         const registry = management.desiredRegistry() orelse return false;
-        if (registry.oauth_operation != null) return false;
         const server = state_module.findMcpServer(registry.servers, server_id) orelse return false;
-        const oauth = server.auth.oauth orelse return false;
-        if (server.connection_approval == null or
-            configuration.serverProblem(server, management.limits) != null or
-            !std.mem.eql(u8, server.transport.kind, "streamable_http") or
-            !std.mem.eql(u8, server.auth.kind, "oauth") or
-            !(std.mem.eql(u8, oauth.status, "client_registration_required") or
-                std.mem.eql(u8, oauth.status, "consent_required") or
-                std.mem.eql(u8, oauth.status, "awaiting_tokens") or
-                std.mem.eql(u8, oauth.status, "reauth_required") or
-                (std.mem.eql(u8, oauth.status, "ready") and self.failedOauthCandidate(server))))
-            return false;
-        if (oauth.registration.client_id != null) {
-            const method = oauth.registration.token_endpoint_auth_method orelse return false;
-            if (!std.mem.eql(u8, method, "none") and
-                oauth.registration.client_secret_ref == null)
-                return false;
-        }
-        return true;
-    }
-
-    fn failedOauthCandidate(self: *const Runtime, server: configuration.ServerWire) bool {
-        if (!server.enabled or policy.runtimeOauthLoaded(&self.state, server)) return false;
-        const management = if (self.state.management) |*value| value else return false;
-        const manifest = management.runtime_manifest orelse return false;
-        const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return false;
-        return management.convergence.failedTarget(target);
+        return policy.canAuthorizeServer(&self.state, self.refresh_job != null, server);
     }
 
     pub fn advanceAuthorization(
@@ -2370,19 +2342,52 @@ fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, re
     return runtime;
 }
 
+fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8) !void {
+    const Text = struct {
+        fn contains(_: *const anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) view.Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var bytes: [32 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try writeProjection(runtime, &writer, .{ .context = runtime, .contains_sensitive_fn = Text.contains, .write_json_fn = Text.write });
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "new-access-token") == null);
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer actual.deinit();
+    const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("testdata/oauth-recovery-view.json"), .{});
+    defer expected.deinit();
+    const server = actual.value.object.get("servers").?.array.items[0].object;
+    var fields = expected.value.object.get(fixture_name).?.object.iterator();
+    while (fields.next()) |field| {
+        const value = server.get(field.key_ptr.*).?;
+        switch (field.value_ptr.*) {
+            .string => |wanted| try std.testing.expectEqualStrings(wanted, value.string),
+            .bool => |wanted| try std.testing.expectEqual(wanted, value.bool),
+            else => unreachable,
+        }
+    }
+}
+
 test "Product MCP expired cold grant waits without changing membership and resumes with new credentials" {
     var effects = OauthTestEffects{};
     var harness = TestHarness{};
     var runtime = try testGrantedOauthRuntime(&effects, &harness, true, 90_000);
     defer runtime.deinit();
+    try testOauthRecoveryProjection(&runtime, "untried");
     harness.unix_seconds = 100;
     try std.testing.expect((try runtime.prepareConfigurationStep(3, .automatic)) == null);
     try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
     try std.testing.expectEqual(.idle, runtime.state.configuration_apply_state);
     try std.testing.expectEqual(.waiting_auth, runtime.state.management.?.convergence.results.items[0].outcome);
+    try std.testing.expect(runtime.inspectDesiredConfiguration().?.authorization_recovery_pending);
+    try testOauthRecoveryProjection(&runtime, "waiting");
     var binding = (try runtime.beginOauthRefresh("oauth")).started;
     defer binding.deinit();
     try std.testing.expect(!binding.runtime_loaded);
+    try testOauthRecoveryProjection(&runtime, "refreshing");
     var new_access = "new-access-token".*;
     const Commit = struct {
         called: bool = false,
@@ -2454,6 +2459,7 @@ test "Product MCP manual recovery distinguishes HTTP auth refusal from network f
         defer first.deinit();
         try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
         try std.testing.expect(runtime.canBeginAuthorization(3, "oauth"));
+        try testOauthRecoveryProjection(&runtime, "failed");
         try std.testing.expect(runtime.nextOauthExpiry() == null);
         const source = configuration.runtimeDescriptorFingerprint(runtime.state.management.?.desiredRegistry().?.servers[0]);
         if (http_rejection) {
@@ -2492,6 +2498,34 @@ test "Product MCP manual recovery distinguishes HTTP auth refusal from network f
         try std.testing.expectEqual(.saved, try runtime.createHttpServer(4, .{ .display_name = "Unrelated", .url = "https://other.example.test/mcp" }));
         try std.testing.expect(runtime.nextOauthExpiry() == null);
         try std.testing.expect(runtime.canBeginAuthorization(5, "oauth"));
+        // Exercise an actual unrelated add/remove, including the membership
+        // epoch and the planner's next-round reopening. It must not refresh
+        // the failed OAuth binding after its new token expires.
+        var unrelated = (try runtime.prepareConfigurationStep(5, .automatic)).?;
+        defer unrelated.deinit();
+        try std.testing.expect(!std.mem.eql(u8, unrelated.target.id(), "oauth"));
+        var unrelated_manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &unrelated.preparation)).?;
+        try std.testing.expect(runtime.completeConfigurationApply(5, &unrelated.preparation, &unrelated_manifest, null, null, false));
+        unrelated.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+        const unrelated_id = runtime.state.management.?.desiredRegistry().?.servers[1].id;
+        try std.testing.expectEqual(.saved, try runtime.setServerEnabled(5, .{ .server_id = unrelated_id, .enabled = false }));
+        var removal = (try runtime.prepareConfigurationStep(6, .automatic)).?;
+        defer removal.deinit();
+        try std.testing.expectEqual(.remove, removal.target.kind);
+        var removed_manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &removal.preparation)).?;
+        try std.testing.expect(runtime.completeConfigurationApply(6, &removal.preparation, &removed_manifest, null, null, false));
+        removal.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+        try std.testing.expect((try runtime.prepareConfigurationStep(6, .automatic)) == null);
+        try std.testing.expect(!runtime.inspectDesiredConfiguration().?.authorization_recovery_pending);
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
+        // Explicitly withdrawing then restoring this source is a new user
+        // intent. Inactive results must not resurrect the previous failure.
+        try std.testing.expectEqual(.saved, try runtime.setServerEnabled(6, .{ .server_id = "oauth", .enabled = false }));
+        try std.testing.expectEqual(.idle, runtime.state.configuration_apply_state);
+        try std.testing.expectEqual(.saved, try runtime.setServerEnabled(7, .{ .server_id = "oauth", .enabled = true }));
+        try std.testing.expect(runtime.nextOauthExpiry() != null);
+        try std.testing.expect((try runtime.prepareConfigurationStep(8, .automatic)) == null);
+        try std.testing.expect(runtime.inspectDesiredConfiguration().?.authorization_recovery_pending);
     };
 }
 

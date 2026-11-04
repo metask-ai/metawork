@@ -843,6 +843,10 @@ pub const Coordinator = struct {
             else => return .busy,
         }) orelse {
             self.apply_pending = false;
+            if (self.control.inspectMcpDesiredConfiguration()) |current| if (current.authorization_recovery_pending) {
+                self.host.notify();
+                return .started;
+            };
             return .rejected;
         };
         self.apply_pending = false;

@@ -4588,6 +4588,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "connection",
         "approvalStatus",
         "authorizationStatus",
+        "canAuthorize",
         "desiredEnabled",
         "runtimeStatus",
         "newTaskAccess",
@@ -4842,6 +4843,10 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           server.authorizationStatus,
           `${serverPath}.authorizationStatus`,
           mcpAuthorizationStatusValues,
+        ),
+        canAuthorize: booleanValue(
+          server.canAuthorize,
+          `${serverPath}.canAuthorize`,
         ),
         taskReferenceCount: count(
           server.taskReferenceCount,

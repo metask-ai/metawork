@@ -1292,6 +1292,12 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
             }
             return error.ApplyDidNotFinish;
         }
+        fn waiting(_: *anyopaque) ?mcp_configuration.ManagementInspection {
+            return .{ .health = .ready, .desired_generation = 3, .runtime_alignment = .current, .server_count = 3, .authorization_recovery_pending = true };
+        }
+        fn noStep(_: *anyopaque, _: u64, _: mcp_configuration.RuntimeApplyIntent) anyerror!?mcp_configuration.RuntimeApplyStep {
+            return null;
+        }
     };
     const allocator = std.testing.allocator;
     const limits: mcp_configuration.Limits = .{ .max_servers = 8, .max_tools_per_server = 32, .max_namespace_bytes = 128, .max_credential_locators = 64, .max_runtime_secrets_per_server = 128, .max_runtime_secret_bytes_per_server = 16 * 1024 };
@@ -1397,4 +1403,9 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     try App.event(&composition, undefined, .effects_wake);
     try std.testing.expectEqual(@as(usize, 4), host.maintenances);
     try std.testing.expect(composition.mcp_management.?.configuration_apply_job != null);
+    try Effects.waitForApply(&composition);
+    _ = composition.mcp_management.?.drain();
+    composition.mcp_management.?.control.inspect_fn = Effects.waiting;
+    composition.mcp_management.?.control.prepare_apply_fn = Effects.noStep;
+    try std.testing.expectEqual(.started, try composition.mcp_management.?.applyConfiguration(.retry_all));
 }

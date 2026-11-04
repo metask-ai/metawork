@@ -5238,6 +5238,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-next-action {
   display: flex;
+  flex-wrap: wrap;
   padding: 12px 13px;
   margin-top: 14px;
   align-items: center;
