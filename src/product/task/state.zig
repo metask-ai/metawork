@@ -2027,28 +2027,10 @@ pub fn applyEvent(
                 const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
                 try record(projection.context, run, receipt);
             }
-            const tool = if (envelope.generated_image_path) |path|
-                try projection.retain_generated_image_fn(projection.context, run, result.id, path, task.durable.id)
-            else
-                try projection.findOrCreateTool(run, result.id, result.name, result.input);
-            tool.is_error = result.is_error;
-            tool.elapsed_ms = result.elapsed_ms;
-            tool.state = if (result.is_error) .failed else .completed;
-            const input = try projection.replaceText(
-                &tool.input,
-                result.input,
-                run.initial_credentials[0],
-            );
-            const content = try projection.replaceText(
-                &tool.content,
-                imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
-                run.initial_credentials[0],
-            );
-            tool.input_truncated = input.truncated;
-            tool.content_truncated = content.truncated;
-            tool.redacted = tool.redacted or input.redacted or content.redacted;
-            if (envelope.generated_image_path == null and !tool.receipt_metadata)
-                try projection.replaceFileReferences(tool, envelope, run.initial_credentials[0], task.durable.id, run.generation);
+            projectToolResultDetails(task.durable.id, run, envelope, projection) catch |failure| switch (failure) {
+                error.ProjectionCapacity, error.ToolCapacity => _ = recordEventProjectionFailure(run),
+                else => return @as(EventApplyError!EventApplication, failure),
+            };
             checkCoreToolCount(run);
             durable_boundary = true;
         },
@@ -2309,6 +2291,35 @@ pub fn applyEvent(
         },
     }
     return .{ .applied = .{ .durable_boundary = durable_boundary } };
+}
+
+// Trusted receipts are accepted by applyEvent before these optional details.
+// A detail capacity gap must still publish and persist this tool_result.
+fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agent.OwnedCoreEvent, projection: EventProjection) EventProjectionError!void {
+    const result = envelope.event.value.known.tool_result;
+    const tool = if (envelope.generated_image_path) |path|
+        try projection.retain_generated_image_fn(projection.context, run, result.id, path, task_id)
+    else
+        try projection.findOrCreateTool(run, result.id, result.name, result.input);
+    tool.is_error = result.is_error;
+    tool.elapsed_ms = result.elapsed_ms;
+    tool.state = if (result.is_error) .failed else .completed;
+    const input = try projection.replaceText(
+        &tool.input,
+        result.input,
+        run.initial_credentials[0],
+    );
+    tool.input_truncated = input.truncated;
+    tool.redacted = tool.redacted or input.redacted;
+    const content = try projection.replaceText(
+        &tool.content,
+        imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
+        run.initial_credentials[0],
+    );
+    tool.content_truncated = content.truncated;
+    tool.redacted = tool.redacted or content.redacted;
+    if (envelope.generated_image_path == null and !tool.receipt_metadata)
+        try projection.replaceFileReferences(tool, envelope, run.initial_credentials[0], task_id, run.generation);
 }
 
 fn clearTrackedText(target: *TrackedText) void {

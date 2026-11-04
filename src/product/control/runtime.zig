@@ -22137,7 +22137,9 @@ test "terminal receipt tail is adopted before completion and deduplicates queued
 
 test "trusted delivery and image metadata survive full Tool and display capacity" {
     for ([_]bool{ false, true }) |generated| {
-        var control = try testRuntime();
+        var storage: [256 * 1024]u8 = undefined;
+        var history = TestTaskPersistence{ .storage = &storage };
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
         defer control.deinit();
         const task = control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
@@ -22149,9 +22151,16 @@ test "trusted delivery and image metadata survive full Tool and display capacity
             defer event.deinit();
             try control.applyEvent(&event);
         }
+        _ = task_test_state.recordEventProjectionFailure(run);
+        var snapshot: [96 * 1024]u8 = undefined;
+        _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id });
+        const key = Runtime.viewKey(.{ .task_id = task.durable.id }, .taskPage);
+        try std.testing.expect(control.encoded_views.get(key) != null);
+        const commits = history.commits;
+        const revision = control.revision;
         control.limits.max_projection_bytes = control.projection_bytes;
         var result = try testEnvelope(task.runtime.routeId(), run.id, if (generated)
-            "{\"tool_result\":{\"id\":\"image\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}"
+            "{\"tool_result\":{\"id\":\"image\",\"name\":\"GenerateImage\",\"input\":\"optional generation parameters exceed remaining display capacity\",\"content\":\"\",\"is_error\":false}}"
         else
             "{\"tool_result\":{\"id\":\"delivery\",\"name\":\"DeliverFile\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
         defer result.deinit();
@@ -22163,11 +22172,32 @@ test "trusted delivery and image metadata survive full Tool and display capacity
             } else return error.MissingGeneratedImage;
             try std.testing.expectEqualStrings("generated-images/kept.png", protected.file_refs.?[0].?.locator);
             try std.testing.expect(protected.file_refs.?[0].?.generated_image);
+            try std.testing.expectEqual(@as(usize, 0), protected.input.len);
             try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
         } else {
             result.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "outputs/kept.docx", 12, @splat(4));
-            try std.testing.expectError(error.ToolCapacity, control.applyEvent(&result));
+            try control.applyEvent(&result);
             try std.testing.expectEqualStrings("outputs/kept.docx", run.outputs[0].?.locator);
+        }
+        try std.testing.expectEqual(commits + 1, history.commits);
+        try std.testing.expectEqual(revision + 1, control.revision);
+        try std.testing.expect(control.encoded_views.get(key) == null);
+        try std.testing.expect(control.task_persistence_health == .ready);
+        try std.testing.expect(run.first_event_rejection == null);
+        var saved = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
+        defer saved.deinit();
+        const wire_run = saved.value.tasks[0].runs[0];
+        if (generated) {
+            const reference = found: {
+                for (wire_run.tools) |tool| if (tool.file_refs) |refs| {
+                    for (refs) |ref| if (ref.generated_image) break :found ref;
+                };
+                return error.MissingSavedGeneratedImage;
+            };
+            try std.testing.expectEqualStrings("generated-images/kept.png", reference.locator);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), wire_run.outputs.len);
+            try std.testing.expectEqualStrings("outputs/kept.docx", wire_run.outputs[0].locator);
         }
         try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
     }
