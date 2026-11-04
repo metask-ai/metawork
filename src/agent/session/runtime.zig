@@ -365,6 +365,24 @@ pub const Runtime = struct {
         return projection;
     }
 
+    /// Compose a complete configuration from actual members and newly prepared
+    /// candidates. Product supplies membership; Agent shares resource owners.
+    pub fn prepareMcpMembership(
+        self: *Runtime,
+        generation: u64,
+        additions: ?*const root.McpRuntimeInput,
+        server_ids: []const []const u8,
+    ) (Error || std.mem.Allocator.Error)!root.McpRuntimeInput {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        if (self.mcp_operation.busy()) return error.McpRefreshInProgress;
+        return mcp_runtime.Input.compose(self.allocator, generation, &self.mcp_servers, additions, server_ids) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidConfig => return error.McpConfigurationApplyFailed,
+        };
+    }
+
     /// Applies one complete MCP server set to the shared AgentCore Runtime.
     /// Errors before input.take leave it owned by the caller. Once taken,
     /// every outcome consumes it: applied transfers the candidate to Runtime;

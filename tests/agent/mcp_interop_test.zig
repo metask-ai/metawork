@@ -880,7 +880,7 @@ test "canonical MCP ABI rejects a hanging candidate within its transport budget 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.armed", .data = "armed" });
     defer tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.release", .data = "release" }) catch {};
     const started = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
-    const candidate_adapter = &candidate_build.input.?.servers.?.adapters[1];
+    const candidate_adapter = &candidate_build.input.?.servers.?.members[1].adapter;
     var budget: CandidateBudgetProbe = .{ .underlying = candidate_adapter.transport, .deadline_ns = started + 300 * std.time.ns_per_ms };
     candidate_adapter.transport = budget.transport();
     try std.testing.expectEqual(.rejected, try runtime.applyMcpConfiguration(&candidate_build.input.?));
@@ -1065,6 +1065,50 @@ test "canonical MCP ABI adds a healthy server after an already loaded server bec
     const trace = try tmp.dir.readFileAlloc(std.testing.io, "next.jsonl", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(trace);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
+}
+
+test "canonical MCP shared members survive more than the retired configuration limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const trace = try std.fmt.allocPrint(std.testing.allocator, "{s}/shared.jsonl", .{root});
+    defer std.testing.allocator.free(trace);
+    var fixture = try HttpFixture.start("2026-07-28", "json", trace);
+    defer fixture.deinit();
+    var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
+    defer preparation.deinit();
+    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    defer build.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&build.input.?));
+    const connector_context = runtime.mcp_servers.descriptors[0].connector.ctx;
+    for (0..150) |_| {
+        var input = try runtime.prepareMcpMembership(1, null, &.{"deterministic-http"});
+        defer input.deinit();
+        try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&input));
+        try std.testing.expectEqual(connector_context, runtime.mcp_servers.descriptors[0].connector.ctx);
+        try std.testing.expect(runtime.retired_mcp_servers.items.len <= 1);
+    }
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer activation.deinit();
+    try std.testing.expectEqual(agent.McpActivationState.ready, activation.state());
+    var probe: RawMcpAdmissionProbe = .{ .api = runtime.api, .runtime = runtime.runtime.?, .workspace = root, .endpoint = fixture.provider_endpoint, .selector = std.mem.zeroes(wire.McpSelectorV1), .execute_tool = true };
+    defer probe.bytes.bytes.deinit(std.testing.allocator);
+    probe.selector.struct_size = @sizeOf(wire.McpSelectorV1);
+    probe.selector.server_binding_identity = agent.mcpBindingIdentity("deterministic-http");
+    probe.selector.tool_name = sdk.bytesView("echo");
+    try probe.check(true);
+    const calls = try tmp.dir.readFileAlloc(std.testing.io, "shared.jsonl", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(calls);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, calls, "\"method\":\"tools/call\""));
 }
 
 fn expectHostMcpCreateAndRestore(runtime: *agent.Runtime, options_value: agent.SessionOpenOptions) !void {

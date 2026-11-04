@@ -114,51 +114,47 @@ pub const ExpectedServer = struct {
 
 pub const Error = error{InvalidConfig};
 
-pub const Servers = struct {
+const Member = struct {
+    allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
-    transport_owners: []connector.TransportOwner,
-    initialized_transport_owners: usize,
-    adapters: []connector.Adapter,
-    initialized_adapters: usize,
-    descriptors: []wire.McpServerV1,
-    expected: []ExpectedServer,
+    references: std.atomic.Value(usize) = .init(1),
+    transport_owner: ?connector.TransportOwner = null,
+    adapter: connector.Adapter,
+    descriptor: wire.McpServerV1,
+    expected: ExpectedServer,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        configs: []const ServerInput,
-    ) (Error || std.mem.Allocator.Error)!Servers {
-        try validate(configs);
-        var self: Servers = .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .transport_owners = &.{},
-            .initialized_transport_owners = 0,
-            .adapters = &.{},
-            .initialized_adapters = 0,
-            .descriptors = &.{},
-            .expected = &.{},
+    fn prepare(allocator: std.mem.Allocator, config: ServerInput) (Error || std.mem.Allocator.Error)!*Member {
+        const member = try allocator.create(Member);
+        errdefer allocator.destroy(member);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        const id = try owned.dupe(u8, config.id);
+        const namespace = try owned.dupe(u8, config.namespace);
+        const client_name = try owned.dupe(u8, config.client_name);
+        const client_version = try owned.dupe(u8, config.client_version);
+        const allowed_tools = try owned.alloc([]const u8, config.allowed_tools.len);
+        for (config.allowed_tools, allowed_tools) |tool, *target|
+            target.* = try owned.dupe(u8, tool);
+        const adapter = connector.Adapter.init(allocator, .{
+            .transport = config.transport_owner.transport,
+            .secrets = config.secrets,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidConfig => return error.InvalidConfig,
         };
-        errdefer self.deinit();
-        const owned = self.arena.allocator();
-        self.transport_owners = try owned.alloc(connector.TransportOwner, configs.len);
-        self.adapters = try owned.alloc(connector.Adapter, configs.len);
-        self.descriptors = try owned.alloc(wire.McpServerV1, configs.len);
-        self.expected = try owned.alloc(ExpectedServer, configs.len);
-        for (configs, 0..) |config, index| {
-            const id = try owned.dupe(u8, config.id);
-            const namespace = try owned.dupe(u8, config.namespace);
-            const client_name = try owned.dupe(u8, config.client_name);
-            const client_version = try owned.dupe(u8, config.client_version);
-            const allowed_tools = try owned.alloc([]const u8, config.allowed_tools.len);
-            for (config.allowed_tools, allowed_tools) |tool, *target|
-                target.* = try owned.dupe(u8, tool);
-            self.expected[index] = .{
+        member.* = .{
+            .allocator = allocator,
+            .arena = arena,
+            .adapter = adapter,
+            .expected = .{
                 .id = id,
                 .binding_identity = bindingIdentity(id),
                 .namespace = namespace,
                 .allowed_tools = allowed_tools,
                 .configuration_fingerprint = config.configuration_fingerprint,
-            };
-            self.descriptors[index] = .{
+            },
+            .descriptor = .{
                 .struct_size = @sizeOf(wire.McpServerV1),
                 .transport_code = switch (config.transport) {
                     .stdio => wire.MCP_TRANSPORT_STDIO,
@@ -170,35 +166,102 @@ pub const Servers = struct {
                     .compat_only => wire.MCP_NEGOTIATION_LEGACY_ONLY,
                 },
                 .reserved0 = 0,
-                .server_binding_identity = self.expected[index].binding_identity,
+                .server_binding_identity = bindingIdentity(id),
                 .namespace = sdk.bytesView(namespace),
                 .client_name = sdk.bytesView(client_name),
                 .client_version = sdk.bytesView(client_version),
                 .timeout_ms = config.timeout_ms,
                 .reserved1 = 0,
-                .connector = std.mem.zeroes(wire.McpConnectorV1),
+                .connector = undefined,
                 .protocol_limits = null,
                 .configuration_fingerprint = config.configuration_fingerprint,
-            };
-        }
+            },
+        };
+        member.descriptor.connector = member.adapter.descriptor();
+        return member;
+    }
+
+    fn retain(self: *Member) void {
+        const previous = self.references.fetchAdd(1, .monotonic);
+        std.debug.assert(previous != 0 and previous != std.math.maxInt(usize));
+    }
+
+    fn release(self: *Member) void {
+        const previous = self.references.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
+        if (previous != 1) return;
+        self.adapter.deinit() catch |err| switch (err) {
+            error.ConnectionsActive => @panic("MCP member released with live connections"),
+            error.ConnectorRetained => @panic("MCP member still retained by AgentCore"),
+        };
+        if (self.transport_owner) |*owner| owner.deinit();
+        self.arena.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
+/// Each configuration owns a list of member references. Shared unchanged
+/// members keep one stable connector; retiring a list never pins its siblings.
+pub const Servers = struct {
+    arena: std.heap.ArenaAllocator,
+    members: []*Member = &.{},
+    initialized_members: usize = 0,
+    descriptors: []wire.McpServerV1 = &.{},
+    expected: []ExpectedServer = &.{},
+
+    fn allocate(allocator: std.mem.Allocator, count: usize) std.mem.Allocator.Error!Servers {
+        var self: Servers = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        errdefer self.arena.deinit();
+        const owned = self.arena.allocator();
+        self.members = try owned.alloc(*Member, count);
+        self.descriptors = try owned.alloc(wire.McpServerV1, count);
+        self.expected = try owned.alloc(ExpectedServer, count);
+        return self;
+    }
+
+    pub fn init(allocator: std.mem.Allocator, configs: []const ServerInput) (Error || std.mem.Allocator.Error)!Servers {
+        try validate(configs);
+        var self = try allocate(allocator, configs.len);
+        errdefer self.deinit();
         for (configs, 0..) |config, index| {
-            self.adapters[index] = connector.Adapter.init(allocator, .{
-                .transport = config.transport_owner.transport,
-                .secrets = config.secrets,
-            }) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidConfig => return error.InvalidConfig,
-            };
-            self.initialized_adapters += 1;
-            self.descriptors[index].connector = self.adapters[index].descriptor();
+            const member = try Member.prepare(allocator, config);
+            self.members[index] = member;
+            self.initialized_members += 1;
+            self.descriptors[index] = member.descriptor;
+            self.expected[index] = member.expected;
         }
-        // All fallible work is complete. Transport ownership moves as one
-        // commit so an initialization failure never partially consumes input.
-        for (configs, 0..) |config, index| {
-            self.transport_owners[index] = config.transport_owner.take();
-            self.initialized_transport_owners += 1;
+        // No ownership moves until every allocation and adapter is prepared.
+        for (configs, self.members) |config, member|
+            member.transport_owner = config.transport_owner.take();
+        return self;
+    }
+
+    pub fn compose(allocator: std.mem.Allocator, current: *const Servers, additions: ?*const Servers, ids: []const []const u8) (Error || std.mem.Allocator.Error)!Servers {
+        if (ids.len > wire.MAX_MCP_SERVERS_V1) return error.InvalidConfig;
+        var self = try allocate(allocator, ids.len);
+        errdefer self.deinit();
+        var tool_count: usize = 0;
+        for (ids, 0..) |id, index| {
+            const member = (if (additions) |value| value.find(id) else null) orelse current.find(id) orelse return error.InvalidConfig;
+            tool_count = std.math.add(usize, tool_count, member.expected.allowed_tools.len) catch return error.InvalidConfig;
+            if (tool_count > wire.MAX_MCP_TOOLS_V1) return error.InvalidConfig;
+            for (self.members[0..index]) |previous| {
+                if (std.mem.eql(u8, previous.expected.id, id) or
+                    std.mem.eql(u8, previous.expected.namespace, member.expected.namespace)) return error.InvalidConfig;
+            }
+            member.retain();
+            self.members[index] = member;
+            self.initialized_members += 1;
+            self.descriptors[index] = member.descriptor;
+            self.expected[index] = member.expected;
         }
         return self;
+    }
+
+    fn find(self: *const Servers, id: []const u8) ?*Member {
+        for (self.members) |member|
+            if (std.mem.eql(u8, member.expected.id, id)) return member;
+        return null;
     }
 
     pub fn attach(self: *const Servers, config: *wire.RuntimeConfigV1) void {
@@ -207,10 +270,7 @@ pub const Servers = struct {
         config.mcp_catalog_limits = null;
     }
 
-    pub fn configuration(
-        self: *const Servers,
-        desired_revision: u64,
-    ) wire.McpConfigurationV1 {
+    pub fn configuration(self: *const Servers, desired_revision: u64) wire.McpConfigurationV1 {
         std.debug.assert(desired_revision != 0);
         return .{
             .struct_size = @sizeOf(wire.McpConfigurationV1),
@@ -227,25 +287,14 @@ pub const Servers = struct {
     }
 
     pub fn isQuiescent(self: *const Servers) bool {
-        for (self.adapters[0..self.initialized_adapters]) |*adapter|
-            if (!adapter.isQuiescent()) return false;
+        for (self.members[0..self.initialized_members]) |member| {
+            if (member.references.load(.acquire) == 1 and !member.adapter.isQuiescent()) return false;
+        }
         return true;
     }
 
     pub fn deinit(self: *Servers) void {
-        var index = self.initialized_adapters;
-        while (index != 0) {
-            index -= 1;
-            self.adapters[index].deinit() catch |err| switch (err) {
-                error.ConnectionsActive => @panic("MCP Runtime released an adapter with live connections"),
-                error.ConnectorRetained => @panic("MCP Runtime released an adapter still retained by AgentCore"),
-            };
-        }
-        index = self.initialized_transport_owners;
-        while (index != 0) {
-            index -= 1;
-            self.transport_owners[index].deinit();
-        }
+        for (self.members[0..self.initialized_members]) |member| member.release();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -274,6 +323,12 @@ pub const Input = struct {
         const servers = self.servers orelse return error.InvalidConfig;
         self.servers = null;
         return servers;
+    }
+
+    pub fn compose(allocator: std.mem.Allocator, generation: u64, current: *const Servers, additions: ?*const Input, ids: []const []const u8) (Error || std.mem.Allocator.Error)!Input {
+        if (generation == 0) return error.InvalidConfig;
+        const added = if (additions) |input| &(input.servers orelse return error.InvalidConfig) else null;
+        return .{ .generation = generation, .servers = try Servers.compose(allocator, current, added, ids) };
     }
 
     pub fn deinit(self: *Input) void {
@@ -390,6 +445,58 @@ test "Runtime input derives authority and consumes transport ownership linearly"
     try std.testing.expectError(error.InvalidConfig, input.take());
     servers.deinit();
     try std.testing.expect(transport.deinitialized);
+}
+
+test "shared MCP members release old configuration lists without retiring a live connector" {
+    var transport: FakeTransport = .{};
+    var owner = connector.TransportOwner.init(transport.descriptor(), FakeTransport.deinit);
+    var input = try Input.init(std.testing.allocator, 1, &.{.{
+        .id = "retained",
+        .transport_owner = &owner,
+        .transport = .stdio,
+        .namespace = "retained",
+        .client_name = "MetaWork",
+        .client_version = "1",
+        .timeout_ms = 1000,
+        .configuration_fingerprint = @splat(1),
+    }});
+    defer input.deinit();
+    var current = try input.take();
+    const descriptor = current.descriptors[0].connector;
+    descriptor.retain_connector.?(descriptor.ctx);
+    try std.testing.expect(!current.isQuiescent());
+    for (0..150) |_| {
+        const next = try Servers.compose(std.testing.allocator, &current, null, &.{"retained"});
+        try std.testing.expect(current.isQuiescent());
+        current.deinit();
+        try std.testing.expect(!transport.deinitialized);
+        try std.testing.expectEqual(descriptor.ctx, next.descriptors[0].connector.ctx);
+        current = next;
+    }
+    try std.testing.expect(!current.isQuiescent());
+    descriptor.release_connector.?(descriptor.ctx);
+    try std.testing.expect(current.isQuiescent());
+    current.deinit();
+    try std.testing.expect(transport.deinitialized);
+}
+
+test "MCP membership composition rejects duplicate members without consuming the source" {
+    var transport: FakeTransport = .{};
+    var owner = connector.TransportOwner.init(transport.descriptor(), FakeTransport.deinit);
+    var input = try Input.init(std.testing.allocator, 1, &.{.{
+        .id = "one",
+        .transport_owner = &owner,
+        .transport = .stdio,
+        .namespace = "one",
+        .client_name = "MetaWork",
+        .client_version = "1",
+        .timeout_ms = 1000,
+        .configuration_fingerprint = @splat(1),
+    }});
+    defer input.deinit();
+    try std.testing.expectError(error.InvalidConfig, Servers.compose(std.testing.allocator, &input.servers.?, null, &.{ "one", "one" }));
+    try std.testing.expect(!transport.deinitialized);
+    try std.testing.expectEqual(@as(usize, 1), input.servers.?.members[0].references.load(.acquire));
 }
 
 test "Runtime input rejects duplicate stable authority identities" {
