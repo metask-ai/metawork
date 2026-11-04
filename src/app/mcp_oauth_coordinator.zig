@@ -250,16 +250,27 @@ pub const Coordinator = struct {
 
     /// A completed apply yields here before another candidate. A raw expired
     /// grant does not hold candidates while the Host's retry floor is pending.
+    pub fn dueMaintenance(self: *Coordinator) ?mcp_types.McpOauthExpiry {
+        if (self.stopping or self.job != null) return null;
+        const now_ms = self.host.now_unix_ms_fn(self.host.context) orelse return null;
+        if (self.retry_not_before_unix_ms) |not_before| if (now_ms < not_before) return null;
+        const expiry = self.control.nextMcpOauthExpiry() orelse return null;
+        return if (expiry.expires_at_unix_ms <= now_ms) expiry else null;
+    }
+
     pub fn runDueMaintenance(self: *Coordinator) bool {
-        if (self.stopping or self.job != null) return false;
-        const now_ms = self.host.now_unix_ms_fn(self.host.context) orelse return false;
-        if (self.retry_not_before_unix_ms) |not_before| if (now_ms < not_before) return false;
-        const expiry = self.control.nextMcpOauthExpiry() orelse return false;
-        if (expiry.expires_at_unix_ms > now_ms) return false;
-        return self.onTimer();
+        _ = self.dueMaintenance() orelse return false;
+        return self.advanceDueMaintenance();
     }
 
     pub fn onTimer(self: *Coordinator) bool {
+        // Timers wake the same main-loop arbitration as completions. They
+        // cannot jump ahead of a candidate's turn to launch network work.
+        if (!self.stopping) self.host.notify();
+        return true;
+    }
+
+    fn advanceDueMaintenance(self: *Coordinator) bool {
         const now_unix_ms = self.host.nowRequired();
         if (self.stopping or self.job != null) return true;
         if (self.auth_delivery_retry_at) |due| {
@@ -277,6 +288,11 @@ pub const Coordinator = struct {
             return true;
         };
         if (expiry.expires_at_unix_ms > now_unix_ms) {
+            self.armEarliest();
+            return true;
+        }
+        if (!expiry.refresh) {
+            self.expireUnrefreshable(expiry, now_unix_ms);
             self.armEarliest();
             return true;
         }
@@ -408,7 +424,7 @@ pub const Coordinator = struct {
         job: *RefreshJob,
         tokens: *mcp_oauth.TokenSet,
     ) !void {
-        var pending = (try self.authorizations.prepareRotation(
+        var pending: ?mcp_platform.PendingHttpAuthRotation = if (job.binding.runtime_binding != .absent) switch (try self.authorizations.prepareRotation(
             job.binding.server_id,
             job.binding.consent_epoch,
             job.binding.token_revision,
@@ -416,11 +432,23 @@ pub const Coordinator = struct {
                 .access_token = tokens.access_token.view(),
                 .refresh_token = if (tokens.refresh_token) |*secret| secret.view() else null,
             },
-        )) orelse {
-            self.recover(job.binding.operation_id);
-            return;
-        };
-        defer pending.deinit();
+        )) {
+            .prepared => |value| value,
+            .server_not_loaded, .consent_epoch_mismatch => incompatible: {
+                // A retained descriptor may use another consent or auth kind.
+                // Its slot cannot govern the current target's refreshed grant.
+                if (job.binding.runtime_binding == .matching_descriptor) {
+                    self.recover(job.binding.operation_id);
+                    return;
+                }
+                break :incompatible null;
+            },
+            .token_revision_mismatch => {
+                self.recover(job.binding.operation_id);
+                return;
+            },
+        } else null;
+        defer if (pending) |*value| value.deinit();
         const access = try self.allocator.dupe(u8, tokens.access_token.view());
         defer {
             std.crypto.secureZero(u8, access);
@@ -452,6 +480,27 @@ pub const Coordinator = struct {
         }
     }
 
+    fn expireUnrefreshable(self: *Coordinator, expiry: mcp_types.McpOauthExpiry, now_ms: u64) void {
+        const outcome = self.control.requireMcpOauthReauthorization(.{
+            .server_id = expiry.server_id,
+            .source_fingerprint = expiry.source_fingerprint,
+            .reason = .expired_grant,
+            .consent_epoch = expiry.consent_epoch,
+            .token_revision = expiry.token_revision,
+            .challenge_scopes = &.{},
+            .challenge_scopes_complete = false,
+        }) catch {
+            self.deferRetry(now_ms);
+            return;
+        };
+        switch (outcome) {
+            .applied, .persistence_outcome_unknown => self.host.notify(),
+            // Product's injected clock may have coarser precision than the
+            // Host timer. A stale expiry must not re-arm an elapsed deadline.
+            .stale, .pending, .rejected => self.deferRetry(now_ms),
+        }
+    }
+
     fn drainRuntimeAuthFailures(self: *Coordinator) bool {
         if (!self.stopping) if (self.auth_delivery_retry_at) |due|
             if (self.host.nowRequired() < due) return false;
@@ -465,6 +514,8 @@ pub const Coordinator = struct {
         for (batch.values) |*failure| {
             const outcome = self.control.requireMcpOauthReauthorization(.{
                 .server_id = failure.server_id,
+                .source_fingerprint = failure.source_fingerprint,
+                .reason = if (failure.trusted_challenge) .challenge else .http_rejection,
                 .consent_epoch = failure.consent_epoch,
                 .token_revision = failure.token_revision,
                 .challenge_scopes = failure.challenge_scopes,
@@ -478,9 +529,12 @@ pub const Coordinator = struct {
                     _ = self.authorizations.acknowledgeRuntimeAuthFailure(failure);
                     changed = true;
                 },
-                .pending, .rejected => {},
+                .pending => {},
+                .rejected => self.deferAuthDelivery(),
             }
         }
+        changed = self.authorizations.releaseDeliveredFailures() or changed;
+        if (changed and !self.stopping) self.host.notify();
         return changed;
     }
 
@@ -533,9 +587,9 @@ pub const Coordinator = struct {
 };
 
 fn commitRotation(context: *anyopaque) void {
-    const pending: *mcp_platform.PendingHttpAuthRotation =
+    const pending: *?mcp_platform.PendingHttpAuthRotation =
         @ptrCast(@alignCast(context));
-    pending.commit();
+    if (pending.*) |*value| value.commit();
 }
 
 fn secureFree(allocator: std.mem.Allocator, secret: []u8) void {
@@ -579,7 +633,10 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
         fn notify(_: *anyopaque) void {}
     };
     var fixture: Fixture = .{};
-    var authorizations = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+    var rejected = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+    defer rejected.deinit();
+    var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
+    authorizations.retainRejectedFailures(&rejected);
     defer authorizations.deinit();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     authorizations.allocator = failing.allocator();
@@ -604,8 +661,11 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
     try std.testing.expectEqual(@as(usize, 0), fixture.deliveries);
     fixture.now_ms = 31_000;
     _ = coordinator.onTimer();
+    _ = coordinator.drain();
+    _ = coordinator.runDueMaintenance();
     try std.testing.expectEqual(@as(usize, 1), fixture.deliveries);
     try std.testing.expectEqual(@as(?u64, null), fixture.armed);
+    try std.testing.expectEqual(@as(usize, 0), authorizations.pending_slots.len);
     var remaining = try authorizations.snapshotRuntimeAuthFailures();
     defer remaining.deinit();
     try std.testing.expectEqual(@as(usize, 0), remaining.values.len);
@@ -761,6 +821,8 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
     try std.testing.expectEqual(@as(?u64, 32_500), fixture.armed);
     fixture.now_ms = 33_000;
     _ = coordinator.onTimer();
+    _ = coordinator.drain();
+    _ = coordinator.runDueMaintenance();
     try std.testing.expectEqual(@as(?u64, 63_000), fixture.armed);
     try std.testing.expect(!coordinator.runDueMaintenance());
     const state = mcp_types.testing.state(&runtime);
@@ -773,6 +835,8 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
     try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
     fixture.now_ms = fixture.armed.?;
     _ = coordinator.onTimer();
+    _ = coordinator.drain();
+    _ = coordinator.runDueMaintenance();
     try std.testing.expectEqualStrings("ab", &fixture.attempts);
     try std.testing.expect(coordinator.job == null);
     try std.testing.expectEqual(@as(?u64, 40_000), mcp_types.testing.state(&runtime).management.?.desiredRegistry().?.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
@@ -832,6 +896,7 @@ test "MCP OAuth refresh reuses consent only for the same resource and covered sc
         .refresh_token_ref = "refresh-token",
         .consent_epoch = 1,
         .token_revision = 2,
+        .runtime_binding = .matching_descriptor,
     };
     try std.testing.expect(refreshDiscoveryCoveredByConsent(
         &binding,
@@ -848,4 +913,67 @@ test "MCP OAuth refresh reuses consent only for the same resource and covered sc
         binding.resource,
         &.{ "files.read", "files.delete" },
     ));
+}
+
+test "MCP OAuth token commit distinguishes matching and retained descriptors with strict revision checks" {
+    const Fixture = struct {
+        commits: usize = 0,
+        recoveries: usize = 0,
+        fn next(_: *anyopaque) ?mcp_types.McpOauthExpiry {
+            return null;
+        }
+        fn begin(_: *anyopaque, _: []const u8) anyerror!mcp_types.McpOauthRefreshBeginOutcome {
+            return error.UnexpectedCall;
+        }
+        fn complete(raw: *anyopaque, input: mcp_types.contract.CompleteRefreshInput, commit: mcp_types.McpOauthRuntimeCommit) anyerror!mcp_types.contract.ManagementOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("new-access-token", input.access_token);
+            commit.commit();
+            self.commits += 1;
+            return .saved;
+        }
+        fn reauth(_: *anyopaque, _: mcp_types.McpRuntimeAuthorizationFailure) anyerror!mcp_types.McpRuntimeAuthorizationFailureOutcome {
+            return error.UnexpectedCall;
+        }
+        fn clear(raw: *anyopaque, _: []const u8) anyerror!mcp_types.contract.ManagementOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.recoveries += 1;
+            return .saved;
+        }
+    };
+    const Case = struct { binding: mcp_types.McpOauthRefreshBinding.RuntimeBinding = .matching_descriptor, slot: bool = true, epoch: u64 = 1, revision: u64 = 1, commit: bool = true, rotated: bool = true };
+    for ([_]Case{
+        .{ .binding = .absent, .slot = false, .rotated = false },
+        .{ .slot = false, .commit = false, .rotated = false },
+        .{},
+        .{ .epoch = 2, .commit = false, .rotated = false },
+        .{ .revision = 2, .commit = false, .rotated = false },
+        .{ .binding = .retained_descriptor },
+        .{ .binding = .retained_descriptor, .slot = false, .rotated = false },
+        .{ .binding = .retained_descriptor, .epoch = 2, .rotated = false },
+        .{ .binding = .retained_descriptor, .revision = 2, .commit = false, .rotated = false },
+    }) |case| {
+        var fixture = Fixture{};
+        var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
+        defer authorizations.deinit();
+        if (case.slot) {
+            authorizations = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+        }
+
+        var credentials: mcp_platform.CredentialStore = undefined;
+        // Only the completion path is entered; no Host or credential effect.
+        var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credentials, &authorizations, undefined);
+        var job: RefreshJob = undefined;
+        job.binding = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .operation_id = "operation", .server_id = "server", .endpoint = "https://mcp.example.test/mcp", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .client_id = "client", .token_endpoint_auth_method = "none", .client_secret_ref = null, .refresh_token_ref = "refresh", .consent_epoch = case.epoch, .token_revision = case.revision, .runtime_binding = case.binding };
+        defer job.binding.deinit();
+        var tokens: mcp_oauth.TokenSet = .{ .access_token = try mcp_oauth.Secret.init(std.testing.allocator, "new-access-token"), .refresh_token = null, .expires_at_unix_ms = 999_000 };
+        defer tokens.deinit();
+        try coordinator.commitTokens(&job, &tokens);
+        try std.testing.expectEqual(@as(usize, if (case.commit) 1 else 0), fixture.commits);
+        try std.testing.expectEqual(@as(usize, if (case.commit) 0 else 1), fixture.recoveries);
+        if (case.slot) {
+            var proof = (try authorizations.prepareRotation("server", 1, if (case.rotated) 2 else 1, .{ .access_token = "probe-token" })).prepared;
+            defer proof.deinit();
+        }
+    }
 }

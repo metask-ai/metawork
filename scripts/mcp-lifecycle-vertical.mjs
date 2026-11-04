@@ -211,12 +211,30 @@ export async function runMcpLifecycleVertical({
           return textSse(`${label}-done`, "MCP desktop completed");
         },
       );
-      const before = await task(taskId);
-      const started = await invoke("metawork.tasks.run", {
-        taskId,
-        expectedBindingEpoch: before.binding.epoch,
-        input: { kind: "text", text: label },
-      });
+      // A fresh Session can still be preparing its catalog. Only a definite
+      // non-admission with no Run may be retried; never replay accepted input.
+      const started = await wait(
+        async () => {
+          const current = (await snapshot()).tasks.find(
+            (task) => task.id === taskId,
+          );
+          const result = await invoke("metawork.tasks.run", {
+            taskId,
+            expectedBindingEpoch: current.binding.epoch,
+            input: { kind: "text", text: label },
+          });
+          if (result.accepted) return result;
+          assert.equal(result.runId, null);
+          assert.equal(
+            result.reason,
+            "catalog_loading",
+            JSON.stringify(result),
+          );
+          return null;
+        },
+        10_000,
+        "fresh MCP Session catalog preparation",
+      );
       assert.equal(started.accepted, true, JSON.stringify(started));
       const pending = await wait(
         async () => {

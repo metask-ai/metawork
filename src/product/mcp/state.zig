@@ -61,6 +61,8 @@ pub const RecoveryMcpAuthority = struct {
 };
 
 pub const McpOauthRefreshBinding = struct {
+    pub const RuntimeBinding = enum { absent, matching_descriptor, retained_descriptor };
+
     arena: std.heap.ArenaAllocator,
     operation_id: []const u8,
     server_id: []const u8,
@@ -74,6 +76,9 @@ pub const McpOauthRefreshBinding = struct {
     refresh_token_ref: []const u8,
     consent_epoch: u64,
     token_revision: u64,
+
+    /// Product proof at operation begin; apply shares the durable marker boundary.
+    runtime_binding: RuntimeBinding,
 
     pub fn deinit(self: *McpOauthRefreshBinding) void {
         self.arena.deinit();
@@ -142,10 +147,17 @@ pub const McpOauthCodeExchangeBeginOutcome = union(enum) {
 pub const McpOauthExpiry = struct {
     server_id: []const u8,
     expires_at_unix_ms: u64,
+    refresh: bool = true,
+    runtime_loaded: bool = true,
+    consent_epoch: u64 = 0,
+    token_revision: u64 = 0,
+    source_fingerprint: [32]u8 = @splat(0),
 };
 
 pub const McpRuntimeAuthorizationFailure = struct {
     server_id: []const u8,
+    source_fingerprint: [32]u8,
+    reason: enum { challenge, http_rejection, expired_grant },
     consent_epoch: u64,
     token_revision: u64,
     challenge_scopes: []const []const u8,

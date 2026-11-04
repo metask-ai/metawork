@@ -328,9 +328,9 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.banner.applying.body": "正在启动连接、完成 MCP 握手并发现工具。",
   "mcp.banner.apply_failed.title": "连接变更未能应用",
   "mcp.banner.apply_failed.body":
-    "配置已经保存，可以直接重试连接，无需重启 MetaWork。",
+    "配置已保存。打开对应服务重试连接或重新登录。",
   "mcp.apply.action": "重试连接",
-  "mcp.apply.started": "正在使用已保存的配置连接。",
+  "mcp.apply.started": "已接纳连接请求，需要时会先恢复授权。",
   "mcp.apply.busy": "另一个 MCP 操作仍在进行。",
   "mcp.apply.unavailable": "MCP Runtime 当前不可用。",
   "mcp.apply.rejected": "已保存的配置无法应用。",
@@ -1696,6 +1696,13 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.authorization.action": "登录",
   "mcp.authorization.again": "重新登录",
   "mcp.authorization.cancel": "取消",
+  "mcp.authorization_status.refreshing": "正在更新授权",
+  "mcp.apply_status.waiting_auth": "等待恢复授权",
+  "mcp.next.authorization_recovery.body":
+    "授权恢复后会自动重试连接，无需删除并重新添加服务。",
+  "mcp.banner.authorization.title": "授权正在进行",
+  "mcp.banner.authorization.body":
+    "授权完成前，新的服务连接会等待。已打开的任务继续使用原有工具。",
   "mcp.authorization.busy": "另一个 OAuth 授权正在进行。",
   "mcp.authorization.started": "OAuth 授权已开始。",
   "mcp.authorization.rejected": "无法启动 OAuth 授权。",

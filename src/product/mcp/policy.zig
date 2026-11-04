@@ -169,6 +169,7 @@ pub fn serverToolsForAdmission(
 pub fn buildOauthRefreshBinding(
     allocator: std.mem.Allocator,
     registry: mcp_configuration.RegistryWire,
+    runtime_binding: mcp_state.McpOauthRefreshBinding.RuntimeBinding,
 ) std.mem.Allocator.Error!mcp_state.McpOauthRefreshBinding {
     const operation = registry.oauth_operation.?;
     const server = mcp_state.findMcpServer(registry.servers, operation.server_id).?;
@@ -202,6 +203,7 @@ pub fn buildOauthRefreshBinding(
         .refresh_token_ref = try owned.dupe(u8, grant.refresh_token_ref.?),
         .consent_epoch = operation.consent_epoch,
         .token_revision = operation.token_revision.?,
+        .runtime_binding = runtime_binding,
     };
     result.arena = arena;
     return result;
@@ -336,16 +338,84 @@ pub fn serverOperationBusy(
 pub fn runtimeOauthRefreshEligible(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
     if (!mcp_configuration.serverRuntimeAuthorizationReady(server)) return false;
     const management = if (mcp.management) |*value| value else return false;
+    if (mcp_configuration.serverProblem(server, management.limits) != null) return false;
     const manifest = management.runtime_manifest orelse return false;
+    if (server.enabled) {
+        if (!runtimeOauthLoaded(mcp, server)) {
+            const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return false;
+            if (management.convergence.failedTarget(target)) return false;
+        }
+        return true;
+    }
     for (manifest.entries) |entry| {
         if (!std.mem.eql(u8, entry.id, server.id) or entry.state != .loaded) continue;
-        return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server)) and (server.enabled or entry.task_references != 0);
+        return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server)) and entry.task_references != 0;
+    }
+    return false;
+}
+
+pub fn runtimeOauthBinding(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) mcp_state.McpOauthRefreshBinding.RuntimeBinding {
+    const management = if (mcp.management) |*value| value else return .absent;
+    const manifest = management.runtime_manifest orelse return .absent;
+    for (manifest.entries) |entry|
+        if (entry.state == .loaded and std.mem.eql(u8, entry.id, server.id))
+            return if (std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server))) .matching_descriptor else .retained_descriptor;
+    return .absent;
+}
+
+pub fn runtimeOauthLoaded(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    return runtimeOauthBinding(mcp, server) == .matching_descriptor;
+}
+
+pub fn canAuthorizeServer(mcp: *const mcp_state.McpProductState, refresh_job_active: bool, server: mcp_configuration.ServerWire) bool {
+    if (mcp.runtime_uncertain or refresh_job_active or
+        mcp.authorization_operation != null or mcp.configuration_apply_state == .applying) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    if (management.inspect().health != .ready) return false;
+    const registry = management.desiredRegistry() orelse return false;
+    if (registry.oauth_operation != null) return false;
+    const oauth = server.auth.oauth orelse return false;
+    if (server.connection_approval == null or
+        mcp_configuration.serverProblem(server, management.limits) != null or
+        !std.mem.eql(u8, server.transport.kind, "streamable_http") or
+        !std.mem.eql(u8, server.auth.kind, "oauth") or
+        !(std.mem.eql(u8, oauth.status, "client_registration_required") or
+            std.mem.eql(u8, oauth.status, "consent_required") or
+            std.mem.eql(u8, oauth.status, "awaiting_tokens") or
+            std.mem.eql(u8, oauth.status, "reauth_required") or
+            (std.mem.eql(u8, oauth.status, "ready") and failedOauthCandidate(mcp, server))))
+        return false;
+    if (oauth.registration.client_id != null) {
+        const method = oauth.registration.token_endpoint_auth_method orelse return false;
+        if (!std.mem.eql(u8, method, "none") and
+            oauth.registration.client_secret_ref == null)
+            return false;
+    }
+    return true;
+}
+
+fn failedOauthCandidate(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    if (!server.enabled or runtimeOauthLoaded(mcp, server)) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    const manifest = management.runtime_manifest orelse return false;
+    const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return false;
+    return management.convergence.failedTarget(target);
+}
+
+pub fn authorizationRecoveryPending(mcp: *const mcp_state.McpProductState) bool {
+    const management = if (mcp.management) |*value| value else return false;
+    const manifest = management.runtime_manifest orelse return false;
+    for (management.convergence.results.items) |result| {
+        if (result.outcome != .waiting_auth) continue;
+        const target = manifest.targetFor(result.target.id(), management.desiredRegistry(), management.limits) orelse continue;
+        if (std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint) and management.convergence.handled(target)) return true;
     }
     return false;
 }
 
 pub fn nextOauthExpiry(
     mcp: *const mcp_state.McpProductState,
+    now_unix_ms: ?u64,
 ) ?mcp_state.McpOauthExpiry {
     const management = if (mcp.management) |*value| value else return null;
     if (management.inspect().health != .ready) return null;
@@ -358,13 +428,25 @@ pub fn nextOauthExpiry(
         if (!runtimeOauthRefreshEligible(mcp, server)) continue;
         const oauth = server.auth.oauth orelse continue;
         const grant = oauth.grant orelse continue;
-        if (grant.refresh_token_ref == null) continue;
-        const expires_at = grant.expires_at_unix_ms orelse continue;
-        const eligible_at = management.oauth_schedule.eligibleAt(server.id, expires_at);
-        if (earliest == null or eligible_at < earliest.?.expires_at_unix_ms)
+        const expires_at = grant.expires_at_unix_ms orelse if (management.oauth_schedule.refreshRequested(server.id)) @as(u64, 0) else continue;
+        const refresh = grant.refresh_token_ref != null;
+        const eligible_at = if (refresh) management.oauth_schedule.eligibleAt(server.id, expires_at) else expires_at;
+        const loaded = runtimeOauthBinding(mcp, server) != .absent;
+        // Local expiry gates new connections; it does not retire a live
+        // member that has no renewal route. Wait for server-side evidence.
+        if (!refresh and loaded) continue;
+        const loaded_due = loaded and now_unix_ms != null and eligible_at <= now_unix_ms.?;
+        const previous_loaded_due = if (earliest) |previous| previous.runtime_loaded and now_unix_ms != null and previous.expires_at_unix_ms <= now_unix_ms.? else false;
+        if (earliest == null or (loaded_due and !previous_loaded_due) or
+            (loaded_due == previous_loaded_due and eligible_at < earliest.?.expires_at_unix_ms))
             earliest = .{
                 .server_id = server.id,
                 .expires_at_unix_ms = eligible_at,
+                .refresh = refresh,
+                .runtime_loaded = loaded,
+                .consent_epoch = grant.consent_epoch,
+                .token_revision = grant.token_revision,
+                .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             };
     }
     return earliest;
@@ -511,6 +593,16 @@ test "browser authorization excludes only its server from OAuth refresh selectio
             .tools = &.{"read"},
         },
     };
+    var approvals: [2][64]u8 = undefined;
+    var consents: [2][64]u8 = undefined;
+    for (&servers, 0..) |*server, index| {
+        server.auth.oauth.?.consent.?.resource = server.transport.url.?;
+        server.auth.oauth.?.consent.?.redirect_uri = "http://127.0.0.1:43123/auth/callback";
+        approvals[index] = mcp_configuration.connectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &approvals[index] };
+        consents[index] = mcp_configuration.oauthConsentFingerprint(server.*, server.auth.oauth.?.consent.?).?;
+        server.auth.oauth.?.consent.?.fingerprint = &consents[index];
+    }
     const registry: mcp_configuration.RegistryWire = .{
         .schema_version = mcp_configuration.schema_version,
         .generation = 1,
@@ -574,21 +666,47 @@ test "browser authorization excludes only its server from OAuth refresh selectio
         }
         break :actual .{ .allocator = std.testing.allocator, .entries = entries };
     };
-    const expiry = nextOauthExpiry(&state).?;
+    const expiry = nextOauthExpiry(&state, null).?;
     try std.testing.expectEqualStrings("refreshable", expiry.server_id);
     try std.testing.expectEqual(@as(u64, 200), expiry.expires_at_unix_ms);
+    // A future loaded deadline must not hide an already due cold grant.
+    // Once both are due, maintenance of the live member takes precedence.
+    const operation = state.authorization_operation;
+    state.authorization_operation = null;
+    const original_member = state.management.?.runtime_manifest.?.entries[0].state;
+    state.management.?.runtime_manifest.?.entries[0].state = .{ .absent = .disabled };
+    try std.testing.expectEqualStrings("authorizing", nextOauthExpiry(&state, 150).?.server_id);
+    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, 200).?.server_id);
+    state.management.?.runtime_manifest.?.entries[0].state = original_member;
+    state.authorization_operation = operation;
     const current = state.management.?.desired.?.value.servers;
+    // A loaded nonrefreshable grant, including a retained disabled member,
+    // must not compete with another service's renewable grant at all.
+    state.authorization_operation = null;
+    const old_refresh = current[0].auth.oauth.?.grant.?.refresh_token_ref;
+    current[0].auth.oauth.?.grant.?.refresh_token_ref = null;
+    state.management.?.runtime_manifest.?.entries[0].task_references = 1;
+    for ([_]bool{ true, false }) |enabled| {
+        current[0].enabled = enabled;
+        try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, 300).?.server_id);
+        try std.testing.expectEqualStrings("ready", current[0].auth.oauth.?.status);
+        try std.testing.expect(current[0].auth.oauth.?.grant != null);
+    }
+    current[0].enabled = true;
+    current[0].auth.oauth.?.grant.?.refresh_token_ref = old_refresh;
+    state.authorization_operation = operation;
+
     current[1].enabled = false;
-    try std.testing.expect(nextOauthExpiry(&state) == null);
+    try std.testing.expect(nextOauthExpiry(&state, null) == null);
     state.management.?.runtime_manifest.?.entries[1].task_references = 1;
-    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state).?.server_id);
+    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, null).?.server_id);
     try std.testing.expectEqual(@as(usize, 0), serverToolsForAdmission(state.management.?.desiredRegistry().?, current[1]).len);
     current[1].timeout_ms += 1;
-    try std.testing.expect(nextOauthExpiry(&state) == null);
+    try std.testing.expect(nextOauthExpiry(&state, null) == null);
     current[1].timeout_ms -= 1;
     // A referenced actual member has no refresh route after Desired deletion.
     state.management.?.desired.?.value.servers = current[0..1];
-    try std.testing.expect(nextOauthExpiry(&state) == null);
+    try std.testing.expect(nextOauthExpiry(&state, null) == null);
 }
 
 test "OAuth operation remains excluded from every rebuilt Admission target" {

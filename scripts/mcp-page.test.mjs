@@ -83,6 +83,7 @@ const servers = [
     },
     approvalStatus: "approved",
     authorizationStatus: "ready",
+    canAuthorize: false,
     desiredEnabled: true,
     runtimeStatus: "ready",
     newTaskAccess: "available",
@@ -124,6 +125,7 @@ const servers = [
     },
     approvalStatus: "approved",
     authorizationStatus: "reauth_required",
+    canAuthorize: true,
     desiredEnabled: true,
     runtimeStatus: "needs_authentication",
     newTaskAccess: "unavailable",
@@ -150,6 +152,7 @@ const servers = [
     },
     approvalStatus: "approved",
     authorizationStatus: "not_required",
+    canAuthorize: false,
     desiredEnabled: false,
     runtimeStatus: "disabled",
     newTaskAccess: "not_allowed",
@@ -505,6 +508,7 @@ test("MCP keeps intentionally disabled servers out of the attention group", () =
       environment: [{ name: "TOKEN", status: "missing" }],
     },
     authorizationStatus: "missing_static_secret",
+    canAuthorize: false,
     runtimeStatus: "needs_authentication",
     newTaskAccess: "unavailable",
   };
@@ -648,6 +652,7 @@ test("MCP keeps a missing connection read-only instead of guessing repair data",
           connection: null,
           approvalStatus: "unapproved",
           authorizationStatus: "not_required",
+          canAuthorize: false,
           runtimeStatus: "invalid_catalog",
           newTaskAccess: "unavailable",
           tools: [],
@@ -903,6 +908,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
             namespace: "mcp_local_search",
             authMode: "none",
             authorizationStatus: "not_required",
+            canAuthorize: false,
             connectionTest: {
               status: "untested",
               toolCount: 0,
@@ -1088,6 +1094,7 @@ test("MCP gates OAuth client secret recovery and configuration on credential sub
       clientSecretStatus: "missing",
     },
     authorizationStatus: "capability_unavailable",
+    canAuthorize: false,
     runtimeStatus: "needs_authentication",
     newTaskAccess: "unavailable",
   };
@@ -1273,6 +1280,7 @@ test("MCP keeps approved enable intent separate from authentication readiness", 
     },
     approvalStatus: "approved",
     authorizationStatus: "missing_static_secret",
+    canAuthorize: false,
     desiredEnabled: false,
     runtimeStatus: "needs_authentication",
     newTaskAccess: "unavailable",
@@ -1524,7 +1532,7 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   assert.ok(screen.getByText("Connection changes were not applied"));
   assert.ok(
     screen.getByText(
-      "Your settings are saved. Retry the connection without restarting MetaWork.",
+      "Your settings are saved. Open a service to retry its connection or sign in again.",
     ),
   );
   assert.ok(screen.getByRole("button", { name: "Retry connection" }));
@@ -1917,5 +1925,168 @@ test("MCP unknown takeover pauses effects while retaining canonical Desired visi
   assert.equal(
     screen.queryByRole("button", { name: "Retry connection" }),
     null,
+  );
+});
+
+const oauthRecoveryProjections = JSON.parse(
+  await readFile(
+    new URL(
+      "../src/product/mcp/testdata/oauth-recovery-view.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+for (const projection of [
+  oauthRecoveryProjections.failed,
+  oauthRecoveryProjections.blocked_replacement,
+]) {
+  test(`MCP keeps an explicit sign-in exit for a failed ready OAuth target (${projection.applyStatus})`, async () => {
+    const authorized = [];
+    const retried = [];
+    const server = {
+      ...servers[1],
+      ...projection,
+      runtimeStatus: "not_loaded",
+      tools: [],
+    };
+    const management = {
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "failed-generation",
+      runtimeAlignment: "current",
+      redacted: false,
+      applyFailureCount: 1,
+      configurationApply: "failed",
+      servers: [server],
+    };
+    const view = render(
+      pageElement(management, "", {
+        onAuthorize: async (...args) => {
+          authorized.push(args);
+          return { outcome: "started", operationId: "new-login" };
+        },
+        onApply: async (...args) => {
+          retried.push(args);
+          return { outcome: "started" };
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
+    const dialog = screen.getByRole("dialog", { name: "Notion" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Retry connection" }),
+    );
+    await waitFor(() => assert.equal(retried.length, 1));
+    assert.deepEqual(retried[0], [server.id]);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Sign in again" }),
+    );
+    await waitFor(() => assert.equal(authorized.length, 1));
+    assert.deepEqual(authorized[0], ["failed-generation", server.id]);
+    view.rerender(
+      pageElement({
+        ...management,
+        servers: [{ ...server, canAuthorize: false }],
+      }),
+    );
+    assert.equal(screen.queryByRole("button", { name: "Sign in again" }), null);
+    view.rerender(
+      pageElement(management, "", {
+        capabilities: {
+          connectionApproval: true,
+          secretCapture: true,
+          secretMaxBytes: 2560,
+          oauth: false,
+        },
+      }),
+    );
+    assert.equal(screen.queryByRole("button", { name: "Sign in again" }), null);
+  });
+}
+
+test("MCP distinguishes authorization waiting and refreshing without offering cancel or retry", () => {
+  for (const authorizationStatus of ["ready", "refreshing"]) {
+    const server = {
+      ...servers[1],
+      authorizationStatus,
+      canAuthorize: false,
+      applyStatus: "waiting_auth",
+      runtimeStatus: "not_loaded",
+      tools: [],
+    };
+    render(
+      pageElement({
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "waiting-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [server],
+        authorizationOperation:
+          authorizationStatus === "refreshing"
+            ? {
+                kind: "exchanging",
+                serverId: server.id,
+                operationId: "refresh",
+              }
+            : { kind: "idle" },
+      }),
+    );
+    const row = screen.getByRole("button", { name: /Notion/ });
+    assert.ok(
+      within(row).getByText(
+        authorizationStatus === "refreshing"
+          ? "Updating authorization"
+          : "Waiting for authorization recovery",
+      ),
+    );
+    fireEvent.click(row);
+    const dialog = screen.getByRole("dialog", { name: "Notion" });
+    assert.ok(
+      within(dialog).getByText(
+        "Authorization will be recovered before this connection is retried automatically.",
+      ),
+    );
+    assert.equal(
+      within(dialog).queryByRole("button", { name: "Retry connection" }),
+      null,
+    );
+    assert.equal(
+      within(dialog).queryByRole("button", { name: "Cancel authorization" }),
+      null,
+    );
+    const stages = dialog.querySelectorAll(".mcp-connection-trace > div");
+    assert.equal(stages[0].dataset.state, "active");
+    assert.equal(stages[1].dataset.state, "pending");
+    assert.equal(dialog.querySelector(".mcp-diagnostic"), null);
+
+    cleanup();
+  }
+});
+
+test("MCP explains the global connection wait during browser authorization", () => {
+  render(
+    pageElement({
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "browser-generation",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [servers[1]],
+      authorizationOperation: {
+        kind: "awaiting_browser",
+        serverId: servers[1].id,
+        operationId: "browser",
+      },
+    }),
+  );
+  assert.ok(
+    screen.getByText(
+      "New server connections wait until authorization finishes. Existing tasks keep their current tools.",
+    ),
   );
 });

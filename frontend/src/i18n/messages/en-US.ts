@@ -385,9 +385,10 @@ export const enUS = {
     "Launching connections, checking the MCP handshake, and discovering tools.",
   "mcp.banner.apply_failed.title": "Connection changes were not applied",
   "mcp.banner.apply_failed.body":
-    "Your settings are saved. Retry the connection without restarting MetaWork.",
+    "Your settings are saved. Open a service to retry its connection or sign in again.",
   "mcp.apply.action": "Retry connection",
-  "mcp.apply.started": "Connecting with the saved settings.",
+  "mcp.apply.started":
+    "Connection requested. Authorization will be recovered first when needed.",
   "mcp.apply.busy": "Another MCP operation is still running.",
   "mcp.apply.unavailable": "The MCP runtime is unavailable right now.",
   "mcp.apply.rejected": "The saved settings cannot be applied.",
@@ -1939,6 +1940,13 @@ export const enUS = {
   "mcp.authorization.action": "Sign in",
   "mcp.authorization.again": "Sign in again",
   "mcp.authorization.cancel": "Cancel",
+  "mcp.authorization_status.refreshing": "Updating authorization",
+  "mcp.apply_status.waiting_auth": "Waiting for authorization recovery",
+  "mcp.next.authorization_recovery.body":
+    "Authorization will be recovered before this connection is retried automatically.",
+  "mcp.banner.authorization.title": "Authorization in progress",
+  "mcp.banner.authorization.body":
+    "New server connections wait until authorization finishes. Existing tasks keep their current tools.",
   "mcp.authorization.busy": "Another OAuth authorization is in progress.",
   "mcp.authorization.started": "OAuth authorization started.",
   "mcp.authorization.rejected": "OAuth authorization could not start.",

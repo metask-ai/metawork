@@ -719,6 +719,7 @@ pub const ManagementInspection = struct {
     desired_generation: ?u64,
     runtime_alignment: RuntimeAlignment,
     server_count: usize,
+    authorization_recovery_pending: bool = false,
 };
 
 /// The attempted target is independent of the global Desired generation.
@@ -728,12 +729,14 @@ pub const RuntimeApplyTarget = struct {
     id_len: usize,
     fingerprint: [32]u8,
     kind: enum { add, replace, remove },
+    oauth: bool = false,
 
     pub fn init(id_value: []const u8, server: ?ServerWire, kind: @FieldType(RuntimeApplyTarget, "kind")) RuntimeApplyTarget {
         std.debug.assert(id_value.len <= 128);
         var value: RuntimeApplyTarget = .{ .id_len = id_value.len, .fingerprint = @splat(0), .kind = kind };
         @memcpy(value.id_storage[0..id_value.len], id_value);
         if (server) |target| {
+            value.oauth = std.mem.eql(u8, target.auth.kind, "oauth");
             var hash = Sha256.init(.{});
             hashField(&hash, "metawork.mcp.apply-target/v1");
             hashField(&hash, &runtimeDescriptorFingerprint(target));
@@ -755,10 +758,11 @@ pub const RuntimeApplyFailure = enum { preparation, rejected, unknown };
 pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server: []const u8 };
 
 /// Product's attempt ledger. Membership growth never invalidates failures;
-/// removal/replacement can reopen them after the current round finishes.
+/// removal/replacement can reopen ordinary failures after the current round.
+/// OAuth failures stay bound until explicit retry or that target changes.
 pub const RuntimeConvergence = struct {
-    pub const Outcome = enum { pending, rejected, failed, capacity };
-    const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome };
+    pub const Outcome = enum { pending, waiting_auth, rejected, failed, capacity };
+    const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome, http_auth_rejected: bool = false };
     results: std.ArrayList(Result) = .empty,
     epoch: u64 = 0,
     round: u64 = 1,
@@ -772,10 +776,54 @@ pub const RuntimeConvergence = struct {
         return self.handledInRound(target, false);
     }
 
+    /// Failed current credentials must not become an automatic refresh loop.
+    /// Membership epochs do not erase the evidence of that connection attempt.
+    pub fn failedTarget(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        for (self.results.items) |result|
+            if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint))
+                return result.outcome == .rejected or result.outcome == .failed;
+        return false;
+    }
+
+    pub fn httpAuthRejected(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        for (self.results.items) |result|
+            if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint))
+                return result.http_auth_rejected;
+        return false;
+    }
+
+    pub fn discardObsolete(self: *RuntimeConvergence, manifest: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits) void {
+        var index: usize = 0;
+        while (index < self.results.items.len) {
+            const result = self.results.items[index];
+            const current = manifest.targetFor(result.target.id(), desired, limits);
+            if (current == null or current.?.kind != result.target.kind or
+                !std.mem.eql(u8, &current.?.fingerprint, &result.target.fingerprint))
+            {
+                _ = self.results.swapRemove(index);
+            } else index += 1;
+        }
+    }
+
+    pub fn recordHttpAuthRejection(self: *RuntimeConvergence, allocator: std.mem.Allocator, target: RuntimeApplyTarget) std.mem.Allocator.Error!void {
+        for (self.results.items) |*result| if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) {
+            result.http_auth_rejected = true;
+            return;
+        };
+        try self.prepare(allocator, target);
+        self.reject(target, .failed);
+        for (self.results.items) |*result| if (std.mem.eql(u8, result.target.id(), target.id())) {
+            result.http_auth_rejected = true;
+            return;
+        };
+        unreachable;
+    }
+
     fn handledInRound(self: *const RuntimeConvergence, target: RuntimeApplyTarget, next_round: bool) bool {
         for (self.results.items) |result| {
             if (!std.mem.eql(u8, result.target.id(), target.id()) or
                 !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
+            if (holdsBinding(result)) return true;
             return result.outcome != .pending and (result.epoch == self.epoch or (!next_round and result.round == self.round));
         }
         return false;
@@ -816,12 +864,17 @@ pub const RuntimeConvergence = struct {
 
     pub fn nextRound(self: *RuntimeConvergence) bool {
         for (self.results.items) |result| {
-            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending) {
+            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending and !holdsBinding(result)) {
                 self.round +|= 1;
                 return true;
             }
         }
         return false;
+    }
+
+    fn holdsBinding(result: Result) bool {
+        return result.outcome == .waiting_auth or
+            (result.target.oauth and (result.outcome == .rejected or result.outcome == .failed));
     }
 
     pub fn retry(self: *RuntimeConvergence) void {
@@ -2337,13 +2390,13 @@ pub const OauthRefreshSchedule = struct {
         const oauth = server.auth.oauth orelse return null;
         const consent = oauth.consent orelse return null;
         const grant = oauth.grant orelse return null;
-        if (grant.refresh_token_ref == null or grant.expires_at_unix_ms == null) return null;
+        if (grant.refresh_token_ref == null) return null;
         var hash = Sha256.init(.{});
         hashField(&hash, &connectionFingerprint(server));
         hashField(&hash, consent.fingerprint);
         hashInteger(&hash, consent.epoch);
         hashInteger(&hash, grant.token_revision);
-        hashInteger(&hash, grant.expires_at_unix_ms.?);
+        hashInteger(&hash, grant.expires_at_unix_ms orelse 0);
         var digest: [32]u8 = undefined;
         hash.final(&digest);
         return digest;
@@ -2365,7 +2418,7 @@ pub const OauthRefreshSchedule = struct {
             } else unreachable;
             std.debug.assert(server.id.len <= self.id_capacity);
             @memcpy(self.ids[index * self.id_capacity ..][0..server.id.len], server.id);
-            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .timing = .{ .expires_at = server.auth.oauth.?.grant.?.expires_at_unix_ms.? } };
+            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .timing = .{ .expires_at = server.auth.oauth.?.grant.?.expires_at_unix_ms orelse std.math.maxInt(u64) } };
         }
     }
     pub fn observeTime(self: *OauthRefreshSchedule, now_ms: ?u64) void {
@@ -2376,6 +2429,15 @@ pub const OauthRefreshSchedule = struct {
     pub fn eligibleAt(self: *const OauthRefreshSchedule, server_id: []const u8, expiry: u64) u64 {
         const index = self.indexOf(server_id) orelse return expiry;
         return self.entries[index].timing.eligibleAt();
+    }
+
+    pub fn requestRefresh(self: *OauthRefreshSchedule, server_id: []const u8) void {
+        if (self.indexOf(server_id)) |index| self.entries[index].timing.manual_requested = true;
+    }
+
+    pub fn refreshRequested(self: *const OauthRefreshSchedule, server_id: []const u8) bool {
+        const index = self.indexOf(server_id) orelse return false;
+        return self.entries[index].timing.manual_requested;
     }
     pub fn deferServer(self: *OauthRefreshSchedule, server_id: []const u8, now_ms: ?u64) void {
         const index = self.indexOf(server_id) orelse return;
@@ -2777,6 +2839,18 @@ pub const RuntimeManifest = struct {
 
     pub const Plan = struct { target: RuntimeApplyTarget, next_round: bool = false };
 
+    /// Count only failed attempts that still describe actual membership work.
+    /// This also keeps failed removals visible after their Desired row is gone.
+    pub fn failureCount(self: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits, convergence: *const RuntimeConvergence) usize {
+        var count: usize = 0;
+        for (convergence.results.items) |result| {
+            if (result.outcome == .pending or result.outcome == .waiting_auth or !convergence.handled(result.target)) continue;
+            const target = self.targetFor(result.target.id(), desired, limits) orelse continue;
+            if (std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint)) count += 1;
+        }
+        return count;
+    }
+
     /// The sole membership policy. A waiting/unloadable Desired is not work;
     /// retained membership and admission authorization are independent facts.
     pub fn targetFor(self: *const RuntimeManifest, id: []const u8, desired: ?RegistryWire, limits: Limits) ?RuntimeApplyTarget {
@@ -2800,7 +2874,7 @@ pub const RuntimeManifest = struct {
             if (next_round) {
                 const ledger = convergence orelse break;
                 const eligible_round = for (ledger.results.items) |result| {
-                    if (result.epoch != ledger.epoch and result.round == ledger.round and result.outcome != .pending) break true;
+                    if (result.epoch != ledger.epoch and result.round == ledger.round and result.outcome != .pending and result.outcome != .waiting_auth) break true;
                 } else false;
                 if (!eligible_round) break;
             }

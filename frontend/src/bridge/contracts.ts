@@ -1603,6 +1603,7 @@ export const mcpRuntimeAlignmentValues = [
 export const mcpApplyStatusValues = [
   "current",
   "pending",
+  "waiting_auth",
   "applying",
   "rejected",
   "failed",
@@ -1634,6 +1635,7 @@ export const mcpAuthorizationStatusValues = [
   "client_registration_required",
   "consent_required",
   "authorizing",
+  "refreshing",
   "ready",
   "reauth_required",
   "capability_unavailable",
@@ -1739,6 +1741,7 @@ export type McpManagementView = {
         };
     approvalStatus: "unapproved" | "approved";
     authorizationStatus: (typeof mcpAuthorizationStatusValues)[number];
+    canAuthorize: boolean;
     taskReferenceCount: number;
     applyStatus: (typeof mcpApplyStatusValues)[number];
     desiredEnabled: boolean;

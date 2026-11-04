@@ -832,6 +832,7 @@ pub const Coordinator = struct {
         if (self.stopping) return .unavailable;
         if (self.configuration_apply_job != null or self.connection_test_job != null or
             self.flow != null) return .busy;
+        if (self.active_authorizations.pending_slots.len != 0) return .busy;
         const inspection = self.control.inspectMcpDesiredConfiguration() orelse return .unavailable;
         if (inspection.health != .ready) return .unavailable;
         const generation = inspection.desired_generation orelse return .rejected;
@@ -842,6 +843,10 @@ pub const Coordinator = struct {
             else => return .busy,
         }) orelse {
             self.apply_pending = false;
+            if (self.control.inspectMcpDesiredConfiguration()) |current| if (current.authorization_recovery_pending) {
+                self.host.notify();
+                return .started;
+            };
             return .rejected;
         };
         self.apply_pending = false;
@@ -947,6 +952,8 @@ pub const Coordinator = struct {
                     .unknown => self.control.failMcpConfigurationApply(apply_job.generation, .unknown),
                     .pending => unreachable,
                 }
+                if (apply_job.result == .rejected or apply_job.result == .failed)
+                    self.active_authorizations.retainRejectedFailures(&apply_job.authorizations);
                 self.configuration_apply_job = null;
                 apply_job.deinit();
                 // Give due maintenance one main-loop opportunity before the
@@ -1714,6 +1721,7 @@ fn writeConsentDetails(
     requires_registration: bool,
 ) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
+    try writer.writeAll("Confirming replaces any saved authorization. If you cancel after confirmation or the browser cannot finish, you must sign in again.\n\n");
     try writeQuotedDetailField(&writer, "Resource", resource.resource);
     try writeQuotedDetailField(&writer, "Authorization server", authorization.issuer);
     try writeQuotedDetailField(&writer, "Redirect", redirect_uri);
@@ -2047,12 +2055,14 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         confirmations: std.atomic.Value(usize) = .init(0),
         opens: usize = 0,
         fail_open: bool = false,
+        saw_replacement_notice: bool = false,
 
         completion: ?*const Dialog.Completion = null,
         token: u64 = 0,
-        fn request(context: *anyopaque, token: u64, _: Dialog.Message, completion: *const Dialog.Completion) !u64 {
+        fn request(context: *anyopaque, token: u64, message: Dialog.Message, completion: *const Dialog.Completion) !u64 {
             const self: *@This() = @ptrCast(@alignCast(context));
             _ = self.confirmations.fetchAdd(1, .acq_rel);
+            self.saw_replacement_notice = self.saw_replacement_notice or std.mem.indexOf(u8, message.message, "Confirming replaces any saved authorization.") != null;
             self.completion = completion;
             self.token = token;
             return token;
@@ -2237,6 +2247,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expectEqual(@as(usize, 5), fake_http.calls.load(.acquire));
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
     try std.testing.expectEqual(@as(usize, 1), host_context.confirmations.load(.acquire));
+    try std.testing.expect(host_context.saw_replacement_notice);
 
     fake_http.registration_failure.store(1, .release);
     const cancelled_start = try coordinator.authorizeOauth(5, cancelled_server_id);

@@ -242,11 +242,18 @@ function validMcpNames(values: string[]): boolean {
   );
 }
 
+function recoveringAuthorization(server: McpServer) {
+  return (
+    server.applyStatus === "waiting_auth" ||
+    server.authorizationStatus === "refreshing"
+  );
+}
+
 function serverNeedsAttention(server: McpServer, applying: boolean) {
   if (!server.desiredEnabled) return false;
   if (server.connection === null) return true;
   if (server.approvalStatus === "unapproved") return true;
-  if (applying) return false;
+  if (applying || recoveringAuthorization(server)) return false;
   return (
     !["not_required", "ready"].includes(server.authorizationStatus) ||
     ["pending", "rejected", "failed", "unknown"].includes(server.applyStatus) ||
@@ -263,6 +270,8 @@ function serverStateKey(server: McpServer, applying: boolean) {
   if (!server.desiredEnabled) return "mcp.desired.disabled" as const;
   if (!["not_required", "ready"].includes(server.authorizationStatus))
     return `mcp.authorization_status.${server.authorizationStatus}` as const;
+  if (server.applyStatus === "waiting_auth")
+    return "mcp.apply_status.waiting_auth" as const;
   if (applying) return "mcp.status.connecting" as const;
   if (["pending", "rejected", "failed", "unknown"].includes(server.applyStatus))
     return `mcp.apply_status.${server.applyStatus}` as const;
@@ -275,7 +284,7 @@ function serverVisualStatus(server: McpServer, applying: boolean) {
   if (server.connection === null) return "invalid_catalog" as const;
   if (server.approvalStatus === "unapproved") return "not_loaded" as const;
   if (!server.desiredEnabled) return "disabled" as const;
-  if (applying) return "connecting" as const;
+  if (applying || recoveringAuthorization(server)) return "connecting" as const;
   if (serverNeedsAttention(server, false)) return "attention" as const;
   return server.runtimeStatus;
 }
@@ -286,6 +295,7 @@ function serverCanApply(server: McpServer) {
     server.approvalStatus === "approved" &&
     server.desiredEnabled &&
     ["not_required", "ready"].includes(server.authorizationStatus) &&
+    server.applyStatus !== "waiting_auth" &&
     server.applyStatus !== "unknown"
   );
 }
@@ -1247,6 +1257,24 @@ export function McpPage({
           </div>
         </Alert>
       );
+    if (management.authorizationOperation.kind !== "idle")
+      return (
+        <Alert variant="neutral" className="mcp-state-banner">
+          <Icon name="refresh" />
+          <div>
+            <strong>
+              {t(
+                management.servers.some(
+                  (server) => server.authorizationStatus === "refreshing",
+                )
+                  ? "mcp.authorization_status.refreshing"
+                  : "mcp.banner.authorization.title",
+              )}
+            </strong>
+            <p>{t("mcp.banner.authorization.body")}</p>
+          </div>
+        </Alert>
+      );
     if (
       management.configurationApply === "failed" ||
       management.applyFailureCount > 0
@@ -1365,6 +1393,19 @@ export function McpPage({
 
     if (!server.desiredEnabled) return null;
 
+    if (
+      server.authorizationStatus === "refreshing" ||
+      server.applyStatus === "waiting_auth"
+    )
+      return nextActionCard(
+        t(
+          server.authorizationStatus === "refreshing"
+            ? "mcp.authorization_status.refreshing"
+            : "mcp.apply_status.waiting_auth",
+        ),
+        t("mcp.next.authorization_recovery.body"),
+      );
+
     if (!["not_required", "ready"].includes(server.authorizationStatus)) {
       const operation = management.authorizationOperation;
       if (operation.kind !== "idle" && operation.serverId === server.id)
@@ -1397,6 +1438,7 @@ export function McpPage({
               : t("mcp.next.authorization.body"),
           operation.kind === "idle" &&
             capabilities.oauth &&
+            server.canAuthorize &&
             server.authorizationStatus !== "capability_unavailable" &&
             !clientSecretMissing ? (
             <Button
@@ -1454,20 +1496,34 @@ export function McpPage({
           ? t("mcp.next.invalid_catalog.body")
           : t("mcp.next.retry_connection.body"),
         server.runtimeStatus === "invalid_catalog" ? undefined : (
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={
-              needsApply ? applyPending || mutationLocked : refreshLocked
-            }
-            onClick={() =>
-              void (needsApply
-                ? applyConfiguration(server.id)
-                : refreshCatalog())
-            }
-          >
-            {t("mcp.next.retry_connection.action")}
-          </Button>
+          <>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={
+                needsApply ? applyPending || mutationLocked : refreshLocked
+              }
+              onClick={() =>
+                void (needsApply
+                  ? applyConfiguration(server.id)
+                  : refreshCatalog())
+              }
+            >
+              {t("mcp.next.retry_connection.action")}
+            </Button>
+            {server.authMode === "oauth" &&
+              capabilities.oauth &&
+              server.canAuthorize && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={serverBusy}
+                  onClick={() => void authorizeServer(server)}
+                >
+                  {t("mcp.authorization.again")}
+                </Button>
+              )}
+          </>
         ),
       );
     }
@@ -2017,7 +2073,11 @@ export function McpPage({
                           : selected.connection?.kind === "streamable_http"
                             ? selected.connection.endpoint
                             : t("mcp.detail.connection_unavailable"),
-                        serverCanApply(selected) ? "complete" : "attention",
+                        recoveringAuthorization(selected)
+                          ? "active"
+                          : serverCanApply(selected)
+                            ? "complete"
+                            : "attention",
                       ],
                       [
                         "handshake",
@@ -2065,12 +2125,13 @@ export function McpPage({
                   )}
                 {renderNextAction(selected)}
 
-                {selected.safeDiagnostic && (
-                  <section className="mcp-diagnostic">
-                    <h3>{t("mcp.detail.diagnostic")}</h3>
-                    <p>{selected.safeDiagnostic}</p>
-                  </section>
-                )}
+                {selected.safeDiagnostic &&
+                  !recoveringAuthorization(selected) && (
+                    <section className="mcp-diagnostic">
+                      <h3>{t("mcp.detail.diagnostic")}</h3>
+                      <p>{selected.safeDiagnostic}</p>
+                    </section>
+                  )}
                 {management.redacted && (
                   <p className="mcp-redaction-notice">
                     <Icon name="warning" />
