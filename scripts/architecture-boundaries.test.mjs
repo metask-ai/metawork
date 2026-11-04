@@ -2958,13 +2958,37 @@ test("Application SDK bindings retain Runtime dependencies for migrated effects"
   assert.match(account, /self\.runtime\.startTimer\(/u);
   assert.match(account, /self\.runtime\.cancelTimer\(/u);
   const platform = read("src/app/platform.zig");
-  for (const method of ["startTimer", "cancelTimer", "showOpenDialog"])
+  for (const method of ["startTimer", "cancelTimer"])
     assert.match(
       platform,
       new RegExp(
         `self\\.native_runtime orelse return error\\.RuntimeUnavailable\\)\\.${method}\\(`,
         "u",
       ),
+    );
+  const request = platform.match(
+    /pub fn requestDialog\([\s\S]*?\n    \}/u,
+  )?.[0];
+  assert.ok(request);
+  assert.match(
+    request,
+    /const runtime = self\.native_runtime orelse return error\.RuntimeUnavailable/u,
+  );
+  assert.match(
+    request,
+    /if \(!self\.supportsAsyncDialogs\(\)\) return error\.UnsupportedService/u,
+  );
+  for (const method of [
+    "requestOpenDialog",
+    "requestSaveDialog",
+    "requestMessageDialog",
+  ])
+    assert.match(request, new RegExp(`runtime\\.${method}\\(`, "u"));
+  for (const file of zigFiles("src"))
+    assert.doesNotMatch(
+      read(file),
+      /\.show(?:Open|Save|Message)Dialog\s*\(/u,
+      file,
     );
   const window = read("src/app/window.zig");
   assert.match(window, /runtime\.showNotification\(/u);

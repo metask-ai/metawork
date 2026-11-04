@@ -957,6 +957,90 @@ test "SDK consumption Application test roots" {
     std.testing.refAllDecls(models_platform_binding);
 }
 
+test "SDK consumption dialog connection replacement settles Save As and reuses response slots" {
+    const Responses = struct {
+        var count: usize = 0;
+        var valid_outcomes: bool = true;
+        var forward: *const fn (?*anyopaque, u64, []const u8, []const u8) anyerror!void = undefined;
+        fn complete(context: ?*anyopaque, window: u64, label: []const u8, bytes: []const u8) !void {
+            count += 1;
+            if (std.mem.startsWith(u8, bytes, "{\"id\":\"save\","))
+                valid_outcomes = valid_outcomes and std.mem.indexOf(u8, bytes, "\"state\":\"cancelled\"") != null;
+            if (std.mem.startsWith(u8, bytes, "{\"id\":\"workspace\","))
+                valid_outcomes = valid_outcomes and std.mem.indexOf(u8, bytes, "DialogCancelled") != null;
+            try forward(context, window, label, bytes);
+        }
+    };
+    Responses.count = 0;
+    Responses.valid_outcomes = true;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
+    Responses.forward = harness.runtime.options.platform.services.complete_webview_bridge_fn.?;
+    harness.runtime.options.platform.services.complete_webview_bridge_fn = Responses.complete;
+    var platform = app_platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try platform.start(&harness.runtime);
+    defer platform.stop(&harness.runtime);
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.filePreviewFixture(control, "/tmp/metawork-dialog-test");
+    defer control.deinit();
+    try product_control.TestSupport.recordDeliveredOutputFixture(control);
+    control.setOutputFileSave(platform.outputFileSave());
+    var dispatcher = try bridge_api.Dispatcher.init(std.testing.allocator, control, undefined, undefined, platform.dispatcherPlatform(), .{}, 1);
+    defer dispatcher.deinit();
+    defer dispatcher.breakConnection();
+    harness.runtime.options.bridge = dispatcher.register(bridge_api.policy.product(.release));
+    const app: native_sdk.App = .{ .context = &platform, .name = "dialog-response-reuse", .source = .html("") };
+    const connect = "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}";
+    try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = connect, .origin = "zero://app", .window_id = 1 } });
+    try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"accepted\":true") != null);
+
+    // These requests enter through Runtime, which allocates and releases the
+    // real SDK response slots. Eighty cycles exceed its 64-slot capacity.
+    for (0..80) |iteration| {
+        const before = Responses.count;
+        var storage: [512]u8 = undefined;
+        const save = try std.fmt.bufPrint(&storage, "{{\"id\":\"save\",\"command\":\"metawork.outputs.action\",\"payload\":{{\"generation\":\"{d}\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"save\"}}}}", .{dispatcher.productDelivery().connectedGeneration().?});
+        try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = save, .origin = "zero://app", .window_id = 1 } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = "{\"id\":\"workspace\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}", .origin = "zero://app", .window_id = 1 } });
+        try std.testing.expectEqual(before, Responses.count);
+        try std.testing.expectEqual(@as(usize, 2), harness.runtime.pendingDialogCount());
+        try std.testing.expectEqual(@as(usize, 1), harness.null_platform.presentedDialogCount());
+
+        // No disconnect: replacing the connection must immediately settle both
+        // commands and release the frozen Save target, before SDK completion.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = connect, .origin = "zero://app", .window_id = 1 } });
+        try std.testing.expectEqual(before + 3, Responses.count);
+        try std.testing.expect(Responses.valid_outcomes);
+        try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"accepted\":true") != null);
+        for (control.pending_output_saves) |pending| try std.testing.expect(pending == null);
+        for (dispatcher.output_in_flight) |pending| try std.testing.expect(pending == null);
+        for (dispatcher.dialogs) |pending| try std.testing.expect(!pending.active);
+        try std.testing.expectEqual(iteration + 1, harness.null_platform.dialog_cancel_count);
+        try std.testing.expectEqual(@as(usize, 0), harness.null_platform.presentedDialogCount());
+
+        // Reuse the freed response slot while the old native results are still
+        // pending. Their callbacks must leave the new command unanswered.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = "{\"id\":\"fresh\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}", .origin = "zero://app", .window_id = 1 } });
+        const fresh = for (dispatcher.dialogs) |pending| {
+            if (pending.active) break pending.handle;
+        } else return error.MissingDialog;
+        while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+        try std.testing.expectEqual(before + 3, Responses.count);
+        try std.testing.expectEqual(@as(usize, 1), harness.runtime.pendingDialogCount());
+        try std.testing.expectEqual(@as(usize, 1), harness.null_platform.presentedDialogCount());
+        try harness.null_platform.finishDialog(fresh, .cancelled, "", .primary);
+        while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
+        try std.testing.expectEqual(before + 4, Responses.count);
+        try std.testing.expectEqualStrings("{\"id\":\"fresh\",\"ok\":true,\"result\":{\"selected\":false}}", harness.null_platform.lastBridgeResponse());
+        try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDialogCount());
+        try std.testing.expectEqual(@as(usize, 0), harness.null_platform.presentedDialogCount());
+    }
+    try std.testing.expectEqual(@as(usize, 160), harness.null_platform.dialog_request_count);
+}
+
 test "notification activation follows SDK command routing into the real Task Bridge hint" {
     const Host = struct {
         calls: usize = 0,
@@ -993,7 +1077,6 @@ test "notification activation follows SDK command routing into the real Task Bri
         .cancel_timer_fn = Host.cancel,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,

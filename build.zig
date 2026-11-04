@@ -155,6 +155,12 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test-sdk-consumption", "Run Application Native SDK effect bindings")
         .dependOn(&b.addRunArtifact(sdk_consumption_tests).step);
+    const dialog_step = b.step("test-native-dialogs", "Run asynchronous dialog ports, continuations and cancellation");
+    dialog_step.dependOn(&b.addRunArtifact(sdk_consumption_tests).step);
+    dialog_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-dialog-mcp", .root_module = test_modules.app, .filters = &.{ "MCP asynchronous", "MCP Application" } })).step);
+    const dialog_bridge_tests = b.addTest(.{ .name = "metawork-dialog-bridge", .root_module = test_modules.bridge, .filters = &.{ "dialog", "Skill import admission", "unified add", "Output action Bridge", "Automatic Workspace root Bridge", "Dispatcher validates authority" } });
+    dialog_step.dependOn(&b.addRunArtifact(dialog_bridge_tests).step);
+    dialog_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-dialog-output", .root_module = test_modules.product_control_runtime, .filters = &.{ "Save As", "Output file", "Output inspection", "Output checks" } })).step);
     const update_host_step = b.step("test-updates-host", "Run update HTTP, lifecycle and Bridge tests");
     update_host_step.dependOn(&run_update_tests.step);
     update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-control", .root_module = test_modules.product_control_runtime, .filters = &.{ "updates", "snapshot serializer matches", "Automatic Workspace snapshot exposes" } })).step);

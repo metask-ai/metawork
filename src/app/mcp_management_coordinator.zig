@@ -20,26 +20,22 @@ const app_platform = @import("platform.zig");
 const connection_approval_details_bytes: usize = mcp_configuration.max_store_bytes * 6 + 4096;
 const oauth_consent_details_bytes: usize = mcp_oauth.Limits.metadata_body_bytes * 6 + 4096;
 
-pub const Confirmation = enum { approved, cancelled, unavailable };
+const Dialog = control_ports.NativeDialog;
+pub const Approval = control_ports.McpApproval;
 
 pub const Host = struct {
     context: *anyopaque,
     confirmation_available: bool = false,
     capture_available: bool = false,
     oauth_available: bool = false,
-    confirm_fn: *const fn (*anyopaque, []const u8, []const u8, []const u8) Confirmation,
+    request_dialog_fn: *const fn (*anyopaque, u64, Dialog.Message, *const Dialog.Completion) anyerror!u64,
+    cancel_dialog_fn: *const fn (*anyopaque, u64) void = cancelUnavailable,
+
     open_url_fn: *const fn (*anyopaque, []const u8) bool,
     now_unix_ms_fn: *const fn (*anyopaque) ?u64,
     notify_fn: *const fn (*anyopaque) void,
 
-    fn confirm(
-        self: Host,
-        title: []const u8,
-        details: []const u8,
-        approval_label: []const u8,
-    ) Confirmation {
-        return self.confirm_fn(self.context, title, details, approval_label);
-    }
+    fn cancelUnavailable(_: *anyopaque, _: u64) void {}
 
     fn openUrl(self: Host, url: []const u8) bool {
         return self.open_url_fn(self.context, url);
@@ -61,23 +57,19 @@ pub fn platformHost(platform: *app_platform.Adapter) Host {
         // Credential entry is provided by the Renderer on every desktop platform.
         .capture_available = true,
         .oauth_available = platform.supportsMcpExternalAuthorization(),
-        .confirm_fn = platformConfirm,
+        .request_dialog_fn = platformRequest,
+        .cancel_dialog_fn = platformCancel,
         .open_url_fn = platformOpenUrl,
         .now_unix_ms_fn = platformNowUnixMs,
         .notify_fn = platformNotify,
     };
 }
 
-fn platformConfirm(
-    context: *anyopaque,
-    title: []const u8,
-    details: []const u8,
-    approval_label: []const u8,
-) Confirmation {
-    const platform: *app_platform.Adapter = @ptrCast(@alignCast(context));
-    const result = platform.confirmMcpDetails(title, details, approval_label) orelse
-        return .unavailable;
-    return if (result) .approved else .cancelled;
+fn platformRequest(context: *anyopaque, id: u64, message: Dialog.Message, completion: *const Dialog.Completion) !u64 {
+    return app_platform.Adapter.requestDialog(context, id, 0, .{ .message = message }, completion);
+}
+fn platformCancel(context: *anyopaque, handle: u64) void {
+    app_platform.Adapter.cancelDialog(context, handle);
 }
 
 fn platformOpenUrl(context: *anyopaque, url: []const u8) bool {
@@ -95,15 +87,7 @@ fn platformNotify(context: *anyopaque) void {
     app_platform.Adapter.notifyRequired(platform);
 }
 
-pub const Outcome = enum {
-    saved,
-    saved_recovery_required,
-    stale_generation,
-    rejected,
-    indeterminate,
-    cancelled,
-    capability_unavailable,
-};
+pub const Outcome = control_ports.McpHostOutcome;
 
 pub const AuthorizationStartOutcome = union(enum) {
     started: []const u8,
@@ -597,6 +581,21 @@ const ConfigurationApplyJob = struct {
     }
 };
 
+const ConfirmationState = struct {
+    id: u64,
+    page_token: u64 = 0,
+    dialog_handle: u64 = 0,
+    details: []u8,
+    title: []const u8,
+    approval_label: []const u8,
+    offset: usize = 0,
+    end: usize = 0,
+    kind: union(enum) {
+        approval: struct { operation: u64, generation: u64, server: []u8, completion: *const Approval.Completion },
+        oauth: []u8,
+    },
+};
+
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -612,6 +611,9 @@ pub const Coordinator = struct {
     configuration_apply_job: ?*ConfigurationApplyJob = null,
     last_cancel_outcome: ?Outcome = null,
     stopping: bool = false,
+    confirmation: ?ConfirmationState = null,
+    next_confirmation_id: u64 = 1,
+    dialog_completion: Dialog.Completion = undefined,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -652,6 +654,7 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) !AuthorizationStartOutcome {
+        if (self.confirmation != null) return .rejected;
         if (self.stopping or self.flow != null or self.connection_test_job != null or
             self.configuration_apply_job != null)
             return .rejected;
@@ -718,6 +721,7 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) !ConnectionTestStartOutcome {
+        if (self.confirmation != null) return .busy;
         if (self.stopping) return .unavailable;
         if (self.connection_test_job != null or self.configuration_apply_job != null or
             self.flow != null) return .busy;
@@ -810,6 +814,7 @@ pub const Coordinator = struct {
     }
 
     pub fn applyConfiguration(self: *Coordinator) !ConfigurationApplyStartOutcome {
+        if (self.confirmation != null) return .busy;
         if (self.stopping) return .unavailable;
         if (self.configuration_apply_job != null or self.connection_test_job != null or
             self.flow != null) return .busy;
@@ -976,6 +981,7 @@ pub const Coordinator = struct {
     pub fn shutdown(self: *Coordinator) void {
         if (self.stopping) return;
         self.stopping = true;
+        self.cancelConfirmation();
         if (self.configuration_apply_job) |apply_job| {
             apply_job.join();
             _ = self.drain();
@@ -1008,40 +1014,136 @@ pub const Coordinator = struct {
         self.* = undefined;
     }
 
-    pub fn approveConnection(
-        self: *Coordinator,
-        expected_generation: u64,
-        server_id: []const u8,
-    ) !Outcome {
-        if (self.stopping or self.configuration_apply_job != null or
-            self.connection_test_job != null or self.flow != null) return .rejected;
-        if (!self.connectionApprovalAvailable()) return .capability_unavailable;
-        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
-            return .rejected;
-        if (inspection.desired_generation != expected_generation)
-            return .stale_generation;
-        const details_storage = try self.allocator.alloc(
-            u8,
-            connection_approval_details_bytes,
-        );
-        defer self.allocator.free(details_storage);
-        const details = self.control.writeMcpConnectionApprovalDetails(
-            expected_generation,
-            server_id,
-            details_storage,
-        ) catch return .rejected;
-        return switch (self.host.confirm(
-            "Approve MCP connection",
-            details,
-            "Approve connection",
-        )) {
-            .approved => mapManagementOutcome(try self.control.approveMcpConnection(
-                expected_generation,
-                .{ .server_id = server_id },
-            )),
-            .cancelled => .cancelled,
-            .unavailable => .capability_unavailable,
+    pub fn beginApproval(self: *Coordinator, operation: u64, expected_generation: u64, server_id: []const u8, completion: *const Approval.Completion) !Approval.Start {
+        if (self.stopping or self.confirmation != null or self.configuration_apply_job != null or self.connection_test_job != null or self.flow != null) return .{ .immediate = .rejected };
+        if (!self.connectionApprovalAvailable()) return .{ .immediate = .capability_unavailable };
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse return .{ .immediate = .rejected };
+        if (inspection.desired_generation != expected_generation) return .{ .immediate = .stale_generation };
+        const storage = try self.allocator.alloc(u8, connection_approval_details_bytes);
+        defer self.allocator.free(storage);
+        const details = try self.control.writeMcpConnectionApprovalDetails(expected_generation, server_id, storage);
+        const server = try self.allocator.dupe(u8, server_id);
+        errdefer self.allocator.free(server);
+        const text = try self.allocator.dupe(u8, details);
+        errdefer self.allocator.free(text);
+        const id = try self.nextConfirmationId();
+        self.confirmation = .{ .id = id, .details = text, .title = "Approve MCP connection", .approval_label = "Approve connection", .kind = .{ .approval = .{ .operation = operation, .generation = expected_generation, .server = server, .completion = completion } } };
+        self.requestConfirmationPage() catch |err| {
+            self.confirmation = null;
+            return err;
         };
+        return .{ .started = id };
+    }
+
+    pub fn cancelApproval(self: *Coordinator, handle: u64) void {
+        const pending = self.confirmation orelse return;
+        if (pending.id != handle or pending.kind != .approval) return;
+        self.cancelConfirmation();
+    }
+
+    fn nextConfirmationId(self: *Coordinator) !u64 {
+        if (self.next_confirmation_id == std.math.maxInt(u64)) return error.Capacity;
+        const id = self.next_confirmation_id;
+        self.next_confirmation_id += 1;
+        return id;
+    }
+
+    fn freeConfirmation(self: *Coordinator, pending: ConfirmationState) void {
+        self.allocator.free(pending.details);
+        switch (pending.kind) {
+            .approval => |approval| self.allocator.free(approval.server),
+            .oauth => |operation| self.allocator.free(operation),
+        }
+    }
+
+    fn cancelConfirmation(self: *Coordinator) void {
+        const pending = self.confirmation orelse return;
+        self.confirmation = null;
+        self.host.cancel_dialog_fn(self.host.context, pending.dialog_handle);
+        self.freeConfirmation(pending);
+    }
+
+    fn requestConfirmationPage(self: *Coordinator) !void {
+        const pending = if (self.confirmation) |*value| value else return error.InvalidState;
+        var end = @min(pending.details.len, pending.offset + 4096);
+        while (end > pending.offset and !std.unicode.utf8ValidateSlice(pending.details[pending.offset..end])) end -= 1;
+        if (end == pending.offset) return error.InvalidConfirmation;
+        pending.end = end;
+        const token = try self.nextConfirmationId();
+        pending.page_token = token;
+        self.dialog_completion = .{ .context = self, .result_fn = confirmationResult };
+        pending.dialog_handle = try self.host.request_dialog_fn(self.host.context, token, .{
+            .title = pending.title,
+            .message = pending.details[pending.offset..end],
+            .style = .warning,
+            .primary_button = if (end == pending.details.len) pending.approval_label else "Next",
+            .secondary_button = "Cancel",
+        }, &self.dialog_completion);
+    }
+
+    fn confirmationResult(context: *anyopaque, token: u64, result: Dialog.Result) void {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.confirmationResultChecked(token, result) catch |err| self.finishConfirmation(.{ .failed = err });
+    }
+
+    fn confirmationResultChecked(self: *Coordinator, token: u64, result: Dialog.Result) !void {
+        const pending = if (self.confirmation) |*value| value else return;
+        if (pending.page_token != token) return;
+        pending.dialog_handle = 0;
+        if (self.stopping) {
+            self.finishConfirmation(.{ .outcome = .cancelled });
+            return;
+        }
+        if (pending.kind == .oauth) {
+            const flow = self.flow orelse {
+                self.cancelConfirmation();
+                return;
+            };
+            if (!std.mem.eql(u8, flow.start.operation_id, pending.kind.oauth) or flow.cancelling or flow.deadline.raw.nanoseconds <= flow.deadline.clock.now(self.io).nanoseconds) {
+                self.finishConfirmation(.{ .outcome = .cancelled });
+                return;
+            }
+        }
+        switch (result) {
+            .cancelled => {
+                self.finishConfirmation(.{ .outcome = .cancelled });
+                return;
+            },
+            .failed => return error.DialogFailed,
+            .files => return error.InvalidDialogResult,
+            .button => |button| if (button != .primary) {
+                self.finishConfirmation(.{ .outcome = .cancelled });
+                return;
+            },
+        }
+        pending.offset = pending.end;
+        if (pending.offset < pending.details.len) {
+            try self.requestConfirmationPage();
+            return;
+        }
+        self.finishConfirmation(.confirmed);
+    }
+
+    fn finishConfirmation(self: *Coordinator, requested: Approval.Result) void {
+        const pending = self.confirmation orelse return;
+        self.confirmation = null;
+        defer self.freeConfirmation(pending);
+        switch (pending.kind) {
+            .approval => |approval| {
+                var result = requested;
+                if (result == .confirmed) {
+                    const inspection = self.control.inspectMcpDesiredConfiguration();
+                    if (self.stopping or self.configuration_apply_job != null or self.connection_test_job != null or self.flow != null) result = .{ .outcome = .rejected } else if (inspection == null or inspection.?.desired_generation != approval.generation) result = .{ .outcome = .stale_generation };
+                }
+                approval.completion.complete_fn(approval.completion.context, approval.operation, result);
+            },
+            .oauth => |operation| {
+                const flow = self.flow orelse return;
+                if (!std.mem.eql(u8, flow.start.operation_id, operation)) return;
+                if (requested == .confirmed and !self.stopping and !flow.cancelling) self.resumeConsent(flow) catch self.finishFlow(flow) else self.finishFlow(flow);
+                self.host.notify();
+            },
+        }
     }
 
     pub fn captureSecret(
@@ -1051,6 +1153,7 @@ pub const Coordinator = struct {
         slot: SecretSlot,
         value: []const u8,
     ) !Outcome {
+        if (self.confirmation != null) return .rejected;
         if (self.stopping or self.configuration_apply_job != null or
             self.connection_test_job != null or self.flow != null) return .rejected;
         if (!self.secretCaptureAvailable()) return .capability_unavailable;
@@ -1199,18 +1302,21 @@ pub const Coordinator = struct {
             flow.start.token_endpoint_auth_method,
             flow.start.client_id == null,
         );
-        switch (self.host.confirm(
-            "Authorize MCP server",
-            details,
-            "Continue to browser",
-        )) {
-            .approved => {},
-            .cancelled, .unavailable => {
-                self.finishFlow(flow);
-                return;
-            },
-        }
+        const text = try self.allocator.dupe(u8, details);
+        errdefer self.allocator.free(text);
+        const operation = try self.allocator.dupe(u8, flow.start.operation_id);
+        errdefer self.allocator.free(operation);
+        const id = try self.nextConfirmationId();
+        self.confirmation = .{ .id = id, .details = text, .title = "Authorize MCP server", .approval_label = "Continue to browser", .kind = .{ .oauth = operation } };
+        self.requestConfirmationPage() catch |err| {
+            self.confirmation = null;
+            return err;
+        };
+    }
 
+    fn resumeConsent(self: *Coordinator, flow: *Flow) !void {
+        const discovery = if (flow.discovery) |*value| value else return error.InvalidState;
+        const attempt = flow.attempt orelse return error.InvalidState;
         if (flow.start.client_id == null) {
             if (!std.mem.eql(u8, flow.start.registration_kind, "dynamic_registration"))
                 return error.InvalidState;
@@ -1556,6 +1662,7 @@ pub const Coordinator = struct {
     }
 
     fn finishFlow(self: *Coordinator, flow: *Flow) void {
+        if (self.confirmation) |pending| if (pending.kind == .oauth and std.mem.eql(u8, pending.kind.oauth, flow.start.operation_id)) self.cancelConfirmation();
         var requires_recovery = flow.durable_request_started;
         if (flow.job) |job| {
             job.cancel();
@@ -1648,7 +1755,7 @@ fn durableFailureRequiresRecovery(failure: JobFailure) bool {
     };
 }
 
-fn mapManagementOutcome(value: mcp_configuration.ManagementOutcome) Outcome {
+pub fn mapManagementOutcome(value: mcp_configuration.ManagementOutcome) Outcome {
     return switch (value) {
         .saved => .saved,
         .saved_recovery_required => .saved_recovery_required,
@@ -1704,8 +1811,8 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
         }
     };
     const TestHost = struct {
-        fn confirm(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) Confirmation {
-            return .unavailable;
+        fn request(_: *anyopaque, _: u64, _: Dialog.Message, _: *const Dialog.Completion) !u64 {
+            return error.UnsupportedService;
         }
         fn open(_: *anyopaque, _: []const u8) bool {
             return false;
@@ -1800,7 +1907,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
         &authorizations,
         .{
             .context = &host_context,
-            .confirm_fn = TestHost.confirm,
+            .request_dialog_fn = TestHost.request,
             .open_url_fn = TestHost.open,
             .now_unix_ms_fn = TestHost.now,
             .notify_fn = TestHost.notify,
@@ -1917,10 +2024,20 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         opens: usize = 0,
         fail_open: bool = false,
 
-        fn confirm(context: *anyopaque, _: []const u8, _: []const u8, _: []const u8) Confirmation {
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+        fn request(context: *anyopaque, token: u64, _: Dialog.Message, completion: *const Dialog.Completion) !u64 {
             const self: *@This() = @ptrCast(@alignCast(context));
             _ = self.confirmations.fetchAdd(1, .acq_rel);
-            return .approved;
+            self.completion = completion;
+            self.token = token;
+            return token;
+        }
+        fn finish(self: *@This()) void {
+            while (self.completion) |completion| {
+                self.completion = null;
+                completion.result_fn(completion.context, self.token, .{ .button = .primary });
+            }
         }
         fn open(context: *anyopaque, _: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -2029,7 +2146,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
             .context = &host_context,
             .confirmation_available = true,
             .oauth_available = true,
-            .confirm_fn = FakeHost.confirm,
+            .request_dialog_fn = FakeHost.request,
             .open_url_fn = FakeHost.open,
             .now_unix_ms_fn = FakeHost.now,
             .notify_fn = FakeHost.notify,
@@ -2060,8 +2177,10 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(started == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     const flow = coordinator.flow.?;
     const attempt = flow.attempt.?;
     const state = queryValue(attempt.authorizationUrl(), "state") orelse
@@ -2086,8 +2205,10 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try writer.interface.flush();
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expectEqual(@as(usize, 5), fake_http.calls.load(.acquire));
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
@@ -2098,6 +2219,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(cancelled_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     waitForCoordinatorJob(&coordinator);
     const cancelled_operation_id = cancelled_start.started;
     try std.testing.expectEqual(
@@ -2113,6 +2235,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(uncertain_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     waitForCoordinatorJob(&coordinator);
     try std.testing.expectEqual(
         Outcome.saved_recovery_required,
@@ -2127,6 +2250,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(retry_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     try std.testing.expect(coordinator.flow != null);
     try std.testing.expect(coordinator.flow.?.job != null);
     waitForCoordinatorJob(&coordinator);
@@ -2144,6 +2268,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(failed_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
     try std.testing.expectEqual(@as(usize, 2), host_context.opens);
@@ -2156,6 +2281,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(shutdown_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
+    host_context.finish();
     try std.testing.expect(coordinator.flow.?.durable_operation_id != null);
     coordinator.shutdown();
     try std.testing.expect(coordinator.flow == null);
@@ -2176,4 +2302,106 @@ fn queryValue(url: []const u8, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, part[0..equal], name)) return part[equal + 1 ..];
     }
     return null;
+}
+
+test "MCP asynchronous confirmation owns paging cancellation and failure terminals" {
+    const Probe = struct {
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+        handle: u64 = 0,
+        cancelled: u64 = 0,
+        requests: usize = 0,
+        responses: usize = 0,
+        failed: bool = false,
+        fail_next: bool = false,
+        fn request(raw: *anyopaque, token: u64, message: Dialog.Message, completion: *const Dialog.Completion) !u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fail_next) return error.DialogQueueFull;
+            try std.testing.expect(message.message.len <= 4096);
+            try std.testing.expectEqualStrings(if (self.requests < 2) "Next" else "Approve", message.primary_button);
+            self.requests += 1;
+            self.token = token;
+            self.handle += 1;
+            self.completion = completion;
+            return self.handle;
+        }
+        fn cancel(raw: *anyopaque, handle: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.cancelled = handle;
+        }
+        fn complete(raw: *anyopaque, id: u64, result: Approval.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(id == 91 and result != .confirmed);
+            self.responses += 1;
+            self.failed = result == .failed;
+        }
+        fn open(_: *anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn now(_: *anyopaque) ?u64 {
+            return 1;
+        }
+        fn notify(_: *anyopaque) void {}
+        fn deliver(self: *@This(), result: Dialog.Result) void {
+            const completion = self.completion.?;
+            completion.result_fn(completion.context, self.token, result);
+        }
+    };
+    // Each terminal occurs on page two. A stale page-one result must never
+    // advance a newer page or acquire Product authority.
+    for (0..5) |scenario| {
+        var probe: Probe = .{};
+        var completion: Approval.Completion = .{ .context = &probe, .complete_fn = Probe.complete };
+        var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, undefined, undefined, undefined, undefined, .{
+            .context = &probe,
+            .confirmation_available = true,
+            .request_dialog_fn = Probe.request,
+            .cancel_dialog_fn = Probe.cancel,
+            .open_url_fn = Probe.open,
+            .now_unix_ms_fn = Probe.now,
+            .notify_fn = Probe.notify,
+        }, undefined);
+        const text = try std.testing.allocator.alloc(u8, 8300);
+        @memset(text, 'x');
+        coordinator.confirmation = .{ .id = 90, .details = text, .title = "Test", .approval_label = "Approve", .kind = .{ .approval = .{
+            .operation = 91,
+            .generation = 1,
+            .server = try std.testing.allocator.dupe(u8, "server"),
+            .completion = &completion,
+        } } };
+        defer coordinator.cancelConfirmation();
+        try coordinator.requestConfirmationPage();
+        try std.testing.expectEqual(AuthorizationStartOutcome.rejected, try coordinator.authorizeOauth(1, "server"));
+        try std.testing.expectEqual(ConnectionTestStartOutcome.busy, try coordinator.testConnection(1, "server"));
+        try std.testing.expectEqual(ConfigurationApplyStartOutcome.busy, try coordinator.applyConfiguration());
+        try std.testing.expectEqual(Outcome.rejected, try coordinator.captureSecret(1, "server", .oauth_client_secret, "value"));
+        try std.testing.expectEqual(Approval.Start{ .immediate = .rejected }, try coordinator.beginApproval(99, 1, "server", &completion));
+        const old_token = probe.token;
+        if (scenario == 3) probe.fail_next = true;
+        probe.deliver(.{ .button = .primary });
+        if (scenario == 3) {
+            try std.testing.expect(probe.failed);
+        } else {
+            try std.testing.expectEqual(@as(usize, 2), probe.requests);
+            Coordinator.confirmationResult(&coordinator, old_token, .{ .button = .primary });
+            try std.testing.expectEqual(@as(usize, 2), probe.requests);
+            switch (scenario) {
+                0 => probe.deliver(.cancelled),
+                1 => probe.deliver(.failed),
+                2 => probe.deliver(.{ .button = .secondary }),
+                4 => {
+                    probe.deliver(.{ .button = .primary });
+                    try std.testing.expectEqual(@as(usize, 3), probe.requests);
+                    coordinator.cancelApproval(90);
+                    try std.testing.expectEqual(@as(u64, 3), probe.cancelled);
+                },
+                else => unreachable,
+            }
+        }
+        try std.testing.expect(coordinator.confirmation == null);
+        try std.testing.expectEqual(@as(usize, if (scenario == 4) 0 else 1), probe.responses);
+        probe.deliver(.{ .button = .primary });
+        try std.testing.expectEqual(@as(usize, if (scenario == 4) 0 else 1), probe.responses);
+    }
+    try std.testing.expectEqual(Outcome.rejected, mapManagementOutcome(.unchanged));
 }

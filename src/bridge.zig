@@ -17,6 +17,7 @@ pub const DispatcherAutomationAuthority = dispatcher_impl.AutomationAuthority;
 pub const McpManagementHost = dispatcher_impl.McpManagementHost;
 pub const UpdatesHost = dispatcher_impl.UpdatesHost;
 pub const McpHostOutcome = dispatcher_impl.McpHostOutcome;
+pub const McpApproval = dispatcher_impl.McpApproval;
 pub const McpAuthorizationStartOutcome = dispatcher_impl.McpAuthorizationStartOutcome;
 pub const McpConnectionTestStartOutcome = dispatcher_impl.McpConnectionTestStartOutcome;
 pub const McpConfigurationApplyStartOutcome = dispatcher_impl.McpConfigurationApplyStartOutcome;

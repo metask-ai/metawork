@@ -678,7 +678,7 @@ export class BridgeClient {
     serverId: string,
   ) {
     return decodeMcpMutationResult(
-      await this.invoke(commands.mcpApproveConnection, {
+      await this.bridge().invoke(commands.mcpApproveConnection, {
         expectedDesiredGeneration,
         serverId,
       }),
