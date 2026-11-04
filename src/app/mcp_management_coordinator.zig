@@ -830,7 +830,7 @@ pub const Coordinator = struct {
         return .started;
     }
 
-    pub fn applyConfiguration(self: *Coordinator, retry: bool) !ConfigurationApplyStartOutcome {
+    pub fn applyConfiguration(self: *Coordinator, intent: mcp_configuration.RuntimeApplyIntent) !ConfigurationApplyStartOutcome {
         if (self.stopping) return .unavailable;
         if (self.configuration_apply_job != null or self.connection_test_job != null or
             self.flow != null) return .busy;
@@ -838,8 +838,9 @@ pub const Coordinator = struct {
         if (inspection.health != .ready) return .unavailable;
         const generation = inspection.desired_generation orelse return .rejected;
         if (generation == 0) return .rejected;
-        var step = (self.control.prepareMcpConfigurationStep(generation, retry) catch |err| switch (err) {
+        var step = (self.control.prepareMcpConfigurationStep(generation, intent) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.McpManagementUnavailable => return .unavailable,
             else => return .busy,
         }) orelse {
             self.apply_pending = false;
@@ -976,7 +977,7 @@ pub const Coordinator = struct {
             }
         }
         if (self.apply_pending and !self.stopping and self.configuration_apply_job == null) {
-            const outcome = self.applyConfiguration(false) catch {
+            const outcome = self.applyConfiguration(.automatic) catch {
                 self.apply_pending = false;
                 return true;
             };
@@ -1485,7 +1486,7 @@ pub const Coordinator = struct {
                     .unchanged, .stale_generation, .rejected => _ = self.recoverDurable(flow),
                 }
                 self.finishFlow(flow);
-                if (apply_after_finish) _ = self.applyConfiguration(false) catch {};
+                if (apply_after_finish) _ = self.applyConfiguration(.automatic) catch {};
             },
             .failed => |failure| {
                 if (durableFailureRequiresRecovery(failure))
@@ -1833,7 +1834,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     );
     defer coordinator.deinit();
 
-    try std.testing.expectError(error.OutOfMemory, coordinator.applyConfiguration(false));
+    try std.testing.expectError(error.OutOfMemory, coordinator.applyConfiguration(.automatic));
     try std.testing.expectEqual(
         mcp_types.McpConfigurationApplyState.failed,
         product_mcp.testing.state(&workbench_owner.mcp.?).configuration_apply_state,

@@ -369,7 +369,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.redacted": "MetaWork 已移除此工具目录中的敏感文本。",
   "mcp.desired.enabled": "已启用",
   "mcp.desired.disabled": "已停用",
-  "mcp.existing_tasks_note": "已打开的任务保留创建时获得的 MCP 访问权限。",
+  "mcp.existing_tasks_note":
+    "现有任务不会获得后续新增工具；撤销授权会限制其后续访问。",
   "mcp.add.action": "添加服务",
   "mcp.add.eyebrow": "新 MCP 服务",
   "mcp.add.title": "添加 MCP 服务",
@@ -482,9 +483,25 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.enablement.connection_unavailable":
     "连接配置不可用，请打开详情查看恢复方式。",
   "mcp.enablement.approval_required": "请先打开详情并完成连接。",
+  "mcp.tasks.count": "现有任务：{count}",
+  "mcp.retained.summary":
+    "为现有任务保留了 {count} 个已停用或删除的服务，新任务不可用。",
+  "mcp.retained.disabled_body":
+    "现有任务保留已应用配置，重新启用后才应用修改。",
+  "mcp.apply_status.pending": "等待连接",
+  "mcp.apply_status.rejected": "变更被拒绝",
+  "mcp.apply_status.failed": "变更未应用",
+  "mcp.apply_status.unknown": "连接状态待确认",
+  "mcp.apply_status.current": "已处理",
+  "mcp.apply_status.applying": "正在连接",
+  "mcp.banner.runtime_unknown.title": "无法确认连接变更结果",
+  "mcp.banner.runtime_unknown.body":
+    "已暂停 MCP 连接、工具刷新和授权操作。请重启 MetaWork 以重新确认服务状态。",
+  "mcp.confirm.delete.oauth_body":
+    "删除后停止续期，现有任务在当前授权到期后不可用。",
   "mcp.confirm.delete.title": "删除这个服务？",
   "mcp.confirm.delete.body":
-    "这会移除配置并更新新任务的访问权限；已打开的任务保持现有访问权限。",
+    "这会移除配置，新任务不再使用该服务。现有任务继续使用当前连接，并遵守工具授权。",
   "mcp.confirm.delete.action": "删除服务",
   "skills.subtitle": "管理 MetaWork 可使用的本地 Skill。",
   "skills.import": "导入 Skill",

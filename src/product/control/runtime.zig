@@ -6191,9 +6191,9 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    pub fn prepareMcpConfigurationStep(self: *Runtime, generation: u64, retry: bool) Error!?mcp_configuration.RuntimeApplyStep {
+    pub fn prepareMcpConfigurationStep(self: *Runtime, generation: u64, intent: mcp_configuration.RuntimeApplyIntent) Error!?mcp_configuration.RuntimeApplyStep {
         const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
-        const step = try mcp.prepareConfigurationStep(generation, retry);
+        const step = try mcp.prepareConfigurationStep(generation, intent);
         if (step != null) self.bumpRevision();
         return step;
     }
@@ -10757,8 +10757,8 @@ fn controlMcpCompleteConnectionTest(context: *anyopaque, server_id: []const u8, 
 fn controlMcpBeginApply(context: *anyopaque, generation: u64) anyerror!void {
     return controlOwner(context).beginMcpConfigurationApply(generation);
 }
-fn controlMcpPrepareApply(context: *anyopaque, generation: u64, retry: bool) anyerror!?mcp_configuration.RuntimeApplyStep {
-    return controlOwner(context).prepareMcpConfigurationStep(generation, retry);
+fn controlMcpPrepareApply(context: *anyopaque, generation: u64, intent: mcp_configuration.RuntimeApplyIntent) anyerror!?mcp_configuration.RuntimeApplyStep {
+    return controlOwner(context).prepareMcpConfigurationStep(generation, intent);
 }
 fn controlMcpCompleteApply(context: *anyopaque, generation: u64, preparation: *mcp_configuration.Preparation, manifest: *mcp_configuration.RuntimeManifest, activation: ?*lifecycle.McpActivation, selection: ?*lifecycle.McpSelection, activation_failed: bool) bool {
     return controlOwner(context).completeMcpConfigurationApply(generation, preparation, manifest, activation, selection, activation_failed);

@@ -107,6 +107,7 @@ import {
   mcpAvailabilities,
   mcpManagementHealthValues,
   mcpConfigurationApplyValues,
+  mcpApplyStatusValues,
   mcpRuntimeAlignmentValues,
   mcpRuntimeStatusValues,
   mcpNewTaskAccessValues,
@@ -4476,7 +4477,28 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     "runtimeAlignment",
     "redacted",
     "servers",
+    "retainedMemberCount",
+    "applyFailureCount",
+    "runtimeUncertain",
   ]);
+  const count = (value: unknown, path: string) => {
+    const result = nonNegativeNumber(value, path);
+    if (!Number.isSafeInteger(result))
+      fail(path, "expected nonnegative safe integer");
+    return result;
+  };
+  const retainedMemberCount = count(
+    item.retainedMemberCount,
+    `${path}.retainedMemberCount`,
+  );
+  const applyFailureCount = count(
+    item.applyFailureCount,
+    `${path}.applyFailureCount`,
+  );
+  const runtimeUncertain = booleanValue(
+    item.runtimeUncertain,
+    `${path}.runtimeUncertain`,
+  );
   const availability = enumValue(
     item.availability,
     `${path}.availability`,
@@ -4562,6 +4584,8 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "safeDiagnostic",
         "connectionTest",
         "tools",
+        "taskReferenceCount",
+        "applyStatus",
       ]);
       const tools = arrayValue(
         server.tools,
@@ -4809,6 +4833,15 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           `${serverPath}.authorizationStatus`,
           mcpAuthorizationStatusValues,
         ),
+        taskReferenceCount: count(
+          server.taskReferenceCount,
+          `${serverPath}.taskReferenceCount`,
+        ),
+        applyStatus: enumValue(
+          server.applyStatus,
+          `${serverPath}.applyStatus`,
+          mcpApplyStatusValues,
+        ),
         desiredEnabled: booleanValue(
           server.desiredEnabled,
           `${serverPath}.desiredEnabled`,
@@ -4871,6 +4904,51 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     )
   )
     fail(path, "ready MCP Runtime cannot contain attention states");
+  if (
+    servers.filter(
+      (server) => !server.desiredEnabled && server.taskReferenceCount > 0,
+    ).length > retainedMemberCount
+  )
+    fail(path, "retained members must include referenced disabled servers");
+  if (
+    servers.filter((server) =>
+      ["rejected", "failed"].includes(server.applyStatus),
+    ).length > applyFailureCount
+  )
+    fail(path, "apply failure count must include published failures");
+  const applyingServers = servers.filter(
+    (server) => server.applyStatus === "applying",
+  ).length;
+  if (
+    applyingServers > 1 ||
+    (applyingServers > 0 && configurationApply !== "applying")
+  )
+    fail(path, "only the current single-member step can be applying");
+  if (
+    runtimeUncertain &&
+    (runtimeAlignment !== "unknown" ||
+      availability !== "unavailable" ||
+      retainedMemberCount !== 0 ||
+      applyFailureCount !== 0 ||
+      servers.some(
+        (server) =>
+          server.applyStatus !== "unknown" ||
+          server.taskReferenceCount !== 0 ||
+          server.runtimeStatus === "ready" ||
+          server.tools.some(
+            (tool) => tool.discovered || tool.availableToNewTasks,
+          ),
+      ))
+  )
+    fail(
+      path,
+      "unknown Runtime takeover cannot claim members or tool authority",
+    );
+  if (
+    desiredGeneration === null &&
+    (retainedMemberCount !== 0 || applyFailureCount !== 0 || runtimeUncertain)
+  )
+    fail(path, "unknown desired state cannot publish membership results");
   for (const [index, server] of servers.entries()) {
     const availableTools = server.tools.filter(
       (tool) => tool.availableToNewTasks,
@@ -4904,6 +4982,9 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     runtimeAlignment,
     redacted: booleanValue(item.redacted, `${path}.redacted`),
     servers,
+    retainedMemberCount,
+    applyFailureCount,
+    runtimeUncertain,
   };
 }
 export function decodeSearchCursor(

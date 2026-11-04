@@ -738,9 +738,12 @@ export class BridgeClient {
       await this.invoke(commands.mcpRefreshCatalog, {}),
     );
   }
-  async applyMcpConfiguration() {
+  async applyMcpConfiguration(serverId?: string) {
     return decodeMcpConfigurationApplyResult(
-      await this.invoke(commands.mcpApplyConfiguration, {}),
+      await this.invoke(
+        commands.mcpApplyConfiguration,
+        serverId === undefined ? {} : { serverId },
+      ),
     );
   }
   async testMcpConnection(expectedDesiredGeneration: string, serverId: string) {

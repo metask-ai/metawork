@@ -1832,11 +1832,26 @@ fn expectProductIncrementalConvergence(bad_first: bool) !void {
     const healthy_id = desired.value.servers[if (bad_first) 1 else 0].id;
     try std.testing.expectEqual(.saved, try control.setMcpAllowedTools(2, .{ .server_id = healthy_id, .tools = &.{"echo"} }));
     var attempts: usize = 0;
-    while (try control.prepareMcpConfigurationStep(3, false)) |value| {
+    while (try control.prepareMcpConfigurationStep(3, .automatic)) |value| {
         var step = value;
         var step_owned = true;
         defer if (step_owned) step.deinit();
         attempts += 1;
+        {
+            var output: [128 * 1024]u8 = undefined;
+            const snapshot = try control.writeAggregateFixture(&output);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, snapshot, .{});
+            defer parsed.deinit();
+            const projected = parsed.value.object.get("mcp").?.object;
+            var applying: usize = 0;
+            for (projected.get("servers").?.array.items) |row| {
+                if (std.mem.eql(u8, row.object.get("applyStatus").?.string, "applying")) {
+                    applying += 1;
+                    try std.testing.expectEqualStrings(step.target.id(), row.object.get("id").?.string);
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 1), applying);
+        }
         try std.testing.expect(attempts <= 2);
         var candidate = try mcp_configuration.prepare(a, durable.storage[0..durable.len], true, false, .{}, product_mcp_limits);
         defer candidate.deinit();
@@ -1871,6 +1886,20 @@ fn expectProductIncrementalConvergence(bad_first: bool) !void {
         applied_manifest_owned = false;
     }
     try std.testing.expectEqual(@as(usize, 2), attempts);
+    {
+        var output: [128 * 1024]u8 = undefined;
+        const snapshot = try control.writeAggregateFixture(&output);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, snapshot, .{});
+        defer parsed.deinit();
+        const projected = parsed.value.object.get("mcp").?.object;
+        try std.testing.expectEqual(@as(i64, 1), projected.get("applyFailureCount").?.integer);
+        try std.testing.expect(!projected.get("runtimeUncertain").?.bool);
+        for (projected.get("servers").?.array.items) |row| {
+            const healthy = std.mem.eql(u8, healthy_id, row.object.get("id").?.string);
+            try std.testing.expectEqualStrings(if (healthy) "current" else "rejected", row.object.get("applyStatus").?.string);
+            try std.testing.expectEqualStrings(if (healthy) "ready" else "not_loaded", row.object.get("runtimeStatus").?.string);
+        }
+    }
     try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, control.inspectMcpDesiredConfiguration().?.runtime_alignment);
     try std.testing.expectEqual(@as(usize, 1), runtime.mcp_servers.expectedServers().len);
     try std.testing.expectEqualStrings(healthy_id, runtime.mcp_servers.expectedServers()[0].id);
@@ -2834,7 +2863,24 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
             generation += 1;
         }
         try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, restarted_workbench.inspectMcpDesiredConfiguration().?.runtime_alignment);
-        try std.testing.expect((try restarted_workbench.prepareMcpConfigurationStep(generation, false)) == null);
+        try std.testing.expect((try restarted_workbench.prepareMcpConfigurationStep(generation, .automatic)) == null);
+        {
+            var output: [128 * 1024]u8 = undefined;
+            const snapshot = try restarted_workbench.writeAggregateFixture(&output);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+            defer parsed.deinit();
+            const projected = parsed.value.object.get("mcp").?.object;
+            try std.testing.expectEqual(@as(i64, 1), projected.get("retainedMemberCount").?.integer);
+            const rows = projected.get("servers").?.array.items;
+            if (race == .retain_deleted or race == .revoked_then_deleted) {
+                try std.testing.expectEqual(@as(usize, 0), rows.len);
+            } else {
+                try std.testing.expectEqual(@as(usize, 1), rows.len);
+                try std.testing.expectEqual(@as(i64, 1), rows[0].object.get("taskReferenceCount").?.integer);
+                try std.testing.expectEqualStrings("current", rows[0].object.get("applyStatus").?.string);
+                try std.testing.expectEqualStrings("disabled", rows[0].object.get("runtimeStatus").?.string);
+            }
+        }
         // Retained membership must still produce a fresh, complete catalog
         // after Desired removal/edit; its tools remain excluded from new Tasks.
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
@@ -2875,7 +2921,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, 0), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
-        var removal = (try restarted_workbench.prepareMcpConfigurationStep(generation, false)).?;
+        var removal = (try restarted_workbench.prepareMcpConfigurationStep(generation, .automatic)).?;
         var removal_owned = true;
         defer if (removal_owned) removal.deinit();
         try std.testing.expectEqual(.remove, removal.target.kind);
@@ -2914,7 +2960,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         const b_id = current.value.servers[1].id;
         try std.testing.expectEqual(.saved, try restarted_workbench.setMcpAllowedTools(3, .{ .server_id = b_id, .tools = &.{"echo"} }));
         try std.testing.expectEqual(.saved, try restarted_workbench.setMcpServerEnabled(4, .{ .server_id = server_id, .enabled = false }));
-        var step = (try restarted_workbench.prepareMcpConfigurationStep(5, false)).?;
+        var step = (try restarted_workbench.prepareMcpConfigurationStep(5, .automatic)).?;
         var step_owned = true;
         defer if (step_owned) step.deinit();
         var candidate = try mcp_configuration.prepare(std.testing.allocator, durable_registry.storage[0..durable_registry.len], true, false, .{}, product_mcp_limits);

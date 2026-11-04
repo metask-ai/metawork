@@ -772,7 +772,7 @@ pub const Runtime = struct {
     pub fn prepareConfigurationStep(
         self: *Runtime,
         expected_generation: u64,
-        retry: bool,
+        intent: configuration.RuntimeApplyIntent,
     ) Error!?configuration.RuntimeApplyStep {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.state.runtime_uncertain) return error.McpManagementUnavailable;
@@ -783,7 +783,14 @@ pub const Runtime = struct {
         const desired = management.desiredRegistry() orelse return error.McpManagementUnavailable;
         if (desired.generation != expected_generation or desired.oauth_operation != null)
             return error.McpManagementUnavailable;
-        if (retry) management.convergence.retry();
+        switch (intent) {
+            .automatic => {},
+            .retry_all => management.convergence.retry(),
+            .retry_server => |id| {
+                if (state_module.findMcpServer(desired.servers, id) == null) return error.McpManagementUnavailable;
+                management.convergence.retryServer(id);
+            },
+        }
         if (self.state.refresh_pending and try self.startPendingRefresh()) return error.CatalogLoading;
         if (self.ports.timer.now()) |now_ms| {
             if (self.state.refresh_deadline_ms) |deadline| {
@@ -837,7 +844,7 @@ pub const Runtime = struct {
             }
         }
         const selected = target orelse {
-            if (management.convergence.nextRound()) return self.prepareConfigurationStep(expected_generation, false);
+            if (management.convergence.nextRound()) return self.prepareConfigurationStep(expected_generation, .automatic);
             return null;
         };
         var step = configuration.RuntimeApplyStep.init(self.allocator, desired, members.items, selected, management.limits) catch |err| switch (err) {

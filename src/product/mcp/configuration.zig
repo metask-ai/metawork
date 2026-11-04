@@ -745,6 +745,8 @@ pub const RuntimeApplyTarget = struct {
 
 pub const RuntimeApplyFailure = enum { preparation, rejected, unknown };
 
+pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server: []const u8 };
+
 /// Product's attempt ledger. Membership growth never invalidates failures;
 /// removal/replacement can reopen them after the current round finishes.
 pub const RuntimeConvergence = struct {
@@ -814,6 +816,15 @@ pub const RuntimeConvergence = struct {
     pub fn retry(self: *RuntimeConvergence) void {
         self.results.clearRetainingCapacity();
         self.round +|= 1;
+    }
+
+    pub fn retryServer(self: *RuntimeConvergence, server_id: []const u8) void {
+        for (self.results.items, 0..) |result, index| {
+            if (std.mem.eql(u8, result.target.id(), server_id)) {
+                _ = self.results.swapRemove(index);
+                break;
+            }
+        }
     }
 };
 
@@ -9194,4 +9205,25 @@ test "removed unattemptable MCP targets cannot create endless follow-up rounds" 
     ledger.applied(RuntimeApplyTarget.init("other", null, .remove));
     try std.testing.expect(ledger.nextRound());
     try std.testing.expect(!ledger.nextRound());
+}
+
+test "Runtime explicit member retry preserves unrelated failures across growth" {
+    var ledger: RuntimeConvergence = .{};
+    defer ledger.deinit(std.testing.allocator);
+    const a = RuntimeApplyTarget.init("a", null, .add);
+    const b = RuntimeApplyTarget.init("b", null, .add);
+    try ledger.prepare(std.testing.allocator, a);
+    ledger.reject(a, .rejected);
+    try ledger.prepare(std.testing.allocator, b);
+    ledger.reject(b, .failed);
+    ledger.retryServer("a");
+    try std.testing.expect(!ledger.handled(a));
+    try std.testing.expect(ledger.handled(b));
+    try ledger.prepare(std.testing.allocator, a);
+    ledger.applied(a);
+    try std.testing.expect(ledger.handled(b));
+    ledger.retryServer("missing");
+    try std.testing.expect(ledger.handled(b));
+    ledger.retry();
+    try std.testing.expect(!ledger.handled(b));
 }

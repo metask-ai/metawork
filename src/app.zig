@@ -280,7 +280,7 @@ const App = struct {
         // Initial MCP connection and catalog discovery use the same complete
         // declarative apply transaction as later Desired mutations. No
         // external MCP effect remains on the Application readiness path.
-        _ = self.mcp_management.?.applyConfiguration(false) catch {};
+        _ = self.mcp_management.?.applyConfiguration(.automatic) catch {};
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,

@@ -133,6 +133,7 @@ pub fn parseOutputId(value: []const u8) ![16]u8 {
 }
 
 pub const Empty = struct {};
+pub const McpApplyConfiguration = struct { serverId: ?[]const u8 = null };
 pub const WindowChromeRefresh = struct { generation: []const u8 };
 pub const WindowChromeControl = struct {
     generation: []const u8,

@@ -3495,9 +3495,11 @@ export default function App() {
       throw error;
     }
   }
-  async function applyMcpConfiguration(): Promise<McpConfigurationApplyResult> {
+  async function applyMcpConfiguration(
+    serverId?: string,
+  ): Promise<McpConfigurationApplyResult> {
     try {
-      const result = await client.applyMcpConfiguration();
+      const result = await client.applyMcpConfiguration(serverId);
       await refreshCommittedView();
       return result;
     } catch (error) {

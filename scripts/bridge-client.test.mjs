@@ -683,6 +683,7 @@ test("MCP management uses only typed revision 1 commands", async () => {
   await client.removeMcpServer("7", "server-1");
   await client.testMcpConnection("7", "server-1");
   await client.applyMcpConfiguration();
+  await client.applyMcpConfiguration("server-1");
   await client.refreshMcpCatalog();
 
   assert.deepEqual(calls, [
@@ -768,6 +769,10 @@ test("MCP management uses only typed revision 1 commands", async () => {
       payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
     },
     { command: "metawork.mcp.applyConfiguration", payload: {} },
+    {
+      command: "metawork.mcp.applyConfiguration",
+      payload: { serverId: "server-1" },
+    },
     { command: "metawork.mcp.refreshCatalog", payload: {} },
   ]);
 });

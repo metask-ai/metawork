@@ -179,7 +179,7 @@ pub const McpManagementPort = struct {
     begin_connection_test_fn: *const fn (*anyopaque, []const u8) anyerror!void,
     complete_connection_test_fn: *const fn (*anyopaque, []const u8, mcp.McpConnectionTestOutcome, u32, u32) void,
     begin_apply_fn: *const fn (*anyopaque, u64) anyerror!void,
-    prepare_apply_fn: *const fn (*anyopaque, u64, bool) anyerror!?mcp_contract.RuntimeApplyStep,
+    prepare_apply_fn: *const fn (*anyopaque, u64, mcp_contract.RuntimeApplyIntent) anyerror!?mcp_contract.RuntimeApplyStep,
     complete_apply_fn: *const fn (*anyopaque, u64, *mcp_contract.Preparation, *mcp_contract.RuntimeManifest, ?*agent.McpActivation, ?*agent.McpSelection, bool) bool,
     fail_apply_fn: *const fn (*anyopaque, u64, mcp_contract.RuntimeApplyFailure) void,
     authorization_operation_fn: *const fn (*anyopaque) ?mcp.McpAuthorizationOperationView,
@@ -214,8 +214,8 @@ pub const McpManagementPort = struct {
     pub fn beginMcpConfigurationApply(self: McpManagementPort, generation: u64) anyerror!void {
         return self.begin_apply_fn(self.context, generation);
     }
-    pub fn prepareMcpConfigurationStep(self: McpManagementPort, generation: u64, retry: bool) anyerror!?mcp_contract.RuntimeApplyStep {
-        return self.prepare_apply_fn(self.context, generation, retry);
+    pub fn prepareMcpConfigurationStep(self: McpManagementPort, generation: u64, intent: mcp_contract.RuntimeApplyIntent) anyerror!?mcp_contract.RuntimeApplyStep {
+        return self.prepare_apply_fn(self.context, generation, intent);
     }
     pub fn completeMcpConfigurationApply(self: McpManagementPort, generation: u64, preparation: *mcp_contract.Preparation, manifest: *mcp_contract.RuntimeManifest, activation: ?*agent.McpActivation, selection: ?*agent.McpSelection, activation_failed: bool) bool {
         return self.complete_apply_fn(self.context, generation, preparation, manifest, activation, selection, activation_failed);

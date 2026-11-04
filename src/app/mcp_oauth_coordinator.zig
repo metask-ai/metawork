@@ -768,7 +768,7 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
     state.host_capabilities.oauth = true;
     state.host_capabilities.connection_approval = true;
     try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Unrelated candidate", .url = "https://candidate.example.test/mcp" }));
-    var candidate = (try runtime.prepareConfigurationStep(2, false)).?;
+    var candidate = (try runtime.prepareConfigurationStep(2, .automatic)).?;
     defer candidate.deinit();
     try std.testing.expectEqual(.add, candidate.target.kind);
     try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
