@@ -6845,6 +6845,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
+        workspace_path: []const u8,
         update_calls: usize = 0,
         update_cancels: usize = 0,
         wake_calls: usize = 0,
@@ -6887,11 +6888,12 @@ test "Dispatcher validates authority before domain calls and preserves committed
         fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
 
         fn open(
-            _: ?*anyopaque,
+            context: ?*anyopaque,
             _: native_sdk.platform.OpenDialogOptions,
             output: []u8,
         ) anyerror!native_sdk.platform.OpenDialogResult {
-            const path = "/tmp";
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const path = self.workspace_path;
             @memcpy(output[0..path.len], path);
             return .{ .paths = output[0..path.len], .count = 1 };
         }
@@ -7024,7 +7026,11 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try fixture.installProductControlExecution(&workbench);
     const initial_revision = workbench.currentRevision();
-    var harness = Harness{};
+    var workspace_tmp = std.testing.tmpDir(.{});
+    defer workspace_tmp.cleanup();
+    const workspace_path = try workspace_tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(workspace_path);
+    var harness: Harness = .{ .workspace_path = workspace_path };
     var dispatcher = try Dispatcher.init(
         std.testing.allocator,
         &workbench,
@@ -7612,7 +7618,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, metask_default, "\"57\"") == null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
-    const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");
+    const unused_grant = try dispatcher.grants.issue(generation, source.window_id, workspace_path);
     var disconnect_storage: [256]u8 = undefined;
     const disconnect = try std.fmt.bufPrint(
         &disconnect_storage,

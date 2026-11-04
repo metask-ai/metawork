@@ -298,6 +298,11 @@ registry commit 明确失败时保持旧 Desired 与 authority；commit 结果�
 
 `runtimeAlignment = current` 表示目标已处理且结果已接纳，不表示全部服务健康。逐目标结果绑定来源版本；无关 Desired generation 或成员增加不重开失败。相关成员移除、替换可以在本轮结束后重开，单轮每个候选最多尝试一次；显式应用重试可重开失败结果，目录刷新不隐式重试未加入的来源。结果存储必须在 effect 前准备，后续失败不能抹掉此前已确认的接管。
 
+Task 在 Session 创建前取得进程内 MCP 引用，引用只拥有原工具 cap、来源版本与当前显式授权上限，不拥有凭据；创建失败、null authority 降级或 prepared rollback 必须释放引用。Task 的 Session 关闭、释放、恢复或模型切换不释放引用，只有 Task 删除明确提交后才释放；删除失败或结果未知必须保留。引用计数按实际来源版本计算，不得阻止 enabled 来源替换。
+
+Disable/Delete 排除该来源的新 Task authority；有 Task 引用时保留实际成员，最后引用释放后自动收敛移除。disabled Edit 只更新 Desired，已有引用继续使用已应用版本，重新启用后才尝试替换。恢复按该 Task 原 cap、checkpoint、当前显式撤权、可信来源和仍有效的 catalog 取交集；不以其他来源的 pending/删除状态作全局拒绝。Delete 保留删除前最后提交的工具授权上限，不能复活先前撤销项；enabled 来源变化仍须在关闭原 Session 前拒绝旧来源恢复。原本 null/空 authority 保持 null，进程引用不写入持久化格式，也不在冷启动重建已删除来源。
+
+
 credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。
 
 损坏记录的隔离必须由持久 pending intent 绑定待处理文件的 exact bytes，先核验 registry 与 journal 的整组物理状态，再移动文件。registry 不可信时先隔离关联 journal，再保存原 registry，确认这些步骤后才建立当前空 registry；只损坏或不匹配的 journal 可以独立隔离并保留可信 registry。重启只完成 pending intent，不读取已完成隔离记录来重建 Desired 或产生凭据 effect；文件内容已变、状态冲突或持久化未确认时保持 recovery required/outcome unknown。每次恢复必须重新确认已移动文件的持久化屏障。

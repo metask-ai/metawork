@@ -773,7 +773,18 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
         if (!self.acceptsMcpGeneration(activation.catalogGeneration())) return error.StaleMcpSelection;
-        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers(), ceiling) catch |err| {
+        // Runtime descriptors prove source identity; today's Product ceiling
+        // supplies grants. The initial descriptor's allowlist may predate a
+        // later explicit tool grant and is not a current permission record.
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const expected = try arena.allocator().dupe(mcp_catalog.ExpectedServer, self.mcp_servers.expectedServers());
+        for (expected) |*server| {
+            var allowed: std.ArrayList([]const u8) = .empty;
+            for (ceiling) |tool| if (std.mem.eql(u8, server.id, tool.server_id)) try allowed.append(arena.allocator(), tool.name);
+            server.allowed_tools = allowed.items;
+        }
+        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, expected, ceiling) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);
         };

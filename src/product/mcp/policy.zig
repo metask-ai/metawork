@@ -270,6 +270,7 @@ pub fn installCommittedDesiredState(
     management: *const mcp_configuration.ManagementPort,
     admission: mcp_state.McpAdmissionAuthority,
 ) void {
+    for (mcp.task_references.items) |*reference| reference.reconcile(management.desiredRegistry() orelse unreachable);
     reconcilePendingReauthorizations(
         mcp,
         management.desiredRegistry() orelse unreachable,

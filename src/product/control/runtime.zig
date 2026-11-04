@@ -614,7 +614,9 @@ const PreparedTaskCreate = struct {
     }
 
     fn rollback(self: *PreparedTaskCreate, control: *Runtime) void {
+        const task_id = self.id();
         self.task.rollback();
+        if (control.mcp) |*mcp| mcp.releaseTaskReference(task_id);
         if (self.order.isActive()) control.workspace.rollbackOrder(&self.order);
     }
 };
@@ -4038,6 +4040,9 @@ pub const Runtime = struct {
             .text = self.taskRuntimeTextProjection(),
             .release = self.taskRuntimeReleaseEffects(),
         };
+        const task_id = self.task_runtime.next_task_id;
+        if (self.mcp) |*mcp| try mcp.retainTaskReference(task_id, task_input.mcp_selection);
+        errdefer if (self.mcp) |*mcp| mcp.releaseTaskReference(task_id);
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
             error.SessionCapacity => return self.sessionPressureError(null),
             error.McpNotRefreshed, error.InvalidMcpSelection, error.StaleMcpSelection => retry: {
@@ -4045,6 +4050,7 @@ pub const Runtime = struct {
                 // authority. A malformed null create is not recoverable here.
                 if (task_input.mcp_selection == null) return err;
                 self.recoverExpiredMcpCatalogNoFail();
+                if (self.mcp) |*mcp| mcp.releaseTaskReference(task_id);
                 mcp_authority = .unavailable;
                 task_input.mcp_selection = null;
                 task_input.mcp_authority = mcp_authority;
@@ -4183,7 +4189,7 @@ pub const Runtime = struct {
         }
         if (original.mcp) |captured| {
             const mcp = if (self.mcp) |*value| value else return error.RecoveryUnavailable;
-            var authority = try mcp.restoreAuthority(captured);
+            var authority = try mcp.restoreAuthorityForTask(task_id, captured);
             const selection = authority.selection;
             authority.selection = null;
             const generation = authority.catalog_generation;
@@ -8750,12 +8756,18 @@ pub const Runtime = struct {
             (if (self.file_change_lane) |lane| !lane.hasTaskJob(task_id) else true);
     }
 
+    fn taskRecordDeleted(context: *anyopaque, task_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.mcp) |*mcp| mcp.releaseTaskReference(task_id);
+    }
+
     fn taskRuntimeDeletionEffects(self: *Runtime) task_runtime.DeletionEffects {
         return .{
             .context = self,
             .release_session_fn = releaseTaskRuntimeSession,
             .commit_without_task_fn = commitTaskRuntimeWithoutTask,
             .resources_quiescent_fn = taskResourcesQuiescent,
+            .task_deleted_fn = taskRecordDeleted,
             .delete_checkpoint_task_fn = deleteTaskRuntimeCheckpointTask,
             .delete_file_change_task_fn = deleteTaskRuntimeFileChanges,
             .delete_attachment_task_fn = deleteTaskRuntimeAttachments,

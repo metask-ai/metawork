@@ -2658,15 +2658,16 @@ const AbsenceProof = union(enum) {
 
 const RuntimeManifestEntry = struct {
     id: []const u8,
+    task_references: u32 = 0,
     state: union(enum) {
         loaded: DescriptorFingerprint,
         absent: AbsenceProof,
     },
 };
 
-/// Immutable, in-memory proof of the descriptors accepted by one Agent
-/// Runtime. It contains no credential bytes and is never persisted or
-/// projected through Bridge.
+/// In-memory proof of accepted descriptors with live Product lifetime counts.
+/// Descriptor facts are immutable until apply; reference counts never authorize
+/// a tool. It contains no credentials and is never persisted or sent over Bridge.
 pub const RuntimeManifest = struct {
     allocator: std.mem.Allocator,
     entries: []RuntimeManifestEntry,
@@ -2752,6 +2753,7 @@ pub const RuntimeManifest = struct {
                 findServer(registry.servers, entry.id)
             else
                 null;
+            if (entry.state == .loaded and entry.task_references != 0 and (target == null or !target.?.enabled)) continue;
             if (!entryCompatible(entry, target, limits)) {
                 const attempt = RuntimeApplyTarget.init(entry.id, target, if (target == null or !target.?.enabled) .remove else .replace);
                 if (convergence == null or !convergence.?.handled(attempt)) return .restart_required;
@@ -2821,7 +2823,7 @@ fn entryCompatible(
     };
 }
 
-fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
+pub fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
     if (server.connection_approval == null) return false;
     if (server.auth.oauth) |oauth|
         return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;

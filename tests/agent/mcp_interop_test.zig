@@ -2459,7 +2459,20 @@ test "real Product HTTP429 refresh retries are bounded and explicit refresh resu
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .rate_limit);
 }
 
-const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit };
+test "real Product retains disabled members for Task restore and removes the last reference" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .retain_disabled);
+}
+
+test "real Product retains deleted members for Task restore without reviving revoked grants" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .retain_deleted);
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .revoked_then_deleted);
+}
+
+test "real Product editing a disabled referenced member keeps the applied version" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .disabled_edit);
+}
+
+const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit, retain_disabled, retain_deleted, revoked_then_deleted, disabled_edit };
 
 fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpTransportKind) !void {
     try expectMcpProductAdmissionCase(protocol_version, transport, .expiry);
@@ -2677,6 +2690,90 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(fresh_task_id),
     );
+    if (race == .retain_disabled or race == .retain_deleted or race == .revoked_then_deleted or race == .disabled_edit) {
+        const mcp = &restarted_workbench.mcp.?;
+        const task = restarted_workbench.task_runtime.find(fresh_task_id).?;
+        var access = try task.runtime.acquireAccess();
+        var original = access.captureRestoreInputs() catch |err| {
+            access.deinit();
+            return err;
+        };
+        access.deinit();
+        defer original.deinit() catch unreachable;
+        try std.testing.expectEqual(@as(u32, 1), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
+        if (race == .retain_disabled) {
+            var extra_tasks: [2]u64 = undefined;
+            for (&extra_tasks) |*extra| extra.* = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
+            try std.testing.expectEqual(@as(u32, 3), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
+            try std.testing.expectError(error.SessionCapacity, restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null }));
+            try std.testing.expectEqual(@as(u32, 3), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
+            for (extra_tasks) |extra| {
+                try restarted_workbench.deleteTask(extra);
+                for (0..2000) |_| {
+                    try restarted_workbench.drainAgentEvents();
+                    restarted_workbench.syncLifecycle();
+                    if (restarted_workbench.task_runtime.find(extra) == null) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                } else return error.TestUnexpectedResult;
+            }
+            try std.testing.expectEqual(@as(u32, 1), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
+        }
+        if (race == .revoked_then_deleted)
+            try std.testing.expectEqual(.saved, try restarted_workbench.setMcpAllowedTools(2, .{ .server_id = server_id, .tools = &.{} }));
+        var generation = restarted_workbench.inspectMcpDesiredConfiguration().?.desired_generation.?;
+        if (race == .retain_deleted or race == .revoked_then_deleted) {
+            try std.testing.expectEqual(.saved, try restarted_workbench.removeMcpServer(generation, server_id));
+        } else {
+            try std.testing.expectEqual(.saved, try restarted_workbench.setMcpServerEnabled(generation, .{ .server_id = server_id, .enabled = false }));
+        }
+        generation = restarted_workbench.inspectMcpDesiredConfiguration().?.desired_generation.?;
+        if (race == .disabled_edit) {
+            try std.testing.expectEqual(.saved, try restarted_workbench.updateMcpHttpConnection(generation, .{ .server_id = server_id, .display_name = "Edited disabled", .negotiation = "modern_only", .timeout_ms = 2_000, .url = "https://disabled.example.test/mcp", .auth_mode = .none }));
+            generation += 1;
+        }
+        try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, restarted_workbench.inspectMcpDesiredConfiguration().?.runtime_alignment);
+        try std.testing.expect((try restarted_workbench.prepareMcpConfigurationStep(generation, false)) == null);
+        const admission = mcp.selectionForNewTask();
+        try std.testing.expect(admission.available);
+        try std.testing.expect(admission.selection == null or admission.selection.?.selectedTools().len == 0);
+        var restored = try mcp.restoreAuthorityForTask(fresh_task_id, original.mcp);
+        defer restored.deinit();
+        try std.testing.expectEqual(@as(usize, if (race == .revoked_then_deleted) 0 else 1), restored.selection.?.selectedTools().len);
+        if (race != .revoked_then_deleted) {
+            var probe: RawMcpAdmissionProbe = .{ .api = restarted_runtime.api, .runtime = restarted_runtime.runtime.?, .workspace = workspace_root, .endpoint = fixture.provider_endpoint, .selector = std.mem.zeroes(wire.McpSelectorV1), .execute_tool = true, .execute_restored_tool = true };
+            defer probe.bytes.bytes.deinit(std.testing.allocator);
+            probe.selector.struct_size = @sizeOf(wire.McpSelectorV1);
+            probe.selector.server_binding_identity = agent.mcpBindingIdentity(server_id);
+            probe.selector.tool_name = sdk.bytesView("echo");
+            try probe.check(true);
+        }
+        try restarted_workbench.deleteTask(fresh_task_id);
+        for (0..2000) |_| {
+            try restarted_workbench.drainAgentEvents();
+            restarted_workbench.syncLifecycle();
+            if (restarted_workbench.task_runtime.find(fresh_task_id) == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, 0), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
+        var removal = (try restarted_workbench.prepareMcpConfigurationStep(generation, false)).?;
+        var removal_owned = true;
+        defer if (removal_owned) removal.deinit();
+        try std.testing.expectEqual(.remove, removal.target.kind);
+        var input = try restarted_runtime.prepareMcpMembership(generation, null, removal.member_ids);
+        defer input.deinit();
+        try std.testing.expectEqual(.applied, try restarted_runtime.applyMcpConfiguration(&input));
+        var removed_manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &removal.preparation)).?;
+        var removed_manifest_owned = true;
+        defer if (removed_manifest_owned) removed_manifest.deinit();
+        try std.testing.expect(try restarted_runtime.activateMcp() == .empty);
+        try std.testing.expect(restarted_workbench.completeMcpConfigurationApply(generation, &removal.preparation, &removed_manifest, null, null, false));
+        removal_owned = false;
+        removed_manifest_owned = false;
+        try std.testing.expectEqual(@as(usize, 0), restarted_runtime.mcp_servers.expectedServers().len);
+        try std.testing.expectError(error.RecoveryUnavailable, mcp.restoreAuthorityForTask(fresh_task_id, original.mcp));
+        try std.testing.expect((try mcp.restoreAuthorityForTask(fresh_task_id, null)).selection == null);
+        return;
+    }
     if (race == .rate_limit) {
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.rate_limit", .data = "429" });
         for (0..5) |attempt| {

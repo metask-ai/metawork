@@ -946,6 +946,12 @@ pub const Coordinator = struct {
                 changed = true;
             }
         }
+        if (!self.stopping and self.configuration_apply_job == null) {
+            if (self.control.inspectMcpDesiredConfiguration()) |inspection| {
+                if (inspection.health == .ready and inspection.runtime_alignment == .restart_required)
+                    self.apply_pending = true;
+            }
+        }
         if (self.apply_pending and !self.stopping and self.configuration_apply_job == null) {
             const outcome = self.applyConfiguration(false) catch {
                 self.apply_pending = false;

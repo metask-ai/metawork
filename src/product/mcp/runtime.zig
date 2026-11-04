@@ -310,6 +310,83 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn retainTaskReference(self: *Runtime, task_id: u64, selection: ?*const agent.McpSelection) Error!void {
+        const selected = selection orelse return;
+        if (selected.selectedTools().len == 0) return;
+        for (self.state.task_references.items) |reference| if (reference.task_id == task_id) return error.InvalidMcpSelection;
+        const registry = self.state.preparation.registry orelse return error.InvalidMcpSelection;
+        var reference = try state_module.McpTaskReference.init(self.allocator, task_id, selected, registry.value.servers);
+        errdefer reference.deinit();
+        if (self.state.management) |*management| if (management.desiredRegistry()) |desired| reference.reconcile(desired);
+        try self.state.task_references.append(self.allocator, reference);
+        self.updateMemberReferenceCounts();
+    }
+
+    pub fn releaseTaskReference(self: *Runtime, task_id: u64) void {
+        for (self.state.task_references.items, 0..) |reference, index| {
+            if (reference.task_id != task_id) continue;
+            var removed = self.state.task_references.orderedRemove(index);
+            removed.deinit();
+            self.updateMemberReferenceCounts();
+            return;
+        }
+    }
+
+    fn updateMemberReferenceCounts(self: *Runtime) void {
+        const management = if (self.state.management) |*value| value else return;
+        const manifest = if (management.runtime_manifest) |*value| value else return;
+        for (manifest.entries) |*entry| {
+            entry.task_references = 0;
+            if (entry.state != .loaded) continue;
+            for (self.state.task_references.items) |reference| {
+                for (reference.tools) |tool| {
+                    if (std.mem.eql(u8, tool.server_id, entry.id) and std.mem.eql(u8, &tool.fingerprint, &entry.state.loaded)) {
+                        entry.task_references += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restore only this process-lifetime Task cap; unrelated Desired rows
+    /// cannot invalidate it and a deleted row cannot resurrect a revoked tool.
+    pub fn restoreAuthorityForTask(self: *Runtime, task_id: u64, original: ?*const agent.McpRestoreSelection) Error!state_module.RecoveryMcpAuthority {
+        const saved = original orelse return .{ .selection = null, .catalog_generation = null };
+        if (saved.isEmpty()) return .{ .selection = null, .catalog_generation = null };
+        if (self.shutting_down or self.state.runtime_uncertain or self.state.activation_failed or !self.state.committed) return error.RecoveryUnavailable;
+        const management = if (self.state.management) |*value| value else return error.RecoveryUnavailable;
+        if (management.inspect().health != .ready) return error.RecoveryUnavailable;
+        const desired = management.desiredRegistry() orelse return error.RecoveryUnavailable;
+        const activation = self.state.activation orelse return error.RecoveryUnavailable;
+        const reference = for (self.state.task_references.items) |*value| {
+            if (value.task_id == task_id) break value;
+        } else return error.RecoveryUnavailable;
+        var tools: std.ArrayList(agent.McpActivationTool) = .empty;
+        defer tools.deinit(self.allocator);
+        const age_ms = activation.catalogAgeMs() orelse return error.RecoveryUnavailable;
+        for (reference.tools) |tool| {
+            if (state_module.findMcpServer(desired.servers, tool.server_id)) |server| {
+                if (server.enabled and !std.mem.eql(u8, &tool.fingerprint, &configuration.runtimeDescriptorFingerprint(server))) return error.RecoveryUnavailable;
+            }
+            if (!tool.allowed) continue;
+            const binding = for (activation.serverHealth()) |health| {
+                if (std.mem.eql(u8, health.id, tool.server_id)) break health.binding_identity;
+            } else continue;
+            const fresh = for (activation.catalogServers()) |server| {
+                if (std.mem.eql(u8, &server.binding_identity, &binding)) break server.fresh and age_ms < server.ttl_remaining_ms;
+            } else false;
+            if (fresh) try tools.append(self.allocator, .{ .server_id = tool.server_id, .name = tool.name });
+        }
+        return .{
+            .selection = self.ports.catalog.prepareRestoreSelection(saved, activation, tools.items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RecoveryUnavailable,
+            },
+            .catalog_generation = activation.catalogGeneration(),
+        };
+    }
+
     pub fn inspectDesiredConfiguration(
         self: *const Runtime,
     ) ?configuration.ManagementInspection {
@@ -723,6 +800,10 @@ pub const Runtime = struct {
         for (members.items, 0..) |server, index| {
             const current = state_module.findMcpServer(desired.servers, server.id);
             if (current != null and current.?.enabled) continue;
+            const retained = for (manifest.entries) |entry| {
+                if (std.mem.eql(u8, entry.id, server.id)) break entry.task_references != 0;
+            } else false;
+            if (retained) continue;
             const attempt = configuration.RuntimeApplyTarget.init(server.id, current, .remove);
             if (management.convergence.handled(attempt)) continue;
             target = attempt;
@@ -815,6 +896,7 @@ pub const Runtime = struct {
         self.state.preparation.deinit();
         self.state.preparation = preparation.take();
         management.installRuntimeManifest(manifest);
+        self.updateMemberReferenceCounts();
         if (self.state.apply_target) |target| management.convergence.applied(target);
         self.state.apply_target = null;
         self.state.configuration_apply_state = .idle;
