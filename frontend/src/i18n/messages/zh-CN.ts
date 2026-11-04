@@ -389,7 +389,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.protocol": "协议策略",
   "mcp.add.timeout": "超时（毫秒）",
   "mcp.add.timeoutHelp":
-    "每次请求的等待时限。运行时最多 {limit} 毫秒，较大的保存值按此上限执行。",
+    "每次请求的等待时限。连接和目录管理最多 {limit} 毫秒，工具调用保留配置值。",
   "mcp.add.command": "启动命令",
   "mcp.add.command_help":
     "粘贴你通常会执行的命令。MetaWork 不会执行管道、重定向或变量替换。",

@@ -73,28 +73,34 @@ pub const Budget = struct {
         const self: *Budget = @ptrCast(@alignCast(raw));
         return self.runtime.prepareMcpRestoreSelection(original, activation, ceiling);
     }
-
-    pub fn wrap(self: *Budget, owner: *agent.McpTransportOwner, timeout_ms: u32) std.mem.Allocator.Error!agent.McpTransportOwner {
-        const wrapper = try self.allocator.create(Transport);
-        self.mutex.lockUncancelable(self.io);
-        const epoch = self.epoch +| 1;
-        self.mutex.unlock(self.io);
-        wrapper.* = .{ .budget = self, .underlying = owner.take(), .epoch = epoch, .timeout_ms = product_mcp.contract.runtimeTimeoutMs(timeout_ms) };
-        self.retain();
-        return .init(.{ .context = wrapper, .open_fn = Transport.open, .request_fn = Transport.request, .tool_request_fn = Transport.toolRequest, .notify_fn = Transport.notify, .close_fn = Transport.close }, Transport.deinit);
-    }
 };
 
+/// Management limits also apply to isolated connection-test Runtimes. Only
+/// the optional candidate scope adds an absolute pre-adoption deadline.
+pub fn wrapTransport(allocator: std.mem.Allocator, owner: *agent.McpTransportOwner, timeout_ms: u32, budget: ?*Budget) std.mem.Allocator.Error!agent.McpTransportOwner {
+    const wrapper = try allocator.create(Transport);
+    var epoch: u64 = 0;
+    if (budget) |scope| {
+        scope.mutex.lockUncancelable(scope.io);
+        epoch = scope.epoch +| 1;
+        scope.mutex.unlock(scope.io);
+        scope.retain();
+    }
+    wrapper.* = .{ .allocator = allocator, .budget = budget, .underlying = owner.take(), .epoch = epoch, .timeout_ms = product_mcp.contract.managementTimeoutMs(timeout_ms) };
+    return .init(.{ .context = wrapper, .open_fn = Transport.open, .request_fn = Transport.request, .tool_request_fn = Transport.toolRequest, .notify_fn = Transport.notify, .close_fn = Transport.close }, Transport.deinit);
+}
+
 const Transport = struct {
-    budget: *Budget,
+    allocator: std.mem.Allocator,
+    budget: ?*Budget,
     underlying: agent.McpTransportOwner,
     epoch: u64,
     timeout_ms: u32,
     const Connection = struct { transport: *Transport, underlying: *anyopaque };
 
     fn remaining(self: *Transport, requested: u32) ?u32 {
-        const timeout = product_mcp.contract.runtimeTimeoutMs(requested);
-        const budget = self.budget;
+        const timeout = product_mcp.contract.managementTimeoutMs(requested);
+        const budget = self.budget orelse return timeout;
         budget.mutex.lockUncancelable(budget.io);
         defer budget.mutex.unlock(budget.io);
         if (!budget.active or !budget.bounded or self.epoch != budget.epoch) return timeout;
@@ -113,7 +119,7 @@ const Transport = struct {
         return switch (result) {
             .failure => result,
             .connection => |connection| blk: {
-                const wrapped = self.budget.allocator.create(Connection) catch {
+                const wrapped = self.allocator.create(Connection) catch {
                     self.underlying.transport.close_fn(connection);
                     return .{ .failure = .fatal };
                 };
@@ -133,7 +139,7 @@ const Transport = struct {
     fn toolRequest(raw: *anyopaque, allocator: std.mem.Allocator, bytes: []const u8, timeout_ms: u32, cancellation: agent.McpCancellation) agent.McpExchangeOutcome {
         const connection: *Connection = @ptrCast(@alignCast(raw));
         const transport = connection.transport.underlying.transport;
-        return (transport.tool_request_fn orelse transport.request_fn)(connection.underlying, allocator, bytes, product_mcp.contract.runtimeTimeoutMs(timeout_ms), cancellation);
+        return (transport.tool_request_fn orelse transport.request_fn)(connection.underlying, allocator, bytes, timeout_ms, cancellation);
     }
 
     fn notify(raw: *anyopaque, bytes: []const u8, timeout_ms: u32, cancellation: agent.McpCancellation) ?agent.McpTransportFailure {
@@ -147,21 +153,22 @@ const Transport = struct {
         const connection: *Connection = @ptrCast(@alignCast(raw));
         const self = connection.transport;
         self.underlying.transport.close_fn(connection.underlying);
-        self.budget.allocator.destroy(connection);
+        self.allocator.destroy(connection);
     }
 
     fn deinit(raw: *anyopaque) void {
         const self: *Transport = @ptrCast(@alignCast(raw));
         const budget = self.budget;
+        const allocator = self.allocator;
         self.underlying.deinit();
-        budget.allocator.destroy(self);
-        budget.release();
+        allocator.destroy(self);
+        if (budget) |scope| scope.release();
     }
 };
 
 test "candidate deadline ends at adoption and never follows old members into later applies" {
     var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
-    var candidate: Transport = .{ .budget = &budget, .underlying = undefined, .epoch = 1, .timeout_ms = 20 };
+    var candidate: Transport = .{ .allocator = std.testing.allocator, .budget = &budget, .underlying = undefined, .epoch = 1, .timeout_ms = 20 };
     try budget.begin(1);
     budget.started_ns -= 1000 * std.time.ns_per_ms;
     try std.testing.expect(candidate.remaining(20) == null);
@@ -176,4 +183,60 @@ test "candidate deadline ends at adoption and never follows old members into lat
     budget.started_ns -= 1000 * std.time.ns_per_ms;
     try std.testing.expectEqual(@as(?u32, 20), candidate.remaining(20));
     budget.end();
+}
+
+test "management timeout limit preserves long tool calls with and without a candidate scope" {
+    const Capture = struct {
+        management_ms: u32 = 0,
+        tool_ms: u32 = 0,
+        destroyed: bool = false,
+        fn open(raw: *anyopaque, _: agent.McpPurpose, _: agent.McpEra, _: u32) agent.McpOpenOutcome {
+            return .{ .connection = raw };
+        }
+        fn request(raw: *anyopaque, _: std.mem.Allocator, _: []const u8, timeout_ms: u32, _: agent.McpCancellation) agent.McpExchangeOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.management_ms = timeout_ms;
+            return .{ .failure = .network };
+        }
+        fn tool(raw: *anyopaque, _: std.mem.Allocator, _: []const u8, timeout_ms: u32, _: agent.McpCancellation) agent.McpExchangeOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.tool_ms = timeout_ms;
+            return .{ .failure = .network };
+        }
+        fn notify(_: *anyopaque, _: []const u8, _: u32, _: agent.McpCancellation) ?agent.McpTransportFailure {
+            return null;
+        }
+        fn close(_: *anyopaque) void {}
+        fn destroy(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.destroyed = true;
+        }
+    };
+    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
+    for ([_]?*Budget{ null, &budget }) |scope| {
+        var capture: Capture = .{};
+        var source = agent.McpTransportOwner.init(.{ .context = &capture, .open_fn = Capture.open, .request_fn = Capture.request, .tool_request_fn = Capture.tool, .notify_fn = Capture.notify, .close_fn = Capture.close }, Capture.destroy);
+        var owner = try wrapTransport(std.testing.allocator, &source, 180_000, scope);
+        if (scope) |active| try active.begin(1);
+        const transport = owner.transport;
+        const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 180_000)) {
+            .connection => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        _ = transport.request_fn(connection, std.testing.allocator, "management", 180_000, .{});
+        _ = transport.tool_request_fn.?(connection, std.testing.allocator, "tool", 180_000, .{});
+        try std.testing.expectEqual(product_mcp.contract.max_management_timeout_ms, capture.management_ms);
+        try std.testing.expectEqual(@as(u32, 180_000), capture.tool_ms);
+        if (scope) |active| {
+            active.applied();
+            try active.begin(2);
+            active.started_ns -= 1000 * std.time.ns_per_s;
+            _ = transport.tool_request_fn.?(connection, std.testing.allocator, "tool", 180_000, .{});
+            try std.testing.expectEqual(@as(u32, 180_000), capture.tool_ms);
+            active.end();
+        }
+        transport.close_fn(connection);
+        owner.deinit();
+        try std.testing.expect(capture.destroyed);
+    }
 }

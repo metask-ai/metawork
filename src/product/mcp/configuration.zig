@@ -15,11 +15,11 @@ pub const max_store_bytes: usize = 256 * 1024;
 pub const max_transaction_bytes: usize = 64 * 1024;
 const lock_file_name = ".registry.lock";
 
-/// Persisted user values remain readable; execution has a bounded Host ceiling.
-pub const max_runtime_timeout_ms: u32 = 120_000;
+/// Management exchanges have a Host ceiling; tool calls keep the user timeout.
+pub const max_management_timeout_ms: u32 = 120_000;
 pub const candidate_timeout_windows: u32 = 8;
-pub fn runtimeTimeoutMs(configured: u32) u32 {
-    return @min(configured, max_runtime_timeout_ms);
+pub fn managementTimeoutMs(configured: u32) u32 {
+    return @min(configured, max_management_timeout_ms);
 }
 
 pub const Limits = struct {

@@ -3949,7 +3949,7 @@ test "production candidate budget admits a slow healthy source beside four exist
     defer budget.release();
     var first = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
     defer first.deinit();
-    try std.testing.expectEqual(mcp_configuration.max_runtime_timeout_ms, first.input.?.servers.?.descriptors[0].timeout_ms);
+    try std.testing.expectEqual(std.math.maxInt(u32), first.input.?.servers.?.descriptors[0].timeout_ms);
     try std.testing.expectEqual(std.math.maxInt(u32), servers[0].timeout_ms);
     try budget.begin(0);
     try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&first.input.?));

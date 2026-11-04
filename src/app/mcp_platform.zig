@@ -926,13 +926,11 @@ pub fn buildRuntime(
             allocator.destroy(owner);
             return err;
         };
-        if (host_environment.catalog_budget) |budget| {
-            owner.* = budget.wrap(owner, server.timeout_ms) catch |err| {
-                owner.deinit();
-                allocator.destroy(owner);
-                return err;
-            };
-        }
+        owner.* = catalog_budget.wrapTransport(allocator, owner, server.timeout_ms, host_environment.catalog_budget) catch |err| {
+            owner.deinit();
+            allocator.destroy(owner);
+            return err;
+        };
         if (authorization) |slot| {
             authorization_list.append(allocator, slot) catch |err| {
                 owner.deinit();
@@ -957,7 +955,7 @@ pub fn buildRuntime(
             .namespace = server.namespace,
             .client_name = client_name,
             .client_version = client_version,
-            .timeout_ms = mcp_configuration.runtimeTimeoutMs(server.timeout_ms),
+            .timeout_ms = server.timeout_ms,
             .configuration_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             .allowed_tools = server.tools,
         };

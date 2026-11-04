@@ -716,11 +716,11 @@ pub fn writeProjection(
         };
         writer.print("],\"taskReferenceCount\":{d},\"applyStatus\":\"{s}\"}}", .{ taskReferenceCount(mcp, server.id), @tagName(serverApplyStatus(mcp, server)) }) catch return error.SnapshotTooLarge;
     }
-    writer.print("],\"retainedMemberCount\":{d},\"applyFailureCount\":{d},\"runtimeUncertain\":{},\"runtimeTimeoutLimitMs\":{d}}}", .{ if (trusted) retainedMemberCount(mcp) else 0, if (trusted) applyFailureCount(mcp) else 0, trusted and mcp.runtime_uncertain, mcp_configuration.max_runtime_timeout_ms }) catch return error.SnapshotTooLarge;
+    writer.print("],\"retainedMemberCount\":{d},\"applyFailureCount\":{d},\"runtimeUncertain\":{},\"runtimeTimeoutLimitMs\":{d}}}", .{ if (trusted) retainedMemberCount(mcp) else 0, if (trusted) applyFailureCount(mcp) else 0, trusted and mcp.runtime_uncertain, mcp_configuration.max_management_timeout_ms }) catch return error.SnapshotTooLarge;
 }
 
 const unavailable_projection =
-    "{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[],\"retainedMemberCount\":0,\"applyFailureCount\":0,\"runtimeUncertain\":false,\"runtimeTimeoutLimitMs\":" ++ std.fmt.comptimePrint("{d}", .{mcp_configuration.max_runtime_timeout_ms}) ++ "}";
+    "{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[],\"retainedMemberCount\":0,\"applyFailureCount\":0,\"runtimeUncertain\":false,\"runtimeTimeoutLimitMs\":" ++ std.fmt.comptimePrint("{d}", .{mcp_configuration.max_management_timeout_ms}) ++ "}";
 
 test "Product MCP View preserves the unavailable snapshot bytes" {
     const Text = struct {
