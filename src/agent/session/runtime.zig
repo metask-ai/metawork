@@ -394,7 +394,6 @@ pub const Runtime = struct {
         self: *Runtime,
         input: *root.McpRuntimeInput,
     ) (Error || std.mem.Allocator.Error)!McpConfigurationApplyOutcome {
-        var reaped: [max_mcp_configuration_applies]mcp_runtime.Servers = undefined;
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
             self.sessions_mutex.unlock(self.io);
@@ -409,20 +408,20 @@ pub const Runtime = struct {
             return error.McpRefreshInProgress;
         }
         std.debug.assert(self.mcp_operation.begin(.apply));
-        var reap_count: usize = 0;
         var retired_index: usize = 0;
         while (retired_index < self.retired_mcp_servers.items.len) {
             if (!self.retired_mcp_servers.items[retired_index].isQuiescent()) {
                 retired_index += 1;
                 continue;
             }
-            reaped[reap_count] = self.retired_mcp_servers.swapRemove(retired_index);
-            reap_count += 1;
+            var retired = self.retired_mcp_servers.swapRemove(retired_index);
+            self.sessions_mutex.unlock(self.io);
+            // Dropping this list changes shared member reference counts. Recheck
+            // the next list after the release, without holding the Session lock
+            // across transport cleanup.
+            retired.deinit();
+            self.sessions_mutex.lockUncancelable(self.io);
         }
-        self.sessions_mutex.unlock(self.io);
-        for (reaped[0..reap_count]) |*servers| servers.deinit();
-
-        self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire) or self.runtime == null) {
             self.sessions_mutex.unlock(self.io);
             self.finishMcpCall(true);
