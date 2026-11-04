@@ -1579,6 +1579,7 @@ test("MCP management is capability-gated and identity checked", () => {
     retainedMemberCount: 0,
     applyFailureCount: 0,
     runtimeUncertain: false,
+    runtimeTimeoutLimitMs: 120000,
     authorizationOperation: { kind: "idle" },
     desiredGeneration: "1",
     runtimeAlignment: "current",

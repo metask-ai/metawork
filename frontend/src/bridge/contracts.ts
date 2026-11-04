@@ -1702,6 +1702,7 @@ export type McpManagementView = {
   retainedMemberCount: number;
   applyFailureCount: number;
   runtimeUncertain: boolean;
+  runtimeTimeoutLimitMs: number;
   servers: {
     id: string;
     displayName: string;

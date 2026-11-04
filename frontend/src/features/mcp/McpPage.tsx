@@ -1964,6 +1964,11 @@ export function McpPage({
                           value={timeoutMs}
                           onChange={(event) => setTimeoutMs(event.target.value)}
                         />
+                        <small>
+                          {t("mcp.add.timeoutHelp", {
+                            limit: management.runtimeTimeoutLimitMs,
+                          })}
+                        </small>
                       </label>
                     </div>
                   </details>
@@ -2457,7 +2462,17 @@ export function McpPage({
                         </div>
                         <div>
                           <dt>{t("mcp.add.timeout")}</dt>
-                          <dd>{selected.timeoutMs}</dd>
+                          <dd>
+                            {selected.timeoutMs}
+                            {selected.timeoutMs >
+                              management.runtimeTimeoutLimitMs && (
+                              <small>
+                                {t("mcp.add.timeoutHelp", {
+                                  limit: management.runtimeTimeoutLimitMs,
+                                })}
+                              </small>
+                            )}
+                          </dd>
                         </div>
                         <div>
                           <dt>{t("mcp.detail.authentication")}</dt>

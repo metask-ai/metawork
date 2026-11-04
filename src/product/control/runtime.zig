@@ -6193,9 +6193,8 @@ pub const Runtime = struct {
 
     pub fn prepareMcpConfigurationStep(self: *Runtime, generation: u64, intent: mcp_configuration.RuntimeApplyIntent) Error!?mcp_configuration.RuntimeApplyStep {
         const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
-        const step = try mcp.prepareConfigurationStep(generation, intent);
-        if (step != null) self.bumpRevision();
-        return step;
+        defer self.publishMcpRuntimeChanges();
+        return mcp.prepareConfigurationStep(generation, intent);
     }
 
     /// Installs the exact Runtime preparation and authority produced by one

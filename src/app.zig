@@ -289,7 +289,6 @@ const App = struct {
             &self.mcp_authorizations.?,
             mcp_oauth_coordinator.platformHost(&self.platform),
         );
-        self.mcp_oauth_refresh.?.catalog_budget = self.mcp_budget;
         self.mcp_oauth_refresh.?.start();
         const account = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
@@ -476,12 +475,12 @@ const App = struct {
                 if (self.mcp_oauth_refresh) |*coordinator| {
                     if (!coordinator.drain()) coordinator.reconcileTimer();
                 }
+                if (self.mcp_oauth_refresh) |*coordinator|
+                    _ = coordinator.runDueMaintenance();
                 if (self.mcp_management) |*coordinator|
                     if (coordinator.drain())
                         if (self.mcp_oauth_refresh) |*refresh|
                             refresh.reconcileTimer();
-                if (self.mcp_oauth_refresh) |*coordinator|
-                    _ = coordinator.runDueMaintenance();
                 self.drainAgentEvents();
                 if (self.control) |control|
                     if (self.dispatcher) |dispatcher| {

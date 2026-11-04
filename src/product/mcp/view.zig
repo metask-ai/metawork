@@ -130,21 +130,25 @@ fn serverApplyStatus(mcp: *const mcp_state.McpProductState, server: mcp_configur
     if (mcp.apply_target) |target| if (std.mem.eql(u8, target.id(), server.id)) return .applying;
     const management = if (mcp.management) |*value| value else return .unknown;
     if (management.runtime_manifest == null) return .unknown;
-    const entry = actualEntry(mcp, server.id);
-    const loaded = if (entry) |value| value.state == .loaded else false;
-    if (!server.enabled and (!loaded or entry.?.task_references != 0)) return .current;
-    if (loaded and server.enabled and std.mem.eql(u8, &entry.?.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server))) return .current;
-    if (server.enabled and (!mcp_configuration.serverRuntimeAuthorizationReady(server) or mcp_configuration.serverProblem(server, management.limits) != null)) return .current;
-    const target = mcp_configuration.RuntimeApplyTarget.init(server.id, server, if (!server.enabled) .remove else if (loaded) .replace else .add);
+    const target = management.runtime_manifest.?.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return .current;
     if (management.convergence.handled(target)) for (management.convergence.results.items) |result| {
         if (!std.mem.eql(u8, result.target.id(), server.id) or !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
         return switch (result.outcome) {
             .pending => .applying,
             .rejected => .rejected,
-            .failed => .failed,
+            .failed, .capacity => .failed,
         };
     };
     return .pending;
+}
+
+fn serverCapacityBlocked(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    if (serverApplyStatus(mcp, server) != .failed) return false;
+    const management = if (mcp.management) |*value| value else return false;
+    for (management.convergence.results.items) |result| {
+        if (std.mem.eql(u8, result.target.id(), server.id)) return result.outcome == .capacity;
+    }
+    return false;
 }
 
 fn retainedMemberCount(mcp: *const mcp_state.McpProductState) usize {
@@ -645,6 +649,8 @@ pub fn writeProjection(
         }) catch return error.SnapshotTooLarge;
         try input.text.writeJson(writer, if (mcp.runtime_uncertain)
             "Runtime configuration outcome is unknown. Restart the application."
+        else if (serverCapacityBlocked(mcp, server))
+            "MCP connection capacity is full. Close unused tasks, then retry the connection."
         else if (mcp.refresh_schedule_failed)
             "Automatic refresh could not be scheduled. Select Refresh to retry."
         else if (mcp.refresh_paused)
@@ -710,11 +716,11 @@ pub fn writeProjection(
         };
         writer.print("],\"taskReferenceCount\":{d},\"applyStatus\":\"{s}\"}}", .{ taskReferenceCount(mcp, server.id), @tagName(serverApplyStatus(mcp, server)) }) catch return error.SnapshotTooLarge;
     }
-    writer.print("],\"retainedMemberCount\":{d},\"applyFailureCount\":{d},\"runtimeUncertain\":{}}}", .{ if (trusted) retainedMemberCount(mcp) else 0, if (trusted) applyFailureCount(mcp) else 0, trusted and mcp.runtime_uncertain }) catch return error.SnapshotTooLarge;
+    writer.print("],\"retainedMemberCount\":{d},\"applyFailureCount\":{d},\"runtimeUncertain\":{},\"runtimeTimeoutLimitMs\":{d}}}", .{ if (trusted) retainedMemberCount(mcp) else 0, if (trusted) applyFailureCount(mcp) else 0, trusted and mcp.runtime_uncertain, mcp_configuration.max_runtime_timeout_ms }) catch return error.SnapshotTooLarge;
 }
 
 const unavailable_projection =
-    "{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[],\"retainedMemberCount\":0,\"applyFailureCount\":0,\"runtimeUncertain\":false}";
+    "{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[],\"retainedMemberCount\":0,\"applyFailureCount\":0,\"runtimeUncertain\":false,\"runtimeTimeoutLimitMs\":" ++ std.fmt.comptimePrint("{d}", .{mcp_configuration.max_runtime_timeout_ms}) ++ "}";
 
 test "Product MCP View preserves the unavailable snapshot bytes" {
     const Text = struct {

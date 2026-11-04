@@ -328,6 +328,11 @@ pub const Runtime = struct {
             var removed = self.state.task_references.orderedRemove(index);
             removed.deinit();
             self.updateMemberReferenceCounts();
+            self.markChanged();
+            if (!self.shutting_down) if (self.state.management) |*management| if (management.runtime_manifest) |*manifest| {
+                if (manifest.nextStep(management.desiredRegistry(), management.limits, &management.convergence) != null)
+                    _ = self.ports.notifier.notify();
+            };
             return;
         }
     }
@@ -340,7 +345,7 @@ pub const Runtime = struct {
             if (entry.state != .loaded) continue;
             for (self.state.task_references.items) |reference| {
                 for (reference.tools) |tool| {
-                    if (std.mem.eql(u8, tool.server_id, entry.id) and std.mem.eql(u8, &tool.fingerprint, &entry.state.loaded)) {
+                    if (std.mem.eql(u8, tool.server_id, entry.id)) {
                         entry.task_references += 1;
                         break;
                     }
@@ -810,52 +815,49 @@ pub const Runtime = struct {
                 return error.McpManagementUnavailable;
             try members.append(self.allocator, server);
         }
-        var target: ?configuration.RuntimeApplyTarget = null;
-        var remove_index: ?usize = null;
-        for (members.items, 0..) |server, index| {
-            const current = state_module.findMcpServer(desired.servers, server.id);
-            if (current != null and current.?.enabled) continue;
-            const retained = for (manifest.entries) |entry| {
-                if (std.mem.eql(u8, entry.id, server.id)) break entry.task_references != 0;
-            } else false;
-            if (retained) continue;
-            const attempt = configuration.RuntimeApplyTarget.init(server.id, current, .remove);
-            if (management.convergence.handled(attempt)) continue;
-            target = attempt;
-            remove_index = index;
-            break;
-        }
-        if (remove_index) |index| {
-            _ = members.orderedRemove(index);
-        } else {
-            for (desired.servers) |server| {
-                if (!configuration.runtimeLoadEligible(server, management.limits)) continue;
-                const existing = for (members.items, 0..) |member, index| {
-                    if (std.mem.eql(u8, member.id, server.id)) break index;
-                } else null;
-                if (existing) |index| {
-                    if (std.mem.eql(u8, &configuration.runtimeDescriptorFingerprint(members.items[index]), &configuration.runtimeDescriptorFingerprint(server))) continue;
-                }
-                const attempt = configuration.RuntimeApplyTarget.init(server.id, server, if (existing == null) .add else .replace);
-                if (management.convergence.handled(attempt)) continue;
-                if (existing) |index| members.items[index] = server else try members.append(self.allocator, server);
-                target = attempt;
-                break;
-            }
-        }
-        const selected = target orelse {
-            if (management.convergence.nextRound()) return self.prepareConfigurationStep(expected_generation, .automatic);
+        const plan = manifest.nextStep(desired, management.limits, &management.convergence) orelse {
+            self.finishConvergence();
             return null;
         };
-        var step = configuration.RuntimeApplyStep.init(self.allocator, desired, members.items, selected, management.limits) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.McpManagementUnavailable,
+        if (plan.next_round) std.debug.assert(management.convergence.nextRound());
+        const selected = plan.target;
+        const existing = for (members.items, 0..) |member, index| {
+            if (std.mem.eql(u8, member.id, selected.id())) break index;
+        } else null;
+        switch (selected.kind) {
+            .remove => {
+                _ = members.orderedRemove(existing orelse return error.McpManagementUnavailable);
+            },
+            .replace => members.items[existing orelse return error.McpManagementUnavailable] = state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable,
+            .add => try members.append(self.allocator, state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable),
+        }
+        try management.convergence.prepare(self.allocator, selected);
+        var step = configuration.RuntimeApplyStep.init(self.allocator, desired, members.items, selected, management.limits) catch |err| {
+            // A rejected composition has no Core effect, but is still a processed
+            // attempt. Keep R intact and let the next candidate make progress.
+            management.convergence.reject(selected, if (members.items.len > management.limits.max_servers) .capacity else .failed);
+            self.state.configuration_apply_state = .failed;
+            self.markChanged();
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return self.prepareConfigurationStep(expected_generation, .automatic);
         };
         errdefer step.deinit();
-        try management.convergence.prepare(self.allocator, selected);
         _ = try self.beginConfigurationApply(expected_generation);
         self.state.apply_target = selected;
+        self.markChanged();
         return step;
+    }
+
+    fn finishConvergence(self: *Runtime) void {
+        const management = if (self.state.management) |*value| value else return;
+        const manifest = if (management.runtime_manifest) |*value| value else return;
+        if (self.state.runtime_uncertain or self.state.activation_failed) return;
+        if (manifest.nextStep(management.desiredRegistry(), management.limits, &management.convergence) != null) return;
+        for (manifest.entries) |entry| if (entry.state == .loaded) return;
+        if (self.state.admission == .blocked and self.state.admission.blocked == .pending_restart) {
+            policy.replaceAdmission(&self.state, .{ .ready = .{ .selection = null, .catalog_generation = null } });
+            self.markChanged();
+        }
     }
 
     pub fn beginConfigurationApply(
@@ -963,6 +965,7 @@ pub const Runtime = struct {
         } else {
             self.expireAdmission();
         }
+        self.finishConvergence();
         self.releaseBoundary();
         return true;
     }
@@ -1939,7 +1942,7 @@ pub const Runtime = struct {
             return;
         const management = if (self.state.management) |*value| value else return;
         const inspection = management.inspect();
-        if (inspection.health != .ready or inspection.runtime_alignment != .current)
+        if (inspection.health != .ready or self.state.runtime_uncertain)
             return;
         const desired = management.desiredRegistry() orelse return;
         if (desired.oauth_operation != null) return;
@@ -2772,4 +2775,60 @@ test "Product MCP Runtime wakes retained auth delivery when apply releases the b
     try std.testing.expect(runtime.failConfigurationApply(1, .preparation));
     try std.testing.expect(!runtime.runtime_auth_delivery_pending);
     try std.testing.expectEqual(@as(usize, 1), harness.notifications);
+}
+
+test "Product MCP composition capacity failure is processed and does not starve a replacement" {
+    const allocator = std.testing.allocator;
+    var limits = test_limits;
+    limits.max_servers = 2;
+    var servers: [4]configuration.ServerWire = undefined;
+    var fingerprints: [4][64]u8 = undefined;
+    const ids = [_][]const u8{ "a", "b", "c", "a" };
+    for (&servers, 0..) |*server, i| {
+        server.* = .{
+            .id = ids[i],
+            .namespace = ids[i],
+            .display_name = ids[i],
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = if (i == 3) 2000 else 1000,
+            .transport = .{ .kind = "streamable_http", .url = "https://example.test/mcp" },
+            .auth = .{ .kind = "none", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        };
+        fingerprints[i] = configuration.connectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &fingerprints[i] };
+    }
+    const actual: configuration.RegistryWire = .{ .schema_version = configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = servers[0..2] };
+    var bytes: [8192]u8 = undefined;
+    var preparation = try configuration.prepare(allocator, try configuration.encode(&bytes, actual, limits), true, false, .{}, limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    for (manifest.entries) |*entry| entry.task_references = 1;
+    const desired: configuration.RegistryWire = .{ .schema_version = configuration.schema_version, .generation = 2, .oauth_operation = null, .servers = servers[2..4] };
+    const management = try configuration.ManagementPort.init(allocator, desired, .{ .persistence = .{ .available = true }, .credentials = .{ .available = true }, .limits = limits, .runtime_manifest = &manifest });
+    manifest_owned = false;
+    var harness = TestHarness{};
+    var runtime = Runtime.init(allocator, harness.ports(), .{ .preparation = preparation, .activation = null, .activation_failed = false, .management = management, .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } }, .host_capabilities = .{}, .committed = true });
+    preparation_owned = false;
+    defer runtime.deinit();
+    var step = (try runtime.prepareConfigurationStep(2, .automatic)).?;
+    defer step.deinit();
+    try std.testing.expectEqualStrings("a", step.target.id());
+    try std.testing.expectEqual(.replace, step.target.kind);
+    try std.testing.expectEqual(@as(usize, 2), step.member_ids.len);
+    const ledger = &runtime.state.management.?.convergence;
+    const c = configuration.RuntimeApplyTarget.init("c", servers[2], .add);
+    try std.testing.expect(ledger.handled(c));
+    try std.testing.expectEqual(.capacity, ledger.results.items[0].outcome);
+    try std.testing.expect(runtime.takeChanged());
+    try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
+    try std.testing.expect((try runtime.prepareConfigurationStep(2, .automatic)) == null);
+    try std.testing.expectEqual(configuration.RuntimeAlignment.current, runtime.state.management.?.inspect().runtime_alignment);
+    for (runtime.state.management.?.runtime_manifest.?.entries) |entry| try std.testing.expectEqual(@as(u32, 1), entry.task_references);
+    try std.testing.expect(harness.queued == null);
 }

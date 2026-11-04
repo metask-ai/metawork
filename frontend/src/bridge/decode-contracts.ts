@@ -4480,6 +4480,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     "retainedMemberCount",
     "applyFailureCount",
     "runtimeUncertain",
+    "runtimeTimeoutLimitMs",
   ]);
   const count = (value: unknown, path: string) => {
     const result = nonNegativeNumber(value, path);
@@ -4495,6 +4496,15 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     item.applyFailureCount,
     `${path}.applyFailureCount`,
   );
+  const runtimeTimeoutLimitMs = count(
+    item.runtimeTimeoutLimitMs,
+    `${path}.runtimeTimeoutLimitMs`,
+  );
+  if (runtimeTimeoutLimitMs === 0 || runtimeTimeoutLimitMs > 0xffffffff)
+    fail(
+      `${path}.runtimeTimeoutLimitMs`,
+      "expected positive u32 timeout limit",
+    );
   const runtimeUncertain = booleanValue(
     item.runtimeUncertain,
     `${path}.runtimeUncertain`,
@@ -4985,6 +4995,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     retainedMemberCount,
     applyFailureCount,
     runtimeUncertain,
+    runtimeTimeoutLimitMs,
   };
 }
 export function decodeSearchCursor(

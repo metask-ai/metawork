@@ -927,7 +927,7 @@ pub fn buildRuntime(
             return err;
         };
         if (host_environment.catalog_budget) |budget| {
-            owner.* = budget.wrap(owner) catch |err| {
+            owner.* = budget.wrap(owner, server.timeout_ms) catch |err| {
                 owner.deinit();
                 allocator.destroy(owner);
                 return err;
@@ -957,7 +957,7 @@ pub fn buildRuntime(
             .namespace = server.namespace,
             .client_name = client_name,
             .client_version = client_version,
-            .timeout_ms = server.timeout_ms,
+            .timeout_ms = mcp_configuration.runtimeTimeoutMs(server.timeout_ms),
             .configuration_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             .allowed_tools = server.tools,
         };

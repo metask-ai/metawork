@@ -204,7 +204,6 @@ const RefreshJob = struct {
 };
 
 pub const Coordinator = struct {
-    catalog_budget: ?*mcp_platform.CatalogBudget = null,
     allocator: std.mem.Allocator,
     io: std.Io,
     control: control_ports.McpOauthPort,
@@ -389,7 +388,7 @@ pub const Coordinator = struct {
             .refresh_token = refresh_token,
             .now_unix_ms = now_unix_ms,
             .cancellation = .init(self.io),
-            .deadline = if (self.catalog_budget) |budget| budget.limitDeadline(std.Io.Clock.Timestamp.fromNow(self.io, refresh_timeout), 30_000) else std.Io.Clock.Timestamp.fromNow(self.io, refresh_timeout),
+            .deadline = std.Io.Clock.Timestamp.fromNow(self.io, refresh_timeout),
         };
         binding_owned = false;
         client_secret_owned = false;

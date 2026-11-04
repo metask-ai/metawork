@@ -494,6 +494,7 @@ const ConfigurationApplyJob = struct {
     authorizations: mcp_platform.HttpAuthorizations,
     allowlists: []agent.McpServerAllowlist,
     budget: ?*mcp_platform.CatalogBudget = null,
+    existing_member_count: usize = 0,
     product_state_installed: bool = false,
     result: ConfigurationApplyResult = .pending,
     finished: std.atomic.Value(bool) = .init(false),
@@ -504,7 +505,7 @@ const ConfigurationApplyJob = struct {
     }
 
     fn run(self: *ConfigurationApplyJob) void {
-        if (self.budget) |budget| budget.begin(self.allowlists.len) catch {
+        if (self.budget) |budget| budget.begin(self.existing_member_count) catch {
             self.publish(.failed);
             return;
         };
@@ -521,10 +522,7 @@ const ConfigurationApplyJob = struct {
             self.publish(.rejected);
             return;
         }
-        if (self.budget) |budget| budget.applied(self.allowlists.len) catch {
-            self.publish(.{ .applied = .{ .activation = null, .selection = null, .activation_failed = true } });
-            return;
-        };
+        if (self.budget) |budget| budget.applied();
         const activation_outcome = self.runtime.activateMcp() catch {
             self.publish(.{ .applied = .{
                 .activation = null,
@@ -545,11 +543,6 @@ const ConfigurationApplyJob = struct {
                 .activation_failed = true,
             } }),
             .activated => |activation| {
-                if (self.budget) |budget| budget.observe(activation) catch {
-                    activation.deinit();
-                    self.publish(.{ .applied = .{ .activation = null, .selection = null, .activation_failed = true } });
-                    return;
-                };
                 if (activation.takeSelection()) |startup_selection|
                     startup_selection.deinit();
                 const selection = self.runtime.createMcpAdmissionSelection(
@@ -899,6 +892,7 @@ pub const Coordinator = struct {
             .authorizations = authorizations,
             .allowlists = allowlists,
             .budget = self.host_environment.catalog_budget,
+            .existing_member_count = step.member_ids.len - @intFromBool(step.target.kind == .add),
         };
         // Ownership has moved even if thread creation fails.
         preparation_owned = false;
@@ -1134,7 +1128,7 @@ pub const Coordinator = struct {
             .transport_override = self.transport_override,
             .input = input,
             .cancellation = .init(self.io),
-            .deadline = if (self.host_environment.catalog_budget != null and (input == .registration or input == .exchange)) self.host_environment.catalog_budget.?.limitDeadline(flow.deadline, 30_000) else flow.deadline,
+            .deadline = flow.deadline,
         };
         input_owned = false;
         errdefer {
@@ -1839,10 +1833,15 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
         mcp_types.McpConfigurationApplyState.failed,
         product_mcp.testing.state(&workbench_owner.mcp.?).configuration_apply_state,
     );
-    try std.testing.expectEqual(
-        mcp_types.McpAdmissionBlockReason.pending_restart,
-        product_mcp.testing.state(&workbench_owner.mcp.?).admission.blocked,
-    );
+    const state = product_mcp.testing.state(&workbench_owner.mcp.?);
+    try std.testing.expect(state.admission == .ready);
+    try std.testing.expect(state.admission.ready.selection == null);
+    try std.testing.expectEqual(.current, workbench_owner.inspectMcpDesiredConfiguration().?.runtime_alignment);
+    for (0..3) |_| {
+        try std.testing.expect(!coordinator.drain());
+        try std.testing.expect(coordinator.configuration_apply_job == null);
+        try std.testing.expect(!coordinator.apply_pending);
+    }
 }
 
 test "MCP Application coordinator completes dynamic registration and OAuth loopback" {

@@ -186,6 +186,7 @@ function pageElement(management, query = "", overrides = {}) {
         retainedMemberCount: 0,
         applyFailureCount: 0,
         runtimeUncertain: false,
+        runtimeTimeoutLimitMs: 120000,
         ...management,
       },
       capabilities: {

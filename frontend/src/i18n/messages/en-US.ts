@@ -447,6 +447,8 @@ export const enUS = {
   "mcp.add.http_help": "Connect to a remote Streamable HTTP endpoint.",
   "mcp.add.protocol": "Protocol policy",
   "mcp.add.timeout": "Timeout (ms)",
+  "mcp.add.timeoutHelp":
+    "Per-request timeout. Execution is limited to {limit} ms; larger saved values use this limit.",
   "mcp.add.command": "Launch command",
   "mcp.add.command_help":
     "Paste the command you would normally run. Shell operators and substitutions are not executed.",

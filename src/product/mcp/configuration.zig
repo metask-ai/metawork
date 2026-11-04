@@ -15,6 +15,13 @@ pub const max_store_bytes: usize = 256 * 1024;
 pub const max_transaction_bytes: usize = 64 * 1024;
 const lock_file_name = ".registry.lock";
 
+/// Persisted user values remain readable; execution has a bounded Host ceiling.
+pub const max_runtime_timeout_ms: u32 = 120_000;
+pub const candidate_timeout_windows: u32 = 8;
+pub fn runtimeTimeoutMs(configured: u32) u32 {
+    return @min(configured, max_runtime_timeout_ms);
+}
+
 pub const Limits = struct {
     max_servers: usize,
     max_tools_per_server: usize,
@@ -750,7 +757,7 @@ pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server:
 /// Product's attempt ledger. Membership growth never invalidates failures;
 /// removal/replacement can reopen them after the current round finishes.
 pub const RuntimeConvergence = struct {
-    pub const Outcome = enum { pending, rejected, failed };
+    pub const Outcome = enum { pending, rejected, failed, capacity };
     const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome };
     results: std.ArrayList(Result) = .empty,
     epoch: u64 = 0,
@@ -762,10 +769,14 @@ pub const RuntimeConvergence = struct {
     }
 
     pub fn handled(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        return self.handledInRound(target, false);
+    }
+
+    fn handledInRound(self: *const RuntimeConvergence, target: RuntimeApplyTarget, next_round: bool) bool {
         for (self.results.items) |result| {
             if (!std.mem.eql(u8, result.target.id(), target.id()) or
                 !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
-            return result.outcome != .pending and (result.epoch == self.epoch or result.round == self.round);
+            return result.outcome != .pending and (result.epoch == self.epoch or (!next_round and result.round == self.round));
         }
         return false;
     }
@@ -2761,29 +2772,52 @@ pub const RuntimeManifest = struct {
         limits: Limits,
         convergence: ?*const RuntimeConvergence,
     ) RuntimeAlignment {
-        for (self.entries) |entry| {
-            const target = if (desired) |registry|
-                findServer(registry.servers, entry.id)
-            else
-                null;
-            if (entry.state == .loaded and entry.task_references != 0 and (target == null or !target.?.enabled)) continue;
-            if (!entryCompatible(entry, target, limits)) {
-                const attempt = RuntimeApplyTarget.init(entry.id, target, if (target == null or !target.?.enabled) .remove else .replace);
-                if (convergence == null or !convergence.?.handled(attempt)) return .restart_required;
+        return if (self.nextStep(desired, limits, convergence) != null) .restart_required else .current;
+    }
+
+    pub const Plan = struct { target: RuntimeApplyTarget, next_round: bool = false };
+
+    /// The sole membership policy. A waiting/unloadable Desired is not work;
+    /// retained membership and admission authorization are independent facts.
+    pub fn targetFor(self: *const RuntimeManifest, id: []const u8, desired: ?RegistryWire, limits: Limits) ?RuntimeApplyTarget {
+        const target = if (desired) |registry| findServer(registry.servers, id) else null;
+        const entry = findManifestEntry(self.entries, id);
+        const eligible = if (target) |server| runtimeLoadEligible(server, limits) else false;
+        if (entry) |actual| {
+            if (actual.state == .loaded) {
+                if (!eligible) return if (actual.task_references != 0) null else RuntimeApplyTarget.init(id, target, .remove);
+                if (std.mem.eql(u8, &actual.state.loaded, &runtimeDescriptorFingerprint(target.?))) return null;
+                return RuntimeApplyTarget.init(id, target, .replace);
             }
+            if (entryCompatible(actual.*, target, limits)) return null;
         }
-        if (desired) |registry| {
-            for (registry.servers) |server| {
-                if (findManifestEntry(self.entries, server.id) != null) continue;
-                if (server.enabled and serverRuntimeAuthorizationReady(server) and
-                    serverProblem(server, limits) == null)
-                {
-                    const attempt = RuntimeApplyTarget.init(server.id, server, .add);
-                    if (convergence == null or !convergence.?.handled(attempt)) return .restart_required;
-                }
+        return if (eligible) RuntimeApplyTarget.init(id, target, .add) else null;
+    }
+
+    pub fn nextStep(self: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits, convergence: ?*const RuntimeConvergence) ?Plan {
+        // Removal makes space first. All other actions follow Desired order.
+        for ([_]bool{ false, true }) |next_round| {
+            if (next_round) {
+                const ledger = convergence orelse break;
+                const eligible_round = for (ledger.results.items) |result| {
+                    if (result.epoch != ledger.epoch and result.round == ledger.round and result.outcome != .pending) break true;
+                } else false;
+                if (!eligible_round) break;
             }
+            for (self.entries) |entry| {
+                const target = self.targetFor(entry.id, desired, limits) orelse continue;
+                if (target.kind != .remove) continue;
+                if (convergence) |ledger| if (ledger.handledInRound(target, next_round)) continue;
+                return .{ .target = target, .next_round = next_round };
+            }
+            if (desired) |registry| for (registry.servers) |server| {
+                const target = self.targetFor(server.id, desired, limits) orelse continue;
+                if (target.kind == .remove) continue;
+                if (convergence) |ledger| if (ledger.handledInRound(target, next_round)) continue;
+                return .{ .target = target, .next_round = next_round };
+            };
         }
-        return .current;
+        return null;
     }
 };
 
@@ -2793,18 +2827,7 @@ fn entryCompatible(
     limits: Limits,
 ) bool {
     return switch (entry.state) {
-        .loaded => |fingerprint| if (target) |server|
-            server.enabled and
-                serverProblem(server, limits) == null and
-                std.mem.eql(u8, &fingerprint, &runtimeDescriptorFingerprint(server)) and
-                (serverRuntimeAuthorizationReady(server) or
-                    if (server.auth.oauth) |oauth|
-                        std.mem.eql(u8, oauth.status, "reauth_required") or
-                            std.mem.eql(u8, oauth.status, "awaiting_tokens")
-                    else
-                        false)
-        else
-            false,
+        .loaded => unreachable,
         .absent => |proof| switch (proof) {
             .disabled => if (target) |server| !server.enabled else true,
             .unapproved => if (target) |server|
@@ -8603,19 +8626,18 @@ test "runtime OAuth rejection retires the grant without invalidating its loaded 
     );
     try std.testing.expect(target.servers[0].auth.oauth.?.grant == null);
     try std.testing.expectEqual(@as(usize, 2), preparation.prepared.plan.transaction.retired_locators.len);
-    try std.testing.expect(entryCompatible(.{
-        .id = "oauth",
-        .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
-    }, target.servers[0], test_limits));
-    var awaiting = target.servers[0];
-    var awaiting_oauth = awaiting.auth.oauth.?;
-    awaiting_oauth.status = "awaiting_tokens";
-    awaiting_oauth.grant = null;
-    awaiting.auth.oauth = awaiting_oauth;
-    try std.testing.expect(entryCompatible(.{
-        .id = "oauth",
-        .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
-    }, awaiting, test_limits));
+    var entries = [_]RuntimeManifestEntry{.{ .id = "oauth", .state = .{ .loaded = runtimeDescriptorFingerprint(server) } }};
+    const manifest: RuntimeManifest = .{ .allocator = std.testing.allocator, .entries = &entries };
+    try std.testing.expectEqual(.remove, manifest.targetFor("oauth", target, test_limits).?.kind);
+    entries[0].task_references = 1;
+    try std.testing.expect(manifest.targetFor("oauth", target, test_limits) == null);
+    var awaiting_servers = [_]ServerWire{target.servers[0]};
+    awaiting_servers[0].auth.oauth.?.status = "awaiting_tokens";
+    var awaiting_registry = target;
+    awaiting_registry.servers = &awaiting_servers;
+    try std.testing.expect(manifest.targetFor("oauth", awaiting_registry, test_limits) == null);
+    entries[0].task_references = 0;
+    try std.testing.expectEqual(.remove, manifest.targetFor("oauth", awaiting_registry, test_limits).?.kind);
 }
 
 test "typed OAuth management commits consent marker and fresh token locators" {
@@ -9226,4 +9248,41 @@ test "Runtime explicit member retry preserves unrelated failures across growth" 
     try std.testing.expect(ledger.handled(b));
     ledger.retry();
     try std.testing.expect(!ledger.handled(b));
+}
+
+test "membership planner exhausts eligibility membership retention and processed outcomes" {
+    var server: ServerWire = .{ .id = "source", .namespace = "source", .display_name = "Source", .enabled = true, .negotiation = "automatic", .timeout_ms = 2000, .transport = .{ .kind = "streamable_http", .url = "https://example.test/mcp" }, .auth = .{ .kind = "none", .oauth = null }, .connection_approval = null, .tools = &.{} };
+    const approval = connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &approval };
+    var entries = [_]RuntimeManifestEntry{.{ .id = server.id, .state = .{ .loaded = runtimeDescriptorFingerprint(server) } }};
+    var manifest: RuntimeManifest = .{ .allocator = std.testing.allocator, .entries = &entries };
+    var desired_servers = [_]ServerWire{server};
+    var desired: RegistryWire = .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &desired_servers };
+    for ([_]bool{ false, true }) |present| for ([_]bool{ false, true }) |enabled| for ([_]bool{ false, true }) |approved| for ([_]bool{ false, true }) |valid| for ([_]bool{ false, true }) |changed| for ([_]bool{ false, true }) |loaded| for ([_]bool{ false, true }) |referenced| {
+        desired_servers[0] = server;
+        desired_servers[0].enabled = enabled;
+        desired_servers[0].connection_approval = if (approved) server.connection_approval else null;
+        if (!valid) desired_servers[0].timeout_ms = 0;
+        if (changed) desired_servers[0].display_name = "Changed";
+        // A connection change (rather than presentation) changes Runtime identity.
+        if (changed) desired_servers[0].transport.url = "https://changed.example.test/mcp";
+        const current_approval = connectionFingerprint(desired_servers[0]);
+        if (approved) desired_servers[0].connection_approval = .{ .fingerprint = &current_approval };
+        desired.servers = if (present) &desired_servers else &.{};
+        manifest.entries = if (loaded) &entries else &.{};
+        entries[0].task_references = @intFromBool(referenced);
+        const eligible = present and enabled and approved and valid;
+        const expected: ?@FieldType(RuntimeApplyTarget, "kind") = if (loaded and !eligible) (if (referenced) null else .remove) else if (eligible and !loaded) .add else if (eligible and loaded and changed) .replace else null;
+        const plan = manifest.nextStep(desired, test_limits, null);
+        try std.testing.expectEqual(expected, if (plan) |value| value.target.kind else null);
+        try std.testing.expectEqual(if (plan == null) RuntimeAlignment.current else .restart_required, manifest.alignment(desired, test_limits));
+        if (plan) |value| {
+            var ledger: RuntimeConvergence = .{};
+            defer ledger.deinit(std.testing.allocator);
+            try ledger.prepare(std.testing.allocator, value.target);
+            ledger.reject(value.target, .failed);
+            try std.testing.expect(manifest.nextStep(desired, test_limits, &ledger) == null);
+            try std.testing.expectEqual(.current, manifest.alignmentWithResults(desired, test_limits, &ledger));
+        }
+    };
 }
