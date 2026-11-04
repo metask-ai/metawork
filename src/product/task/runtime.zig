@@ -798,6 +798,7 @@ pub const PreparedRun = struct {
                 false,
                 true,
                 null,
+                false,
             );
             run_record.terminal_observed = true;
             task_state.freezeRunElapsedMs(run_record, self.effects.run_clock.now());
@@ -4643,6 +4644,14 @@ pub const Runtime = struct {
                 self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
             }
         }
+    }
+
+    pub fn stopEventDelivery(self: *Runtime) void {
+        for (self.tasks) |entry| if (entry) |task| switch (task.runtime.attachment) {
+            .attached => |*attached| attached.binding.stopEventDelivery(),
+            // A close worker stops its Session before entering any wait.
+            .closing, .detached => {},
+        };
     }
 
     pub fn prepareShutdown(

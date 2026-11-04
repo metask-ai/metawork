@@ -338,6 +338,7 @@ pub fn cancelRun(context: *anyopaque) void {
         false,
         true,
         null,
+        false,
     );
     publishAutomaticTitleFallback(run);
     job.notifier.notify();
@@ -504,6 +505,7 @@ pub fn commitRunTerminal(
     source_diagnostic_truncated: bool,
     exclude_on_product_terminal: bool,
     model_error: ?state.RunModelError,
+    event_delivery_lost: bool,
 ) bool {
     std.debug.assert(state.isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
@@ -517,6 +519,7 @@ pub fn commitRunTerminal(
             .diagnostic_len = projected.len,
             .diagnostic_truncated = source_diagnostic_truncated or projected.truncated,
             .diagnostic_redacted = projected.redacted,
+            .event_delivery_lost = event_delivery_lost,
             .model_error = if (model_error) |value| saved: {
                 const storage = run.model_error_storage.?;
                 storage.* = value;
@@ -579,6 +582,7 @@ fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: 
         truncated,
         false,
         if (result.model_error) |detail| projectModelError(projector, detail, &run.initialRedactionSecrets()) else null,
+        result.event_delivery_lost,
     );
 }
 
@@ -595,6 +599,7 @@ fn commitBeginFailure(projector: TextProjector, run: *state.RunRecord, failure: 
         false,
         true,
         null,
+        false,
     );
 }
 

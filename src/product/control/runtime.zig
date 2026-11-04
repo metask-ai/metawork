@@ -7697,6 +7697,7 @@ pub const Runtime = struct {
             .context = self,
             .cancel_fn = cancelApprovalRuntimeExecutor,
         });
+        self.task_runtime.stopEventDelivery();
         if (self.mcp_executor) |lane| lane.shutdown();
         self.executor.shutdown();
         self.approval_executor.shutdown();

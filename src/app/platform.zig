@@ -277,6 +277,13 @@ pub const Adapter = struct {
         return true;
     }
 
+    /// Agent notifications use the same required relay without making a
+    /// closed consumer fatal to the executing callback.
+    pub fn notifyAgentEvents(context: ?*anyopaque) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
+        return self.requestRequiredWake();
+    }
+
     pub fn notifyRequired(context: *anyopaque) void {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (!self.requestRequiredWake())
@@ -628,9 +635,10 @@ const RequiredWakeTest = struct {
     const Worker = struct {
         adapter: *Adapter,
         exited: std.Io.Event = .unset,
+        accepted: bool = false,
 
         fn run(self: *@This()) void {
-            Adapter.notifyRequired(self.adapter);
+            self.accepted = Adapter.notifyAgentEvents(self.adapter);
             self.exited.set(std.testing.io);
         }
     };
@@ -643,6 +651,7 @@ test "required wake lets a worker exit while a Bridge callback holds the host lo
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try std.testing.expect(!Adapter.notifyAgentEvents(&adapter));
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
 
@@ -656,10 +665,12 @@ test "required wake lets a worker exit while a Bridge callback holds the host lo
     T.host_lock.unlock(std.testing.io);
     thread.join();
     try exited;
+    try std.testing.expect(worker.accepted);
 
     adapter.stop(&harness.runtime);
     try std.testing.expectEqual(@as(usize, 1), T.calls.load(.monotonic));
     try std.testing.expect(!adapter.requestRequiredWake());
+    try std.testing.expect(!Adapter.notifyAgentEvents(&adapter));
 }
 
 test "required wake coalesces requests while the host is busy" {
@@ -673,7 +684,7 @@ test "required wake coalesces requests while the host is busy" {
     defer adapter.stop(&harness.runtime);
 
     T.host_lock.lockUncancelable(std.testing.io);
-    for (0..32) |_| Adapter.notifyRequired(&adapter);
+    for (0..32) |_| try std.testing.expect(Adapter.notifyAgentEvents(&adapter));
     T.host_lock.unlock(std.testing.io);
 
     adapter.stop(&harness.runtime);

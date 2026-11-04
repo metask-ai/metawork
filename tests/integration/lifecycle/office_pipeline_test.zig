@@ -122,12 +122,13 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 return;
             }
             if (std.mem.eql(u8, mode, "consumer-starvation")) {
-                try std.testing.expect(terminal.phase == .failed);
-                const diagnostic = run.terminal_diagnostic[0..state.terminalPayload(run).?.diagnostic_len];
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "boundary=event_pump reason=queue_rejected") != null);
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "error=DeadlineExceeded") != null);
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, agent.core_manifest_sha256) != null);
+                try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
                 try std.testing.expect(run.event_stream_finalized);
+                try std.testing.expect(run.first_event_rejection == null);
+                try std.testing.expect(run.terminal_drain_rejection == null);
+                try std.testing.expectEqual(@as(usize, 256), std.mem.count(u8, run.assistant.list.items, "Synthetic stream chunk. "));
+                try std.testing.expectEqual(state.AssistantOutputKind.final, run.assistant_output_kind.?);
+                try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
                 return;
             }
             if (std.mem.eql(u8, mode, "fixture-error")) {
@@ -222,8 +223,8 @@ fn qualify(mode: []const u8) !void {
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             // Deliberately withhold the sole Product consumer while actual Core
             // receives a bounded legal stream. Keep all production queue limits
-            // and deadlines unchanged. This models an occupied Native loop; it
-            // does not assert that a particular OS dialog was exercised here.
+            // unchanged. This models an occupied Native loop, not an actual
+            // OS dialog. Resume after the former fatal deadline has passed.
             var ready = false;
             for (0..5000) |_| {
                 if (temporary.dir.statFile(std.testing.io, "starvation-ready", .{})) |_| {
@@ -234,6 +235,9 @@ fn qualify(mode: []const u8) !void {
             }
             try std.testing.expect(ready);
             try std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
+            const task = control.task_runtime.find(task_id).?;
+            try std.testing.expect(runtime.pendingEventCount(task.runtime.routeId()) != 0);
+            try std.testing.expect(state.terminalPayload(state.findRun(task.durable.runs, id).?) == null);
         }
         finish(&control, task_id, id, mode) catch |err| {
             const trace = temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(2 * 1024 * 1024)) catch return err;
@@ -270,8 +274,9 @@ fn qualify(mode: []const u8) !void {
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
             defer std.testing.allocator.free(saved);
-            try std.testing.expect(std.mem.indexOf(u8, saved, "boundary=event_pump reason=queue_rejected") != null);
-            try std.testing.expect(std.mem.indexOf(u8, saved, "error=DeadlineExceeded") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "Synthetic stream chunk.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "queue_capacity_failure") == null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "event_pipeline_failure") == null);
         }
     }
     if (std.mem.eql(u8, mode, "deny")) try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "denied.txt", .{}));
@@ -302,7 +307,7 @@ test "Office canonical Product executor retains real callback rejection identity
     try qualify("callback-budget");
 }
 
-test "Office canonical stream preserves queue rejection when the sole consumer is withheld" {
+test "Office canonical stream survives consumer backpressure and retains the full response" {
     try qualify("consumer-starvation");
 }
 

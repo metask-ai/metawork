@@ -431,6 +431,7 @@ pub const TerminalPayload = struct {
     diagnostic_truncated: bool = false,
     diagnostic_redacted: bool = false,
     model_error: ?*RunModelError = null,
+    event_delivery_lost: bool = false,
 };
 
 pub const CompactTerminalPayload = struct {
@@ -1543,7 +1544,8 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (run.event_stream_finalized or run.terminal_event_drain_marked) continue;
-        if (terminalPayload(run) == null) continue;
+        const terminal = terminalPayload(run) orelse continue;
+        if (terminal.event_delivery_lost) _ = recordEventProjectionFailure(run);
         run.model_activity = .none;
         run.terminal_event_drain_marked = true;
         changed = true;
@@ -1567,10 +1569,11 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
             run.output_segment.list.items.len != 0 or
             run.output_continued.list.items.len != 0)
         {
-            if (run.terminal_drain_rejection == null)
-                run.terminal_drain_rejection = OutputProtocolObservation.capture(run);
-            if (run.event_projection_failure == null)
-                run.event_projection_failure = .dependency_contract_failure;
+            if (!terminalPayload(run).?.event_delivery_lost) {
+                if (run.terminal_drain_rejection == null)
+                    run.terminal_drain_rejection = OutputProtocolObservation.capture(run);
+                _ = recordDependencyContractFailure(run);
+            }
             run.open_output_segment = null;
             run.output_continued_group = null;
             run.output_retry_group = null;
@@ -2638,70 +2641,75 @@ test "event drain advances the final commentary boundary with the committed suff
     );
 }
 
-test "event drain fails closed when an output segment remains unresolved" {
-    var commentary_ends: [0]u64 = .{};
-    var runs = [_]?RunRecord{.{
-        .id = 7,
-        .generation = 1,
-        .execution_generation = 1,
-        .execution_protocol = .anthropic_messages,
-        .execution_model = "model",
-        .permission_profile = .approval_required,
-        .permission_interaction = .interactive,
-        .input = .{ .text = .{ .value = @constCast("prompt") } },
-        .commentary_ends = &commentary_ends,
-        .tools = &.{},
-        .terminal_diagnostic = @constCast(""),
-        .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
-        .output_segment_protocol_seen = true,
-    }};
-    var compacts: [0]?CompactRecord = .{};
-    var ui_history: [0]?UiRecord = .{};
-    var task = Task{
-        .durable = .{
-            .id = 3,
-            .recent_order = 1,
+test "event drain distinguishes local missing events from genuine unresolved segments" {
+    for ([_]bool{ false, true }) |local_gap| {
+        var commentary_ends: [0]u64 = .{};
+        var runs = [_]?RunRecord{.{
+            .id = 7,
+            .generation = 1,
             .execution_generation = 1,
             .execution_protocol = .anthropic_messages,
-            .execution_model = @constCast("model"),
+            .execution_model = "model",
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
-            .workspace_id = 2,
-            .workspace_root = @constCast("root"),
-            .title = @constCast("title"),
-            .runs = &runs,
-            .compacts = &compacts,
-            .ui_history = &ui_history,
-        },
-        .runtime = .{},
-    };
-    const run = &task.durable.runs[0].?;
-    try run.output_segment.list.appendSlice(std.testing.allocator, "draft");
-    defer run.output_segment.list.deinit(std.testing.allocator);
-    run.terminal_payload = .{
-        .exclude_on_product_terminal = false,
-        .phase = .completed,
-        .outcome = .completed,
-        .cause = null,
-        .session_disposition_at_completion = .reusable,
-    };
-    run.terminal_publication.store(.published, .release);
+            .input = .{ .text = .{ .value = @constCast("prompt") } },
+            .commentary_ends = &commentary_ends,
+            .tools = &.{},
+            .terminal_diagnostic = @constCast(""),
+            .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
+            .output_segment_protocol_seen = true,
+        }};
+        var compacts: [0]?CompactRecord = .{};
+        var ui_history: [0]?UiRecord = .{};
+        var task = Task{
+            .durable = .{
+                .id = 3,
+                .recent_order = 1,
+                .execution_generation = 1,
+                .execution_protocol = .anthropic_messages,
+                .execution_model = @constCast("model"),
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
+                .workspace_id = 2,
+                .workspace_root = @constCast("root"),
+                .title = @constCast("title"),
+                .runs = &runs,
+                .compacts = &compacts,
+                .ui_history = &ui_history,
+            },
+            .runtime = .{},
+        };
+        const run = &task.durable.runs[0].?;
+        try run.output_segment.list.appendSlice(std.testing.allocator, "draft");
+        defer run.output_segment.list.deinit(std.testing.allocator);
+        run.terminal_payload = .{
+            .exclude_on_product_terminal = false,
+            .phase = .completed,
+            .outcome = .completed,
+            .cause = null,
+            .session_disposition_at_completion = .reusable,
+        };
+        run.terminal_payload.event_delivery_lost = local_gap;
+        run.terminal_publication.store(.published, .release);
 
-    try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
-        &task,
-        null,
-        null,
-    ));
-    try std.testing.expectEqual(
-        EventProjectionFailure.dependency_contract_failure,
-        run.event_projection_failure.?,
-    );
-    try std.testing.expectEqual(
-        RunOutcome.dependency_contract_failure,
-        productTerminalFacts(run).?.outcome,
-    );
-    try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
-    try std.testing.expectEqual(@as(u64, 5), run.terminal_drain_rejection.?.open.?.bytes);
-    try std.testing.expect(run.first_event_rejection == null);
+        try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+        try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
+            &task,
+            null,
+            null,
+        ));
+        try std.testing.expectEqual(
+            if (local_gap) EventProjectionFailure.consumer_rejected else EventProjectionFailure.dependency_contract_failure,
+            run.event_projection_failure.?,
+        );
+        try std.testing.expectEqual(
+            if (local_gap) RunOutcome.failed else RunOutcome.dependency_contract_failure,
+            productTerminalFacts(run).?.outcome,
+        );
+        try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
+        if (local_gap) {
+            try std.testing.expect(run.terminal_drain_rejection == null);
+        } else try std.testing.expectEqual(@as(u64, 5), run.terminal_drain_rejection.?.open.?.bytes);
+        try std.testing.expect(run.first_event_rejection == null);
+    }
 }

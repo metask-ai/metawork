@@ -161,8 +161,8 @@ Run 受控终止保留 stopped；Task 可等待新的用户意图，这不等于
 | 步骤 | 工作及完成条件 |
 | --- | --- |
 | 1 | 有界 drain，Run/compact 按 Session 计数收口；验证跨 Session 公平性，测量单事件和提交耗时 |
-| 2 | 可取消背压、RequiredWake、关闭前粘性唤醒及回执尾部交接；验证普通 Stop、close、shutdown 不死锁、不因本地退出 poison |
-| 3 | 核算与保留分离，明确错误分类和违约升级，修正 completion_seen 与输入接续，落实回执和生图最小记录；正文政策按第 5 节延后 |
+| 2 | 可取消背压、RequiredWake 和关闭前粘性唤醒；验证普通 Stop、close、shutdown 不死锁、不因本地退出 poison |
+| 3 | 核算与保留分离，明确错误分类和违约升级，修正 completion_seen 与输入接续，落实回执尾部交接和生图最小记录；正文政策按第 5 节延后 |
 | 4 | 修正既有 cause 映射和相关文档歧义；前述机制可用后最后删除 16，使用 MAX_TURNS_V1 |
 | 5 | 完成真实执行、桌面及历史重开验收，收集性能与 watchdog 证据后报告完成 |
 

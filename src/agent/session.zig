@@ -531,13 +531,10 @@ pub const Limits = struct {
     per_session_control_reserved_capacity: usize = 16,
     per_session_control_reserved_bytes: usize = 512 * 1024,
     max_event_bytes: usize = default_event_limits.max_event_bytes,
-    event_enqueue_timeout: std.Io.Duration = .fromMilliseconds(100),
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
     max_terminal_diagnostic_bytes: usize = 512,
     event_ready_notifier: ?EventReadyNotifier = null,
-    event_ready_retry_interval: std.Io.Duration = .fromMilliseconds(5),
-    event_ready_timeout: std.Io.Duration = .fromMilliseconds(50),
 };
 
 pub const SessionSnapshot = struct {
@@ -708,6 +705,8 @@ pub const Session = struct {
     raw_abort_status_code: ?u32 = null,
     dependency_contract_failure: bool = false,
     file_changes_lost: std.atomic.Value(bool) = .init(false),
+    event_delivery_stopped: std.atomic.Value(bool) = .init(false),
+    event_delivery_lost: std.atomic.Value(bool) = .init(false),
     permission_interaction: PermissionInteraction = .interactive,
     shell_policy: ShellPolicy = .disabled,
     permission_stop_requested: bool = false,
@@ -861,6 +860,8 @@ pub const Session = struct {
         self.raw_abort_status_code = null;
         self.dependency_contract_failure = false;
         self.file_changes_lost.store(false, .release);
+        self.event_delivery_stopped.store(false, .release);
+        self.event_delivery_lost.store(false, .release);
         self.permission_stop_requested = false;
         self.cancel_requested = false;
         self.state = .queued;
@@ -1938,6 +1939,16 @@ pub const Session = struct {
         if (!self.run_done) setTerminationSignalLocked(self, signal);
     }
 
+    pub fn stopEventDelivery(self: *Session) void {
+        self.lock();
+        self.event_delivery_stopped.store(true, .release);
+        const callbacks = self.active_callback_refs != 0;
+        self.unlock();
+        // A new callback sees the sticky state before waiting. Only existing
+        // callback owners can already be asleep on the queue condition.
+        if (callbacks) self.agent_runtime.events.stopWaiting(&self.event_delivery_stopped);
+    }
+
     pub fn close(self: *Session, interruption: ExternalInterruption) Error!void {
         self.lock();
         if (self.state == .closed) {
@@ -1968,6 +1979,7 @@ pub const Session = struct {
         const run_id = self.active_run_id;
         const compact_id = self.active_compact_id;
         self.state = .closing;
+        self.event_delivery_stopped.store(true, .release);
         const signal: TerminationSignal = .{ .interrupted = interruption };
         if (compact_active) {
             if (!self.compact_done) {
@@ -1984,6 +1996,10 @@ pub const Session = struct {
         }
         self.broadcast();
         self.unlock();
+
+        // Closing admission first prevents a concurrent prepare from resetting
+        // the sticky exit state between installation and the callback join.
+        self.stopEventDelivery();
 
         if (should_abort_now) {
             if (compact_active) self.abortCompact(compact_id) else self.abortRun(run_id, signal);
@@ -2455,6 +2471,7 @@ pub const Session = struct {
             .termination_signal = self.termination_signal,
             .first_callback_rejection = self.first_callback_rejection,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
+            .event_delivery_lost = self.event_delivery_lost.load(.acquire),
             .failure = final_failure,
             .model_error = if (final_failure == .dependency_contract) null else observed_model_error,
             .session_disposition_at_completion = self.dispositionLocked(),
@@ -2531,7 +2548,7 @@ pub const Session = struct {
             const matches = candidate.raw != null and candidate.raw.? == identity.session;
             candidate.unlock();
             if (matches) {
-                if (candidate.retainCoreCallback(raw_run) != null) retained = candidate;
+                if (candidate.retainCoreCallback(raw_run, false) != null) retained = candidate;
                 break;
             }
         }
@@ -2800,7 +2817,7 @@ pub const Session = struct {
         event_json: wire.BytesViewV1,
     ) callconv(.c) u32 {
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
-        const run_id = self.retainCoreCallback(raw_run) orelse return wire.EVENT_FATAL;
+        const run_id = self.retainCoreCallback(raw_run, true) orelse return wire.EVENT_FATAL;
         defer self.releaseCoreCallback();
         const encoded = sdk.borrowedBytes(event_json) catch {
             self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .invalid_bytes });
@@ -2915,13 +2932,23 @@ pub const Session = struct {
             .allocator = self.agent_runtime.allocator,
         };
         const event_kind = std.meta.activeTag(parsed.value.known);
-        self.agent_runtime.events.enqueueWithDeadline(envelope, self.agent_runtime.event_enqueue_timeout) catch |err| {
+        const admission: event_pump.Error!void = if (self.event_delivery_stopped.load(.acquire))
+            error.ConsumerStopped
+        else if (is_file_changes)
+            self.agent_runtime.events.enqueue(envelope)
+        else
+            self.agent_runtime.events.enqueueWaiting(envelope, &self.event_delivery_stopped);
+        admission catch |err| {
             envelope.deinit();
+            if (err == error.ConsumerStopped) {
+                self.event_delivery_lost.store(true, .release);
+                if (is_file_changes) self.file_changes_lost.store(true, .release);
+                return wire.EVENT_CONTINUE;
+            }
             if (is_file_changes and switch (err) {
                 error.GlobalCapacity,
                 error.SessionCapacity,
                 error.SessionSlotCapacity,
-                error.DeadlineExceeded,
                 => true,
                 else => false,
             }) {
@@ -2937,19 +2964,18 @@ pub const Session = struct {
                 error.SessionCapacity,
                 error.SessionSlotCapacity,
                 error.SequenceExhausted,
-                error.DeadlineExceeded,
                 => .capacity,
+                error.ConsumerStopped => unreachable,
             } });
             self.recordCallbackRejection(.{ .boundary = .event_pump, .reason = .queue_rejected, .event = event_kind, .failure = err, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
-            self.recordCallbackRejection(.{ .boundary = .notifier, .reason = .consumer_unavailable, .event = event_kind, .encoded_bytes = encoded.len });
-            self.recordTerminationSignal(.{
-                .event_consumer_notification_failure = .unavailable,
-            });
-            return wire.EVENT_FATAL;
+            self.stopEventDelivery();
+            // Matching abort is explicitly allowed from a Core callback.
+            // A close already in progress owns its own abort and join.
+            self.requestTermination(run_id, .{ .interrupted = .session_close }) catch {};
         }
         return wire.EVENT_CONTINUE;
     }
@@ -2967,7 +2993,7 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        const callback_run_id = self.retainCoreCallback(raw_run) orelse return wire.UI_FATAL;
+        const callback_run_id = self.retainCoreCallback(raw_run, false) orelse return wire.UI_FATAL;
         defer self.releaseCoreCallback();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
@@ -3135,6 +3161,7 @@ pub const Session = struct {
     fn retainCoreCallback(
         self: *Session,
         raw_run: ?*const wire.RunContextV1,
+        allow_closing: bool,
     ) ?u64 {
         const run = sdk.validateRunContext(raw_run) catch {
             self.recordCallbackRejection(.{ .boundary = .admission, .reason = .invalid_context });
@@ -3143,7 +3170,7 @@ pub const Session = struct {
         };
         self.lock();
         defer self.unlock();
-        if (self.state == .closing or self.state == .closed) return null;
+        if (self.state == .closed or (self.state == .closing and !allow_closing)) return null;
         if (self.raw == null or run.session != self.raw.? or
             !self.run_started or !self.core_call_in_progress or
             run.run_id != self.active_run_id)

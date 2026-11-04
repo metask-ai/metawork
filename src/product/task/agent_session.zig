@@ -69,6 +69,10 @@ pub const Binding = struct {
         return self.route_id;
     }
 
+    pub fn stopEventDelivery(self: *const Binding) void {
+        if (self.owner) |owner| owner.session.stopEventDelivery();
+    }
+
     pub fn testFixture(route_id: u64) Binding {
         std.debug.assert(@import("builtin").is_test);
         std.debug.assert(route_id != 0);

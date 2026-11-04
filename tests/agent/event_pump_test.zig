@@ -123,7 +123,7 @@ test "text chunks remain byte lossless through the event pump" {
     try std.testing.expectEqualStrings("hello 世界!", writer.buffered());
 }
 
-test "event pump waits for a slow consumer and fails at the hard deadline" {
+test "event pump waits for a slow consumer until space is available" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
         .global_count = 1,
         .global_bytes = 1024,
@@ -140,10 +140,10 @@ test "event pump waits for a slow consumer and fails at the hard deadline" {
     var context = PumpEnqueueContext{
         .pump = &pump,
         .envelope = try pumpEnvelope(1, 1, "{\"text_chunk\":\"second\"}"),
-        .timeout = .fromSeconds(1),
     };
     const thread = try std.Thread.spawn(.{}, enqueuePumpOnThread, .{&context});
     try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try std.testing.expect(!context.finished.load(.acquire));
     var first = pump.takeFair().?;
     first.deinit();
     thread.join();
@@ -151,16 +151,58 @@ test "event pump waits for a slow consumer and fails at the hard deadline" {
     try std.testing.expect(context.failure == null);
     var second = pump.takeFair().?;
     second.deinit();
+}
 
-    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"third\"}"));
-    var timed_out = try pumpEnvelope(1, 1, "{\"text_chunk\":\"fourth\"}");
-    try std.testing.expectError(
-        error.DeadlineExceeded,
-        pump.enqueueWithDeadline(timed_out, .fromMilliseconds(5)),
-    );
-    timed_out.deinit();
-    var third = pump.takeFair().?;
-    third.deinit();
+test "event pump consumer stop wakes waiters and remains sticky" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 1,
+        .global_bytes = 1024,
+        .global_control_reserved_count = 0,
+        .global_control_reserved_bytes = 0,
+        .per_session_count = 1,
+        .per_session_bytes = 1024,
+        .per_session_control_reserved_count = 0,
+        .per_session_control_reserved_bytes = 0,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    try pump.enqueue(try pumpEnvelope(1, 1, "{\"text_chunk\":\"first\"}"));
+    var context = PumpEnqueueContext{
+        .pump = &pump,
+        .envelope = try pumpEnvelope(1, 1, "{\"text_chunk\":\"blocked\"}"),
+    };
+    defer context.envelope.deinit();
+    const thread = try std.Thread.spawn(.{}, enqueuePumpOnThread, .{&context});
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    pump.stopWaiting(&context.stopped);
+    thread.join();
+    try std.testing.expectEqual(error.ConsumerStopped, context.failure.?);
+    try std.testing.expect(!context.succeeded);
+    try std.testing.expectEqual(@as(usize, 1), pump.pendingForSession(1));
+    // The producer retains a rejected envelope; a subsequent callback cannot
+    // re-enter the wait even if close has already drained the old queue.
+    var first = pump.takeFair().?;
+    first.deinit();
+    try std.testing.expectError(error.ConsumerStopped, pump.enqueueWaiting(context.envelope, &context.stopped));
+}
+
+test "event pump does not wait for an envelope that cannot fit an empty queue" {
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .global_count = 1,
+        .global_bytes = 8,
+        .global_control_reserved_count = 0,
+        .global_control_reserved_bytes = 0,
+        .per_session_count = 1,
+        .per_session_bytes = 8,
+        .per_session_control_reserved_count = 0,
+        .per_session_control_reserved_bytes = 0,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    var envelope = try pumpEnvelope(1, 1, "{\"text_chunk\":\"larger than the queue\"}");
+    defer envelope.deinit();
+    const stopped: std.atomic.Value(bool) = .init(false);
+    try std.testing.expectError(error.EventTooLarge, pump.enqueueWaiting(envelope, &stopped));
 }
 
 test "delivery sideband uses event byte admission and transport retains only original Core JSON" {

@@ -156,7 +156,7 @@ Agent Session 的公开回答入口只有 choice-only `respondPermission`。调�
 
 当前 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Product Control 保存新 Task 默认审批模式，Task 捕获其 effective profile 与自动评审事实，每个 Run 保存 provenance。人工审批与自动评审都映射 `approval_required → accept_edits + unrestricted`，完全访问映射 `full_access → full_access + unrestricted`；自动评审仅改变 Host 回答当前 callback 的方式，`auto` 和 `dont_ask` 等其他 Core mode 不是 MetaWork 产品档位。Agent 接受 fresh create、按已提交 profile 的 restore，以及 Product 在同一 attachment 静止后明确请求的官方 Session mode mutation；它不拥有默认值、产品模式选择、持久化或 UI。人工与自动评审之间只改变 Host 委托，不调用 Core mutator；跨 profile 使用官方 SDK `update_permission_mode`，不能以规则、Session shadow 或目标 profile restore 模拟。Agent 在互斥区间验证 idle、无 callback/Core call/abort 引用与完整 Session identity，并比较前后 typed description 的 mode 和 policy generation：真正改变必须推进 generation，相同 mode 必须保持 generation；Core 明确拒绝、预算拒绝与 poisoned/未知状态分别返回 typed disposition，不推断成功或静默降级。变更撤销 Session grants，不允许以反向 mutation 假装恢复原授权；Product 的 checkpoint/metadata 事务与旧基线恢复由[Product 架构](product-architecture.md#22-workspace-与-task-admission)拥有。`full_access` callback 不进入 Host 自动评审，保留核心保护的原处理方式。
 
-Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer wake 在有界重试后仍不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
+Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer required wake 已关闭而不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
 
 PermissionProfile 切换只通过官方 mutator；report、describe、policy generation 与实际权限 effect 的验证责任及平台差异见[验证规范](validation.md)，不从旧 artifact 的结果推导当前版本行为。
 
@@ -422,9 +422,9 @@ flowchart LR
 
 事件泵同时约束 global/per-Session count 与 bytes、单事件大小、control reserve 和每次主循环消费的事件数/墙钟预算；两个 terminal 观察之间的消费共用一次预算，跨 Session 保持公平。时间预算在事件处理边界检查，不打断单次同步提交；精确容量由实现和测试拥有。
 
-默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界、公平调度和 deadline。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
+默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界和公平调度。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
 
-单事件尺寸超限映射为独立的 Product `event_payload_too_large`，队列准入容量不足继续映射为 `queue_capacity_failure`；Renderer 必须区分这两种原因，不将其描述为磁盘或工作台存储已满。
+单事件尺寸超限继续映射为独立的 Product `event_payload_too_large`；事件泵临时饱和采用可取消背压，不再生成 `queue_capacity_failure`。后者仍可表达执行队列等既有准入失败，Renderer 不将这些原因描述为磁盘或工作台存储已满。
 
 ### 过载语义
 
@@ -439,7 +439,11 @@ flowchart LR
 | UI request/response state       | 不得静默丢失                                                                              |
 | run/error/cancel/terminal state | 不得静默丢失                                                                              |
 
-当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
+正常消费期间，关键事件在队列饱和时等待空间，不能因消费耗时返回 fatal；等待不持有阻止消费、abort 或 close 推进的 Session 锁。普通 Stop 保持消费，不主动制造缺口。超过整个可用队列字节容量的单事件无法靠等待接纳，仍须明确拒绝，不能永久挂起。
+
+消费者停止推进的 close/shutdown 必须在 join 前设置精确操作范围内粘性的停止等待状态并唤醒 callback；合法但未入队的事件标记本地缺口并返回 `EVENT_CONTINUE`，后续事件不重新等待，真实身份或协议违约仍拒绝。当前活动 Run 在 closing 中的合法事件仍完成接受校验，不能仅因 closing 返回 fatal。缺口沿有界 TerminalResult/terminal publication 交接，不依赖向饱和队列补写事件；已入队的所有权保持不变，新操作不继承旧状态。
+
+Application 将 Agent 消费通知接入既有 RequiredWake，沿用非阻塞 request、pending 合并与交付；每轮预算耗尽仍有事件时请求后续 wake。通知 unavailable 表示消费路径关闭，解除队列等待并按既有控制路径请求取消，合法 `on_event` 返回 `EVENT_CONTINUE`；匹配 abort 可从 callback 调用。不要另建周期重试或通过 callback fatal 退出。RequiredWake 对底层通知合同违约的原失败处理保持不变。正文记录政策由 Product 合同拥有，本节不授权静默丢弃 text_chunk。
 
 `file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 有界单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode 容量不足或 pump admission 容量不足可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在与 Host 相同的总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
 
