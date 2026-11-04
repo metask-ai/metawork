@@ -1860,7 +1860,7 @@ pub const Runtime = struct {
     pub fn nextOauthExpiry(self: *const Runtime) ?state_module.McpOauthExpiry {
         if (self.state.runtime_uncertain) return null;
         if (self.shutting_down or self.catalogBoundaryBusy()) return null;
-        return policy.nextOauthExpiry(&self.state);
+        return policy.nextOauthExpiry(&self.state, self.ports.unix_clock.nowMs());
     }
 
     pub fn updateRefreshDeadline(self: *Runtime) void {

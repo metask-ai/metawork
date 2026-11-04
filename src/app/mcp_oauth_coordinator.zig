@@ -250,16 +250,27 @@ pub const Coordinator = struct {
 
     /// A completed apply yields here before another candidate. A raw expired
     /// grant does not hold candidates while the Host's retry floor is pending.
+    pub fn dueMaintenance(self: *Coordinator) ?mcp_types.McpOauthExpiry {
+        if (self.stopping or self.job != null) return null;
+        const now_ms = self.host.now_unix_ms_fn(self.host.context) orelse return null;
+        if (self.retry_not_before_unix_ms) |not_before| if (now_ms < not_before) return null;
+        const expiry = self.control.nextMcpOauthExpiry() orelse return null;
+        return if (expiry.expires_at_unix_ms <= now_ms) expiry else null;
+    }
+
     pub fn runDueMaintenance(self: *Coordinator) bool {
-        if (self.stopping or self.job != null) return false;
-        const now_ms = self.host.now_unix_ms_fn(self.host.context) orelse return false;
-        if (self.retry_not_before_unix_ms) |not_before| if (now_ms < not_before) return false;
-        const expiry = self.control.nextMcpOauthExpiry() orelse return false;
-        if (expiry.expires_at_unix_ms > now_ms) return false;
-        return self.onTimer();
+        _ = self.dueMaintenance() orelse return false;
+        return self.advanceDueMaintenance();
     }
 
     pub fn onTimer(self: *Coordinator) bool {
+        // Timers wake the same main-loop arbitration as completions. They
+        // cannot jump ahead of a candidate's turn to launch network work.
+        if (!self.stopping) self.host.notify();
+        return true;
+    }
+
+    fn advanceDueMaintenance(self: *Coordinator) bool {
         const now_unix_ms = self.host.nowRequired();
         if (self.stopping or self.job != null) return true;
         if (self.auth_delivery_retry_at) |due| {
@@ -641,6 +652,8 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
     try std.testing.expectEqual(@as(usize, 0), fixture.deliveries);
     fixture.now_ms = 31_000;
     _ = coordinator.onTimer();
+    _ = coordinator.drain();
+    _ = coordinator.runDueMaintenance();
     try std.testing.expectEqual(@as(usize, 1), fixture.deliveries);
     try std.testing.expectEqual(@as(?u64, null), fixture.armed);
     try std.testing.expectEqual(@as(usize, 0), authorizations.pending_slots.len);
@@ -799,6 +812,8 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
     try std.testing.expectEqual(@as(?u64, 32_500), fixture.armed);
     fixture.now_ms = 33_000;
     _ = coordinator.onTimer();
+    _ = coordinator.drain();
+    _ = coordinator.runDueMaintenance();
     try std.testing.expectEqual(@as(?u64, 63_000), fixture.armed);
     try std.testing.expect(!coordinator.runDueMaintenance());
     const state = mcp_types.testing.state(&runtime);
@@ -811,6 +826,8 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
     try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
     fixture.now_ms = fixture.armed.?;
     _ = coordinator.onTimer();
+    _ = coordinator.drain();
+    _ = coordinator.runDueMaintenance();
     try std.testing.expectEqualStrings("ab", &fixture.attempts);
     try std.testing.expect(coordinator.job == null);
     try std.testing.expectEqual(@as(?u64, 40_000), mcp_types.testing.state(&runtime).management.?.desiredRegistry().?.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);

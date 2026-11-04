@@ -363,6 +363,7 @@ pub fn runtimeOauthLoaded(mcp: *const mcp_state.McpProductState, server: mcp_con
 
 pub fn nextOauthExpiry(
     mcp: *const mcp_state.McpProductState,
+    now_unix_ms: ?u64,
 ) ?mcp_state.McpOauthExpiry {
     const management = if (mcp.management) |*value| value else return null;
     if (management.inspect().health != .ready) return null;
@@ -378,12 +379,16 @@ pub fn nextOauthExpiry(
         const expires_at = grant.expires_at_unix_ms orelse if (management.oauth_schedule.refreshRequested(server.id)) @as(u64, 0) else continue;
         const refresh = grant.refresh_token_ref != null;
         const eligible_at = if (refresh) management.oauth_schedule.eligibleAt(server.id, expires_at) else expires_at;
-        if (earliest == null or eligible_at < earliest.?.expires_at_unix_ms)
+        const loaded = runtimeOauthLoaded(mcp, server);
+        const loaded_due = loaded and now_unix_ms != null and eligible_at <= now_unix_ms.?;
+        const previous_loaded_due = if (earliest) |previous| previous.runtime_loaded and now_unix_ms != null and previous.expires_at_unix_ms <= now_unix_ms.? else false;
+        if (earliest == null or (loaded_due and !previous_loaded_due) or
+            (loaded_due == previous_loaded_due and eligible_at < earliest.?.expires_at_unix_ms))
             earliest = .{
                 .server_id = server.id,
                 .expires_at_unix_ms = eligible_at,
                 .refresh = refresh,
-                .runtime_loaded = runtimeOauthLoaded(mcp, server),
+                .runtime_loaded = loaded,
                 .consent_epoch = grant.consent_epoch,
                 .token_revision = grant.token_revision,
                 .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
@@ -606,21 +611,30 @@ test "browser authorization excludes only its server from OAuth refresh selectio
         }
         break :actual .{ .allocator = std.testing.allocator, .entries = entries };
     };
-    const expiry = nextOauthExpiry(&state).?;
+    const expiry = nextOauthExpiry(&state, null).?;
     try std.testing.expectEqualStrings("refreshable", expiry.server_id);
     try std.testing.expectEqual(@as(u64, 200), expiry.expires_at_unix_ms);
+    // A future loaded deadline must not hide an already due cold grant.
+    // Once both are due, maintenance of the live member takes precedence.
+    const operation = state.authorization_operation;
+    state.authorization_operation = null;
+    state.management.?.runtime_manifest.?.entries[0].state.loaded[0] ^= 1;
+    try std.testing.expectEqualStrings("authorizing", nextOauthExpiry(&state, 150).?.server_id);
+    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, 200).?.server_id);
+    state.management.?.runtime_manifest.?.entries[0].state.loaded[0] ^= 1;
+    state.authorization_operation = operation;
     const current = state.management.?.desired.?.value.servers;
     current[1].enabled = false;
-    try std.testing.expect(nextOauthExpiry(&state) == null);
+    try std.testing.expect(nextOauthExpiry(&state, null) == null);
     state.management.?.runtime_manifest.?.entries[1].task_references = 1;
-    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state).?.server_id);
+    try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, null).?.server_id);
     try std.testing.expectEqual(@as(usize, 0), serverToolsForAdmission(state.management.?.desiredRegistry().?, current[1]).len);
     current[1].timeout_ms += 1;
-    try std.testing.expect(nextOauthExpiry(&state) == null);
+    try std.testing.expect(nextOauthExpiry(&state, null) == null);
     current[1].timeout_ms -= 1;
     // A referenced actual member has no refresh route after Desired deletion.
     state.management.?.desired.?.value.servers = current[0..1];
-    try std.testing.expect(nextOauthExpiry(&state) == null);
+    try std.testing.expect(nextOauthExpiry(&state, null) == null);
 }
 
 test "OAuth operation remains excluded from every rebuilt Admission target" {

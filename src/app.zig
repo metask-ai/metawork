@@ -137,6 +137,7 @@ const App = struct {
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
     mcp_budget: ?*mcp_platform.CatalogBudget = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
+    mcp_candidate_turn: bool = false,
     single_instance: ?*app_single_instance.Coordinator = null,
     update_transport: ?update_http.Adapter = null,
     updates: ?update_coordinator.Coordinator = null,
@@ -472,16 +473,11 @@ const App = struct {
                     coordinator.drain();
                 if (self.models_coordinator) |coordinator|
                     coordinator.drain();
-                if (self.mcp_oauth_refresh) |*coordinator| {
-                    if (!coordinator.drain()) coordinator.reconcileTimer();
-                }
-                if (self.mcp_oauth_refresh) |*coordinator|
-                    _ = coordinator.runDueMaintenance();
-                if (self.mcp_management) |*coordinator|
-                    if (coordinator.drain())
-                        if (self.mcp_oauth_refresh) |*refresh|
-                            refresh.reconcileTimer();
+                // Product consumes catalog completion before management can
+                // observe the shared boundary and decide whether to advance.
                 self.drainAgentEvents();
+                if (self.mcp_oauth_refresh) |*coordinator| _ = coordinator.drain();
+                self.advanceMcp();
                 if (self.control) |control|
                     if (self.dispatcher) |dispatcher| {
                         control.drainFilePreviewCompletions(
@@ -562,6 +558,26 @@ const App = struct {
     fn drainAgentEvents(self: *@This()) void {
         const control = self.control orelse return;
         self.agent_events.drain(control.agentEventConsumer());
+    }
+
+    fn advanceMcp(self: *App) void {
+        const due = if (self.mcp_oauth_refresh) |*oauth| oauth.dueMaintenance() else null;
+        const maintenance_first = if (due) |value| value.runtime_loaded or !self.mcp_candidate_turn else false;
+        var maintained = false;
+        if (maintenance_first) if (self.mcp_oauth_refresh) |*oauth| {
+            maintained = oauth.runDueMaintenance();
+            if (maintained) self.mcp_candidate_turn = true;
+        };
+        if (self.mcp_management) |*management| {
+            const had_apply = management.configuration_apply_job != null;
+            _ = management.drain();
+            if (!had_apply and management.configuration_apply_job != null) self.mcp_candidate_turn = false;
+        }
+        const applying = if (self.mcp_management) |*management| management.configuration_apply_job != null else false;
+        if (!maintained and !applying) if (self.mcp_oauth_refresh) |*oauth| {
+            if (oauth.runDueMaintenance()) self.mcp_candidate_turn = true;
+        };
+        if (self.mcp_oauth_refresh) |*oauth| oauth.reconcileTimer();
     }
 };
 
@@ -1210,4 +1226,175 @@ pub fn runPermissionReviewEvaluation(init: std.process.Init) !void {
 
 test {
     _ = @import("app/history_store.zig");
+}
+
+test "main-loop wake consumes catalog completion and fairly schedules MCP recovery and candidates" {
+    const fixture = @import("lifecycle_fixture");
+    fixture.fake_core.reset();
+    const mcp = @import("metawork_product_mcp");
+    const control_ports = @import("metawork_product_control_ports");
+    const Effects = struct {
+        now_ms: u64 = 0,
+        maintenances: usize = 0,
+        loaded: bool = false,
+        var identity: u8 = 0x51;
+        fn commit(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, identity);
+            identity += 1;
+            return true;
+        }
+        fn request(_: *anyopaque, _: u64, _: control_ports.NativeDialog.Message, _: *const control_ports.NativeDialog.Completion) !u64 {
+            return error.UnexpectedCall;
+        }
+        fn open(_: *anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn now(raw: *anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.now_ms;
+        }
+        fn notify(_: *anyopaque) void {}
+        fn arm(_: *anyopaque, _: u64) bool {
+            return true;
+        }
+        fn cancel(_: *anyopaque) void {}
+        fn next(raw: *anyopaque) ?mcp.McpOauthExpiry {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .server_id = "waiting-grant", .expires_at_unix_ms = 0, .runtime_loaded = self.loaded };
+        }
+        fn begin(raw: *anyopaque, _: []const u8) anyerror!mcp.McpOauthRefreshBeginOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.maintenances += 1;
+            // Reject before any effect. The next due grant still competes
+            // with candidates after the ordinary retry floor.
+            return .rejected;
+        }
+        fn complete(_: *anyopaque, _: mcp_configuration.CompleteRefreshInput, _: mcp.McpOauthRuntimeCommit) anyerror!mcp_configuration.ManagementOutcome {
+            return error.UnexpectedCall;
+        }
+        fn reauth(_: *anyopaque, _: mcp.McpRuntimeAuthorizationFailure) anyerror!mcp.McpRuntimeAuthorizationFailureOutcome {
+            return error.UnexpectedCall;
+        }
+        fn oauthClear(_: *anyopaque, _: []const u8) anyerror!mcp_configuration.ManagementOutcome {
+            return error.UnexpectedCall;
+        }
+        fn waitForApply(composition: *App) !void {
+            const pending = composition.mcp_management.?.configuration_apply_job.?;
+            for (0..5_000) |_| {
+                if (pending.finished.load(.acquire)) return;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch unreachable;
+            }
+            return error.ApplyDidNotFinish;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const limits: mcp_configuration.Limits = .{ .max_servers = 8, .max_tools_per_server = 32, .max_namespace_bytes = 128, .max_credential_locators = 64, .max_runtime_secrets_per_server = 128, .max_runtime_secret_bytes_per_server = 16 * 1024 };
+    var preparation = try mcp_configuration.prepare(allocator, null, true, false, .{}, limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const agent_runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        agent_runtime.shutdown() catch unreachable;
+        agent_runtime.deinit();
+    }
+    var control = try product_control.Runtime.init(allocator, std.testing.io, agent_runtime, .{ .worker_count = 1, .queue_capacity = 1 }, .{ .mcp = .{
+        .preparation = &preparation,
+        .management = .{
+            .persistence = .{ .available = true, .commit_journal_fn = Effects.commit, .commit_registry_fn = Effects.commit, .clear_journal_fn = Effects.clear },
+            .credentials = .{ .available = true },
+            .identity_generator = .{ .available = true, .fill_fn = Effects.fill },
+            .limits = limits,
+            .runtime_manifest = &manifest,
+        },
+    } });
+    preparation_owned = false;
+    manifest_owned = false;
+    defer control.deinit();
+    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(0, .{ .display_name = "Candidate", .url = "https://candidate.example.test/mcp" }));
+    // The sole completion notification is already being consumed. Product
+    // still owns this finished job until the main-loop lifecycle drain.
+    const product = &control.mcp.?;
+    const job = try allocator.create(mcp.testing.RefreshJob);
+    job.* = .{
+        .allocator = allocator,
+        .catalog = undefined,
+        .notifier = undefined,
+        .request_generation = mcp.testing.state(product).refresh_request_generation,
+        .arena = .init(allocator),
+        .allowlists = &.{},
+        .build_admission = false,
+        .state = .init(.completed),
+        .outcome = .empty,
+    };
+    mcp.testing.installRefreshJob(product, job);
+    var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = allocator };
+    defer authorizations.deinit();
+    const harness = try native_sdk.TestHarness().create(allocator, .{});
+    defer harness.destroy(allocator);
+    var credentials: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    var host: Effects = .{};
+    var composition: App = .{
+        .env_map = undefined,
+        .io = std.testing.io,
+        .frontend_asset_root = "",
+        .main_thread_id = std.Thread.getCurrentId(),
+        .automation = undefined,
+        .platform = undefined,
+        .completion_transport = undefined,
+        .control = &control,
+        .mcp_management = mcp_management_coordinator.Coordinator.init(allocator, std.testing.io, control.mcpManagementPort(), agent_runtime, &credentials, &authorizations, .{
+            .context = &host,
+            .request_dialog_fn = Effects.request,
+            .open_url_fn = Effects.open,
+            .now_unix_ms_fn = Effects.now,
+            .notify_fn = Effects.notify,
+        }, .{}),
+        .mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(allocator, std.testing.io, .{
+            .context = &host,
+            .next_expiry_fn = Effects.next,
+            .begin_refresh_fn = Effects.begin,
+            .complete_refresh_fn = Effects.complete,
+            .require_reauthorization_fn = Effects.reauth,
+            .clear_operation_fn = Effects.oauthClear,
+            .recover_operation_fn = Effects.oauthClear,
+        }, &credentials, &authorizations, .{ .context = &host, .now_unix_ms_fn = Effects.now, .arm_fn = Effects.arm, .cancel_fn = Effects.cancel, .notify_fn = Effects.notify }),
+    };
+    defer composition.mcp_management.?.deinit();
+    defer composition.mcp_oauth_refresh.?.deinit();
+    fixture.fake_core.forceNextMcpApplyDisposition(fixture.wire.MCP_APPLY_REJECTED);
+    try App.event(&composition, undefined, .effects_wake);
+    try std.testing.expect(mcp.testing.refreshJob(product) == null);
+    try std.testing.expect(composition.mcp_management.?.configuration_apply_job != null);
+    try std.testing.expectEqual(@as(usize, 1), host.maintenances);
+    try Effects.waitForApply(&composition);
+    host.now_ms = 30_000;
+    try App.event(&composition, undefined, .effects_wake);
+    try std.testing.expectEqual(@as(usize, 2), host.maintenances);
+    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(1, .{ .display_name = "Second", .url = "https://second.example.test/mcp" }));
+    host.now_ms = 60_000;
+    _ = composition.mcp_oauth_refresh.?.onTimer();
+    try std.testing.expectEqual(@as(usize, 2), host.maintenances);
+    fixture.fake_core.forceNextMcpApplyDisposition(fixture.wire.MCP_APPLY_REJECTED);
+    try App.event(&composition, undefined, .effects_wake);
+    try std.testing.expect(composition.mcp_management.?.configuration_apply_job != null);
+    try std.testing.expectEqual(@as(usize, 2), host.maintenances);
+    try Effects.waitForApply(&composition);
+    try App.event(&composition, undefined, .effects_wake);
+    try std.testing.expectEqual(@as(usize, 3), host.maintenances);
+    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(2, .{ .display_name = "Third", .url = "https://third.example.test/mcp" }));
+    host.loaded = true;
+    host.now_ms = 90_000;
+    fixture.fake_core.forceNextMcpApplyDisposition(fixture.wire.MCP_APPLY_REJECTED);
+    try App.event(&composition, undefined, .effects_wake);
+    try std.testing.expectEqual(@as(usize, 4), host.maintenances);
+    try std.testing.expect(composition.mcp_management.?.configuration_apply_job != null);
 }
