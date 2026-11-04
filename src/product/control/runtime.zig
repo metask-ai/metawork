@@ -20199,9 +20199,36 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
     try std.testing.expect(desired.servers[0].auth.oauth.?.grant == null);
     try std.testing.expectEqual(
-        mcp_configuration.RuntimeAlignment.current,
+        mcp_configuration.RuntimeAlignment.restart_required,
         control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
+    var removal = (try control.prepareMcpConfigurationStep(5, .automatic)).?;
+    var removal_owned = true;
+    defer if (removal_owned) removal.deinit();
+    try std.testing.expectEqual(.remove, removal.target.kind);
+    try std.testing.expectEqualStrings("oauth", removal.target.id());
+    var removed_manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &removal.preparation)).?;
+    var removed_manifest_owned = true;
+    defer if (removed_manifest_owned) removed_manifest.deinit();
+    // This Product-boundary test has no catalog. Keep its recovery enqueue
+    // explicitly unavailable while accepting the confirmed membership result.
+    const NoCatalogExecutor = struct {
+        fn enqueue(_: *anyopaque, _: mcp_runtime.Job) error{ ExecutorShuttingDown, QueueFull }!void {
+            return error.QueueFull;
+        }
+        fn cancel(_: *anyopaque, _: *anyopaque) bool {
+            return false;
+        }
+    };
+    const previous_executor = control.mcp.?.ports.executor;
+    defer control.mcp.?.ports.executor = previous_executor;
+    control.mcp.?.ports.executor = .{ .context = &control, .enqueue_fn = NoCatalogExecutor.enqueue, .cancel_fn = NoCatalogExecutor.cancel };
+    try std.testing.expect(control.completeMcpConfigurationApply(5, &removal.preparation, &removed_manifest, null, null, true));
+    removal_owned = false;
+    removed_manifest_owned = false;
+    try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, control.inspectMcpDesiredConfiguration().?.runtime_alignment);
+    for (mcp_testing.state(&control.mcp.?).management.?.runtime_manifest.?.entries) |entry|
+        try std.testing.expect(!std.mem.eql(u8, entry.id, "oauth"));
     try std.testing.expectEqual(McpAdmissionBlockReason.activation_unavailable, mcp_testing.state(&control.mcp.?).admission.blocked);
     try std.testing.expectEqual(
         @as(usize, 1),

@@ -211,7 +211,8 @@ pub const Runtime = struct {
 
     /// Capture availability together with the synchronous Selection borrow,
     /// rather than sampling readiness again after copying that pointer.
-    pub fn selectionForNewTask(self: *const Runtime) NewTaskAdmission {
+    pub fn selectionForNewTask(self: *Runtime) NewTaskAdmission {
+        self.expireAdmission();
         if (self.shutting_down or !self.state.committed or self.state.admission != .ready or self.admissionExpired())
             return .{ .available = false, .selection = null };
         const selection = policy.selectionForNewTask(&self.state);
@@ -221,7 +222,7 @@ pub const Runtime = struct {
     }
 
     pub fn newTaskAuthorityReady(self: *const Runtime) bool {
-        return self.selectionForNewTask().available;
+        return !self.shutting_down and self.state.committed and self.state.admission == .ready and !self.admissionExpired();
     }
 
     pub fn authorizationOperation(
@@ -1798,6 +1799,7 @@ pub const Runtime = struct {
     }
 
     pub fn updateRefreshDeadline(self: *Runtime) void {
+        self.state.catalog_observed_at_ms = null;
         self.state.refresh_deadline_ms = null;
         self.state.expiry_deadline_ms = null;
         const activation = self.state.activation orelse return;
@@ -1815,6 +1817,15 @@ pub const Runtime = struct {
             activation.catalogServers(),
             observed_at_ms,
         );
+        self.state.catalog_observed_at_ms = observed_at_ms;
+        self.updateAdmissionDeadline();
+        self.expireAdmission();
+    }
+
+    fn updateAdmissionDeadline(self: *Runtime) void {
+        self.state.expiry_deadline_ms = null;
+        const activation = self.state.activation orelse return;
+        const observed_at_ms = self.state.catalog_observed_at_ms orelse return;
         var ttl_ms: ?u64 = null;
         if (self.state.admission == .ready) if (self.state.admission.ready.selection) |selection| {
             for (selection.selectedTools()) |tool| {
@@ -1829,7 +1840,58 @@ pub const Runtime = struct {
         };
         if (ttl_ms) |ttl|
             self.state.expiry_deadline_ms = std.math.add(u64, observed_at_ms, ttl) catch null;
-        self.expireAdmission();
+    }
+
+    fn admissionCatalogAgeMs(self: *const Runtime) ?u64 {
+        const activation = self.state.activation orelse return null;
+        const age = activation.catalogAgeMs() orelse return null;
+        const observed = self.state.catalog_observed_at_ms orelse return age;
+        const now = self.ports.timer.now() orelse return age;
+        return @max(age, now -| observed);
+    }
+
+    /// Rebuild only from the already-published tool cap and still-fresh source
+    /// proofs. This is a local Selection copy, with no refresh or new authority.
+    fn narrowExpiredAdmission(self: *Runtime) Error!bool {
+        if (self.state.admission != .ready) return false;
+        const original = self.state.admission.ready.selection orelse return false;
+        const activation = self.state.activation orelse return false;
+        const age = self.admissionCatalogAgeMs() orelse return false;
+        const desired = if (self.state.management) |*management| management.desiredRegistry() else null;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const allowlists = @constCast(try policy.buildRefreshAllowlists(arena.allocator(), &self.state, desired));
+        for (allowlists) |*allowlist| {
+            const binding = for (activation.serverHealth()) |health| {
+                if (std.mem.eql(u8, health.id, allowlist.id)) break health.binding_identity;
+            } else {
+                allowlist.tools = &.{};
+                continue;
+            };
+            const fresh = for (activation.catalogServers()) |server| {
+                if (std.mem.eql(u8, &binding, &server.binding_identity)) break server.fresh and age < server.ttl_remaining_ms;
+            } else false;
+            if (!fresh) {
+                allowlist.tools = &.{};
+                continue;
+            }
+            var count: usize = 0;
+            const tools = @constCast(allowlist.tools);
+            for (allowlist.tools) |tool| {
+                const selected = for (original.selectedTools()) |entry| {
+                    if (std.mem.eql(u8, entry.server_id, allowlist.id) and std.mem.eql(u8, entry.name, tool)) break true;
+                } else false;
+                if (selected) {
+                    tools[count] = tool;
+                    count += 1;
+                }
+            }
+            allowlist.tools = tools[0..count];
+        }
+        const selection = (try self.ports.catalog.createAdmissionSelection(activation, allowlists)) orelse return false;
+        policy.replaceAdmission(&self.state, .{ .ready = .{ .selection = selection, .catalog_generation = activation.catalogGeneration() } });
+        self.updateAdmissionDeadline();
+        return true;
     }
 
     pub fn admissionExpired(self: *const Runtime) bool {
@@ -1853,16 +1915,17 @@ pub const Runtime = struct {
 
     fn expireAdmission(self: *Runtime) void {
         if (self.admissionExpired()) {
-            policy.blockAdmission(&self.state, .activation_unavailable);
+            const narrowed = self.narrowExpiredAdmission() catch false;
+            if (!narrowed) policy.blockAdmission(&self.state, .activation_unavailable);
             self.markChanged();
         }
     }
 
     pub fn syncFreshness(self: *Runtime) bool {
         self.observeOauthTime();
-        const was_ready = self.state.admission == .ready;
+        const expired = self.admissionExpired();
         self.expireAdmission();
-        if (!was_ready or self.state.admission == .ready) return false;
+        if (!expired) return false;
         if (!self.state.refresh_paused)
             _ = self.queueRefresh(false, false) catch {};
         return true;

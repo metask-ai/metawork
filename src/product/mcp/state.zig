@@ -372,6 +372,7 @@ pub const McpProductState = struct {
     refresh_pending: bool = false,
     refresh_deadline_ms: ?u64 = null,
     expiry_deadline_ms: ?u64 = null,
+    catalog_observed_at_ms: ?u64 = null,
     refresh_not_before_ms: ?u64 = null,
     refresh_failures: u8 = 0,
     refresh_paused: bool = false,

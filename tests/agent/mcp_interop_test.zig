@@ -2609,7 +2609,11 @@ test "real Product keeps B admission when a retained unselected A reaches its ea
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .unrelated_expiry);
 }
 
-const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit, retain_disabled, retain_deleted, revoked_then_deleted, disabled_edit, unrelated_expiry };
+test "real Product narrows selected A on expiry and admits a Task with still-fresh B" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .selected_expiry);
+}
+
+const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit, retain_disabled, retain_deleted, revoked_then_deleted, disabled_edit, unrelated_expiry, selected_expiry };
 
 fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpTransportKind) !void {
     try expectMcpProductAdmissionCase(protocol_version, transport, .expiry);
@@ -2946,7 +2950,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         try std.testing.expect((try mcp.restoreAuthorityForTask(fresh_task_id, null)).selection == null);
         return;
     }
-    if (race == .unrelated_expiry) {
+    if (race == .unrelated_expiry or race == .selected_expiry) {
         // Keep both metadata sources healthy. Only A's shorter observation
         // expires in Product's clock; A is retained for the original Task.
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
@@ -2965,15 +2969,21 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         defer current.deinit();
         const b_id = current.value.servers[1].id;
         try std.testing.expectEqual(.saved, try restarted_workbench.setMcpAllowedTools(3, .{ .server_id = b_id, .tools = &.{"echo"} }));
-        try std.testing.expectEqual(.saved, try restarted_workbench.setMcpServerEnabled(4, .{ .server_id = server_id, .enabled = false }));
-        var step = (try restarted_workbench.prepareMcpConfigurationStep(5, .automatic)).?;
+        if (race == .unrelated_expiry)
+            try std.testing.expectEqual(.saved, try restarted_workbench.setMcpServerEnabled(4, .{ .server_id = server_id, .enabled = false }));
+        const generation = restarted_workbench.inspectMcpDesiredConfiguration().?.desired_generation.?;
+        var step = (try restarted_workbench.prepareMcpConfigurationStep(generation, .automatic)).?;
         var step_owned = true;
         defer if (step_owned) step.deinit();
         var candidate = try mcp_configuration.prepare(std.testing.allocator, durable_registry.storage[0..durable_registry.len], true, false, .{}, product_mcp_limits);
         defer candidate.deinit();
+        for (candidate.registry.?.value.servers, candidate.server_states) |server, *state|
+            if (!std.mem.eql(u8, server.id, b_id)) {
+                state.* = .disabled;
+            };
         var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{});
         defer built.deinit();
-        var input = try restarted_runtime.prepareMcpMembership(5, &built.input.?, step.member_ids);
+        var input = try restarted_runtime.prepareMcpMembership(generation, &built.input.?, step.member_ids);
         defer input.deinit();
         try std.testing.expectEqual(.applied, try restarted_runtime.applyMcpConfiguration(&input));
         const activated = switch (try restarted_runtime.activateMcp()) {
@@ -2988,17 +2998,25 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         var applied = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &step.preparation)).?;
         var applied_owned = true;
         defer if (applied_owned) applied.deinit();
-        try std.testing.expect(restarted_workbench.completeMcpConfigurationApply(5, &step.preparation, &applied, activated, selected, false));
+        try std.testing.expect(restarted_workbench.completeMcpConfigurationApply(generation, &step.preparation, &applied, activated, selected, false));
         step_owned = false;
         applied_owned = false;
-        refresh_timer.now_ms += 2_500;
         const mcp = &restarted_workbench.mcp.?;
+        if (race == .selected_expiry) try std.testing.expectEqual(@as(usize, 2), mcp.selectionForNewTask().selection.?.selectedTools().len);
+        refresh_timer.now_ms += 2_500;
         try std.testing.expect(mcp.state.refresh_deadline_ms.? <= refresh_timer.now_ms);
-        try std.testing.expect(mcp.state.expiry_deadline_ms.? > refresh_timer.now_ms);
+        if (race == .selected_expiry) try std.testing.expect(mcp.state.expiry_deadline_ms.? <= refresh_timer.now_ms);
         const admission = mcp.selectionForNewTask();
+        try std.testing.expect(mcp.state.expiry_deadline_ms.? > refresh_timer.now_ms);
         try std.testing.expect(admission.available);
         try std.testing.expectEqual(@as(usize, 1), admission.selection.?.selectedTools().len);
         try std.testing.expectEqualStrings(b_id, admission.selection.?.selectedTools()[0].server_id);
+        const next_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
+        try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.ready_with_selection, try restarted_workbench.taskMcpAuthority(next_task));
+        for (mcp.state.task_references.items) |reference| if (reference.task_id == next_task) {
+            try std.testing.expectEqual(@as(usize, 1), reference.tools.len);
+            try std.testing.expectEqualStrings(b_id, reference.tools[0].server_id);
+        };
         shutdownProduct(&restarted_workbench, restarted_runtime);
         restarted_product_live = false;
         return;
