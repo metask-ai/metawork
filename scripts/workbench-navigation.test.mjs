@@ -65,7 +65,13 @@ function run(id, text, assistant, outcome, toolContent = "", cause = null) {
     terminal:
       outcome === null
         ? null
-        : { outcome, cause, diagnosticDisposition: "absent", modelError: null },
+        : {
+            outcome,
+            cause,
+            diagnosticDisposition: "absent",
+            recordingIncomplete: false,
+            modelError: null,
+          },
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
     tools: toolContent
       ? [

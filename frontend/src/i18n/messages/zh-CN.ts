@@ -890,6 +890,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.completed": "工作已完成",
   "run.no_final_response": "本轮未返回回复",
   "run.actions": "本轮操作",
+  "run.recording_incomplete": "部分过程或回复未完整保留。",
   "run.terminal.partial_reason": "{reason}回复未完成。",
   "account.diagnostics": "账号诊断",
   "feedback.pending": "正在处理…",

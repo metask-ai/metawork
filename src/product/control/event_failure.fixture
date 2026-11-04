@@ -1,4 +1,16 @@
 [
-  {"outcome":"failed","cause":"event_payload_too_large","diagnosticDisposition":"absent","modelError":null},
-  {"outcome":"failed","cause":"queue_capacity_failure","diagnosticDisposition":"absent","modelError":null}
+  {
+    "outcome": "failed",
+    "cause": "event_payload_too_large",
+    "diagnosticDisposition": "absent",
+    "modelError": null,
+    "recordingIncomplete": false
+  },
+  {
+    "outcome": "failed",
+    "cause": "queue_capacity_failure",
+    "diagnosticDisposition": "absent",
+    "modelError": null,
+    "recordingIncomplete": false
+  }
 ]

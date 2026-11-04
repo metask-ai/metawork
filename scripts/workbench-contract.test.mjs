@@ -509,7 +509,13 @@ test("Run submitted time is nullable, bounded, and valid before completion", () 
 });
 
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
-  return { outcome, cause, diagnosticDisposition, modelError: null };
+  return {
+    outcome,
+    cause,
+    diagnosticDisposition,
+    recordingIncomplete: false,
+    modelError: null,
+  };
 }
 
 test("model error details accept the Host fixture and reject malformed or authority-expanding shapes", () => {
@@ -1206,6 +1212,28 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
 
     assert.deepEqual(decodeWorkbenchSnapshot(agentFailure), agentFailure);
   }
+});
+
+test("recording integrity is explicit and independent from successful completion", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  const run = task.runs[0];
+  run.phase = "completed";
+  run.activity = null;
+  run.terminal = { ...terminal("completed"), recordingIncomplete: true };
+  assert.equal(
+    decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal.outcome,
+    "completed",
+  );
+  for (const invalid of [null, "true", 1]) {
+    run.terminal.recordingIncomplete = invalid;
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+  }
+  delete run.terminal.recordingIncomplete;
+  assert.throws(() => decodeWorkbenchSnapshot(value));
 });
 
 test("event size and queue capacity retain distinct Host fixture causes", () => {

@@ -140,6 +140,7 @@ const terminal = {
   outcome: "completed",
   cause: null,
   diagnosticDisposition: "absent",
+  recordingIncomplete: false,
   modelError: null,
 };
 const done = {

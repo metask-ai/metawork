@@ -4234,6 +4234,14 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn recordEventPipelineFailure(self: *Runtime, route_id: u64, run_id: u64) bool {
+        const task = self.findByRouteId(route_id) orelse return false;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
+        if (!task_state.recordEventPipelineFailure(run)) return false;
+        task.durable.recent_order = self.takeRecentOrder();
+        return true;
+    }
+
     pub fn recordDependencyContractFailure(
         self: *Runtime,
         route_id: u64,
@@ -5735,7 +5743,6 @@ pub const Runtime = struct {
             run.terminal_observed = true;
             const eligible = terminal.outcome == .completed and
                 terminal.session_disposition_at_completion == .reusable and
-                run.event_projection_failure == null and
                 run.completed_input_counts != null and
                 !run.input_continuation_cancelled and !run.input_continuation_attempted;
             var pending = false;

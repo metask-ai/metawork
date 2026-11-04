@@ -3759,8 +3759,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             if (task.completion_seen_run_id != null and
                 task.completion_seen_run_id.? == run.id and
                 run.outcome != null and
-                std.mem.eql(u8, run.outcome.?, "completed") and
-                run.event_projection_failure == null)
+                std.mem.eql(u8, run.outcome.?, "completed"))
                 completion_seen_valid = true;
             if (run.file_change_observation) |observation|
                 if (std.mem.eql(u8, observation, "collecting"))
@@ -5087,8 +5086,14 @@ test "task store rejects states that would violate the product contract" {
     runs[0].event_projection_failure = null;
 
     tasks[0].completion_seen_run_id = 1;
+    runs[0].event_projection_failure = "consumer_rejected";
+    try validate(&state, testLimits());
     runs[0].event_projection_failure = "dependency_contract_failure";
+    runs[0].phase = "failed";
+    runs[0].outcome = "dependency_contract_failure";
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].phase = "completed";
+    runs[0].outcome = "completed";
     tasks[0].completion_seen_run_id = 0;
     runs[0].event_projection_failure = null;
 

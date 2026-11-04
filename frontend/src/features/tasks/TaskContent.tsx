@@ -707,7 +707,7 @@ export function TaskContent({
               : terminal?.cause
                 ? t(`cause.${terminal.cause}`)
                 : null;
-          const terminalLabel = reason
+          const outcomeLabel = reason
             ? run.output.responseKind === "partial"
               ? t("run.terminal.partial_reason", { reason })
               : reason
@@ -717,6 +717,11 @@ export function TaskContent({
               : terminal
                 ? t(terminalMessage(run.output.responseKind, terminal.outcome))
                 : "";
+          const terminalLabel = terminal?.recordingIncomplete
+            ? terminal.outcome === "completed"
+              ? t("run.recording_incomplete")
+              : `${outcomeLabel} ${t("run.recording_incomplete")}`
+            : outcomeLabel;
           const responseCopyable = responseCopyEligible(run);
           const submittedTime = formatRunTimestamp(
             locale,

@@ -1026,6 +1026,8 @@ export const enUS = {
   "run.terminal.completed": "Work completed",
   "run.no_final_response": "This turn returned no final response",
   "run.actions": "Run actions",
+  "run.recording_incomplete":
+    "Some process details or response content were not fully retained.",
   "run.terminal.partial_reason": "{reason} Response incomplete.",
   "account.diagnostics": "Account diagnostics",
   "feedback.pending": "Working…",

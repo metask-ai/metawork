@@ -124,6 +124,65 @@ test "ordinary Task creation does not retry MCP errors on null Selection or gene
     }
 }
 
+test "recording gaps continue execution while later protocol or Host failures remain fatal" {
+    const Failure = enum { none, protocol, receipt, allocation };
+    inline for (std.meta.tags(Failure)) |failure| {
+        const scenario = try ReviewScenario.initForInput(.controlled);
+        defer scenario.deinit();
+        defer fake_core.releaseControlled();
+        const control = &scenario.control;
+        const task = control.task_runtime.find(scenario.task_id).?;
+        const run = task_state.findRun(task.durable.runs, task.runtime.active_run_id).?;
+        const route = task.runtime.routeId();
+        for (0..run.tools.len + 2) |index| {
+            var storage: [256]u8 = undefined;
+            const encoded = try std.fmt.bufPrint(&storage, "{{\"tool_start\":{{\"id\":\"retained-{d}\",\"name\":\"Read\",\"input\":\"file\"}}}}", .{index});
+            try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, encoded));
+            try control.drainAgentEvents();
+        }
+        try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        try std.testing.expect(!run.event_pipeline_failed);
+        try std.testing.expect(task_state.productTerminalFacts(run) == null);
+        switch (failure) {
+            .none => {},
+            .protocol => {
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":999,\"turn\":999,\"group\":999,\"disposition\":\"final\",\"bytes\":1}}"));
+                try std.testing.expectError(error.InvalidOutputSegment, control.drainAgentEvents());
+            },
+            .receipt => {
+                var envelope = try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"not a delivery\"}}");
+                envelope.delivered_file = std.mem.zeroes(lifecycle.FileDeliveryReceipt);
+                try scenario.runtime.events.enqueue(envelope);
+                try std.testing.expectError(error.InvalidDeliveryReceipt, control.drainAgentEvents());
+            },
+            .allocation => {
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"new progress text\"}}"));
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+                const allocator = control.allocator;
+                control.allocator = failing.allocator();
+                defer control.allocator = allocator;
+                try std.testing.expectError(error.OutOfMemory, control.drainAgentEvents());
+            },
+        }
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        const terminal = task_state.productTerminalFacts(run).?;
+        switch (failure) {
+            .none => try std.testing.expectEqual(.completed, terminal.outcome),
+            .protocol => {
+                try std.testing.expectEqual(.dependency_contract_failure, terminal.outcome);
+                try std.testing.expectEqual(.dependency_contract_failure, run.event_projection_failure.?);
+                try std.testing.expect(!task_state.recordEventProjectionFailure(run));
+            },
+            .receipt, .allocation => {
+                try std.testing.expect(run.event_pipeline_failed);
+                try std.testing.expectEqual(.failed, terminal.outcome);
+                try std.testing.expectEqual(.event_pipeline_failure, terminal.cause.?);
+            },
+        }
+    }
+}
+
 test "history capacity executes more than sixteen Runs through worker retirement" {
     const scenario = try ReviewScenario.initForInput(.controlled);
     defer scenario.deinit();
@@ -10422,35 +10481,38 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
 }
 
 test "active input continues exactly once after normal completion and never repeats adopted input" {
-    for ([_]bool{ false, true }) |adopt| {
-        const scenario = try ReviewScenario.initForInput(.controlled);
-        defer scenario.deinit();
-        fake_core.adopt_input_before_receipt = adopt;
-        fake_core.expected_run_text = "new constraint fixture-secret";
-        const task = scenario.control.task_runtime.find(scenario.task_id).?;
-        const id = task.runtime.active_run_id;
-        const epoch = task.durable.binding_epoch;
-        const response = try scenario.control.testSendInput("input-1", scenario.task_id, epoch, .{ .run = id }, .{ .text = "new constraint fixture-secret" });
-        try std.testing.expectEqual(.submitted, response.outcome);
-        try std.testing.expectEqual(@as(?u64, id), response.run_id);
-        try std.testing.expectEqual(@as(?u32, 1), response.sequence);
-        try std.testing.expectEqualStrings("new constraint fixture-secret", task.durable.runs[0].?.additional_inputs[0].?.raw_text.?);
-        try std.testing.expectEqual(@as(usize, "new constraint fixture-secret".len), scenario.control.task_runtime.pending_input_bytes);
-        try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.additional_inputs[0].?.text, "fixture-secret") == null);
-        fake_core.releaseControlled();
-        try settleInputScenario(scenario);
-        const history = &task.durable.runs[0].?.additional_inputs[0].?;
-        try std.testing.expect(history.raw_text == null);
-        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
-        try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
-        try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .transferred, history.state);
-        try std.testing.expectEqual(adopt, history.order != null);
-        try std.testing.expectEqual(if (adopt) @as(?u64, null) else task.durable.runs[1].?.id, history.transferred_to_run_id);
-        if (!adopt) try std.testing.expect(fake_core.run_text_matches);
-        const late = try scenario.control.testSendInput("input-late", scenario.task_id, epoch, .{ .run = id }, .{ .text = "do not launch again" });
-        try std.testing.expectEqual(.rejected, late.outcome);
-        for (0..5) |_| scenario.control.syncLifecycle();
-        try std.testing.expectEqual(@as(usize, if (adopt) 1 else 2), fake_core.run_calls);
+    for ([_]bool{ false, true }) |gap| {
+        for ([_]bool{ false, true }) |adopt| {
+            const scenario = try ReviewScenario.initForInput(.controlled);
+            defer scenario.deinit();
+            fake_core.adopt_input_before_receipt = adopt;
+            fake_core.expected_run_text = "new constraint fixture-secret";
+            const task = scenario.control.task_runtime.find(scenario.task_id).?;
+            const id = task.runtime.active_run_id;
+            const epoch = task.durable.binding_epoch;
+            const response = try scenario.control.testSendInput("input-1", scenario.task_id, epoch, .{ .run = id }, .{ .text = "new constraint fixture-secret" });
+            try std.testing.expectEqual(.submitted, response.outcome);
+            try std.testing.expectEqual(@as(?u64, id), response.run_id);
+            try std.testing.expectEqual(@as(?u32, 1), response.sequence);
+            try std.testing.expectEqualStrings("new constraint fixture-secret", task.durable.runs[0].?.additional_inputs[0].?.raw_text.?);
+            try std.testing.expectEqual(@as(usize, "new constraint fixture-secret".len), scenario.control.task_runtime.pending_input_bytes);
+            try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.additional_inputs[0].?.text, "fixture-secret") == null);
+            if (gap) _ = task_state.recordEventProjectionFailure(&task.durable.runs[0].?);
+            fake_core.releaseControlled();
+            try settleInputScenario(scenario);
+            const history = &task.durable.runs[0].?.additional_inputs[0].?;
+            try std.testing.expect(history.raw_text == null);
+            try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+            try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
+            try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .transferred, history.state);
+            try std.testing.expectEqual(adopt, history.order != null);
+            try std.testing.expectEqual(if (adopt) @as(?u64, null) else task.durable.runs[1].?.id, history.transferred_to_run_id);
+            if (!adopt) try std.testing.expect(fake_core.run_text_matches);
+            const late = try scenario.control.testSendInput("input-late", scenario.task_id, epoch, .{ .run = id }, .{ .text = "do not launch again" });
+            try std.testing.expectEqual(.rejected, late.outcome);
+            for (0..5) |_| scenario.control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, if (adopt) 1 else 2), fake_core.run_calls);
+        }
     }
 }
 

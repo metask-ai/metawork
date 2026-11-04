@@ -68,6 +68,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     InvalidDeliveryReceipt,
     InvalidOutputSegment,
     InvalidInputAdoption,
+    InvalidUsage,
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
@@ -6105,18 +6106,15 @@ pub const Runtime = struct {
             var envelope = value;
             defer envelope.deinit();
             self.applyEvent(&envelope) catch |err| {
-                if (first_projection_error.* == null)
-                    first_projection_error.* = err;
-                if (err == error.InvalidOutputSegment or err == error.InvalidInputAdoption)
-                    self.recordDependencyContractFailure(
-                        envelope.session_id,
-                        envelope.run_id,
-                    )
-                else
-                    self.recordEventProjectionFailure(
-                        envelope.session_id,
-                        envelope.run_id,
-                    );
+                switch (err) {
+                    error.ProjectionCapacity, error.ToolCapacity => {
+                        self.recordEventProjectionFailure(envelope.session_id, envelope.run_id);
+                        continue;
+                    },
+                    error.InvalidOutputSegment, error.InvalidInputAdoption, error.InvalidUsage => self.recordDependencyContractFailure(envelope.session_id, envelope.run_id),
+                    else => self.recordEventPipelineFailure(envelope.session_id, envelope.run_id),
+                }
+                if (first_projection_error.* == null) first_projection_error.* = err;
                 self.agent_runtime.requestRunTermination(
                     envelope.session_id,
                     envelope.run_id,
@@ -6190,6 +6188,12 @@ pub const Runtime = struct {
         run_id: u64,
     ) void {
         if (!self.task_runtime.recordEventProjectionFailure(route_id, run_id)) return;
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    fn recordEventPipelineFailure(self: *Runtime, route_id: u64, run_id: u64) void {
+        if (!self.task_runtime.recordEventPipelineFailure(route_id, run_id)) return;
         self.commitTaskStateNoFail();
         self.bumpRevision();
     }
@@ -16340,7 +16344,7 @@ test "output segment byte mismatch fails the dependency protocol" {
     try std.testing.expect(run.event_rejection_reported and run.drain_rejection_reported);
 }
 
-test "commentary boundary capacity fails before canonical output mutation" {
+test "commentary capacity omits the group and closes protocol accounting" {
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_commentary_segments_per_run = 1;
@@ -16365,14 +16369,16 @@ test "commentary boundary capacity fails before canonical output mutation" {
         "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"commentary\",\"bytes\":6}}",
     );
     defer close.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&close));
+    try control.applyEvent(&close);
     try std.testing.expectEqualStrings("first", run.assistant.list.items);
     try std.testing.expectEqualSlices(u64, &.{5}, run.commentary_ends[0..run.commentary_count]);
-    try std.testing.expectEqualStrings("second", run.output_segment.list.items);
-    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
+    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+    try std.testing.expectEqual(@as(u64, 2), run.next_output_segment_index);
 }
 
-test "output segment close is atomic when the destination reserve fails" {
+test "output reserve capacity closes the segment and marks an incomplete response" {
     var control = try testRuntime();
     defer control.deinit();
     const task = control.task_runtime.tasks[0].?;
@@ -16397,12 +16403,13 @@ test "output segment close is atomic when the destination reserve fails" {
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":6}}",
     );
     defer end.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&end));
-    try std.testing.expect(run.open_output_segment != null);
-    try std.testing.expectEqual(@as(u64, 0), run.next_output_segment_index);
-    try std.testing.expectEqualStrings("answer", run.output_segment.list.items);
+    try control.applyEvent(&end);
+    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expectEqual(@as(u64, 1), run.next_output_segment_index);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
-    try std.testing.expect(run.assistant_output_kind == null);
+    try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
+    try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
 }
 
 test "assistant output budget is aggregate across committed and open segments" {
@@ -16426,11 +16433,41 @@ test "assistant output budget is aggregate across committed and open segments" {
     }
     var overflow = try testEnvelope(route, run.id, "{\"text_chunk\":\"five!\"}");
     defer overflow.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try control.applyEvent(&overflow);
     try std.testing.expectEqualStrings("four", run.assistant.list.items);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expect(run.open_output_segment != null);
-    try std.testing.expectEqual(@as(u64, 0), run.open_output_segment.?.bytes);
+    try std.testing.expectEqual(@as(u64, 5), run.open_output_segment.?.bytes);
+    var end = try testEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":5}}");
+    defer end.deinit();
+    try control.applyEvent(&end);
+    try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
+    try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+    try std.testing.expect(run.open_output_segment == null);
+}
+
+test "discarded oversized provisional text does not mark a committed recording gap" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_assistant_message_bytes = 4;
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"oversized discarded attempt\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"discarded\",\"bytes\":27}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":0}}",
+        "{\"text_chunk\":\"done\"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":0,\"disposition\":\"final\",\"bytes\":4}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("done", run.assistant.list.items);
+    try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+    try std.testing.expect(run.event_projection_failure == null);
 }
 
 test "partial output stays provisional until the segment is classified" {
@@ -19812,7 +19849,10 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     );
 }
 
-test "projection failure after Agent terminal becomes a product failure" {
+test "projection gap preserves completion, continuation and completion-seen persistence" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence = TestTaskPersistence{ .storage = storage };
     var control = try testRuntime();
     defer control.deinit();
     const events = [_][]const u8{
@@ -19849,8 +19889,8 @@ test "projection failure after Agent terminal becomes a product failure" {
     // that the canonical event stream could not be represented completely.
     try std.testing.expectEqual(RunOutcome.completed, terminalPayload(run).?.outcome);
     const product = productTerminalFacts(run).?;
-    try std.testing.expectEqual(RunOutcome.failed, product.outcome);
-    try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
+    try std.testing.expectEqual(RunOutcome.completed, product.outcome);
+    try std.testing.expect(product.cause == null);
     // Continuation stays with the Session disposition; the projection loss is
     // a Run-level product fact only.
     try std.testing.expect(control.task_runtime.continuationAvailable(
@@ -19858,16 +19898,26 @@ test "projection failure after Agent terminal becomes a product failure" {
         control.taskRuntimeProjectionEffects(),
     ));
 
+    try std.testing.expect(control.task_runtime.markCompletionSeen(3, run.id));
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.workspace_root, "/tmp/metawork-test", control.limits.max_workspace_bytes);
+    try control.commitTaskState();
+    var restored = try task_persistence.decode(std.testing.allocator, storage[0..persistence.len], control.taskPersistenceLimits());
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(?u64, 7), restored.value.tasks[0].completion_seen_run_id);
+    try std.testing.expectEqualStrings("completed", restored.value.tasks[0].runs[0].outcome.?);
+    try std.testing.expectEqualStrings("consumer_rejected", restored.value.tasks[0].runs[0].event_projection_failure.?);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"recordingIncomplete\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":true") != null);
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -19933,7 +19983,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }
@@ -20103,7 +20153,7 @@ test "Runtime rejects cross-session routes and usage overflow" {
     try control.applyEvent(&maximum);
     var overflow = try testEnvelope(3, 7, "{\"usage\":{\"input_tokens\":1}}");
     defer overflow.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try std.testing.expectError(error.InvalidUsage, control.applyEvent(&overflow));
 }
 
 test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up" {

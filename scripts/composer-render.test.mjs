@@ -215,6 +215,7 @@ function renderCompletedSurface(
   compacts = [],
   {
     pendingUi = null,
+    recordingIncomplete = false,
     inputSubmissions = [],
     uiHistory = [],
     conversationCoverage = "included",
@@ -257,6 +258,7 @@ function renderCompletedSurface(
               outcome: "completed",
               cause: null,
               diagnosticDisposition: "absent",
+              recordingIncomplete,
               modelError: null,
             },
         usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
@@ -557,6 +559,25 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
   const empty = renderCompletedSurface("");
   assert.match(empty, /This turn returned no final response/);
   assert.doesNotMatch(empty, /Work completed/);
+});
+
+test("a completed response with a recording gap shows the Host warning once", () => {
+  const markup = renderCompletedSurface("Release is ready", undefined, [], {
+    recordingIncomplete: true,
+  });
+  assert.match(markup, /Release is ready/);
+  assert.equal(
+    (
+      markup.match(
+        /Some process details or response content were not fully retained/g,
+      ) ?? []
+    ).length,
+    1,
+  );
+  assert.doesNotMatch(
+    markup,
+    /Work failed|This turn returned no final response/,
+  );
 });
 
 test("pending UI follows the unified Assistant output without technical history", () => {

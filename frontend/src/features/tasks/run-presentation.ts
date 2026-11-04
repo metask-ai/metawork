@@ -142,7 +142,8 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
     processCanCollapse,
     showTerminalNotice:
       run.terminal !== null &&
-      (run.output.responseKind === "partial" ||
+      (run.terminal.recordingIncomplete ||
+        run.output.responseKind === "partial" ||
         run.terminal.outcome !== "completed" ||
         !responseVisible),
     tools,
