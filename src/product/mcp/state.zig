@@ -149,10 +149,13 @@ pub const McpOauthExpiry = struct {
     runtime_loaded: bool = true,
     consent_epoch: u64 = 0,
     token_revision: u64 = 0,
+    source_fingerprint: [32]u8 = @splat(0),
 };
 
 pub const McpRuntimeAuthorizationFailure = struct {
     server_id: []const u8,
+    source_fingerprint: [32]u8,
+    reason: enum { challenge, http_rejection, expired_grant },
     consent_epoch: u64,
     token_revision: u64,
     challenge_scopes: []const []const u8,

@@ -20254,6 +20254,8 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         McpRuntimeAuthorizationFailureOutcome.stale,
         try control.requireMcpOauthReauthorization(.{
             .server_id = "oauth",
+            .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
+            .reason = .challenge,
             .consent_epoch = 3,
             .token_revision = 7,
             .challenge_scopes = &.{},
@@ -20268,6 +20270,8 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         McpRuntimeAuthorizationFailureOutcome.applied,
         try control.requireMcpOauthReauthorization(.{
             .server_id = "oauth",
+            .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
+            .reason = .challenge,
             .consent_epoch = 3,
             .token_revision = 7,
             .challenge_scopes = &.{"files.write"},
@@ -20352,6 +20356,8 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         McpRuntimeAuthorizationFailureOutcome.applied,
         try control.requireMcpOauthReauthorization(.{
             .server_id = "incomplete",
+            .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(incomplete_server),
+            .reason = .challenge,
             .consent_epoch = 3,
             .token_revision = 8,
             .challenge_scopes = &.{"files.write"},
@@ -20367,6 +20373,8 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         McpRuntimeAuthorizationFailureOutcome.applied,
         try control.requireMcpOauthReauthorization(.{
             .server_id = "oversized",
+            .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(oversized_server),
+            .reason = .challenge,
             .consent_epoch = 3,
             .token_revision = 8,
             .challenge_scopes = &oversized_scopes,

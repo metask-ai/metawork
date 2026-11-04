@@ -337,8 +337,14 @@ pub fn runtimeOauthRefreshEligible(mcp: *const mcp_state.McpProductState, server
     if (!mcp_configuration.serverRuntimeAuthorizationReady(server)) return false;
     const management = if (mcp.management) |*value| value else return false;
     if (mcp_configuration.serverProblem(server, management.limits) != null) return false;
-    if (server.enabled) return true;
     const manifest = management.runtime_manifest orelse return false;
+    if (server.enabled) {
+        if (!runtimeOauthLoaded(mcp, server)) {
+            const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return false;
+            if (management.convergence.failedTarget(target)) return false;
+        }
+        return true;
+    }
     for (manifest.entries) |entry| {
         if (!std.mem.eql(u8, entry.id, server.id) or entry.state != .loaded) continue;
         return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server)) and entry.task_references != 0;
@@ -369,7 +375,7 @@ pub fn nextOauthExpiry(
         if (!runtimeOauthRefreshEligible(mcp, server)) continue;
         const oauth = server.auth.oauth orelse continue;
         const grant = oauth.grant orelse continue;
-        const expires_at = grant.expires_at_unix_ms orelse continue;
+        const expires_at = grant.expires_at_unix_ms orelse if (management.oauth_schedule.refreshRequested(server.id)) @as(u64, 0) else continue;
         const refresh = grant.refresh_token_ref != null;
         const eligible_at = if (refresh) management.oauth_schedule.eligibleAt(server.id, expires_at) else expires_at;
         if (earliest == null or eligible_at < earliest.?.expires_at_unix_ms)
@@ -380,6 +386,7 @@ pub fn nextOauthExpiry(
                 .runtime_loaded = runtimeOauthLoaded(mcp, server),
                 .consent_epoch = grant.consent_epoch,
                 .token_revision = grant.token_revision,
+                .source_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             };
     }
     return earliest;

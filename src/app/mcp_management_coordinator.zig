@@ -832,6 +832,7 @@ pub const Coordinator = struct {
         if (self.stopping) return .unavailable;
         if (self.configuration_apply_job != null or self.connection_test_job != null or
             self.flow != null) return .busy;
+        if (self.active_authorizations.pending_slots.len != 0) return .busy;
         const inspection = self.control.inspectMcpDesiredConfiguration() orelse return .unavailable;
         if (inspection.health != .ready) return .unavailable;
         const generation = inspection.desired_generation orelse return .rejected;
@@ -947,6 +948,8 @@ pub const Coordinator = struct {
                     .unknown => self.control.failMcpConfigurationApply(apply_job.generation, .unknown),
                     .pending => unreachable,
                 }
+                if (apply_job.result == .rejected or apply_job.result == .failed)
+                    self.active_authorizations.retainRejectedFailures(&apply_job.authorizations);
                 self.configuration_apply_job = null;
                 apply_job.deinit();
                 // Give due maintenance one main-loop opportunity before the

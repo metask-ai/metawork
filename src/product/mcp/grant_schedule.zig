@@ -7,6 +7,7 @@ pub const Grant = struct {
     refresh_due: ?u64 = null,
     retry_not_before: u64 = 0,
     failures: u8 = 0,
+    manual_requested: bool = false,
 
     pub fn observeTime(self: *Grant, now_ms: ?u64) void {
         const now = now_ms orelse return;
@@ -16,7 +17,7 @@ pub const Grant = struct {
     }
 
     pub fn eligibleAt(self: Grant) u64 {
-        return @max(self.refresh_due orelse self.expires_at, self.retry_not_before);
+        return @max(if (self.manual_requested) 0 else self.refresh_due orelse self.expires_at, self.retry_not_before);
     }
 
     pub fn deferAttempt(self: *Grant, now_ms: ?u64) void {

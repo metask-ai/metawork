@@ -792,9 +792,13 @@ pub const Runtime = struct {
             return error.McpManagementUnavailable;
         switch (intent) {
             .automatic => {},
-            .retry_all => management.convergence.retry(),
+            .retry_all => {
+                for (desired.servers) |server| self.requestRejectedGrantRefresh(server);
+                management.convergence.retry();
+            },
             .retry_server => |id| {
-                if (state_module.findMcpServer(desired.servers, id) == null) return error.McpManagementUnavailable;
+                const server = state_module.findMcpServer(desired.servers, id) orelse return error.McpManagementUnavailable;
+                self.requestRejectedGrantRefresh(server);
                 management.convergence.retryServer(id);
             },
         }
@@ -836,8 +840,9 @@ pub const Runtime = struct {
         try management.convergence.prepare(self.allocator, selected);
         if (selected.kind != .remove) {
             const server = state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable;
-            if (server.auth.oauth) |oauth| if (oauth.grant) |grant| if (grant.expires_at_unix_ms) |expiry| if (self.ports.unix_clock.nowMs()) |now_ms| {
-                if (now_ms >= expiry) {
+            if (server.auth.oauth) |oauth| if (oauth.grant) |grant| {
+                const expired = if (grant.expires_at_unix_ms) |expiry| if (self.ports.unix_clock.nowMs()) |now_ms| now_ms >= expiry else false else false;
+                if (expired or management.oauth_schedule.refreshRequested(server.id)) {
                     management.convergence.reject(selected, .waiting_auth);
                     self.markChanged();
                     return self.prepareConfigurationStep(expected_generation, .automatic);
@@ -858,6 +863,17 @@ pub const Runtime = struct {
         self.state.apply_target = selected;
         self.markChanged();
         return step;
+    }
+
+    fn requestRejectedGrantRefresh(self: *Runtime, server: configuration.ServerWire) void {
+        if (!server.enabled) return;
+        const oauth = server.auth.oauth orelse return;
+        const grant = oauth.grant orelse return;
+        if (grant.refresh_token_ref == null) return;
+        const management = &self.state.management.?;
+        const manifest = management.runtime_manifest orelse return;
+        const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse configuration.RuntimeApplyTarget.init(server.id, server, .replace);
+        if (management.convergence.httpAuthRejected(target)) management.oauth_schedule.requestRefresh(server.id);
     }
 
     fn finishConvergence(self: *Runtime) void {
@@ -1252,6 +1268,8 @@ pub const Runtime = struct {
         } };
     }
 
+    /// Accept versioned authentication observations. A bare HTTP rejection is
+    /// retained for explicit recovery; only challenge/expiry can retire a grant.
     pub fn requireOauthReauthorization(
         self: *Runtime,
         failure: state_module.McpRuntimeAuthorizationFailure,
@@ -1279,9 +1297,26 @@ pub const Runtime = struct {
                 return .rejected;
         const server = state_module.findMcpServer(registry.servers, failure.server_id) orelse
             return .stale;
+        if (!std.mem.eql(u8, &failure.source_fingerprint, &configuration.runtimeDescriptorFingerprint(server))) return .stale;
         const oauth = server.auth.oauth orelse return .stale;
         const consent = oauth.consent orelse return .stale;
         if (consent.epoch != failure.consent_epoch) return .stale;
+        if (failure.reason == .http_rejection) {
+            const grant = oauth.grant orelse return .stale;
+            if (!std.mem.eql(u8, oauth.status, "ready") or grant.token_revision != failure.token_revision) return .stale;
+            const manifest = management.runtime_manifest orelse return .rejected;
+            const target = manifest.targetFor(server.id, registry, management.limits) orelse configuration.RuntimeApplyTarget.init(server.id, server, .replace);
+            try management.convergence.recordHttpAuthRejection(self.allocator, target);
+            self.finishConvergence();
+            self.markChanged();
+            return .applied;
+        }
+        if (failure.reason == .expired_grant) {
+            const grant = oauth.grant orelse return .stale;
+            const expiry = grant.expires_at_unix_ms orelse return .stale;
+            const now_ms = self.ports.unix_clock.nowMs() orelse return .rejected;
+            if (now_ms < expiry or grant.token_revision != failure.token_revision) return .stale;
+        }
         const scope_step_up = policy.scopeSetAddsRequirement(
             consent.scopes,
             trusted_challenge_scopes,
@@ -1431,7 +1466,8 @@ pub const Runtime = struct {
             !(std.mem.eql(u8, oauth.status, "client_registration_required") or
                 std.mem.eql(u8, oauth.status, "consent_required") or
                 std.mem.eql(u8, oauth.status, "awaiting_tokens") or
-                std.mem.eql(u8, oauth.status, "reauth_required")))
+                std.mem.eql(u8, oauth.status, "reauth_required") or
+                (std.mem.eql(u8, oauth.status, "ready") and self.failedOauthCandidate(server))))
             return false;
         if (oauth.registration.client_id != null) {
             const method = oauth.registration.token_endpoint_auth_method orelse return false;
@@ -1440,6 +1476,14 @@ pub const Runtime = struct {
                 return false;
         }
         return true;
+    }
+
+    fn failedOauthCandidate(self: *const Runtime, server: configuration.ServerWire) bool {
+        if (!server.enabled or policy.runtimeOauthLoaded(&self.state, server)) return false;
+        const management = if (self.state.management) |*value| value else return false;
+        const manifest = management.runtime_manifest orelse return false;
+        const target = manifest.targetFor(server.id, management.desiredRegistry(), management.limits) orelse return false;
+        return management.convergence.failedTarget(target);
     }
 
     pub fn advanceAuthorization(
@@ -2309,7 +2353,7 @@ const OauthTestEffects = struct {
     }
 };
 
-fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, refreshable: bool) !Runtime {
+fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, refreshable: bool, expiry: ?u64) !Runtime {
     var runtime = try effects.coldRuntime(harness, "consent_required");
     errdefer runtime.deinit();
     var start = (try runtime.beginAuthorization(1, "oauth", "attempt")).?;
@@ -2321,7 +2365,7 @@ fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, re
     try std.testing.expect(runtime.advanceAuthorization("attempt", .exchanging));
     var access = "access-token".*;
     var refresh = "refresh-token".*;
-    try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = if (refreshable) &refresh else null, .expires_at_unix_ms = 90_000 }));
+    try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = if (refreshable) &refresh else null, .expires_at_unix_ms = expiry }));
     try std.testing.expect(runtime.finishAuthorization("attempt"));
     return runtime;
 }
@@ -2329,7 +2373,7 @@ fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, re
 test "Product MCP expired cold grant waits without changing membership and resumes with new credentials" {
     var effects = OauthTestEffects{};
     var harness = TestHarness{};
-    var runtime = try testGrantedOauthRuntime(&effects, &harness, true);
+    var runtime = try testGrantedOauthRuntime(&effects, &harness, true, 90_000);
     defer runtime.deinit();
     harness.unix_seconds = 100;
     try std.testing.expect((try runtime.prepareConfigurationStep(3, .automatic)) == null);
@@ -2369,14 +2413,14 @@ test "Product MCP expired cold grant waits without changing membership and resum
 test "Product MCP expired grant without refresh token schedules reauthorization without an apply loop" {
     var effects = OauthTestEffects{};
     var harness = TestHarness{};
-    var runtime = try testGrantedOauthRuntime(&effects, &harness, false);
+    var runtime = try testGrantedOauthRuntime(&effects, &harness, false, 90_000);
     defer runtime.deinit();
     harness.unix_seconds = 100;
     const expiry = runtime.nextOauthExpiry().?;
     try std.testing.expect(!expiry.refresh);
     try std.testing.expectEqual(@as(u64, 90_000), expiry.expires_at_unix_ms);
     try std.testing.expect((try runtime.prepareConfigurationStep(3, .automatic)) == null);
-    try std.testing.expectEqual(.applied, try runtime.requireOauthReauthorization(.{ .server_id = expiry.server_id, .consent_epoch = expiry.consent_epoch, .token_revision = expiry.token_revision, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
+    try std.testing.expectEqual(.applied, try runtime.requireOauthReauthorization(.{ .server_id = expiry.server_id, .source_fingerprint = expiry.source_fingerprint, .reason = .expired_grant, .consent_epoch = expiry.consent_epoch, .token_revision = expiry.token_revision, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
     try std.testing.expectEqualStrings("reauth_required", runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.status);
     try std.testing.expect(runtime.nextOauthExpiry() == null);
     try std.testing.expect((try runtime.prepareConfigurationStep(4, .automatic)) == null);
@@ -2386,7 +2430,7 @@ test "Product MCP expired grant without refresh token schedules reauthorization 
 test "Product MCP token expiry never becomes a loaded member removal" {
     var effects = OauthTestEffects{};
     var harness = TestHarness{};
-    var runtime = try testGrantedOauthRuntime(&effects, &harness, true);
+    var runtime = try testGrantedOauthRuntime(&effects, &harness, true, 90_000);
     defer runtime.deinit();
     var step = (try runtime.prepareConfigurationStep(3, .automatic)).?;
     defer step.deinit();
@@ -2398,6 +2442,57 @@ test "Product MCP token expiry never becomes a loaded member removal" {
     try std.testing.expect(runtime.state.management.?.runtime_manifest.?.entries[0].state == .loaded);
     try std.testing.expect(runtime.nextOauthExpiry().?.runtime_loaded);
     try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+}
+
+test "Product MCP manual recovery distinguishes HTTP auth refusal from network failure and stops new-token loops" {
+    for ([_]bool{ false, true }) |has_expiry| for ([_]bool{ false, true }) |http_rejection| {
+        var effects = OauthTestEffects{};
+        var harness = TestHarness{};
+        var runtime = try testGrantedOauthRuntime(&effects, &harness, true, if (has_expiry) 90_000 else null);
+        defer runtime.deinit();
+        var first = (try runtime.prepareConfigurationStep(3, .automatic)).?;
+        defer first.deinit();
+        try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
+        try std.testing.expect(runtime.canBeginAuthorization(3, "oauth"));
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
+        const source = configuration.runtimeDescriptorFingerprint(runtime.state.management.?.desiredRegistry().?.servers[0]);
+        if (http_rejection) {
+            try std.testing.expectEqual(.stale, try runtime.requireOauthReauthorization(.{ .server_id = "oauth", .source_fingerprint = @splat(0), .reason = .http_rejection, .consent_epoch = 1, .token_revision = 1, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
+            try std.testing.expectEqual(.applied, try runtime.requireOauthReauthorization(.{ .server_id = "oauth", .source_fingerprint = source, .reason = .http_rejection, .consent_epoch = 1, .token_revision = 1, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
+            try std.testing.expectEqualStrings("ready", runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.status);
+        }
+        var retry = try runtime.prepareConfigurationStep(3, .{ .retry_server = "oauth" });
+        defer if (retry) |*value| value.deinit();
+        if (!http_rejection) {
+            try std.testing.expect(retry != null);
+            try std.testing.expect(!runtime.state.management.?.oauth_schedule.refreshRequested("oauth"));
+            try std.testing.expect(runtime.state.management.?.desiredRegistry().?.oauth_operation == null);
+            try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
+            continue;
+        }
+        try std.testing.expect(retry == null);
+        try std.testing.expect(runtime.nextOauthExpiry().?.expires_at_unix_ms <= 1000);
+        var binding = (try runtime.beginOauthRefresh("oauth")).started;
+        defer binding.deinit();
+        const Commit = struct {
+            fn commit(_: *anyopaque) void {}
+        };
+        var token = "new-access-token".*;
+        try std.testing.expectEqual(.saved, try runtime.completeOauthRefresh(.{ .operation_id = binding.operation_id, .server_id = "oauth", .access_token = &token, .expires_at_unix_ms = 999_000 }, .{ .context = &effects, .commit_fn = Commit.commit }));
+        var fresh = (try runtime.prepareConfigurationStep(4, .automatic)).?;
+        defer fresh.deinit();
+        try std.testing.expect(runtime.failConfigurationApply(4, .rejected));
+        harness.unix_seconds = 2000;
+        for (0..3) |_| try std.testing.expect(runtime.nextOauthExpiry() == null);
+        try std.testing.expectEqual(.stale, try runtime.requireOauthReauthorization(.{ .server_id = "oauth", .source_fingerprint = source, .reason = .http_rejection, .consent_epoch = 1, .token_revision = 1, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
+        try std.testing.expect(try runtime.requestRefresh(false));
+        harness.executeQueued();
+        try std.testing.expect(runtime.syncRefreshJob());
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
+        try std.testing.expectEqual(.saved, try runtime.createHttpServer(4, .{ .display_name = "Unrelated", .url = "https://other.example.test/mcp" }));
+        try std.testing.expect(runtime.nextOauthExpiry() == null);
+        try std.testing.expect(runtime.canBeginAuthorization(5, "oauth"));
+    };
 }
 
 test "cold absence supports consent DCR with a secret and reauthorization through token commit" {
@@ -2956,6 +3051,8 @@ test "Product MCP Runtime wakes retained auth delivery when apply releases the b
         state_module.McpRuntimeAuthorizationFailureOutcome.pending,
         try runtime.requireOauthReauthorization(.{
             .server_id = "oauth-server",
+            .source_fingerprint = @splat(0),
+            .reason = .challenge,
             .consent_epoch = 1,
             .token_revision = 1,
             .challenge_scopes = &.{},

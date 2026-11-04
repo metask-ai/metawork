@@ -463,6 +463,8 @@ pub const Coordinator = struct {
     fn expireUnrefreshable(self: *Coordinator, expiry: mcp_types.McpOauthExpiry, now_ms: u64) void {
         const outcome = self.control.requireMcpOauthReauthorization(.{
             .server_id = expiry.server_id,
+            .source_fingerprint = expiry.source_fingerprint,
+            .reason = .expired_grant,
             .consent_epoch = expiry.consent_epoch,
             .token_revision = expiry.token_revision,
             .challenge_scopes = &.{},
@@ -472,8 +474,10 @@ pub const Coordinator = struct {
             return;
         };
         switch (outcome) {
-            .applied, .stale => self.host.notify(),
-            .pending, .rejected, .persistence_outcome_unknown => self.deferRetry(now_ms),
+            .applied, .persistence_outcome_unknown => self.host.notify(),
+            // Product's injected clock may have coarser precision than the
+            // Host timer. A stale expiry must not re-arm an elapsed deadline.
+            .stale, .pending, .rejected => self.deferRetry(now_ms),
         }
     }
 
@@ -490,6 +494,8 @@ pub const Coordinator = struct {
         for (batch.values) |*failure| {
             const outcome = self.control.requireMcpOauthReauthorization(.{
                 .server_id = failure.server_id,
+                .source_fingerprint = failure.source_fingerprint,
+                .reason = if (failure.trusted_challenge) .challenge else .http_rejection,
                 .consent_epoch = failure.consent_epoch,
                 .token_revision = failure.token_revision,
                 .challenge_scopes = failure.challenge_scopes,
@@ -503,9 +509,12 @@ pub const Coordinator = struct {
                     _ = self.authorizations.acknowledgeRuntimeAuthFailure(failure);
                     changed = true;
                 },
-                .pending, .rejected => {},
+                .pending => {},
+                .rejected => self.deferAuthDelivery(),
             }
         }
+        changed = self.authorizations.releaseDeliveredFailures() or changed;
+        if (changed and !self.stopping) self.host.notify();
         return changed;
     }
 
@@ -604,7 +613,10 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
         fn notify(_: *anyopaque) void {}
     };
     var fixture: Fixture = .{};
-    var authorizations = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+    var rejected = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+    defer rejected.deinit();
+    var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
+    authorizations.retainRejectedFailures(&rejected);
     defer authorizations.deinit();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     authorizations.allocator = failing.allocator();
@@ -631,6 +643,7 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
     _ = coordinator.onTimer();
     try std.testing.expectEqual(@as(usize, 1), fixture.deliveries);
     try std.testing.expectEqual(@as(?u64, null), fixture.armed);
+    try std.testing.expectEqual(@as(usize, 0), authorizations.pending_slots.len);
     var remaining = try authorizations.snapshotRuntimeAuthFailures();
     defer remaining.deinit();
     try std.testing.expectEqual(@as(usize, 0), remaining.values.len);

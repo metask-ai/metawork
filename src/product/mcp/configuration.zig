@@ -758,7 +758,7 @@ pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server:
 /// removal/replacement can reopen them after the current round finishes.
 pub const RuntimeConvergence = struct {
     pub const Outcome = enum { pending, waiting_auth, rejected, failed, capacity };
-    const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome };
+    const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome, http_auth_rejected: bool = false };
     results: std.ArrayList(Result) = .empty,
     epoch: u64 = 0,
     round: u64 = 1,
@@ -770,6 +770,36 @@ pub const RuntimeConvergence = struct {
 
     pub fn handled(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
         return self.handledInRound(target, false);
+    }
+
+    /// Failed current credentials must not become an automatic refresh loop.
+    /// Membership epochs do not erase the evidence of that connection attempt.
+    pub fn failedTarget(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        for (self.results.items) |result|
+            if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint))
+                return result.outcome == .rejected or result.outcome == .failed;
+        return false;
+    }
+
+    pub fn httpAuthRejected(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        for (self.results.items) |result|
+            if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint))
+                return result.http_auth_rejected;
+        return false;
+    }
+
+    pub fn recordHttpAuthRejection(self: *RuntimeConvergence, allocator: std.mem.Allocator, target: RuntimeApplyTarget) std.mem.Allocator.Error!void {
+        for (self.results.items) |*result| if (std.mem.eql(u8, result.target.id(), target.id()) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) {
+            result.http_auth_rejected = true;
+            return;
+        };
+        try self.prepare(allocator, target);
+        self.reject(target, .failed);
+        for (self.results.items) |*result| if (std.mem.eql(u8, result.target.id(), target.id())) {
+            result.http_auth_rejected = true;
+            return;
+        };
+        unreachable;
     }
 
     fn handledInRound(self: *const RuntimeConvergence, target: RuntimeApplyTarget, next_round: bool) bool {
@@ -2338,13 +2368,13 @@ pub const OauthRefreshSchedule = struct {
         const oauth = server.auth.oauth orelse return null;
         const consent = oauth.consent orelse return null;
         const grant = oauth.grant orelse return null;
-        if (grant.refresh_token_ref == null or grant.expires_at_unix_ms == null) return null;
+        if (grant.refresh_token_ref == null) return null;
         var hash = Sha256.init(.{});
         hashField(&hash, &connectionFingerprint(server));
         hashField(&hash, consent.fingerprint);
         hashInteger(&hash, consent.epoch);
         hashInteger(&hash, grant.token_revision);
-        hashInteger(&hash, grant.expires_at_unix_ms.?);
+        hashInteger(&hash, grant.expires_at_unix_ms orelse 0);
         var digest: [32]u8 = undefined;
         hash.final(&digest);
         return digest;
@@ -2366,7 +2396,7 @@ pub const OauthRefreshSchedule = struct {
             } else unreachable;
             std.debug.assert(server.id.len <= self.id_capacity);
             @memcpy(self.ids[index * self.id_capacity ..][0..server.id.len], server.id);
-            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .timing = .{ .expires_at = server.auth.oauth.?.grant.?.expires_at_unix_ms.? } };
+            self.entries[index] = .{ .id_len = server.id.len, .binding = next, .timing = .{ .expires_at = server.auth.oauth.?.grant.?.expires_at_unix_ms orelse std.math.maxInt(u64) } };
         }
     }
     pub fn observeTime(self: *OauthRefreshSchedule, now_ms: ?u64) void {
@@ -2377,6 +2407,15 @@ pub const OauthRefreshSchedule = struct {
     pub fn eligibleAt(self: *const OauthRefreshSchedule, server_id: []const u8, expiry: u64) u64 {
         const index = self.indexOf(server_id) orelse return expiry;
         return self.entries[index].timing.eligibleAt();
+    }
+
+    pub fn requestRefresh(self: *OauthRefreshSchedule, server_id: []const u8) void {
+        if (self.indexOf(server_id)) |index| self.entries[index].timing.manual_requested = true;
+    }
+
+    pub fn refreshRequested(self: *const OauthRefreshSchedule, server_id: []const u8) bool {
+        const index = self.indexOf(server_id) orelse return false;
+        return self.entries[index].timing.manual_requested;
     }
     pub fn deferServer(self: *OauthRefreshSchedule, server_id: []const u8, now_ms: ?u64) void {
         const index = self.indexOf(server_id) orelse return;
