@@ -19420,7 +19420,8 @@ test "file observation closure agrees after event drain and delayed artifact com
         .{ .already_incomplete = true, .expected = .incomplete },
         .{ .running_tool = true, .expected = .incomplete },
         .{ .cause = null, .expected = .incomplete },
-        .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .consumer_rejected, .expected = .incomplete },
+        .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .consumer_rejected },
+        .{ .cause = .event_pipeline_failure, .expected = .incomplete },
         .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .dependency_contract_failure, .expected = .incomplete },
     };
     for (cases) |case| {

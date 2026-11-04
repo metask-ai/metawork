@@ -1350,8 +1350,7 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
 /// Completion describes the observation stream, not whether the Run succeeded.
 pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservation {
     std.debug.assert(run.event_stream_finalized and run.pending_file_change_artifacts == 0);
-    if (run.file_change_observation == .incomplete or run.file_changes_known_loss or
-        run.event_projection_failure != null)
+    if (run.file_change_observation == .incomplete or run.file_changes_known_loss)
         return .incomplete;
     const terminal = productTerminalFacts(run).?;
     for (run.tools) |entry| {
