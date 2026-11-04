@@ -2,7 +2,7 @@
 
 日期：2026-11-04。关联：[MetaWork #72](https://github.com/shuzuan-org/metawork/issues/72)。
 
-状态：方案复审 APPROVE，无阻塞 finding；本文已合入复审随附的错误分类、违约优先级、RequiredWake 和 compact 修正。实施按下述依赖顺序推进，进展和验证证据由 Git 与 TinyKG 任务 DAG 跟踪。正文额度、分预算和截断政策按用户决定延后另议。
+状态：方案复审 APPROVE。实现已按依赖分步提交，覆盖有界 drain、可取消背压、真实执行结果与记录缺口、回执交接和移除 16；当前验证结果及剩余边界见文末，详细证据由 Git 与 TinyKG 任务 DAG 跟踪。正文额度、分预算和截断政策按用户决定延后另议。
 
 本文是实施方案，不是 decision record，不替代现行规范。实施时同步更新第 10 节列出的相关真源；方案通过不表示代码、性能或平台验收通过。
 
@@ -210,3 +210,13 @@ Run 受控终止保留 stopped；Task 可等待新的用户意图，这不等于
 | [验证规范](../validation.md) | 活性不变量、验收责任与经验证后形成的长期证据 |
 
 不修改 AGENTS.md、Storage 合同、SQL、迁移清单、cause 枚举域、ABI 或依赖 lock。若发现必须改变这些边界，先提供具体必要性并重新评审，不能以实施方便扩大范围。
+
+## 11. 本轮实施验证
+
+- 分步提交：`735931fa` 有界 drain，`88600ae6` 背压与关闭，`4372b5ca` 结果/记录隔离及完成已读，`0e649b35` 可信回执，`230adf9e` 移除 16 与既有 cause 映射；无 SQL、迁移、依赖 artifact 或 AgentCore 修改。
+- canonical Core 的单 Run 完成 40 次 Bash 调用、41 次 Provider 请求；超过 32 个 Tool 展示槽后仍 completed/reusable，缺口进入历史，无自动续跑或重放。
+- 生产队列积压至少 100 个事件，20ms 注入提交延迟下，drain 约 39.6ms 后返回，Stop 后仍有 95 个待消费事件，约 486.6ms 后正式 cancelled/reusable，未标记本地事件交付丢失。这是 Debug framed writer 调度实验，不是 SQLite 基准或固定 SLA。
+- 正式 Node/Renderer 测试 1,234 passed、2 existing skipped，typecheck 与严格 Native 静态检查通过。相关 Control/lifecycle/image roots 542 passed、3 existing skipped；Office canonical pipeline 9 passed，包含饱和慢提交和跨 16/32 场景。
+- macOS arm64 实际 automation 桌面 active-input vertical 通过 Stop、后续新意图、输入接续、Skill 等待、超时对账及冷重启不重放。现有 Office 桌面入口另通过实际 DeliverFile 回执与冷历史投影；其 direct Run 接回已有 fresh-catalog 等待 helper。architecture/Office guards 45 passed，fmt/diff 检查通过。
+- 完整 Native 图实际执行为 1,694 passed、11 skipped、7 failed，另有 CoreFoundation 链接失败；干净基线 `7720b2b3` 上的定向 MCP platform/interop/configuration/app roots 复现完全相同的 7 个失败及链接错误。本轮未改动或豁免这些 Gate，完整图不得报告通过。
+- 长时间背压下的 Core watchdog 和生产 SQLite 的完整历史性能分位未测；不承诺无限暂停或固定 Stop 时延。单次同步提交仍不可被 drain 预算打断，active Run checkpoint 恢复仍不在本轮范围。

@@ -22186,6 +22186,10 @@ test "Outputs persist through real history restore and sanitized locators lose f
         try control.applyEvent(&envelope);
         const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
         try std.testing.expect(run.outputs[1].?.redacted);
+        var image = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"image-receipt\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
+        defer image.deinit();
+        image.generated_image_path = try std.testing.allocator.dupe(u8, "generated-images/restored.png");
+        try control.applyEvent(&image);
         try TestSupport.commitTaskHistory(&control);
         try std.testing.expect(history.len > 0);
         try std.testing.expect(std.mem.indexOf(u8, storage[0..history.len], "SECRET-KEY") == null);
@@ -22204,6 +22208,11 @@ test "Outputs persist through real history restore and sanitized locators lose f
     try std.testing.expect(run.outputs[1].?.redacted);
     try std.testing.expectEqualStrings("", run.outputs[1].?.locator);
     try std.testing.expect(run.outputs[2] == null);
+    const image = for (run.tools) |entry| {
+        if (entry) |tool| if (tool.receipt_metadata) break tool;
+    } else return error.MissingGeneratedImage;
+    try std.testing.expect(image.file_refs.?[0].?.generated_image);
+    try std.testing.expectEqualStrings("generated-images/restored.png", image.file_refs.?[0].?.locator);
 }
 
 test "late credential discovery revokes Output locators in current and durable projections" {
