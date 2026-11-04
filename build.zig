@@ -1200,6 +1200,12 @@ fn addMcpInteropTests(
         .optimize = modules.app.optimize,
         .link_libc = link_libc,
     });
+    // This independent test root links Application frameworks through the coordinator.
+    if (cases.resolved_target.?.result.os.tag == .macos) {
+        if (b.sysroot) |sysroot| cases.addFrameworkPath(.{
+            .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }),
+        });
+    }
     cases.addImport("lifecycle_fixture", existingImport(modules.app, "lifecycle_fixture"));
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("metawork_account_contract", modules.account_contract);
