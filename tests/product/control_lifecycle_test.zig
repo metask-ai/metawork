@@ -142,18 +142,21 @@ test "recording gaps continue execution while later protocol or Host failures re
         }
         try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
         try std.testing.expect(!run.event_pipeline_failed);
+        try std.testing.expect(run.first_event_rejection == null);
         try std.testing.expect(task_state.productTerminalFacts(run) == null);
         switch (failure) {
             .none => {},
             .protocol => {
                 try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":999,\"turn\":999,\"group\":999,\"disposition\":\"final\",\"bytes\":1}}"));
                 try std.testing.expectError(error.InvalidOutputSegment, control.drainAgentEvents());
+                try std.testing.expectEqual(error.InvalidOutputSegment, run.first_event_rejection.?.failure);
             },
             .receipt => {
                 var envelope = try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"not a delivery\"}}");
                 envelope.delivered_file = std.mem.zeroes(lifecycle.FileDeliveryReceipt);
                 try scenario.runtime.events.enqueue(envelope);
                 try std.testing.expectError(error.InvalidDeliveryReceipt, control.drainAgentEvents());
+                try std.testing.expectEqual(error.InvalidDeliveryReceipt, run.first_event_rejection.?.failure);
             },
             .allocation => {
                 try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"new progress text\"}}"));
@@ -162,6 +165,7 @@ test "recording gaps continue execution while later protocol or Host failures re
                 control.allocator = failing.allocator();
                 defer control.allocator = allocator;
                 try std.testing.expectError(error.OutOfMemory, control.drainAgentEvents());
+                try std.testing.expectEqual(error.OutOfMemory, run.first_event_rejection.?.failure);
             },
         }
         fake_core.releaseControlled();

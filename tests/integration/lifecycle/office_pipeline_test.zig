@@ -159,7 +159,7 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
                 try std.testing.expect(run.event_stream_finalized);
                 try std.testing.expectEqual(state.EventProjectionFailure.consumer_rejected, run.event_projection_failure.?);
-                try std.testing.expectEqual(error.ToolCapacity, run.first_event_rejection.?.failure);
+                try std.testing.expect(run.first_event_rejection == null);
                 try std.testing.expect(run.terminal_drain_rejection == null);
                 try std.testing.expect(run.open_output_segment == null);
                 try std.testing.expect(std.mem.endsWith(u8, run.assistant.list.items, "Long run completed."));

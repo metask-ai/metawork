@@ -1896,7 +1896,9 @@ pub fn applyEvent(
     if (run.event_stream_finalized) return .late_terminal;
     const expected_output = OutputProtocolObservation.capture(run);
     errdefer |failure| {
-        if (run.first_event_rejection == null) {
+        if (failure != error.ProjectionCapacity and failure != error.ToolCapacity and
+            run.first_event_rejection == null)
+        {
             const known = switch (envelope.event.value) {
                 .known => |event| event,
                 .unknown => null,
