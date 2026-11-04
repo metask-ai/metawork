@@ -672,6 +672,7 @@ pub const HttpAuthorizations = struct {
     /// One rejected candidate's Host auth references, retained only until its
     /// typed observations are consumed. Never used for membership or rotation.
     pending_slots: []*HttpAuthSlot = &.{},
+    pending_slot_storage: []*HttpAuthSlot = &.{},
 
     /// Prepare the actual member mapping before apply. Unchanged transports
     /// retain their existing rotation/failure slot, including retained members.
@@ -695,25 +696,43 @@ pub const HttpAuthorizations = struct {
         for (self.slots) |slot| slot.release();
         if (self.slots.len != 0) self.allocator.free(self.slots);
         for (self.pending_slots) |slot| slot.release();
-        if (self.pending_slots.len != 0) self.allocator.free(self.pending_slots);
+        if (self.pending_slot_storage.len != 0) self.allocator.free(self.pending_slot_storage);
         self.* = undefined;
     }
 
     pub fn retainRejectedFailures(self: *HttpAuthorizations, rejected: *HttpAuthorizations) void {
         std.debug.assert(self.pending_slots.len == 0 and rejected.pending_slots.len == 0);
-        for (rejected.slots) |slot| if (slot.runtimeAuthFailureCount() != 0) {
-            self.pending_slots = rejected.slots;
-            rejected.slots = &.{};
+        const storage = rejected.slots;
+        rejected.slots = &.{};
+        var count: usize = 0;
+        for (storage) |slot| {
+            const shared = for (self.slots) |active| {
+                if (active == slot) break true;
+            } else false;
+            if (shared or slot.runtimeAuthFailureCount() == 0) {
+                slot.release();
+            } else {
+                storage[count] = slot;
+                count += 1;
+            }
+        }
+        if (count == 0) {
+            if (storage.len != 0) self.allocator.free(storage);
             return;
-        };
+        }
+        // Compact without allocating: retain the complete backing allocation
+        // for correct release, and expose only candidate-owned observations.
+        self.pending_slot_storage = storage;
+        self.pending_slots = storage[0..count];
     }
 
     pub fn releaseDeliveredFailures(self: *HttpAuthorizations) bool {
         if (self.pending_slots.len == 0) return false;
         for (self.pending_slots) |slot| if (slot.runtimeAuthFailureCount() != 0) return false;
         for (self.pending_slots) |slot| slot.release();
-        self.allocator.free(self.pending_slots);
+        self.allocator.free(self.pending_slot_storage);
         self.pending_slots = &.{};
+        self.pending_slot_storage = &.{};
         return true;
     }
 
@@ -2040,6 +2059,50 @@ test "OAuth snapshot secret copies clean up every partial allocation" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "rejected candidate handoff excludes shared slots and preserves only its own failures" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |shared_failure| for ([_]bool{ false, true }) |candidate_failure| {
+        var active = try testing.pendingAuthorizations(allocator, std.testing.io);
+        defer active.deinit();
+        if (!shared_failure) {
+            var initial = try active.snapshotRuntimeAuthFailures();
+            defer initial.deinit();
+            _ = active.acknowledgeRuntimeAuthFailure(&initial.values[0]);
+        }
+        const shared = active.slots[0];
+        const candidate = try HttpAuthSlot.create(allocator, std.testing.io, "candidate", @splat(0), 1, 1, .{ .access_token = "candidate-token" });
+        const irrelevant = try HttpAuthSlot.create(allocator, std.testing.io, "idle", @splat(0), 1, 1, .{ .access_token = "idle-token" });
+        if (candidate_failure) {
+            var lease = candidate.lease();
+            defer lease.deinit();
+            candidate.recordRuntimeAuthFailure(&lease, &.{});
+        }
+        const slots = try allocator.alloc(*HttpAuthSlot, 3);
+        shared.retain();
+        slots[0] = shared;
+        slots[1] = candidate;
+        slots[2] = irrelevant;
+        var rejected: HttpAuthorizations = .{ .allocator = allocator, .slots = slots };
+        defer rejected.deinit();
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        active.allocator = failing.allocator();
+        active.retainRejectedFailures(&rejected);
+        active.allocator = allocator;
+        try std.testing.expectEqual(@as(usize, if (candidate_failure) 1 else 0), active.pending_slots.len);
+        var batch = try active.snapshotRuntimeAuthFailures();
+        defer batch.deinit();
+        try std.testing.expectEqual(@as(usize, @intFromBool(shared_failure)) + @intFromBool(candidate_failure), batch.values.len);
+        for (batch.values) |*failure| if (std.mem.eql(u8, failure.server_id, "candidate")) {
+            try std.testing.expect(active.acknowledgeRuntimeAuthFailure(failure));
+        };
+        try std.testing.expectEqual(candidate_failure, active.releaseDeliveredFailures());
+        try std.testing.expectEqual(@as(usize, 0), active.pending_slots.len);
+        var remaining = try active.snapshotRuntimeAuthFailures();
+        defer remaining.deinit();
+        try std.testing.expectEqual(@as(usize, @intFromBool(shared_failure)), remaining.values.len);
+    };
 }
 
 test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {

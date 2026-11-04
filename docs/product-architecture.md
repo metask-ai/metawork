@@ -317,7 +317,7 @@ MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorizatio
 
 Product MCP 的自动刷新共享单一作业并合并重复请求；极短 TTL 受最小网络间隔约束，持续失败有有界退避和暂停，普通 Task 输入不能重置预算或跳过退避。显式刷新或新配置可以恢复尝试；队列、timer/wake 与网络失败分别保留可诊断事实。查询只观察当前 freshness，不登记网络或恢复工作；正常推进由 Host timer、控制入口和 completion 承担。
 
-无可信 challenge 的 HTTP 401/403 只形成绑定来源与 token revision 的拒绝事实，不自动退休 grant。手动重试仅凭该事实请求一次受控刷新；普通网络失败不触发无依据的刷新，已知过期仍遵守连接前恢复。当前目标失败且未加载的 ready 授权允许用户显式重新登录。失败候选只保留一份待交付的有界 auth-slot 引用集合，不作为实际成员或 rotation authority；Product 消费或判定过期后释放，分配失败由既有 OAuth 交付 timer 重试。
+无可信 challenge 的 HTTP 401/403 只形成绑定来源与 token revision 的拒绝事实，不自动退休 grant。手动重试仅凭该事实请求一次受控刷新；普通网络失败不触发无依据的刷新，已知过期仍遵守连接前恢复。当前目标失败且未加载的 ready 授权允许用户显式重新登录。disabled 来源的认证失败作为不再适用的终态确认，不退休 grant 或反复定时投递。失败候选只保留不在 active 集合中的候选 slot，形成一份待交付的有界引用集合，不作为实际成员或 rotation authority；Product 消费或判定过期后释放，分配失败由既有 OAuth 交付 timer 重试。
 
 OAuth grant 的提前刷新时间在提交安装或启动恢复时固定；暂缺合法时间时，由后续显式生命周期观察补齐，查询保持纯读并暂用真实 expiry。Product 按 server、connection/consent 和 token revision 保留进程内有界退避，返回 `max(refresh_due, retry_not_before)` 最早的一台；marker 确认清除或目标刷新 begin 被拒后才推进相应重试状态，全局事务忙不归为单台服务器失败。旧 operation 不得影响新绑定；调度不得改写 grant 的真实 expiry。Product Control 只注入既有系统时钟的读能力，Application 继续拥有单个 OAuth timer 及其全局下限，不借用 Schedule 的 arm/cancel 或另建持久化调度状态。catalog refresh 等待 OAuth marker/apply/在途作业时由完成事件继续推进，不能以到期的 retry floor 形成毫秒轮询；独立的 freshness deadline 仍须及时失效准入。
 

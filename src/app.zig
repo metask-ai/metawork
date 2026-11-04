@@ -1404,7 +1404,20 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     try std.testing.expectEqual(@as(usize, 4), host.maintenances);
     try std.testing.expect(composition.mcp_management.?.configuration_apply_job != null);
     try Effects.waitForApply(&composition);
+    // The rejected mapping shares a live slot whose failure has not been
+    // consumed. It must not enter the candidate-only handoff or block apply.
+    authorizations.deinit();
+    authorizations = try mcp_platform.testing.pendingAuthorizations(allocator, std.testing.io);
+    var empty_authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = allocator };
+    defer empty_authorizations.deinit();
+    const rejected_job = composition.mcp_management.?.configuration_apply_job.?;
+    rejected_job.authorizations.deinit();
+    rejected_job.authorizations = try authorizations.compose(&empty_authorizations, &.{"server"}, null);
     _ = composition.mcp_management.?.drain();
+    try std.testing.expectEqual(@as(usize, 0), authorizations.pending_slots.len);
+    var unconsumed = try authorizations.snapshotRuntimeAuthFailures();
+    defer unconsumed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), unconsumed.values.len);
     composition.mcp_management.?.control.inspect_fn = Effects.waiting;
     composition.mcp_management.?.control.prepare_apply_fn = Effects.noStep;
     try std.testing.expectEqual(.started, try composition.mcp_management.?.applyConfiguration(.retry_all));

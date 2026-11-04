@@ -1301,6 +1301,9 @@ pub const Runtime = struct {
         const server = state_module.findMcpServer(registry.servers, failure.server_id) orelse
             return .stale;
         if (!std.mem.eql(u8, &failure.source_fingerprint, &configuration.runtimeDescriptorFingerprint(server))) return .stale;
+        // Disabled sources cannot enter reauthorization. Their retained
+        // transports may still report failures; consume those as inapplicable.
+        if (!server.enabled) return .stale;
         const oauth = server.auth.oauth orelse return .stale;
         const consent = oauth.consent orelse return .stale;
         if (consent.epoch != failure.consent_epoch) return .stale;
@@ -2447,6 +2450,43 @@ test "Product MCP token expiry never becomes a loaded member removal" {
     try std.testing.expect(runtime.state.management.?.runtime_manifest.?.entries[0].state == .loaded);
     try std.testing.expect(runtime.nextOauthExpiry().?.runtime_loaded);
     try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+}
+
+test "disabled retained OAuth auth refusal is terminal and does not prevent final removal" {
+    for ([_]bool{ false, true }) |refreshable| {
+        var effects = OauthTestEffects{};
+        var harness = TestHarness{};
+        var runtime = try testGrantedOauthRuntime(&effects, &harness, refreshable, 90_000);
+        defer runtime.deinit();
+        var step = (try runtime.prepareConfigurationStep(3, .automatic)).?;
+        defer step.deinit();
+        var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &step.preparation)).?;
+        try std.testing.expect(runtime.completeConfigurationApply(3, &step.preparation, &manifest, null, null, false));
+        step.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+        const source = configuration.runtimeDescriptorFingerprint(runtime.state.management.?.desiredRegistry().?.servers[0]);
+        try runtime.state.task_references.ensureUnusedCapacity(std.testing.allocator, 1);
+        const reference: state_module.McpTaskReference = reference: {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            errdefer arena.deinit();
+            const owned = arena.allocator();
+            const tools = try owned.alloc(state_module.McpTaskReference.Tool, 1);
+            tools[0] = .{ .server_id = try owned.dupe(u8, "oauth"), .name = try owned.dupe(u8, "echo"), .fingerprint = source };
+            break :reference .{ .arena = arena, .task_id = 7, .tools = tools };
+        };
+        runtime.state.task_references.appendAssumeCapacity(reference);
+        runtime.updateMemberReferenceCounts();
+        try std.testing.expectEqual(.saved, try runtime.setServerEnabled(3, .{ .server_id = "oauth", .enabled = false }));
+        try std.testing.expectEqual(@as(u32, 1), runtime.state.management.?.runtime_manifest.?.entries[0].task_references);
+        for (0..3) |_| try std.testing.expectEqual(.stale, try runtime.requireOauthReauthorization(.{ .server_id = "oauth", .source_fingerprint = source, .reason = .challenge, .consent_epoch = 1, .token_revision = 1, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
+        const oauth = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+        try std.testing.expectEqualStrings("ready", oauth.status);
+        try std.testing.expect(oauth.grant != null);
+        try std.testing.expect((try runtime.prepareConfigurationStep(4, .automatic)) == null);
+        runtime.releaseTaskReference(7);
+        var removal = (try runtime.prepareConfigurationStep(4, .automatic)).?;
+        defer removal.deinit();
+        try std.testing.expectEqual(.remove, removal.target.kind);
+    }
 }
 
 test "Product MCP manual recovery distinguishes HTTP auth refusal from network failure and stops new-token loops" {
