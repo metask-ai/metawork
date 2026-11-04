@@ -338,6 +338,8 @@ pub const McpProductState = struct {
     refresh_schedule_failed: bool = false,
     connection_test: ?McpConnectionTest = null,
     configuration_apply_state: McpConfigurationApplyState = .idle,
+    apply_target: ?mcp_configuration.RuntimeApplyTarget = null,
+    runtime_uncertain: bool = false,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     host_capabilities: McpHostCapabilities,

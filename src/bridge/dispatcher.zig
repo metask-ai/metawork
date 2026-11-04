@@ -185,7 +185,7 @@ pub const McpManagementHost = struct {
     capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot, []const u8) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
     cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
-    apply_fn: *const fn (*anyopaque) anyerror!McpConfigurationApplyStartOutcome,
+    apply_fn: *const fn (*anyopaque, bool) anyerror!McpConfigurationApplyStartOutcome,
 };
 
 pub const Dispatcher = struct {
@@ -4555,7 +4555,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const host = self.mcp_management_host orelse
             return std.fmt.bufPrint(output, "{{\"outcome\":\"unavailable\"}}", .{});
-        const outcome = try host.apply_fn(host.context);
+        const outcome = try host.apply_fn(host.context, true);
         if (outcome == .started) self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
     }
@@ -4629,7 +4629,7 @@ pub const Dispatcher = struct {
             inspection.runtime_alignment != .restart_required)
             return;
         const host = self.mcp_management_host orelse return;
-        _ = host.apply_fn(host.context) catch return;
+        _ = host.apply_fn(host.context, false) catch return;
     }
 
     fn encodeMcpTypedOutcome(

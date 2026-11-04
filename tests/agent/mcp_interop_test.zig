@@ -979,6 +979,17 @@ fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
     // the previously published selectors remain usable during candidate I/O.
     try probe.check(true);
     try std.testing.expect(!apply.done.load(.acquire));
+    const host_selection = activation.takeSelection() orelse return error.TestUnexpectedResult;
+    defer host_selection.deinit();
+    const host_options: agent.SessionOpenOptions = .{
+        .model_binding = .{ .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = healthy.provider_endpoint, .model = "fixture-model" }, .credential = "fixture-credential" },
+        .permission_mode = .full_access,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .mcp_selection = host_selection,
+    };
+    try expectHostMcpCreateAndRestore(runtime, host_options);
+    try std.testing.expect(!apply.done.load(.acquire));
     const during_apply = try tmp.dir.readFileAlloc(std.testing.io, "healthy.jsonl", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(during_apply);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, during_apply, "\"method\":\"tools/call\""));
@@ -994,6 +1005,7 @@ fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
     probe.execute_tool = false;
     probe.execute_restored_tool = true;
     try probe.check(true);
+    try expectHostMcpCreateAndRestore(runtime, host_options);
     const settled_trace = try tmp.dir.readFileAlloc(std.testing.io, "healthy.jsonl", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(settled_trace);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, settled_trace, "\"method\":\"tools/call\""));
@@ -1109,6 +1121,57 @@ test "canonical MCP shared members survive more than the retired configuration l
     const calls = try tmp.dir.readFileAlloc(std.testing.io, "shared.jsonl", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(calls);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, calls, "\"method\":\"tools/call\""));
+}
+
+test "an untrusted report after real MCP adoption retains resources and fences further MCP effects" {
+    const CorruptReport = struct {
+        var original: wire.RuntimeApplyMcpConfigurationFnV1 = undefined;
+
+        fn apply(runtime: ?*wire.RuntimeHandle, configuration: ?*const wire.McpConfigurationV1, report: ?*wire.McpApplyReportV1, diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+            const status = original(runtime, configuration, report, diagnostic);
+            if (status == wire.STATUS_OK) report.?.reserved[0] = 1;
+            return status;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const trace = try std.fmt.allocPrint(std.testing.allocator, "{s}/uncertain.jsonl", .{root});
+    defer std.testing.allocator.free(trace);
+    var fixture = try HttpFixture.start("2026-07-28", "json", trace);
+    defer fixture.deinit();
+    var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
+    defer preparation.deinit();
+    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    defer build.deinit();
+    const api = try sdk.Api.discover();
+    var raw = api.raw.*;
+    var mcp_api = raw.mcp.?.*;
+    CorruptReport.original = mcp_api.apply_configuration.?;
+    mcp_api.apply_configuration = CorruptReport.apply;
+    raw.mcp = &mcp_api;
+    const runtime = try agent.Runtime.initWithApi(std.testing.io, std.testing.allocator, &raw, .{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    try std.testing.expectError(error.McpConfigurationApplyUncertain, runtime.applyMcpConfiguration(&build.input.?));
+    try std.testing.expect(runtime.mcp_configuration_uncertain);
+    try std.testing.expectEqual(@as(usize, 0), runtime.mcp_servers.expectedServers().len);
+    try std.testing.expectEqual(@as(usize, 1), runtime.retired_mcp_servers.items.len);
+    try std.testing.expect(!runtime.retired_mcp_servers.items[0].isQuiescent());
+    try std.testing.expectError(error.McpConfigurationApplyUncertain, runtime.activateMcp());
+    try std.testing.expectError(error.McpConfigurationApplyUncertain, runtime.prepareMcpMembership(1, null, &.{}));
+    // Optional MCP failure does not close ordinary text Session admission.
+    const session = try runtime.createSession(.{
+        .model_binding = .{ .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "fixture-model" }, .credential = "fixture-credential" },
+        .permission_mode = .full_access,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+    });
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
 }
 
 fn expectHostMcpCreateAndRestore(runtime: *agent.Runtime, options_value: agent.SessionOpenOptions) !void {
@@ -1619,6 +1682,121 @@ fn expectIsolatedMcpActivation(protocol_version: []const u8) !void {
     try std.testing.expectEqualStrings("deterministic-http", selection.selectedTools()[0].server_id);
 }
 
+test "real Product converges healthy members with a rejected candidate in either order" {
+    try expectProductIncrementalConvergence(false);
+    try expectProductIncrementalConvergence(true);
+}
+
+fn expectProductIncrementalConvergence(bad_first: bool) !void {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    const trace = try std.fmt.allocPrint(a, "{s}/converge.jsonl", .{root});
+    defer a.free(trace);
+    var fixture = try HttpFixture.start("2026-07-28", "json", trace);
+    defer fixture.deinit();
+    var stopped = try HttpFixture.start("2026-07-28", "json", trace);
+    const bad_endpoint = try a.dupe(u8, stopped.endpoint);
+    defer a.free(bad_endpoint);
+    stopped.deinit();
+    var preparation = try mcp_configuration.prepare(a, null, true, false, .{}, product_mcp_limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(a, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const storage = try a.alloc(u8, mcp_configuration.max_store_bytes);
+    defer a.free(storage);
+    var durable: DurableRegistry = .{ .storage = storage };
+    const runtime = try agent.Runtime.init(std.testing.io, a, .{ .max_sessions = 1 });
+    var runtime_owned = true;
+    defer if (runtime_owned) {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    };
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{
+        .preparation = &preparation,
+        .management = managementConfiguration(&durable, &manifest),
+        .host_capabilities = .{ .connection_approval = true },
+    } });
+    runtime_owned = false;
+    preparation_owned = false;
+    manifest_owned = false;
+    defer shutdownProduct(&control, runtime);
+    for (0..2) |index| {
+        const bad = (index == 0) == bad_first;
+        try std.testing.expectEqual(.saved, try control.createMcpHttpServer(index, .{ .display_name = if (bad) "Bad" else "Healthy", .url = if (bad) bad_endpoint else fixture.endpoint, .timeout_ms = 200, .negotiation = "modern_only" }));
+    }
+    var desired = try mcp_configuration.decode(a, durable.storage[0..durable.len], product_mcp_limits);
+    defer desired.deinit();
+    const healthy_id = desired.value.servers[if (bad_first) 1 else 0].id;
+    try std.testing.expectEqual(.saved, try control.setMcpAllowedTools(2, .{ .server_id = healthy_id, .tools = &.{"echo"} }));
+    var attempts: usize = 0;
+    while (try control.prepareMcpConfigurationStep(3, false)) |value| {
+        var step = value;
+        var step_owned = true;
+        defer if (step_owned) step.deinit();
+        attempts += 1;
+        try std.testing.expect(attempts <= 2);
+        var candidate = try mcp_configuration.prepare(a, durable.storage[0..durable.len], true, false, .{}, product_mcp_limits);
+        defer candidate.deinit();
+        for (candidate.registry.?.value.servers, candidate.server_states) |server, *state| {
+            if (!std.mem.eql(u8, server.id, step.candidate_id.?)) state.* = .disabled;
+        }
+        var build = try mcp_platform.buildRuntime(std.testing.io, a, &candidate, .{});
+        defer build.deinit();
+        var input = try runtime.prepareMcpMembership(3, &build.input.?, step.member_ids);
+        defer input.deinit();
+        const outcome = try runtime.applyMcpConfiguration(&input);
+        if (outcome == .rejected) {
+            control.failMcpConfigurationApply(3, .rejected);
+            continue;
+        }
+        try std.testing.expectEqual(.applied, outcome);
+        var applied_manifest = (try mcp_configuration.RuntimeManifest.candidate(a, &step.preparation)).?;
+        var applied_manifest_owned = true;
+        defer if (applied_manifest_owned) applied_manifest.deinit();
+        const activation = switch (try runtime.activateMcp()) {
+            .activated => |activated| activated,
+            else => return error.TestUnexpectedResult,
+        };
+        const selection = activation.takeSelection();
+        const installed = control.completeMcpConfigurationApply(3, &step.preparation, &applied_manifest, activation, selection, false);
+        if (!installed) {
+            if (selection) |selected| selected.deinit();
+            activation.deinit();
+            return error.TestUnexpectedResult;
+        }
+        step_owned = false;
+        applied_manifest_owned = false;
+    }
+    try std.testing.expectEqual(@as(usize, 2), attempts);
+    try std.testing.expectEqual(mcp_configuration.RuntimeAlignment.current, control.inspectMcpDesiredConfiguration().?.runtime_alignment);
+    try std.testing.expectEqual(@as(usize, 1), runtime.mcp_servers.expectedServers().len);
+    try std.testing.expectEqualStrings(healthy_id, runtime.mcp_servers.expectedServers()[0].id);
+    const admission = control.mcp.?.selectionForNewTask();
+    try std.testing.expect(admission.available);
+    try std.testing.expect(admission.selection != null);
+    try expectHostMcpCreateAndRestore(runtime, .{
+        .model_binding = .{ .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "fixture-model" }, .credential = "fixture-credential" },
+        .permission_mode = .full_access,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .mcp_selection = admission.selection,
+    });
+    var probe: RawMcpAdmissionProbe = .{ .api = runtime.api, .runtime = runtime.runtime.?, .workspace = root, .endpoint = fixture.provider_endpoint, .selector = std.mem.zeroes(wire.McpSelectorV1), .execute_tool = true };
+    defer probe.bytes.bytes.deinit(a);
+    probe.selector.struct_size = @sizeOf(wire.McpSelectorV1);
+    probe.selector.server_binding_identity = agent.mcpBindingIdentity(healthy_id);
+    probe.selector.tool_name = sdk.bytesView("echo");
+    try probe.check(true);
+    const calls = try tmp.dir.readFileAlloc(std.testing.io, "converge.jsonl", a, .limited(1024 * 1024));
+    defer a.free(calls);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, calls, "\"method\":\"tools/call\""));
+}
+
 test "real Product cold mixed configuration failure does not invent server network failures" {
     try expectProductAtomicApplyFailure(false);
 }
@@ -1694,7 +1872,7 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     defer candidate_build.deinit();
     try control.beginMcpConfigurationApply(2);
     try std.testing.expectEqual(.rejected, try runtime.applyMcpConfiguration(&candidate_build.input.?));
-    control.failMcpConfigurationApply(2);
+    control.failMcpConfigurationApply(2, .rejected);
     var output: [512 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&output);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, snapshot, .{});
@@ -1706,8 +1884,8 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     try std.testing.expectEqual(@as(usize, 2), servers.len);
     try std.testing.expectEqualStrings(if (healthy_loaded) "ready" else "not_loaded", servers[0].object.get("runtimeStatus").?.string);
     try std.testing.expectEqualStrings("not_loaded", servers[1].object.get("runtimeStatus").?.string);
-    for (servers) |server| {
-        try std.testing.expectEqualStrings("restart_required", server.object.get("newTaskAccess").?.string);
+    for (servers, 0..) |server, index| {
+        try std.testing.expectEqualStrings(if (healthy_loaded) (if (index == 0) "available" else "not_allowed") else "restart_required", server.object.get("newTaskAccess").?.string);
         try std.testing.expect(!std.mem.eql(u8, "Server is unavailable", server.object.get("safeDiagnostic").?.string));
     }
     // A disabled bad descriptor is omitted from the complete candidate. The

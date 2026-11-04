@@ -27,7 +27,6 @@ pub const OperationState = struct {
         if (self.busy()) return false;
         self.phase = phase;
         self.previous_generation = null;
-        if (phase == .apply) self.current_generation = null;
         return true;
     }
 
@@ -57,7 +56,7 @@ pub const OperationState = struct {
     }
 };
 
-test "MCP operation fence retains one refresh handoff and invalidates every apply epoch" {
+test "MCP operation fence retains published authority during apply and one refresh handoff" {
     var state = OperationState{};
     try std.testing.expect(state.begin(.refresh));
     try std.testing.expect(!state.begin(.apply));
@@ -72,9 +71,9 @@ test "MCP operation fence retains one refresh handoff and invalidates every appl
     state.fail(true);
     try std.testing.expect(state.accepts(8) and !state.busy());
     try std.testing.expect(state.begin(.apply));
-    try std.testing.expect(!state.accepts(8));
+    try std.testing.expect(state.accepts(8));
     state.completeApply();
-    try std.testing.expect(!state.busy() and !state.accepts(8));
+    try std.testing.expect(!state.busy() and state.accepts(8));
     try std.testing.expect(state.begin(.refresh));
     state.completeRefresh(9);
     try std.testing.expect(state.begin(.refresh));

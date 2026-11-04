@@ -163,10 +163,7 @@ pub fn serverToolsForAdmission(
     registry: mcp_configuration.RegistryWire,
     server: mcp_configuration.ServerWire,
 ) []const []const u8 {
-    if (registry.oauth_operation) |operation|
-        if (std.mem.eql(u8, operation.server_id, server.id)) return &.{};
-    if (!serverAdmittedByDesiredState(server)) return &.{};
-    return server.tools;
+    return mcp_configuration.admissionTools(registry, server);
 }
 
 pub fn buildOauthRefreshBinding(
@@ -210,10 +207,11 @@ pub fn buildOauthRefreshBinding(
 
 fn refreshToolsForServer(
     desired: ?mcp_configuration.RegistryWire,
-    server_id: []const u8,
+    applied: mcp_configuration.ServerWire,
 ) []const []const u8 {
     const registry = desired orelse return &.{};
-    const server = mcp_state.findMcpServer(registry.servers, server_id) orelse return &.{};
+    const server = mcp_state.findMcpServer(registry.servers, applied.id) orelse return &.{};
+    if (!std.mem.eql(u8, &mcp_configuration.runtimeDescriptorFingerprint(server), &mcp_configuration.runtimeDescriptorFingerprint(applied))) return &.{};
     return serverToolsForAdmission(registry, server);
 }
 
@@ -234,7 +232,7 @@ pub fn buildRefreshAllowlists(
     var write: usize = 0;
     for (startup.servers, mcp.preparation.server_states) |server, server_state| {
         if (server_state != .eligible) continue;
-        const tools = refreshToolsForServer(desired, server.id);
+        const tools = refreshToolsForServer(desired, server);
         const owned_tools = try allocator.alloc([]const u8, tools.len);
         for (tools, owned_tools) |tool, *owned|
             owned.* = try allocator.dupe(u8, tool);
@@ -620,7 +618,7 @@ test "OAuth operation remains excluded from every rebuilt Admission target" {
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        refreshToolsForServer(registry, "oauth").len,
+        refreshToolsForServer(registry, oauth_server).len,
     );
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -628,7 +626,7 @@ test "OAuth operation remains excluded from every rebuilt Admission target" {
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        refreshToolsForServer(registry, "other").len,
+        refreshToolsForServer(registry, other).len,
     );
     registry.oauth_operation = null;
     try std.testing.expectEqual(
@@ -637,7 +635,7 @@ test "OAuth operation remains excluded from every rebuilt Admission target" {
     );
     try std.testing.expectEqual(
         @as(usize, 2),
-        refreshToolsForServer(registry, "oauth").len,
+        refreshToolsForServer(registry, oauth_server).len,
     );
     var oauth = oauth_server.auth.oauth.?;
     oauth.status = "reauth_required";

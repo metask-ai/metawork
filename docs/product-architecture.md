@@ -292,9 +292,11 @@ Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事�
 
 授权缺失的 absence proof 按连接是否真正需要加载对账：未具备加载条件时，consent、DCR 注册所得 client identity/secret locator 或 reauthorization 中间状态变化不能单独使正式 Runtime 失配；具备加载条件后仍须真实 apply 才能成为 loaded，不能将授权成功当作 Runtime 接管成功。static credential absence 仍绑定对应 credential 引用，不能借 OAuth 中间态规则放宽其校验。
 
-MCP mutation 必须从 canonical Desired 构造完整 candidate，先提交 registry，再由 Application coordinator 构造 Runtime input、调用 Agent declarative apply、取得正式 Activation，最后由 Product Control 原子安装 Manifest、Activation 与 Admission Authority。正式 apply 成功只影响之后创建的 Session；已有 Session 保持创建时已复制的 authority，不热替换或即时撤权。
+MCP mutation 先提交 canonical Desired；Product Control 再以最后已确认的 Runtime Manifest 为起点，每步加入、替换或移除一个目标，构造完整成员集合。Application coordinator 只执行该步 preparation、Agent declarative apply 与正式 Activation；Product Control 逐步接纳 Manifest、Activation 与按当前授权派生的 Admission Authority，不等待整轮结束。Agent 复用未变化成员的 connector owner，不为每步复制整组执行资源。已有 Session 保持创建时的 authority 上限，由 Core 按实际来源和目录重新评估，不热替换其 Selection。
 
-registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。Agent apply 拒绝、malformed report、resource limit 或 activation failure 形成 typed failure 并保持 fail-closed admission，不能把未接管的 descriptor 标记为 loaded。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。
+registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。正式拒绝只记录对应目标本次未接管，并保留仍可证明有效的旧 Runtime/catalog authority；新准入仍须按当前已提交授权、来源版本与原 deadline 过滤，不能恢复旧权限或重置 TTL。无法信任的 ABI/report 必须停止后续 MCP effect、关闭相应准入，并保留 Core 可能持有的资源直到安全释放；不能把未确认的 descriptor 标记为 loaded。已应用但 Activation 失败时保留接管事实，以既有有界目录刷新恢复 authority，不重新应用已确认的成员。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。
+
+`runtimeAlignment = current` 表示目标已处理且结果已接纳，不表示全部服务健康。逐目标结果绑定来源版本；无关 Desired generation 或成员增加不重开失败。相关成员移除、替换可以在本轮结束后重开，单轮每个候选最多尝试一次；显式应用重试可重开失败结果，目录刷新不隐式重试未加入的来源。结果存储必须在 effect 前准备，后续失败不能抹掉此前已确认的接管。
 
 credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。
 

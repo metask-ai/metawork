@@ -712,6 +712,147 @@ pub const ManagementInspection = struct {
     server_count: usize,
 };
 
+/// The attempted target is independent of the global Desired generation.
+/// IDs and fingerprints contain no credential material.
+pub const RuntimeApplyTarget = struct {
+    id_storage: [128]u8 = undefined,
+    id_len: usize,
+    fingerprint: [32]u8,
+    kind: enum { add, replace, remove },
+
+    pub fn init(id_value: []const u8, server: ?ServerWire, kind: @FieldType(RuntimeApplyTarget, "kind")) RuntimeApplyTarget {
+        std.debug.assert(id_value.len <= 128);
+        var value: RuntimeApplyTarget = .{ .id_len = id_value.len, .fingerprint = @splat(0), .kind = kind };
+        @memcpy(value.id_storage[0..id_value.len], id_value);
+        if (server) |target| {
+            var hash = Sha256.init(.{});
+            hashField(&hash, "metawork.mcp.apply-target/v1");
+            hashField(&hash, &runtimeDescriptorFingerprint(target));
+            hashField(&hash, &authenticationFingerprint(target));
+            hashField(&hash, if (target.enabled) "enabled" else "disabled");
+            if (target.connection_approval) |approval| hashField(&hash, approval.fingerprint);
+            hash.final(&value.fingerprint);
+        }
+        return value;
+    }
+
+    pub fn id(self: *const RuntimeApplyTarget) []const u8 {
+        return self.id_storage[0..self.id_len];
+    }
+};
+
+pub const RuntimeApplyFailure = enum { preparation, rejected, unknown };
+
+/// Product's attempt ledger. Membership growth never invalidates failures;
+/// removal/replacement can reopen them after the current round finishes.
+pub const RuntimeConvergence = struct {
+    pub const Outcome = enum { pending, rejected, failed };
+    const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome };
+    results: std.ArrayList(Result) = .empty,
+    epoch: u64 = 0,
+    round: u64 = 1,
+
+    pub fn deinit(self: *RuntimeConvergence, allocator: std.mem.Allocator) void {
+        self.results.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn handled(self: *const RuntimeConvergence, target: RuntimeApplyTarget) bool {
+        for (self.results.items) |result| {
+            if (!std.mem.eql(u8, result.target.id(), target.id()) or
+                !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
+            return result.outcome != .pending and (result.epoch == self.epoch or result.round == self.round);
+        }
+        return false;
+    }
+
+    /// Reserve result storage before any external effect.
+    pub fn prepare(self: *RuntimeConvergence, allocator: std.mem.Allocator, target: RuntimeApplyTarget) std.mem.Allocator.Error!void {
+        for (self.results.items) |*result| {
+            if (!std.mem.eql(u8, result.target.id(), target.id())) continue;
+            result.* = .{ .target = target, .epoch = self.epoch, .round = self.round, .outcome = .pending };
+            return;
+        }
+        try self.results.append(allocator, .{ .target = target, .epoch = self.epoch, .round = self.round, .outcome = .pending });
+    }
+
+    pub fn reject(self: *RuntimeConvergence, target: RuntimeApplyTarget, outcome: Outcome) void {
+        std.debug.assert(outcome != .pending);
+        for (self.results.items) |*result| {
+            if (std.mem.eql(u8, result.target.id(), target.id()) and
+                std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint))
+            {
+                result.outcome = outcome;
+                return;
+            }
+        }
+        unreachable;
+    }
+
+    pub fn applied(self: *RuntimeConvergence, target: RuntimeApplyTarget) void {
+        for (self.results.items, 0..) |result, index| {
+            if (std.mem.eql(u8, result.target.id(), target.id())) {
+                _ = self.results.swapRemove(index);
+                break;
+            }
+        }
+        if (target.kind != .add) self.epoch +|= 1;
+    }
+
+    pub fn nextRound(self: *RuntimeConvergence) bool {
+        for (self.results.items) |result| {
+            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending) {
+                self.round +|= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn retry(self: *RuntimeConvergence) void {
+        self.results.clearRetainingCapacity();
+        self.round +|= 1;
+    }
+};
+
+/// Immutable full Runtime target for one atomic apply. Only candidate_id
+/// requires a newly constructed transport; every other member is shared.
+pub const RuntimeApplyStep = struct {
+    pub const Grant = struct { id: []const u8, tools: []const []const u8 };
+    preparation: Preparation,
+    member_ids: []const []const u8,
+    grants: []const Grant,
+    candidate_id: ?[]const u8,
+    target: RuntimeApplyTarget,
+
+    pub fn init(allocator: std.mem.Allocator, desired: RegistryWire, servers: []ServerWire, target: RuntimeApplyTarget, limits: Limits) (Error || std.mem.Allocator.Error)!RuntimeApplyStep {
+        var registry = try cloneRegistry(allocator, .{ .schema_version = schema_version, .generation = desired.generation, .oauth_operation = null, .servers = servers }, limits);
+        errdefer registry.deinit();
+        const states = try allocator.alloc(ServerPreparationState, servers.len);
+        errdefer allocator.free(states);
+        @memset(states, .eligible);
+        const ids = try registry.arena.allocator().alloc([]const u8, servers.len);
+        const grants = try registry.arena.allocator().alloc(Grant, servers.len);
+        var candidate_id: ?[]const u8 = null;
+        for (registry.value.servers, ids, grants) |server, *id_value, *grant| {
+            id_value.* = server.id;
+            if (target.kind != .remove and std.mem.eql(u8, server.id, target.id())) candidate_id = server.id;
+            const current = findServer(desired.servers, server.id);
+            const tools: []const []const u8 = if (current != null and
+                std.mem.eql(u8, &runtimeDescriptorFingerprint(current.?), &runtimeDescriptorFingerprint(server))) admissionTools(desired, current.?) else &.{};
+            const copied = try registry.arena.allocator().alloc([]const u8, tools.len);
+            for (tools, copied) |tool, *value| value.* = try registry.arena.allocator().dupe(u8, tool);
+            grant.* = .{ .id = server.id, .tools = copied };
+        }
+        return .{ .preparation = .{ .allocator = allocator, .state = .available, .registry = registry, .server_states = states }, .member_ids = ids, .grants = grants, .candidate_id = candidate_id, .target = target };
+    }
+
+    pub fn deinit(self: *RuntimeApplyStep) void {
+        self.preparation.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const ManagementOutcome = enum {
     unchanged,
     saved,
@@ -759,6 +900,7 @@ pub const ManagementPort = struct {
     identity_generator: FreshServerIdentityGenerator,
     coordinator: TransactionCoordinator,
     oauth_schedule: OauthRefreshSchedule,
+    convergence: RuntimeConvergence = .{},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -799,6 +941,7 @@ pub const ManagementPort = struct {
     }
 
     pub fn deinit(self: *ManagementPort) void {
+        self.convergence.deinit(self.allocator);
         self.oauth_schedule.deinit();
         if (self.runtime_manifest) |*manifest| manifest.deinit();
         if (self.desired) |*registry| registry.deinit();
@@ -814,7 +957,7 @@ pub const ManagementPort = struct {
             .health = self.coordinator.health,
             .desired_generation = desired_generation,
             .runtime_alignment = if (self.runtime_manifest) |*manifest|
-                manifest.alignment(if (self.desired) |registry| registry.value else null, self.limits)
+                manifest.alignmentWithResults(if (self.desired) |registry| registry.value else null, self.limits, &self.convergence)
             else
                 .unknown,
             .server_count = if (self.desired) |registry| registry.value.servers.len else 0,
@@ -826,7 +969,7 @@ pub const ManagementPort = struct {
         target: RegistryWire,
     ) RuntimeAlignment {
         return if (self.runtime_manifest) |*manifest|
-            manifest.alignment(target, self.limits)
+            manifest.alignmentWithResults(target, self.limits, &self.convergence)
         else
             .unknown;
     }
@@ -2123,6 +2266,14 @@ pub const ManagementPort = struct {
         self.oauth_schedule.reconcile(replacement.value);
         if (self.desired) |*registry| registry.deinit();
         self.desired = replacement;
+        var index: usize = 0;
+        while (index < self.convergence.results.items.len) {
+            const id = self.convergence.results.items[index].target.id();
+            const retained = if (self.runtime_manifest) |*manifest| findManifestEntry(manifest.entries, id) != null else false;
+            if (findServer(replacement.value.servers, id) != null or retained) {
+                index += 1;
+            } else _ = self.convergence.results.swapRemove(index);
+        }
     }
 };
 
@@ -2587,19 +2738,34 @@ pub const RuntimeManifest = struct {
         desired: ?RegistryWire,
         limits: Limits,
     ) RuntimeAlignment {
+        return self.alignmentWithResults(desired, limits, null);
+    }
+
+    pub fn alignmentWithResults(
+        self: *const RuntimeManifest,
+        desired: ?RegistryWire,
+        limits: Limits,
+        convergence: ?*const RuntimeConvergence,
+    ) RuntimeAlignment {
         for (self.entries) |entry| {
             const target = if (desired) |registry|
                 findServer(registry.servers, entry.id)
             else
                 null;
-            if (!entryCompatible(entry, target, limits)) return .restart_required;
+            if (!entryCompatible(entry, target, limits)) {
+                const attempt = RuntimeApplyTarget.init(entry.id, target, if (target == null or !target.?.enabled) .remove else .replace);
+                if (convergence == null or !convergence.?.handled(attempt)) return .restart_required;
+            }
         }
         if (desired) |registry| {
             for (registry.servers) |server| {
                 if (findManifestEntry(self.entries, server.id) != null) continue;
                 if (server.enabled and serverRuntimeAuthorizationReady(server) and
                     serverProblem(server, limits) == null)
-                    return .restart_required;
+                {
+                    const attempt = RuntimeApplyTarget.init(server.id, server, .add);
+                    if (convergence == null or !convergence.?.handled(attempt)) return .restart_required;
+                }
             }
         }
         return .current;
@@ -2658,8 +2824,19 @@ fn entryCompatible(
 fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
     if (server.connection_approval == null) return false;
     if (server.auth.oauth) |oauth|
-        return std.mem.eql(u8, oauth.status, "ready");
+        return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;
     return true;
+}
+
+pub fn runtimeLoadEligible(server: ServerWire, limits: Limits) bool {
+    return server.enabled and serverRuntimeAuthorizationReady(server) and serverProblem(server, limits) == null;
+}
+
+pub fn admissionTools(registry: RegistryWire, server: ServerWire) []const []const u8 {
+    if (!server.enabled or !serverRuntimeAuthorizationReady(server)) return &.{};
+    if (registry.oauth_operation) |operation|
+        if (std.mem.eql(u8, operation.server_id, server.id)) return &.{};
+    return server.tools;
 }
 
 fn oauthDoesNotRequireLoading(server: ServerWire) bool {
@@ -8979,4 +9156,36 @@ test "unapproved server never resolves credentials" {
     try std.testing.expect(prepared.server_states[0] == .unapproved);
     try std.testing.expectEqual(@as(usize, 0), Resolver.calls);
     try std.testing.expectEqual(@as(usize, 0), prepared.credentials.len);
+}
+
+test "failed MCP candidate survives membership growth and retries once after replacement" {
+    var ledger: RuntimeConvergence = .{};
+    defer ledger.deinit(std.testing.allocator);
+    const bad = RuntimeApplyTarget.init("bad", null, .add);
+    try ledger.prepare(std.testing.allocator, bad);
+    ledger.reject(bad, .rejected);
+    ledger.applied(RuntimeApplyTarget.init("healthy", null, .add));
+    try std.testing.expect(ledger.handled(bad));
+    try std.testing.expect(!ledger.nextRound());
+    ledger.applied(RuntimeApplyTarget.init("healthy", null, .replace));
+    try std.testing.expect(ledger.handled(bad));
+    try std.testing.expect(ledger.nextRound());
+    try std.testing.expect(!ledger.handled(bad));
+    try ledger.prepare(std.testing.allocator, bad);
+    ledger.reject(bad, .rejected);
+    try std.testing.expect(ledger.handled(bad));
+    try std.testing.expect(!ledger.nextRound());
+    ledger.retry();
+    try std.testing.expect(!ledger.handled(bad));
+}
+
+test "removed unattemptable MCP targets cannot create endless follow-up rounds" {
+    var ledger: RuntimeConvergence = .{};
+    defer ledger.deinit(std.testing.allocator);
+    const bad = RuntimeApplyTarget.init("bad", null, .add);
+    try ledger.prepare(std.testing.allocator, bad);
+    ledger.reject(bad, .failed);
+    ledger.applied(RuntimeApplyTarget.init("other", null, .remove));
+    try std.testing.expect(ledger.nextRound());
+    try std.testing.expect(!ledger.nextRound());
 }

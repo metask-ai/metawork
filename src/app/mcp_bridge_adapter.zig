@@ -19,9 +19,10 @@ pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.Mcp
 
 fn applyConfiguration(
     context: *anyopaque,
+    retry: bool,
 ) anyerror!bridge_api.McpConfigurationApplyStartOutcome {
     const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    return switch (try coordinator.applyConfiguration()) {
+    return switch (try coordinator.applyConfiguration(retry)) {
         .started => .started,
         .busy => .busy,
         .rejected => .rejected,

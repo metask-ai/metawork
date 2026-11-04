@@ -647,6 +647,24 @@ pub const HttpAuthorizations = struct {
     allocator: std.mem.Allocator,
     slots: []*HttpAuthSlot = &.{},
 
+    /// Prepare the actual member mapping before apply. Unchanged transports
+    /// retain their existing rotation/failure slot, including retained members.
+    pub fn compose(self: *const HttpAuthorizations, additions: *const HttpAuthorizations, ids: []const []const u8, replaced_id: ?[]const u8) std.mem.Allocator.Error!HttpAuthorizations {
+        var slots: std.ArrayList(*HttpAuthSlot) = .empty;
+        defer slots.deinit(self.allocator);
+        errdefer for (slots.items) |slot| slot.release();
+        for (ids) |id| {
+            const source = if (replaced_id != null and std.mem.eql(u8, replaced_id.?, id)) additions else self;
+            for (source.slots) |slot| {
+                if (!std.mem.eql(u8, slot.server_id, id)) continue;
+                try slots.append(self.allocator, slot);
+                slot.retain();
+                break;
+            }
+        }
+        return .{ .allocator = self.allocator, .slots = try slots.toOwnedSlice(self.allocator) };
+    }
+
     pub fn deinit(self: *HttpAuthorizations) void {
         for (self.slots) |slot| slot.release();
         if (self.slots.len != 0) self.allocator.free(self.slots);

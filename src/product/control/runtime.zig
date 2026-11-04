@@ -6184,6 +6184,13 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
+    pub fn prepareMcpConfigurationStep(self: *Runtime, generation: u64, retry: bool) Error!?mcp_configuration.RuntimeApplyStep {
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        const step = try mcp.prepareConfigurationStep(generation, retry);
+        if (step != null) self.bumpRevision();
+        return step;
+    }
+
     /// Installs the exact Runtime preparation and authority produced by one
     /// successful declarative AgentCore apply. Every pointer remains owned by
     /// the caller when the generation no longer matches.
@@ -6212,9 +6219,10 @@ pub const Runtime = struct {
     pub fn failMcpConfigurationApply(
         self: *Runtime,
         expected_generation: u64,
+        reason: mcp_configuration.RuntimeApplyFailure,
     ) void {
         const runtime = if (self.mcp) |*value| value else return;
-        if (runtime.failConfigurationApply(expected_generation)) self.bumpRevision();
+        if (runtime.failConfigurationApply(expected_generation, reason)) self.bumpRevision();
     }
 
     pub fn completeMcpConnectionTest(
@@ -10188,6 +10196,7 @@ pub const Runtime = struct {
             .begin_connection_test_fn = controlMcpBeginConnectionTest,
             .complete_connection_test_fn = controlMcpCompleteConnectionTest,
             .begin_apply_fn = controlMcpBeginApply,
+            .prepare_apply_fn = controlMcpPrepareApply,
             .complete_apply_fn = controlMcpCompleteApply,
             .fail_apply_fn = controlMcpFailApply,
             .authorization_operation_fn = controlMcpAuthorizationOperation,
@@ -10735,11 +10744,14 @@ fn controlMcpCompleteConnectionTest(context: *anyopaque, server_id: []const u8, 
 fn controlMcpBeginApply(context: *anyopaque, generation: u64) anyerror!void {
     return controlOwner(context).beginMcpConfigurationApply(generation);
 }
+fn controlMcpPrepareApply(context: *anyopaque, generation: u64, retry: bool) anyerror!?mcp_configuration.RuntimeApplyStep {
+    return controlOwner(context).prepareMcpConfigurationStep(generation, retry);
+}
 fn controlMcpCompleteApply(context: *anyopaque, generation: u64, preparation: *mcp_configuration.Preparation, manifest: *mcp_configuration.RuntimeManifest, activation: ?*lifecycle.McpActivation, selection: ?*lifecycle.McpSelection, activation_failed: bool) bool {
     return controlOwner(context).completeMcpConfigurationApply(generation, preparation, manifest, activation, selection, activation_failed);
 }
-fn controlMcpFailApply(context: *anyopaque, generation: u64) void {
-    controlOwner(context).failMcpConfigurationApply(generation);
+fn controlMcpFailApply(context: *anyopaque, generation: u64, reason: mcp_configuration.RuntimeApplyFailure) void {
+    controlOwner(context).failMcpConfigurationApply(generation, reason);
 }
 fn controlMcpAuthorizationOperation(context: *anyopaque) ?McpAuthorizationOperationView {
     return controlOwner(context).mcpAuthorizationOperation();
@@ -20178,7 +20190,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         mcp_configuration.RuntimeAlignment.current,
         control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
-    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
+    try std.testing.expectEqual(McpAdmissionBlockReason.activation_unavailable, mcp_testing.state(&control.mcp.?).admission.blocked);
     try std.testing.expectEqual(
         @as(usize, 1),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
@@ -20201,7 +20213,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             .display_name = "Renamed OAuth",
         }),
     );
-    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
+    try std.testing.expectEqual(McpAdmissionBlockReason.activation_unavailable, mcp_testing.state(&control.mcp.?).admission.blocked);
     try std.testing.expectEqual(
         @as(usize, 1),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
@@ -20404,10 +20416,10 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"configurationApply\":\"applying\"",
     ) != null);
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.refreshing,
+        McpAdmissionBlockReason.pending_restart,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    control.failMcpConfigurationApply(1);
+    control.failMcpConfigurationApply(1, .preparation);
     const failed_apply_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -20756,7 +20768,7 @@ test "MCP startup activation failure stays globally unavailable without inventin
         control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.pending_restart,
+        McpAdmissionBlockReason.activation_unavailable,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
