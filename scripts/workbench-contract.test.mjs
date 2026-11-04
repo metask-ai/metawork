@@ -1767,8 +1767,11 @@ test("MCP management is capability-gated and identity checked", () => {
       newTaskAccess: "unavailable",
       tools: [],
     });
-    recovering.mcp.applyFailureCount =
-      projection.applyStatus === "rejected" ? 1 : 0;
+    recovering.mcp.applyFailureCount = ["rejected", "failed"].includes(
+      projection.applyStatus,
+    )
+      ? 1
+      : 0;
     assert.deepEqual(decodeWorkbenchSnapshot(recovering), recovering);
     delete server.canAuthorize;
     assert.throws(() => decodeWorkbenchSnapshot(recovering), /canAuthorize/);

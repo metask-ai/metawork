@@ -4101,7 +4101,7 @@ test "real Core connects a restored expired grant only with committed new bearer
     try std.testing.expect(owner.control.inspectMcpDesiredConfiguration().?.authorization_recovery_pending);
     var binding = (try owner.control.beginMcpOauthRefresh("deterministic-http")).started;
     defer binding.deinit();
-    try std.testing.expect(!binding.runtime_loaded);
+    try std.testing.expectEqual(.absent, binding.runtime_binding);
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "oauth-new-bearer.jsonl", .{}));
     var new_token = "new-access-token".*;
     try std.testing.expectEqual(.saved, try owner.control.completeMcpOauthRefresh(.{ .operation_id = binding.operation_id, .server_id = "deterministic-http", .access_token = &new_token, .expires_at_unix_ms = 999_000 }, .{ .context = &store, .commit_fn = Store.commit }));

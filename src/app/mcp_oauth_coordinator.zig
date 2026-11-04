@@ -424,7 +424,7 @@ pub const Coordinator = struct {
         job: *RefreshJob,
         tokens: *mcp_oauth.TokenSet,
     ) !void {
-        var pending: ?mcp_platform.PendingHttpAuthRotation = if (job.binding.runtime_loaded) switch (try self.authorizations.prepareRotation(
+        var pending: ?mcp_platform.PendingHttpAuthRotation = if (job.binding.runtime_binding != .absent) switch (try self.authorizations.prepareRotation(
             job.binding.server_id,
             job.binding.consent_epoch,
             job.binding.token_revision,
@@ -434,7 +434,16 @@ pub const Coordinator = struct {
             },
         )) {
             .prepared => |value| value,
-            .server_not_loaded, .consent_epoch_mismatch, .token_revision_mismatch => {
+            .server_not_loaded, .consent_epoch_mismatch => incompatible: {
+                // A retained descriptor may use another consent or auth kind.
+                // Its slot cannot govern the current target's refreshed grant.
+                if (job.binding.runtime_binding == .matching_descriptor) {
+                    self.recover(job.binding.operation_id);
+                    return;
+                }
+                break :incompatible null;
+            },
+            .token_revision_mismatch => {
                 self.recover(job.binding.operation_id);
                 return;
             },
@@ -887,6 +896,7 @@ test "MCP OAuth refresh reuses consent only for the same resource and covered sc
         .refresh_token_ref = "refresh-token",
         .consent_epoch = 1,
         .token_revision = 2,
+        .runtime_binding = .matching_descriptor,
     };
     try std.testing.expect(refreshDiscoveryCoveredByConsent(
         &binding,
@@ -905,7 +915,7 @@ test "MCP OAuth refresh reuses consent only for the same resource and covered sc
     ));
 }
 
-test "MCP OAuth token commit accepts proven absence and rejects a missing loaded slot" {
+test "MCP OAuth token commit distinguishes matching and retained descriptors with strict revision checks" {
     const Fixture = struct {
         commits: usize = 0,
         recoveries: usize = 0,
@@ -931,20 +941,39 @@ test "MCP OAuth token commit accepts proven absence and rejects a missing loaded
             return .saved;
         }
     };
-    for ([_]bool{ false, true }) |loaded| {
+    const Case = struct { binding: mcp_types.McpOauthRefreshBinding.RuntimeBinding = .matching_descriptor, slot: bool = true, epoch: u64 = 1, revision: u64 = 1, commit: bool = true, rotated: bool = true };
+    for ([_]Case{
+        .{ .binding = .absent, .slot = false, .rotated = false },
+        .{ .slot = false, .commit = false, .rotated = false },
+        .{},
+        .{ .epoch = 2, .commit = false, .rotated = false },
+        .{ .revision = 2, .commit = false, .rotated = false },
+        .{ .binding = .retained_descriptor },
+        .{ .binding = .retained_descriptor, .slot = false, .rotated = false },
+        .{ .binding = .retained_descriptor, .epoch = 2, .rotated = false },
+        .{ .binding = .retained_descriptor, .revision = 2, .commit = false, .rotated = false },
+    }) |case| {
         var fixture = Fixture{};
         var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
         defer authorizations.deinit();
+        if (case.slot) {
+            authorizations = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+        }
+
         var credentials: mcp_platform.CredentialStore = undefined;
         // Only the completion path is entered; no Host or credential effect.
         var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credentials, &authorizations, undefined);
         var job: RefreshJob = undefined;
-        job.binding = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .operation_id = "operation", .server_id = "oauth", .endpoint = "https://mcp.example.test/mcp", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .client_id = "client", .token_endpoint_auth_method = "none", .client_secret_ref = null, .refresh_token_ref = "refresh", .consent_epoch = 1, .token_revision = 1, .runtime_loaded = loaded };
+        job.binding = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .operation_id = "operation", .server_id = "server", .endpoint = "https://mcp.example.test/mcp", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .client_id = "client", .token_endpoint_auth_method = "none", .client_secret_ref = null, .refresh_token_ref = "refresh", .consent_epoch = case.epoch, .token_revision = case.revision, .runtime_binding = case.binding };
         defer job.binding.deinit();
         var tokens: mcp_oauth.TokenSet = .{ .access_token = try mcp_oauth.Secret.init(std.testing.allocator, "new-access-token"), .refresh_token = null, .expires_at_unix_ms = 999_000 };
         defer tokens.deinit();
         try coordinator.commitTokens(&job, &tokens);
-        try std.testing.expectEqual(@as(usize, if (loaded) 0 else 1), fixture.commits);
-        try std.testing.expectEqual(@as(usize, if (loaded) 1 else 0), fixture.recoveries);
+        try std.testing.expectEqual(@as(usize, if (case.commit) 1 else 0), fixture.commits);
+        try std.testing.expectEqual(@as(usize, if (case.commit) 0 else 1), fixture.recoveries);
+        if (case.slot) {
+            var proof = (try authorizations.prepareRotation("server", 1, if (case.rotated) 2 else 1, .{ .access_token = "probe-token" })).prepared;
+            defer proof.deinit();
+        }
     }
 }

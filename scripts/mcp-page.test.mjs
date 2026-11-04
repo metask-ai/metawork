@@ -1928,71 +1928,83 @@ test("MCP unknown takeover pauses effects while retaining canonical Desired visi
   );
 });
 
-test("MCP keeps an explicit sign-in exit for a failed ready OAuth target", async () => {
-  const authorized = [];
-  const retried = [];
-  const server = {
-    ...servers[1],
-    authorizationStatus: "ready",
-    canAuthorize: true,
-    applyStatus: "rejected",
-    runtimeStatus: "not_loaded",
-    tools: [],
-  };
-  const management = {
-    availability: "degraded",
-    managementHealth: "ready",
-    operation: "idle",
-    desiredGeneration: "failed-generation",
-    runtimeAlignment: "current",
-    redacted: false,
-    applyFailureCount: 1,
-    configurationApply: "failed",
-    servers: [server],
-  };
-  const view = render(
-    pageElement(management, "", {
-      onAuthorize: async (...args) => {
-        authorized.push(args);
-        return { outcome: "started", operationId: "new-login" };
-      },
-      onApply: async (...args) => {
-        retried.push(args);
-        return { outcome: "started" };
-      },
-    }),
-  );
-  fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
-  const dialog = screen.getByRole("dialog", { name: "Notion" });
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Retry connection" }),
-  );
-  await waitFor(() => assert.equal(retried.length, 1));
-  assert.deepEqual(retried[0], [server.id]);
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Sign in again" }),
-  );
-  await waitFor(() => assert.equal(authorized.length, 1));
-  assert.deepEqual(authorized[0], ["failed-generation", server.id]);
-  view.rerender(
-    pageElement({
-      ...management,
-      servers: [{ ...server, canAuthorize: false }],
-    }),
-  );
-  assert.equal(screen.queryByRole("button", { name: "Sign in again" }), null);
-  view.rerender(
-    pageElement(management, "", {
-      capabilities: {
-        connectionApproval: true,
-        secretCapture: true,
-        secretMaxBytes: 2560,
-        oauth: false,
-      },
-    }),
-  );
-  assert.equal(screen.queryByRole("button", { name: "Sign in again" }), null);
-});
+const oauthRecoveryProjections = JSON.parse(
+  await readFile(
+    new URL(
+      "../src/product/mcp/testdata/oauth-recovery-view.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+for (const projection of [
+  oauthRecoveryProjections.failed,
+  oauthRecoveryProjections.blocked_replacement,
+]) {
+  test(`MCP keeps an explicit sign-in exit for a failed ready OAuth target (${projection.applyStatus})`, async () => {
+    const authorized = [];
+    const retried = [];
+    const server = {
+      ...servers[1],
+      ...projection,
+      runtimeStatus: "not_loaded",
+      tools: [],
+    };
+    const management = {
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "failed-generation",
+      runtimeAlignment: "current",
+      redacted: false,
+      applyFailureCount: 1,
+      configurationApply: "failed",
+      servers: [server],
+    };
+    const view = render(
+      pageElement(management, "", {
+        onAuthorize: async (...args) => {
+          authorized.push(args);
+          return { outcome: "started", operationId: "new-login" };
+        },
+        onApply: async (...args) => {
+          retried.push(args);
+          return { outcome: "started" };
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
+    const dialog = screen.getByRole("dialog", { name: "Notion" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Retry connection" }),
+    );
+    await waitFor(() => assert.equal(retried.length, 1));
+    assert.deepEqual(retried[0], [server.id]);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Sign in again" }),
+    );
+    await waitFor(() => assert.equal(authorized.length, 1));
+    assert.deepEqual(authorized[0], ["failed-generation", server.id]);
+    view.rerender(
+      pageElement({
+        ...management,
+        servers: [{ ...server, canAuthorize: false }],
+      }),
+    );
+    assert.equal(screen.queryByRole("button", { name: "Sign in again" }), null);
+    view.rerender(
+      pageElement(management, "", {
+        capabilities: {
+          connectionApproval: true,
+          secretCapture: true,
+          secretMaxBytes: 2560,
+          oauth: false,
+        },
+      }),
+    );
+    assert.equal(screen.queryByRole("button", { name: "Sign in again" }), null);
+  });
+}
 
 test("MCP distinguishes authorization waiting and refreshing without offering cancel or retry", () => {
   for (const authorizationStatus of ["ready", "refreshing"]) {

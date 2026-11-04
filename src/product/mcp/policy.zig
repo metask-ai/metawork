@@ -169,6 +169,7 @@ pub fn serverToolsForAdmission(
 pub fn buildOauthRefreshBinding(
     allocator: std.mem.Allocator,
     registry: mcp_configuration.RegistryWire,
+    runtime_binding: mcp_state.McpOauthRefreshBinding.RuntimeBinding,
 ) std.mem.Allocator.Error!mcp_state.McpOauthRefreshBinding {
     const operation = registry.oauth_operation.?;
     const server = mcp_state.findMcpServer(registry.servers, operation.server_id).?;
@@ -202,6 +203,7 @@ pub fn buildOauthRefreshBinding(
         .refresh_token_ref = try owned.dupe(u8, grant.refresh_token_ref.?),
         .consent_epoch = operation.consent_epoch,
         .token_revision = operation.token_revision.?,
+        .runtime_binding = runtime_binding,
     };
     result.arena = arena;
     return result;
@@ -352,13 +354,17 @@ pub fn runtimeOauthRefreshEligible(mcp: *const mcp_state.McpProductState, server
     return false;
 }
 
-pub fn runtimeOauthLoaded(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
-    const management = if (mcp.management) |*value| value else return false;
-    const manifest = management.runtime_manifest orelse return false;
+pub fn runtimeOauthBinding(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) mcp_state.McpOauthRefreshBinding.RuntimeBinding {
+    const management = if (mcp.management) |*value| value else return .absent;
+    const manifest = management.runtime_manifest orelse return .absent;
     for (manifest.entries) |entry|
         if (entry.state == .loaded and std.mem.eql(u8, entry.id, server.id))
-            return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server));
-    return false;
+            return if (std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server))) .matching_descriptor else .retained_descriptor;
+    return .absent;
+}
+
+pub fn runtimeOauthLoaded(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    return runtimeOauthBinding(mcp, server) == .matching_descriptor;
 }
 
 pub fn canAuthorizeServer(mcp: *const mcp_state.McpProductState, refresh_job_active: bool, server: mcp_configuration.ServerWire) bool {
@@ -425,7 +431,10 @@ pub fn nextOauthExpiry(
         const expires_at = grant.expires_at_unix_ms orelse if (management.oauth_schedule.refreshRequested(server.id)) @as(u64, 0) else continue;
         const refresh = grant.refresh_token_ref != null;
         const eligible_at = if (refresh) management.oauth_schedule.eligibleAt(server.id, expires_at) else expires_at;
-        const loaded = runtimeOauthLoaded(mcp, server);
+        const loaded = runtimeOauthBinding(mcp, server) != .absent;
+        // Local expiry gates new connections; it does not retire a live
+        // member that has no renewal route. Wait for server-side evidence.
+        if (!refresh and loaded) continue;
         const loaded_due = loaded and now_unix_ms != null and eligible_at <= now_unix_ms.?;
         const previous_loaded_due = if (earliest) |previous| previous.runtime_loaded and now_unix_ms != null and previous.expires_at_unix_ms <= now_unix_ms.? else false;
         if (earliest == null or (loaded_due and !previous_loaded_due) or
@@ -664,12 +673,29 @@ test "browser authorization excludes only its server from OAuth refresh selectio
     // Once both are due, maintenance of the live member takes precedence.
     const operation = state.authorization_operation;
     state.authorization_operation = null;
-    state.management.?.runtime_manifest.?.entries[0].state.loaded[0] ^= 1;
+    const original_member = state.management.?.runtime_manifest.?.entries[0].state;
+    state.management.?.runtime_manifest.?.entries[0].state = .{ .absent = .disabled };
     try std.testing.expectEqualStrings("authorizing", nextOauthExpiry(&state, 150).?.server_id);
     try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, 200).?.server_id);
-    state.management.?.runtime_manifest.?.entries[0].state.loaded[0] ^= 1;
+    state.management.?.runtime_manifest.?.entries[0].state = original_member;
     state.authorization_operation = operation;
     const current = state.management.?.desired.?.value.servers;
+    // A loaded nonrefreshable grant, including a retained disabled member,
+    // must not compete with another service's renewable grant at all.
+    state.authorization_operation = null;
+    const old_refresh = current[0].auth.oauth.?.grant.?.refresh_token_ref;
+    current[0].auth.oauth.?.grant.?.refresh_token_ref = null;
+    state.management.?.runtime_manifest.?.entries[0].task_references = 1;
+    for ([_]bool{ true, false }) |enabled| {
+        current[0].enabled = enabled;
+        try std.testing.expectEqualStrings("refreshable", nextOauthExpiry(&state, 300).?.server_id);
+        try std.testing.expectEqualStrings("ready", current[0].auth.oauth.?.status);
+        try std.testing.expect(current[0].auth.oauth.?.grant != null);
+    }
+    current[0].enabled = true;
+    current[0].auth.oauth.?.grant.?.refresh_token_ref = old_refresh;
+    state.authorization_operation = operation;
+
     current[1].enabled = false;
     try std.testing.expect(nextOauthExpiry(&state, null) == null);
     state.management.?.runtime_manifest.?.entries[1].task_references = 1;

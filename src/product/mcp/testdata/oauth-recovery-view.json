@@ -18,5 +18,11 @@
     "authorizationStatus": "ready",
     "applyStatus": "rejected",
     "canAuthorize": true
+  },
+  "blocked_replacement": {
+    "runtimeStatus": "not_loaded",
+    "authorizationStatus": "ready",
+    "applyStatus": "failed",
+    "canAuthorize": true
   }
 }
