@@ -186,6 +186,8 @@ const App = struct {
             if (self.mcp_credential_store) |*store| store else null,
         );
         var preparation = startup_preparation.preparation;
+        if (preparation.recovery_diagnostic != .none)
+            std.log.warn("MCP startup recovery: {s}", .{@tagName(preparation.recovery_diagnostic)});
         var preparation_owned = true;
         defer if (preparation_owned) preparation.deinit();
         var runtime_manifest = try mcp_startup.emptyRuntimeManifest(std.heap.c_allocator);

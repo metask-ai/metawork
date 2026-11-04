@@ -2676,6 +2676,23 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
   const officePublish = "src/native_sdk_compat/office_resource_publish.zig";
+  const mcpProcess = "src/native_sdk_compat/mcp_process.zig";
+  assert.deepEqual(externSymbols(read(mcpProcess), ["kernel32"]), [
+    "AssignProcessToJobObject",
+    "CreateJobObjectW",
+    "ResumeThread",
+    "SetInformationJobObject",
+  ]);
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("metawork_mcp_process_compat")'),
+    ),
+    ["src/app/mcp_platform.zig"],
+  );
+  assert.doesNotMatch(
+    read(mcpProcess),
+    /CreateProcess|CreatePipe|ReadFile|WriteFile/,
+  );
   assert.deepEqual(externSymbols(read(officePublish), ["c"]), ["renameatx_np"]);
   assert.deepEqual(
     zigFiles("src/").filter((file) =>

@@ -62,6 +62,9 @@ pub const Response = struct {
 
 pub const FetchError = error{
     CancelledBeforeSend,
+    NetworkBeforeSend,
+    DeadlineExceededBeforeSend,
+    InvalidResponseBeforeSend,
     Cancelled,
     DeadlineExceeded,
     Network,
@@ -135,6 +138,8 @@ pub const StdHttpTransport = struct {
     ) FetchError!Response {
         const self: *StdHttpTransport = @ptrCast(@alignCast(raw.?));
         if (self.cancellation.isCancelled()) return error.CancelledBeforeSend;
+        if (self.deadline.raw.nanoseconds <= self.deadline.clock.now(self.io).nanoseconds)
+            return error.DeadlineExceededBeforeSend;
         const Event = union(enum) {
             response: FetchError!Response,
             deadline,
@@ -142,23 +147,37 @@ pub const StdHttpTransport = struct {
         };
         var events: [3]Event = undefined;
         var selection = std.Io.Select(Event).init(self.io, &events);
+        // Only fetchOne writes this fact. Every read follows a join, including
+        // partial Select registration failure, so no guessed error mapping or
+        // extra operation identity is needed.
+        var send_started = false;
         select_start.start(&selection, .{
-            .{ .response, fetchOne, .{ self, request, body_buffer, header_buffer } },
+            .{ .response, fetchOne, .{ self, request, body_buffer, header_buffer, &send_started } },
             .{ .deadline, waitDeadline, .{ self.io, self.deadline } },
             .{ .cancelled, waitCancellation, .{self.cancellation} },
-        }) catch return error.Network;
+        }) catch return classifyFailure(error.Network, send_started);
         const outcome = selection.await() catch {
             selection.cancelDiscard();
-            return error.Network;
+            return classifyFailure(error.Network, send_started);
         };
-        defer selection.cancelDiscard();
+        selection.cancelDiscard();
         return switch (outcome) {
-            .response => |response| if (self.cancellation.isCancelled())
-                error.Cancelled
-            else
-                response,
-            .deadline => error.DeadlineExceeded,
-            .cancelled => error.Cancelled,
+            // A complete selected response remains a known remote result;
+            // cancellation during loser cleanup cannot erase it.
+            .response => |response| response catch |err| classifyFailure(err, send_started),
+            .deadline => classifyFailure(error.DeadlineExceeded, send_started),
+            .cancelled => classifyFailure(error.Cancelled, send_started),
+        };
+    }
+
+    fn classifyFailure(cause: FetchError, send_started: bool) FetchError {
+        if (send_started) return cause;
+        return switch (cause) {
+            error.Network => error.NetworkBeforeSend,
+            error.Cancelled => error.CancelledBeforeSend,
+            error.DeadlineExceeded => error.DeadlineExceededBeforeSend,
+            error.InvalidResponse => error.InvalidResponseBeforeSend,
+            else => cause,
         };
     }
 
@@ -167,9 +186,25 @@ pub const StdHttpTransport = struct {
         request: Request,
         body_buffer: []u8,
         header_buffer: []u8,
+        send_started: *bool,
     ) FetchError!Response {
-        if (!validHttpsUrl(request.url) or request.headers.len > 8)
-            return error.InvalidResponse;
+        if (!validHttpsUrl(request.url)) return error.InvalidResponse;
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
+        defer client.deinit();
+        return fetchWithClient(&client, request, body_buffer, header_buffer, send_started);
+    }
+
+    /// HTTP mechanics only. HTTPS endpoint policy remains at fetchOne; tests
+    /// use a plain loopback peer to observe the actual write boundary without
+    /// changing TLS verification or the production endpoint policy.
+    fn fetchWithClient(
+        client: *std.http.Client,
+        request: Request,
+        body_buffer: []u8,
+        header_buffer: []u8,
+        send_started: *bool,
+    ) FetchError!Response {
+        if (request.headers.len > 8) return error.InvalidResponse;
         const uri = std.Uri.parse(request.url) catch return error.InvalidResponse;
         var headers: [8]std.http.Header = undefined;
         var header_count: usize = 0;
@@ -187,8 +222,6 @@ pub const StdHttpTransport = struct {
             headers[header_count] = .{ .name = header.name, .value = header.value };
             header_count += 1;
         }
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
-        defer client.deinit();
         const method: std.http.Method = switch (request.method) {
             .get => .GET,
             .post => .POST,
@@ -205,6 +238,8 @@ pub const StdHttpTransport = struct {
             .extra_headers = headers[0..header_count],
         }) catch return error.Network;
         defer http_request.deinit();
+        if (method == .GET and request.body.len != 0) return error.InvalidResponse;
+        send_started.* = true;
         if (method == .POST) {
             http_request.transfer_encoding = .{ .content_length = request.body.len };
             var request_body = http_request.sendBodyUnflushed(&.{}) catch
@@ -213,7 +248,6 @@ pub const StdHttpTransport = struct {
             request_body.end() catch return error.Network;
             http_request.connection.?.flush() catch return error.Network;
         } else {
-            if (request.body.len != 0) return error.InvalidResponse;
             http_request.sendBodiless() catch return error.Network;
         }
         var response = http_request.receiveHead(&.{}) catch return error.Network;
@@ -331,7 +365,9 @@ pub fn parseRuntimeBearerChallenge(
 ) (error{InvalidChallenge} || std.mem.Allocator.Error)!RuntimeBearerChallenge {
     const bearer = selectBearerChallenge(input) orelse
         return error.InvalidChallenge;
-    const challenge = try parseBearerChallenge(bearer);
+    var challenge_storage: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &challenge_storage);
+    const challenge = try parseBearerChallenge(bearer, &challenge_storage);
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const scopes = if (challenge.scope) |scope|
@@ -779,6 +815,8 @@ pub fn discoverResourceEffect(
     if (!validHttpsUrl(endpoint)) return error.InvalidEndpoint;
     var body_buffer: [Limits.metadata_body_bytes]u8 = undefined;
     var header_buffer: [Limits.header_bytes]u8 = undefined;
+    var challenge_storage: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &challenge_storage);
     var challenge: ?Challenge = null;
     const probe = transport.fetch(
         .{ .method = .get, .url = endpoint, .headers = &.{.{
@@ -790,12 +828,12 @@ pub fn discoverResourceEffect(
     ) catch |err| switch (err) {
         error.CancelledBeforeSend => return error.Cancelled,
         error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded => return error.DeadlineExceeded,
-        error.Network, error.ResponseTooLarge, error.InvalidResponse => null,
+        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
+        error.Network, error.NetworkBeforeSend, error.ResponseTooLarge, error.InvalidResponse, error.InvalidResponseBeforeSend => null,
     };
     if (probe) |response| if (response.status == 401) {
         if (response.www_authenticate) |header|
-            challenge = parseBearerChallenge(header) catch
+            challenge = parseBearerChallenge(header, &challenge_storage) catch
                 return error.InvalidChallenge;
     };
 
@@ -822,7 +860,7 @@ pub fn discoverResourceEffect(
         error.OutOfMemory => return error.OutOfMemory,
         error.CancelledBeforeSend => return error.Cancelled,
         error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded => return error.DeadlineExceeded,
+        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
         else => {},
     }
 
@@ -923,7 +961,7 @@ pub fn discoverAuthorizationServer(
             error.OutOfMemory => return error.OutOfMemory,
             error.CancelledBeforeSend => return error.Cancelled,
             error.Cancelled => return error.Cancelled,
-            error.DeadlineExceeded => return error.DeadlineExceeded,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
             else => {
                 last_error = @errorCast(err);
                 continue;
@@ -1349,6 +1387,7 @@ pub fn registerDynamicClientEffect(
     const requested_method = server.dynamicRegistrationAuthMethod() orelse
         return error.UnsupportedAuthorizationServer;
     var request_storage: [Limits.request_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &request_storage);
     var writer = std.Io.Writer.fixed(&request_storage);
     const grant_types: []const []const u8 = if (server.refresh_token_supported)
         &.{ "authorization_code", "refresh_token" }
@@ -1363,7 +1402,9 @@ pub fn registerDynamicClientEffect(
         .application_type = "native",
     }, .{}, &writer) catch return error.InvalidAuthorizationRequest;
     var body_buffer: [Limits.registration_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &body_buffer);
     var header_buffer: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &header_buffer);
     const response = transport.fetch(.{
         .method = .post,
         .url = endpoint,
@@ -1373,7 +1414,7 @@ pub fn registerDynamicClientEffect(
         },
         .body = writer.buffered(),
     }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.RegistrationOutcomeUnknown,
     };
     if (response.status == 400 and jsonContentType(response.content_type) and
@@ -1400,9 +1441,16 @@ fn parseRegistrationResponse(
     requested_method: TokenEndpointAuthMethod,
     refresh_token_requested: bool,
 ) (Error || std.mem.Allocator.Error)!Registration {
+    if (body.len == 0 or body.len > Limits.registration_body_bytes)
+        return error.InvalidRegistrationResponse;
+    // JSON unescaping and array storage must not leave secret-bearing arena
+    // allocations behind. Only the validated owned result escapes this scope.
+    var scratch: [Limits.registration_body_bytes * 8]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
         RegistrationResponse,
-        allocator,
+        fixed.allocator(),
         body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
     ) catch return error.InvalidRegistrationResponse;
@@ -1507,7 +1555,7 @@ pub fn exchangeAuthorizationCodeEffect(
         .headers = headers[0..header_count],
         .body = writer.buffered(),
     }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.TokenOutcomeUnknown,
     };
     if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
@@ -1591,7 +1639,7 @@ pub fn refreshAccessTokenEffect(
         .headers = headers[0..header_count],
         .body = writer.buffered(),
     }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.TokenOutcomeUnknown,
     };
     if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
@@ -1608,9 +1656,14 @@ fn parseTokenResponse(
     body: []const u8,
     now_unix_ms: u64,
 ) (Error || std.mem.Allocator.Error)!TokenSet {
+    if (body.len == 0 or body.len > Limits.token_body_bytes)
+        return error.InvalidTokenResponse;
+    var scratch: [Limits.token_body_bytes * 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
         TokenResponse,
-        allocator,
+        fixed.allocator(),
         body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
     ) catch return error.InvalidTokenResponse;
@@ -1678,26 +1731,45 @@ fn registrationErrorProvesNoClient(body: []const u8) bool {
     }, parsed.value.@"error");
 }
 
-fn parseBearerChallenge(input: []const u8) error{InvalidChallenge}!Challenge {
-    if (input.len == 0 or input.len > Limits.header_bytes)
-        return error.InvalidChallenge;
-    var cursor = std.mem.trim(u8, input, " \t");
-    if (cursor.len < 6 or !std.ascii.eqlIgnoreCase(cursor[0..6], "Bearer"))
-        return error.InvalidChallenge;
+fn parseBearerChallenge(input: []const u8, storage: []u8) error{InvalidChallenge}!Challenge {
+    var cursor = selectBearerChallenge(input) orelse return error.InvalidChallenge;
     cursor = std.mem.trimStart(u8, cursor[6..], " \t");
+    var writer = std.Io.Writer.fixed(storage);
     var result: Challenge = .{};
     while (cursor.len != 0) {
-        const equals = std.mem.indexOfScalar(u8, cursor, '=') orelse
-            return error.InvalidChallenge;
-        const name = std.mem.trim(u8, cursor[0..equals], " \t");
-        cursor = cursor[equals + 1 ..];
-        if (cursor.len == 0 or cursor[0] != '"') return error.InvalidChallenge;
-        const relative_end = std.mem.indexOfScalar(u8, cursor[1..], '"') orelse
-            return error.InvalidChallenge;
-        const end = relative_end + 1;
-        const value = cursor[1..end];
-        if (std.mem.indexOfScalar(u8, value, '\\') != null)
-            return error.InvalidChallenge;
+        var name_end: usize = 0;
+        while (name_end < cursor.len and authTokenByte(cursor[name_end])) name_end += 1;
+        if (name_end == 0) return error.InvalidChallenge;
+        const name = cursor[0..name_end];
+        cursor = std.mem.trimStart(u8, cursor[name_end..], " \t");
+        if (cursor.len == 0 or cursor[0] != '=') return error.InvalidChallenge;
+        cursor = std.mem.trimStart(u8, cursor[1..], " \t");
+        if (cursor.len == 0) return error.InvalidChallenge;
+        const start = writer.buffered().len;
+        if (cursor[0] == '"') {
+            cursor = cursor[1..];
+            while (true) {
+                if (cursor.len == 0) return error.InvalidChallenge;
+                var byte = cursor[0];
+                cursor = cursor[1..];
+                if (byte == '"') break;
+                if (byte == '\\') {
+                    if (cursor.len == 0) return error.InvalidChallenge;
+                    byte = cursor[0];
+                    cursor = cursor[1..];
+                }
+                if ((byte < 0x20 and byte != '\t') or byte == 0x7f)
+                    return error.InvalidChallenge;
+                writer.writeByte(byte) catch return error.InvalidChallenge;
+            }
+        } else {
+            var end: usize = 0;
+            while (end < cursor.len and authTokenByte(cursor[end])) end += 1;
+            if (end == 0) return error.InvalidChallenge;
+            writer.writeAll(cursor[0..end]) catch return error.InvalidChallenge;
+            cursor = cursor[end..];
+        }
+        const value = writer.buffered()[start..];
         if (std.ascii.eqlIgnoreCase(name, "resource_metadata")) {
             if (result.resource_metadata != null) return error.InvalidChallenge;
             result.resource_metadata = value;
@@ -1705,10 +1777,11 @@ fn parseBearerChallenge(input: []const u8) error{InvalidChallenge}!Challenge {
             if (result.scope != null) return error.InvalidChallenge;
             result.scope = value;
         }
-        cursor = std.mem.trimStart(u8, cursor[end + 1 ..], " \t");
+        cursor = std.mem.trimStart(u8, cursor, " \t");
         if (cursor.len == 0) break;
         if (cursor[0] != ',') return error.InvalidChallenge;
         cursor = std.mem.trimStart(u8, cursor[1..], " \t");
+        if (cursor.len == 0) return error.InvalidChallenge;
     }
     return result;
 }
@@ -1727,47 +1800,67 @@ fn copyHeaderValue(
 /// field without confusing comma-separated Bearer auth-params with the start
 /// of the next scheme.
 fn selectBearerChallenge(value: []const u8) ?[]const u8 {
+    if (value.len == 0 or value.len > Limits.header_bytes or
+        std.mem.indexOfAny(u8, value, "\r\n") != null) return null;
     var search: usize = 0;
     while (search < value.len) {
         while (search < value.len and
             (value[search] == ' ' or value[search] == '\t' or value[search] == ','))
             search += 1;
         const start = search;
-        while (search < value.len and std.ascii.isAlphanumeric(value[search]))
+        while (search < value.len and authTokenByte(value[search]))
             search += 1;
         if (search == start) return null;
         const scheme = value[start..search];
-        if (std.ascii.eqlIgnoreCase(scheme, "Bearer")) {
-            var end = value.len;
-            var comma = search;
-            while (std.mem.indexOfScalarPos(u8, value, comma, ',')) |found| {
-                var candidate = found + 1;
+        if (search < value.len and value[search] != ' ' and value[search] != '\t' and value[search] != ',') return null;
+        var end = value.len;
+        var quoted = false;
+        var escaped = false;
+        while (search < value.len) : (search += 1) {
+            const byte = value[search];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (quoted and byte == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (byte == '"') {
+                quoted = !quoted;
+                continue;
+            }
+            if (byte == ',' and !quoted) {
+                var candidate = search + 1;
                 while (candidate < value.len and
                     (value[candidate] == ' ' or value[candidate] == '\t'))
                     candidate += 1;
                 var token_end = candidate;
-                while (token_end < value.len and
-                    std.ascii.isAlphanumeric(value[token_end]))
+                while (token_end < value.len and authTokenByte(value[token_end]))
                     token_end += 1;
                 var after_token = token_end;
                 while (after_token < value.len and
                     (value[after_token] == ' ' or value[after_token] == '\t'))
                     after_token += 1;
-                if (token_end > candidate and after_token > token_end and
-                    (after_token >= value.len or value[after_token] != '='))
+                if (token_end > candidate and
+                    (after_token == value.len or value[after_token] != '='))
                 {
-                    end = found;
+                    end = search;
                     break;
                 }
-                comma = found + 1;
             }
+        }
+        if (quoted or escaped) return null;
+        if (std.ascii.eqlIgnoreCase(scheme, "Bearer")) {
             return std.mem.trim(u8, value[start..end], " \t");
         }
-        const comma = std.mem.indexOfScalarPos(u8, value, search, ',') orelse
-            return null;
-        search = comma + 1;
+        search = if (end < value.len) end + 1 else value.len;
     }
     return null;
+}
+
+fn authTokenByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", byte) != null;
 }
 
 fn protectedResourceMetadataUrl(
@@ -2803,6 +2896,44 @@ test "MCP OAuth never treats malformed success as a replayable failure" {
     );
 }
 
+test "MCP OAuth secret parsing owns unescaped results outside scrubbed scratch" {
+    var tokens = try parseTokenResponse(std.testing.allocator,
+        \\{"access_token":"a\u0062c","refresh_token":"r\u0065fresh","token_type":"Bearer","expires_in":10}
+    , 1000);
+    defer tokens.deinit();
+    var registration = try parseRegistrationResponse(std.testing.allocator,
+        \\{"client_id":"client","client_secret":"s\u0065cret","token_endpoint_auth_method":"client_secret_basic"}
+    , "http://127.0.0.1:8080/callback", .client_secret_basic, false);
+    defer registration.deinit();
+    try std.testing.expectEqualStrings("abc", tokens.access_token.view());
+    try std.testing.expectEqualStrings("refresh", tokens.refresh_token.?.view());
+    try std.testing.expectEqual(@as(?u64, 11000), tokens.expires_at_unix_ms);
+    try std.testing.expectEqualStrings("secret", registration.client_secret.?.view());
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, parseTokenResponse(failing.allocator(),
+        \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer"}
+    , 1000));
+    try std.testing.expectError(error.InvalidTokenResponse, parseTokenResponse(std.testing.allocator, "{}", 1000));
+}
+
+test "MCP OAuth Bearer grammar preserves quoted commas escapes and token parameters" {
+    var challenge = try parseRuntimeBearerChallenge(std.testing.allocator,
+        \\Basic realm="legacy, Bearer scope=wrong", Bearer realm="a,b\"c", error = insufficient_scope, scope = "files.read files.write", DPoP realm="future"
+    );
+    defer challenge.deinit();
+    try std.testing.expectEqual(@as(usize, 2), challenge.scopes.len);
+    try std.testing.expectEqualStrings("files.read", challenge.scopes[0]);
+    var token = try parseRuntimeBearerChallenge(std.testing.allocator, "Bearer scope=files.read");
+    defer token.deinit();
+    try std.testing.expectEqualStrings("files.read", token.scopes[0]);
+    for ([_][]const u8{
+        "Bearer scope=read, Scope=write",
+        "Bearer scope=\"read",
+        "Bearer scope=read\r\nInjected: yes",
+        "Bearer scope=read,",
+    }) |invalid| try std.testing.expectError(error.InvalidChallenge, parseRuntimeBearerChallenge(std.testing.allocator, invalid));
+}
+
 test "MCP OAuth selects Bearer from combined challenges" {
     try std.testing.expectEqualStrings(
         "Bearer resource_metadata=\"https://mcp.example.test/prm\", scope=\"a b\"",
@@ -2916,6 +3047,100 @@ test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknow
     );
 }
 
+test "MCP OAuth records the real HTTP write boundary without weakening HTTPS policy" {
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        reply: bool,
+        seen: bool = false,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn serve(self: *@This()) !void {
+            const io = std.testing.io;
+            var stream = try self.listener.accept(io);
+            defer stream.close(io);
+            var in: [4096]u8 = undefined;
+            var out: [4096]u8 = undefined;
+            var reader = stream.reader(io, &in);
+            var writer = stream.writer(io, &out);
+            var server: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = try server.receiveHead();
+            if (request.head.method != .POST) return error.UnexpectedMethod;
+            self.seen = true;
+            if (self.reply) try request.respond("{}", .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json" }} });
+        }
+    };
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    for ([_]bool{ false, true }) |reply| {
+        var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
+        defer listener.deinit(std.testing.io);
+        const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/token", .{listener.socket.address.getPort()});
+        defer std.testing.allocator.free(url);
+        var peer: Peer = .{ .listener = &listener, .reply = reply };
+        const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+        defer client.deinit();
+        var body: [512]u8 = undefined;
+        var headers: [1024]u8 = undefined;
+        var started = false;
+        const result = StdHttpTransport.fetchWithClient(&client, .{ .method = .post, .url = url, .body = "fixture" }, &body, &headers, &started);
+        thread.join();
+        try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+        try std.testing.expect(peer.seen and started);
+        if (reply) try std.testing.expectEqualStrings("{}", (try result).body) else {
+            try std.testing.expectError(error.Network, result);
+            try std.testing.expectEqual(error.Network, StdHttpTransport.classifyFailure(error.Network, started));
+        }
+        var cancellation = Cancellation.init(std.testing.io);
+        var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = std.testing.io, .cancellation = &cancellation, .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+        // The production entry still rejects a plain endpoint before sending.
+        try std.testing.expectError(error.InvalidResponseBeforeSend, transport.transport().fetch(.{ .method = .post, .url = url }, &body, &headers));
+    }
+}
+
+test "MCP OAuth partial Select registration joins DNS before classifying no send" {
+    const Probe = struct {
+        var base: std.Io = undefined;
+        var entered: std.Io.Event = .unset;
+        var exited: bool = false;
+        var registered: usize = 0;
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, bytes: []const u8, alignment: std.mem.Alignment, run: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            registered += 1;
+            if (registered == 2) {
+                entered.waitUncancelable(base);
+                return error.ConcurrencyUnavailable;
+            }
+            return base.vtable.groupConcurrent(userdata, group, bytes, alignment, run);
+        }
+        fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
+            defer resolved.close(base);
+            defer exited = true;
+            entered.set(base);
+            try std.Io.sleep(base, .fromSeconds(60), .awake);
+            return error.UnknownHostName;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    Probe.base = threaded.io();
+    Probe.entered = .unset;
+    Probe.exited = false;
+    Probe.registered = 0;
+    var vtable = Probe.base.vtable.*;
+    vtable.netLookup = Probe.lookup;
+    vtable.groupConcurrent = Probe.concurrent;
+    const io: std.Io = .{ .userdata = Probe.base.userdata, .vtable = &vtable };
+    var cancellation = Cancellation.init(io);
+    var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+    var body: [32]u8 = undefined;
+    var headers: [32]u8 = undefined;
+    try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token" }, &body, &headers));
+    try std.testing.expect(Probe.exited);
+}
+
 test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
     const Dns = struct {
         var io: std.Io = undefined;
@@ -2947,15 +3172,15 @@ test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
         var headers: [32]u8 = undefined;
         const result = transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers);
         try std.testing.expectError(switch (mode) {
-            .complete => error.Network,
-            .cancel => error.Cancelled,
-            .deadline => error.DeadlineExceeded,
+            .complete => error.NetworkBeforeSend,
+            .cancel => error.CancelledBeforeSend,
+            .deadline => error.DeadlineExceededBeforeSend,
         }, result);
         try std.testing.expect(Dns.exited.load(.acquire));
     }
 }
 
-test "MCP OAuth registration failure remains an uncertain POST outcome" {
+test "MCP OAuth unavailable concurrency proves the POST was not sent" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
     defer threaded.deinit();
     const io = threaded.io();
@@ -2963,7 +3188,7 @@ test "MCP OAuth registration failure remains an uncertain POST outcome" {
     var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
     var body: [32]u8 = undefined;
     var headers: [32]u8 = undefined;
-    try std.testing.expectError(error.Network, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));
+    try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));
 }
 
 test "MCP OAuth well-known derivation omits resource query but preserves identity" {

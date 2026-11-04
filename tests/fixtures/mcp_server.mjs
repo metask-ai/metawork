@@ -37,6 +37,10 @@ function startStdio() {
 
 function startHttp() {
   let providerCalls = 0;
+  let nextPing = 0;
+  let nextSession = 0;
+  const pendingPings = new Map();
+  const sessions = new Set();
   let selectedMcpToolName;
   let reducedMcpAuthority = false;
   const server = createServer((request, response) => {
@@ -49,6 +53,21 @@ function startHttp() {
     request.on("end", () => {
       try {
         if (bytes > 1024 * 1024) throw new Error("request too large");
+        if (
+          options.framing === "ping" &&
+          request.method === "DELETE" &&
+          request.url === "/mcp"
+        ) {
+          if (
+            request.headers["mcp-protocol-version"] !==
+              options.protocolVersion ||
+            !sessions.delete(request.headers["mcp-session-id"])
+          )
+            throw new Error("invalid session close");
+          trace({ transport: "http", direction: "close" });
+          response.writeHead(200).end();
+          return;
+        }
         if (request.method !== "POST") throw new Error("unexpected method");
         const body = Buffer.concat(chunks).toString("utf8");
         const protocol =
@@ -318,6 +337,34 @@ function startHttp() {
           protocolHeader,
           message,
         });
+        const pending = pendingPings.get(message.id);
+        if (options.framing === "ping" && pending) {
+          if (
+            message.jsonrpc !== "2.0" ||
+            message.method !== undefined ||
+            !message.result ||
+            Object.keys(message.result).length !== 0 ||
+            message.error !== undefined ||
+            protocolHeader !== pending.protocol ||
+            request.headers["mcp-session-id"] !== pending.session
+          )
+            throw new Error("invalid ping response");
+          pendingPings.delete(message.id);
+          trace({ transport: "http", direction: "pong", message });
+          response.writeHead(202).end();
+          pending.response.end(`event: message\ndata: ${pending.json}\n\n`);
+          return;
+        }
+        let session;
+        if (options.framing === "ping") {
+          session = request.headers["mcp-session-id"];
+          if (session && !sessions.has(session))
+            throw new Error("unknown session");
+          if (!session) {
+            session = `fixture-http-session-${++nextSession}`;
+            sessions.add(session);
+          }
+        }
         if (
           options.refreshGate &&
           existsSync(`${options.refreshGate}.rate_limit`) &&
@@ -339,7 +386,31 @@ function startHttp() {
             direction: "response",
             message: rpcResponse,
           });
-          if (options.framing === "sse" || options.framing === "interleaved") {
+          if (options.framing === "ping") {
+            const ping = {
+              jsonrpc: "2.0",
+              id: `fixture-http-ping-${++nextPing}`,
+              method: "ping",
+            };
+            pendingPings.set(ping.id, {
+              response,
+              json,
+              session,
+              protocol: protocolHeader,
+            });
+            response.on("close", () => pendingPings.delete(ping.id));
+            response.writeHead(200, {
+              "content-type": "text/event-stream",
+              "mcp-session-id": session,
+            });
+            trace({ transport: "http", direction: "ping", message: ping });
+            response.write(
+              `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress" })}\n\ndata: ${JSON.stringify(ping)}\n\n`,
+            );
+          } else if (
+            options.framing === "sse" ||
+            options.framing === "interleaved"
+          ) {
             response.writeHead(200, { "content-type": "text/event-stream" });
             response.end(
               `id: fixture-empty-event\ndata:\n\n` +
@@ -698,7 +769,7 @@ function parseOptions(args) {
     !["2026-07-28", "2025-11-25", "2025-06-18"].includes(protocolVersion) ||
     !["stdio", "http"].includes(transport) ||
     !["text", "image"].includes(resultKind) ||
-    !["json", "sse", "interleaved"].includes(framing) ||
+    !["json", "sse", "interleaved", "ping"].includes(framing) ||
     !Number.isSafeInteger(delayMs) ||
     delayMs < 0 ||
     delayMs > 10_000 ||

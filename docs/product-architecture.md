@@ -296,6 +296,10 @@ MCP mutation 必须从 canonical Desired 构造完整 candidate，先提交 regi
 
 registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。Agent apply 拒绝、malformed report、resource limit 或 activation failure 形成 typed failure 并保持 fail-closed admission，不能把未接管的 descriptor 标记为 loaded。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。
 
+credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。
+
+损坏记录的隔离必须由持久 pending intent 绑定待处理文件的 exact bytes，先核验 registry 与 journal 的整组物理状态，再移动文件。registry 不可信时先隔离关联 journal，再保存原 registry，确认这些步骤后才建立当前空 registry；只损坏或不匹配的 journal 可以独立隔离并保留可信 registry。重启只完成 pending intent，不读取已完成隔离记录来重建 Desired 或产生凭据 effect；文件内容已变、状态冲突或持久化未确认时保持 recovery required/outcome unknown。每次恢复必须重新确认已移动文件的持久化屏障。
+
 Application 启动时只创建一次 canonical empty Agent Runtime；恢复出的 Desired 必须在 Product Control 与 coordinator 就绪后沿与后续 mutation 相同的 apply 路径安装。empty create 后 apply 是正常启动协议，不是失败 fallback 或第二条 Runtime path。Agent Runtime create 失败终止启动；外部 MCP child、network、handshake 或 catalog failure 只能使相关 MCP authority unavailable，不能关闭普通 Text Task admission。
 
 MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorization 共享 Product Control 的串行化边界；浏览器授权等待不占用该边界，只携带 server-bound operation identity。浏览器等待期间，其他 server 的 OAuth refresh 和 reduced-authority catalog refresh 仍可运行；进入单一 durable `oauth_operation` 后才按事务串行。所有 completion 必须按 operation、server/connection fingerprint、consent epoch 与当前 generation 重新授权，stale 结果只清理自身资源。目标 server 进入 OAuth 或 reauthorization 时必须先提交排除它的 reduced authority，不能无关地冻结其他 server。
@@ -309,6 +313,8 @@ Product MCP 的自动刷新共享单一作业并合并重复请求；极短 TTL 
 OAuth grant 的提前刷新时间在提交安装或启动恢复时固定；暂缺合法时间时，由后续显式生命周期观察补齐，查询保持纯读并暂用真实 expiry。Product 按 server、connection/consent 和 token revision 保留进程内有界退避，返回 `max(refresh_due, retry_not_before)` 最早的一台；marker 确认清除或目标刷新 begin 被拒后才推进相应重试状态，全局事务忙不归为单台服务器失败。旧 operation 不得影响新绑定；调度不得改写 grant 的真实 expiry。Product Control 只注入既有系统时钟的读能力，Application 继续拥有单个 OAuth timer 及其全局下限，不借用 Schedule 的 arm/cancel 或另建持久化调度状态。catalog refresh 等待 OAuth marker/apply/在途作业时由完成事件继续推进，不能以到期的 retry floor 形成毫秒轮询；独立的 freshness deadline 仍须及时失效准入。
 
 Product Control 为该共享刷新作业持有独立于 Run 池的有界控制执行容量，所有 Run worker 等待人工审批或 Run 队列已满时，目录刷新仍须推进；此容量不执行 Run，不改变 MCP apply/OAuth/refresh 的既有串行化边界。关闭先停止 MCP admission/timer 并取消尚未开始的刷新，join 在途刷新后才接纳或丢弃其 completion、释放对应 owner；Agent Runtime 和 transport 必须活到该 join 完成。
+
+关闭期间返回的正式 apply completion 仍须按当前绑定接纳已发生的 Runtime 接管事实并更新 Manifest，但不能重新安装 Activation、Selection、新 Task 准入或刷新任务；候选执行资源由完成交接的 owner 释放。stale completion 不消费候选，失败 completion 不能覆盖 shutting_down 边界。
 
 ### 2.6 文件 attachment staging
 
