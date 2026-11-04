@@ -20,7 +20,7 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 16;
+const async_product_handler_count = 17;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -122,15 +122,8 @@ pub const AutomationAuthority = struct {
     }
 };
 
-pub const McpHostOutcome = enum {
-    saved,
-    saved_recovery_required,
-    stale_generation,
-    rejected,
-    indeterminate,
-    cancelled,
-    capability_unavailable,
-};
+pub const McpHostOutcome = product_control.McpHostOutcome;
+pub const McpApproval = product_control.McpApproval;
 
 pub const McpAuthorizationStartOutcome = union(enum) {
     started: []const u8,
@@ -189,7 +182,9 @@ pub const ModelsHost = struct {
 pub const McpManagementHost = struct {
     context: *anyopaque,
     test_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpConnectionTestStartOutcome,
-    approve_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpHostOutcome,
+    begin_approval_fn: *const fn (*anyopaque, u64, u64, []const u8, *const McpApproval.Completion) anyerror!McpApproval.Start,
+    cancel_approval_fn: *const fn (*anyopaque, u64) void,
+    map_approval_fn: *const fn (*anyopaque, mcp_configuration.ManagementOutcome) McpHostOutcome,
     capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot, []const u8) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
     cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
@@ -203,6 +198,7 @@ const DialogContinuation = union(enum) {
     skill_import: struct { kind: product_control.SkillImportSourceKind, target: product_control.SkillImportTarget },
     skill_export: skill_management.InstallId,
     attachments,
+    mcp_approval: struct { generation: u64, server: []u8 },
 };
 const PendingDialog = struct {
     active: bool = false,
@@ -290,6 +286,8 @@ pub const Dispatcher = struct {
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
+    allocator: std.mem.Allocator,
+    approval_completion: McpApproval.Completion = undefined,
     dialogs: [native_sdk.runtime.max_dialog_requests]PendingDialog = @splat(.{}),
     next_dialog_id: u64 = 1,
     dialog_completion: Dialog.Completion = undefined,
@@ -343,6 +341,7 @@ pub const Dispatcher = struct {
     ) std.mem.Allocator.Error!Dispatcher {
         std.debug.assert(bootstrap_window_id != 0);
         return .{
+            .allocator = allocator,
             .control = control,
             .account_commands = account_commands,
             .custom_provider_commands = custom_provider_commands,
@@ -419,7 +418,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.mcp_update_stdio_connection, .function = updateMcpStdioConnection },
             .{ .name = commands.mcp_update_http_connection, .function = updateMcpHttpConnection },
             .{ .name = commands.mcp_rename_server, .function = renameMcpServer },
-            .{ .name = commands.mcp_approve_connection, .function = approveMcpConnection },
             .{ .name = commands.mcp_capture_secret, .function = captureMcpSecret },
             .{ .name = commands.mcp_authorize_oauth, .function = authorizeMcpOauth },
             .{ .name = commands.mcp_cancel_authorization, .function = cancelMcpAuthorization },
@@ -516,6 +514,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[13] = .{ .name = commands.choose_automatic_workspace_root, .context = self, .invoke_fn = chooseAutomaticWorkspaceRoot };
         self.registered_async_handlers[14] = .{ .name = commands.choose_skill_import, .context = self, .invoke_fn = chooseSkillImport };
         self.registered_async_handlers[15] = .{ .name = commands.export_skill, .context = self, .invoke_fn = exportSkill };
+        self.registered_async_handlers[16] = .{ .name = commands.mcp_approve_connection, .context = self, .invoke_fn = approveMcpConnection };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -2111,9 +2110,15 @@ pub const Dispatcher = struct {
 
     fn chooseAttachments(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.beginDialog(invocation, responder, .attachments, .{ .open = .{ .title = "Choose files", .allow_multiple = true } }) catch |err| {
+        self.chooseAttachmentsChecked(invocation, responder) catch |err| {
             responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
         };
+    }
+
+    fn chooseAttachmentsChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        defer parsed.deinit();
+        try self.beginDialog(invocation, responder, .attachments, .{ .open = .{ .title = "Choose files", .allow_multiple = true } });
     }
 
     fn addDroppedAttachments(
@@ -3105,6 +3110,19 @@ pub const Dispatcher = struct {
     }
 
     fn beginDialog(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, continuation: DialogContinuation, options: Dialog.Options) !void {
+        const entry = try self.reserveDialog(invocation, responder, continuation);
+        errdefer entry.active = false;
+        self.dialog_completion = .{ .context = self, .result_fn = dialogResult };
+        if (self.automation.active() and (continuation == .workspace or continuation == .attachments)) {
+            const path = if (continuation == .workspace) self.automation.workspaceRoot() orelse return error.AutomationWorkspaceUnavailable else self.automation.attachmentPaths() orelse return error.AutomationAttachmentUnavailable;
+            const count = if (continuation == .workspace) 1 else countAutomationAttachmentPaths(path) orelse return error.InvalidBridgePayload;
+            dialogResult(self, entry.id, .{ .files = .{ .paths = path, .count = count } });
+            return;
+        }
+        entry.handle = try self.platform.request_dialog_fn(self.platform.context, entry.id, entry.window, options, &self.dialog_completion);
+    }
+
+    fn reserveDialog(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, continuation: DialogContinuation) !*PendingDialog {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
@@ -3117,15 +3135,10 @@ pub const Dispatcher = struct {
         entry.* = .{ .active = true, .id = self.next_dialog_id, .window = invocation.source.window_id, .generation = generation, .responder = responder, .request_len = invocation.request.id.len, .continuation = continuation };
         self.next_dialog_id += 1;
         @memcpy(entry.request[0..entry.request_len], invocation.request.id);
-        errdefer entry.active = false;
-        self.dialog_completion = .{ .context = self, .result_fn = dialogResult };
-        if (self.automation.active() and (continuation == .workspace or continuation == .attachments)) {
-            const path = if (continuation == .workspace) self.automation.workspaceRoot() orelse return error.AutomationWorkspaceUnavailable else self.automation.attachmentPaths() orelse return error.AutomationAttachmentUnavailable;
-            const count = if (continuation == .workspace) 1 else countAutomationAttachmentPaths(path) orelse return error.InvalidBridgePayload;
-            dialogResult(self, entry.id, .{ .files = .{ .paths = path, .count = count } });
-            return;
-        }
-        entry.handle = try self.platform.request_dialog_fn(self.platform.context, entry.id, entry.window, options, &self.dialog_completion);
+        return entry;
+    }
+    fn releaseDialogInput(self: *Dispatcher, entry: PendingDialog) void {
+        if (entry.continuation == .mcp_approval) self.allocator.free(entry.continuation.mcp_approval.server);
     }
 
     fn pendingDialog(self: *Dispatcher, id: u64) ?*PendingDialog {
@@ -3139,6 +3152,7 @@ pub const Dispatcher = struct {
             const entry = self.pendingDialog(id) orelse return;
             const owned = entry.*;
             entry.active = false;
+            defer self.releaseDialogInput(owned);
             owned.responder.fail(owned.request[0..owned.request_len], .handler_failed, @errorName(err)) catch {};
         };
     }
@@ -3148,7 +3162,10 @@ pub const Dispatcher = struct {
             if (!entry.active) continue;
             const owned = entry.*;
             entry.active = false;
-            self.platform.cancel_dialog_fn(self.platform.context, owned.handle);
+            if (owned.continuation == .mcp_approval) {
+                if (self.mcp_management_host) |host| host.cancel_approval_fn(host.context, owned.handle);
+            } else self.platform.cancel_dialog_fn(self.platform.context, owned.handle);
+            self.releaseDialogInput(owned);
             owned.responder.fail(owned.request[0..owned.request_len], .handler_failed, "DialogCancelled") catch {};
         }
     }
@@ -3212,6 +3229,7 @@ pub const Dispatcher = struct {
                 const exported = (try self.requireProductControl()).exportSkill(install_id, selected.paths) catch |err| break :skill try encodeSkillExportResult(&output, false, null, @tagName(product_control.skillImportReason(err)));
                 break :skill try encodeSkillExportResult(&output, true, exported.fileName(), null);
             },
+            .mcp_approval => return error.InvalidDialogResult,
             .attachments => {
                 entry.active = false;
                 if (cancelled) {
@@ -4368,25 +4386,67 @@ pub const Dispatcher = struct {
         return self.finishMcpMutation(workbench, output, outcome);
     }
 
-    fn approveMcpConnection(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
+    fn approveMcpConnection(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
+        self.beginMcpApproval(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn beginMcpApproval(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.McpServerIdentity, invocation.request.payload);
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireProductControl();
-        if (workbench.mcpServerOperationBusy(parsed.value.serverId))
-            return encodeMcpTypedOutcome(output, "busy", null);
-        const host = self.mcp_management_host orelse
-            return self.finishMcpHostMutation(workbench, output, .capability_unavailable);
-        const outcome = try host.approve_fn(host.context, expected, parsed.value.serverId);
-        return self.finishMcpHostMutation(workbench, output, outcome);
+        const control = try self.requireProductControl();
+        const host = self.mcp_management_host orelse {
+            var output: [256]u8 = undefined;
+            try responder.success(invocation.request.id, try self.finishMcpHostMutation(control, &output, .capability_unavailable));
+            return;
+        };
+        if (control.mcpServerOperationBusy(parsed.value.serverId)) {
+            var output: [256]u8 = undefined;
+            try responder.success(invocation.request.id, try encodeMcpTypedOutcome(&output, "busy", null));
+            return;
+        }
+        const server = try self.allocator.dupe(u8, parsed.value.serverId);
+        errdefer self.allocator.free(server);
+        const entry = try self.reserveDialog(invocation, responder, .{ .mcp_approval = .{ .generation = expected, .server = server } });
+        errdefer entry.active = false;
+        self.approval_completion = .{ .context = self, .complete_fn = approvalResult };
+        switch (try host.begin_approval_fn(host.context, entry.id, expected, server, &self.approval_completion)) {
+            .started => |handle| entry.handle = handle,
+            .immediate => |outcome| approvalResult(self, entry.id, .{ .outcome = outcome }),
+        }
+    }
+    fn approvalResult(context: *anyopaque, id: u64, result: McpApproval.Result) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.approvalResultChecked(id, result) catch |err| {
+            const entry = self.pendingDialog(id) orelse return;
+            const owned = entry.*;
+            entry.active = false;
+            defer self.releaseDialogInput(owned);
+            owned.responder.fail(owned.request[0..owned.request_len], .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn approvalResultChecked(self: *Dispatcher, id: u64, result: McpApproval.Result) !void {
+        const entry = self.pendingDialog(id) orelse return;
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.delivery.validateConnection(entry.generation, entry.window);
+        const input = entry.continuation.mcp_approval;
+        const control = try self.requireProductControl();
+        const host = self.mcp_management_host orelse return error.HostUnavailable;
+        const outcome: McpHostOutcome = switch (result) {
+            .failed => |err| return err,
+            .outcome => |value| value,
+            .confirmed => if (control.mcpServerOperationBusy(input.server)) .rejected else host.map_approval_fn(host.context, try control.approveMcpConnection(input.generation, .{ .server_id = input.server })),
+        };
+        var output: [256]u8 = undefined;
+        const encoded = try self.finishMcpHostMutation(control, &output, outcome);
+        const owned = entry.*;
+        entry.active = false;
+        defer self.releaseDialogInput(owned);
+        owned.responder.success(owned.request[0..owned.request_len], encoded) catch {};
     }
 
     fn captureMcpSecret(

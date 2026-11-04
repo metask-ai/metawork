@@ -1013,6 +1013,8 @@ fn absoluteReferenceRelativePath(
 
 pub const OutputFileTarget = output_check.Target;
 pub const NativeDialog = control_ports.NativeDialog;
+pub const McpApproval = control_ports.McpApproval;
+pub const McpHostOutcome = control_ports.McpHostOutcome;
 pub const OutputSavePort = control_ports.OutputFileSave;
 pub const OutputSaveInput = control_ports.OutputFileSaveInput;
 pub const OutputCancel = enum { pending_cancelled, job_cancelling, committed, not_found };

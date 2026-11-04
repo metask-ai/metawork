@@ -310,6 +310,13 @@ pub const ScheduleHost = struct {
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
 
+pub const McpHostOutcome = enum { saved, saved_recovery_required, stale_generation, rejected, indeterminate, cancelled, capability_unavailable };
+pub const McpApproval = struct {
+    pub const Result = union(enum) { confirmed, outcome: McpHostOutcome, failed: anyerror };
+    pub const Start = union(enum) { started: u64, immediate: McpHostOutcome };
+    pub const Completion = struct { context: *anyopaque, complete_fn: *const fn (*anyopaque, u64, Result) void };
+};
+
 /// Main-loop native dialog capability. Completion storage belongs to the caller
 /// and must outlive cancellation until the native loop has stopped delivering.
 pub const NativeDialog = struct {
