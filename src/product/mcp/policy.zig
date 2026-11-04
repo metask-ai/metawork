@@ -336,11 +336,22 @@ pub fn serverOperationBusy(
 pub fn runtimeOauthRefreshEligible(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
     if (!mcp_configuration.serverRuntimeAuthorizationReady(server)) return false;
     const management = if (mcp.management) |*value| value else return false;
+    if (mcp_configuration.serverProblem(server, management.limits) != null) return false;
+    if (server.enabled) return true;
     const manifest = management.runtime_manifest orelse return false;
     for (manifest.entries) |entry| {
         if (!std.mem.eql(u8, entry.id, server.id) or entry.state != .loaded) continue;
-        return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server)) and (server.enabled or entry.task_references != 0);
+        return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server)) and entry.task_references != 0;
     }
+    return false;
+}
+
+pub fn runtimeOauthLoaded(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
+    const management = if (mcp.management) |*value| value else return false;
+    const manifest = management.runtime_manifest orelse return false;
+    for (manifest.entries) |entry|
+        if (entry.state == .loaded and std.mem.eql(u8, entry.id, server.id))
+            return std.mem.eql(u8, &entry.state.loaded, &mcp_configuration.runtimeDescriptorFingerprint(server));
     return false;
 }
 
@@ -358,13 +369,17 @@ pub fn nextOauthExpiry(
         if (!runtimeOauthRefreshEligible(mcp, server)) continue;
         const oauth = server.auth.oauth orelse continue;
         const grant = oauth.grant orelse continue;
-        if (grant.refresh_token_ref == null) continue;
         const expires_at = grant.expires_at_unix_ms orelse continue;
-        const eligible_at = management.oauth_schedule.eligibleAt(server.id, expires_at);
+        const refresh = grant.refresh_token_ref != null;
+        const eligible_at = if (refresh) management.oauth_schedule.eligibleAt(server.id, expires_at) else expires_at;
         if (earliest == null or eligible_at < earliest.?.expires_at_unix_ms)
             earliest = .{
                 .server_id = server.id,
                 .expires_at_unix_ms = eligible_at,
+                .refresh = refresh,
+                .runtime_loaded = runtimeOauthLoaded(mcp, server),
+                .consent_epoch = grant.consent_epoch,
+                .token_revision = grant.token_revision,
             };
     }
     return earliest;
@@ -511,6 +526,16 @@ test "browser authorization excludes only its server from OAuth refresh selectio
             .tools = &.{"read"},
         },
     };
+    var approvals: [2][64]u8 = undefined;
+    var consents: [2][64]u8 = undefined;
+    for (&servers, 0..) |*server, index| {
+        server.auth.oauth.?.consent.?.resource = server.transport.url.?;
+        server.auth.oauth.?.consent.?.redirect_uri = "http://127.0.0.1:43123/auth/callback";
+        approvals[index] = mcp_configuration.connectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &approvals[index] };
+        consents[index] = mcp_configuration.oauthConsentFingerprint(server.*, server.auth.oauth.?.consent.?).?;
+        server.auth.oauth.?.consent.?.fingerprint = &consents[index];
+    }
     const registry: mcp_configuration.RegistryWire = .{
         .schema_version = mcp_configuration.schema_version,
         .generation = 1,

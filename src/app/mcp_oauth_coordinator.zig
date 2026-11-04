@@ -280,6 +280,11 @@ pub const Coordinator = struct {
             self.armEarliest();
             return true;
         }
+        if (!expiry.refresh) {
+            self.expireUnrefreshable(expiry, now_unix_ms);
+            self.armEarliest();
+            return true;
+        }
         self.begin(expiry.server_id, now_unix_ms) catch {
             self.deferRetry(now_unix_ms);
             self.armEarliest();
@@ -408,7 +413,7 @@ pub const Coordinator = struct {
         job: *RefreshJob,
         tokens: *mcp_oauth.TokenSet,
     ) !void {
-        var pending = (try self.authorizations.prepareRotation(
+        var pending: ?mcp_platform.PendingHttpAuthRotation = if (job.binding.runtime_loaded) switch (try self.authorizations.prepareRotation(
             job.binding.server_id,
             job.binding.consent_epoch,
             job.binding.token_revision,
@@ -416,11 +421,14 @@ pub const Coordinator = struct {
                 .access_token = tokens.access_token.view(),
                 .refresh_token = if (tokens.refresh_token) |*secret| secret.view() else null,
             },
-        )) orelse {
-            self.recover(job.binding.operation_id);
-            return;
-        };
-        defer pending.deinit();
+        )) {
+            .prepared => |value| value,
+            .server_not_loaded, .consent_epoch_mismatch, .token_revision_mismatch => {
+                self.recover(job.binding.operation_id);
+                return;
+            },
+        } else null;
+        defer if (pending) |*value| value.deinit();
         const access = try self.allocator.dupe(u8, tokens.access_token.view());
         defer {
             std.crypto.secureZero(u8, access);
@@ -449,6 +457,23 @@ pub const Coordinator = struct {
             .rejected => self.recover(job.binding.operation_id),
             .indeterminate => {},
             .unchanged, .stale_generation => unreachable,
+        }
+    }
+
+    fn expireUnrefreshable(self: *Coordinator, expiry: mcp_types.McpOauthExpiry, now_ms: u64) void {
+        const outcome = self.control.requireMcpOauthReauthorization(.{
+            .server_id = expiry.server_id,
+            .consent_epoch = expiry.consent_epoch,
+            .token_revision = expiry.token_revision,
+            .challenge_scopes = &.{},
+            .challenge_scopes_complete = false,
+        }) catch {
+            self.deferRetry(now_ms);
+            return;
+        };
+        switch (outcome) {
+            .applied, .stale => self.host.notify(),
+            .pending, .rejected, .persistence_outcome_unknown => self.deferRetry(now_ms),
         }
     }
 
@@ -533,9 +558,9 @@ pub const Coordinator = struct {
 };
 
 fn commitRotation(context: *anyopaque) void {
-    const pending: *mcp_platform.PendingHttpAuthRotation =
+    const pending: *?mcp_platform.PendingHttpAuthRotation =
         @ptrCast(@alignCast(context));
-    pending.commit();
+    if (pending.*) |*value| value.commit();
 }
 
 fn secureFree(allocator: std.mem.Allocator, secret: []u8) void {
@@ -848,4 +873,48 @@ test "MCP OAuth refresh reuses consent only for the same resource and covered sc
         binding.resource,
         &.{ "files.read", "files.delete" },
     ));
+}
+
+test "MCP OAuth token commit accepts proven absence and rejects a missing loaded slot" {
+    const Fixture = struct {
+        commits: usize = 0,
+        recoveries: usize = 0,
+        fn next(_: *anyopaque) ?mcp_types.McpOauthExpiry {
+            return null;
+        }
+        fn begin(_: *anyopaque, _: []const u8) anyerror!mcp_types.McpOauthRefreshBeginOutcome {
+            return error.UnexpectedCall;
+        }
+        fn complete(raw: *anyopaque, input: mcp_types.contract.CompleteRefreshInput, commit: mcp_types.McpOauthRuntimeCommit) anyerror!mcp_types.contract.ManagementOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("new-access-token", input.access_token);
+            commit.commit();
+            self.commits += 1;
+            return .saved;
+        }
+        fn reauth(_: *anyopaque, _: mcp_types.McpRuntimeAuthorizationFailure) anyerror!mcp_types.McpRuntimeAuthorizationFailureOutcome {
+            return error.UnexpectedCall;
+        }
+        fn clear(raw: *anyopaque, _: []const u8) anyerror!mcp_types.contract.ManagementOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.recoveries += 1;
+            return .saved;
+        }
+    };
+    for ([_]bool{ false, true }) |loaded| {
+        var fixture = Fixture{};
+        var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
+        defer authorizations.deinit();
+        var credentials: mcp_platform.CredentialStore = undefined;
+        // Only the completion path is entered; no Host or credential effect.
+        var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credentials, &authorizations, undefined);
+        var job: RefreshJob = undefined;
+        job.binding = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .operation_id = "operation", .server_id = "oauth", .endpoint = "https://mcp.example.test/mcp", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .client_id = "client", .token_endpoint_auth_method = "none", .client_secret_ref = null, .refresh_token_ref = "refresh", .consent_epoch = 1, .token_revision = 1, .runtime_loaded = loaded };
+        defer job.binding.deinit();
+        var tokens: mcp_oauth.TokenSet = .{ .access_token = try mcp_oauth.Secret.init(std.testing.allocator, "new-access-token"), .refresh_token = null, .expires_at_unix_ms = 999_000 };
+        defer tokens.deinit();
+        try coordinator.commitTokens(&job, &tokens);
+        try std.testing.expectEqual(@as(usize, if (loaded) 0 else 1), fixture.commits);
+        try std.testing.expectEqual(@as(usize, if (loaded) 1 else 0), fixture.recoveries);
+    }
 }

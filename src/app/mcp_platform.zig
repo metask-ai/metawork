@@ -634,7 +634,7 @@ pub const PendingHttpAuthRotation = struct {
     }
 };
 
-const HttpAuthRotationPreparation = union(enum) {
+pub const HttpAuthRotationPreparation = union(enum) {
     prepared: PendingHttpAuthRotation,
     server_not_loaded,
     consent_epoch_mismatch,
@@ -729,7 +729,7 @@ pub const HttpAuthorizations = struct {
         expected_token_revision: u64,
         update: HttpTokenUpdate,
     ) std.mem.Allocator.Error!HttpAuthRotationOutcome {
-        var pending = switch (try self.prepareRotationDetailed(
+        var pending = switch (try self.prepareRotation(
             server_id,
             expected_consent_epoch,
             expected_token_revision,
@@ -746,27 +746,6 @@ pub const HttpAuthorizations = struct {
     }
 
     pub fn prepareRotation(
-        self: *HttpAuthorizations,
-        server_id: []const u8,
-        expected_consent_epoch: u64,
-        expected_token_revision: u64,
-        update: HttpTokenUpdate,
-    ) std.mem.Allocator.Error!?PendingHttpAuthRotation {
-        return switch (try self.prepareRotationDetailed(
-            server_id,
-            expected_consent_epoch,
-            expected_token_revision,
-            update,
-        )) {
-            .prepared => |prepared| prepared,
-            .server_not_loaded,
-            .consent_epoch_mismatch,
-            .token_revision_mismatch,
-            => null,
-        };
-    }
-
-    fn prepareRotationDetailed(
         self: *HttpAuthorizations,
         server_id: []const u8,
         expected_consent_epoch: u64,
@@ -2042,7 +2021,7 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
         4,
         7,
         .{ .access_token = "new-access-token" },
-    )).?;
+    )).prepared;
     defer pending.deinit();
     pending.commit();
     try std.testing.expectEqualStrings("old-access-token", in_flight.token());
@@ -2083,13 +2062,13 @@ test "OAuth HTTP authorization reservation is exclusive and abandonment is retry
         4,
         7,
         .{ .access_token = "first-token" },
-    )).?;
+    )).prepared;
     try std.testing.expect((try authorizations.prepareRotation(
         "oauth-server",
         4,
         7,
         .{ .access_token = "second-token" },
-    )) == null);
+    )) == .token_revision_mismatch);
     first.deinit();
 
     var retry = (try authorizations.prepareRotation(
@@ -2097,7 +2076,7 @@ test "OAuth HTTP authorization reservation is exclusive and abandonment is retry
         4,
         7,
         .{ .access_token = "retry-token" },
-    )).?;
+    )).prepared;
     defer retry.deinit();
     retry.commit();
     var lease = slot.lease();

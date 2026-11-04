@@ -757,7 +757,7 @@ pub const RuntimeApplyIntent = union(enum) { automatic, retry_all, retry_server:
 /// Product's attempt ledger. Membership growth never invalidates failures;
 /// removal/replacement can reopen them after the current round finishes.
 pub const RuntimeConvergence = struct {
-    pub const Outcome = enum { pending, rejected, failed, capacity };
+    pub const Outcome = enum { pending, waiting_auth, rejected, failed, capacity };
     const Result = struct { target: RuntimeApplyTarget, epoch: u64, round: u64, outcome: Outcome };
     results: std.ArrayList(Result) = .empty,
     epoch: u64 = 0,
@@ -776,6 +776,7 @@ pub const RuntimeConvergence = struct {
         for (self.results.items) |result| {
             if (!std.mem.eql(u8, result.target.id(), target.id()) or
                 !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
+            if (result.outcome == .waiting_auth) return true;
             return result.outcome != .pending and (result.epoch == self.epoch or (!next_round and result.round == self.round));
         }
         return false;
@@ -816,7 +817,7 @@ pub const RuntimeConvergence = struct {
 
     pub fn nextRound(self: *RuntimeConvergence) bool {
         for (self.results.items) |result| {
-            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending) {
+            if (result.epoch != self.epoch and result.round == self.round and result.outcome != .pending and result.outcome != .waiting_auth) {
                 self.round +|= 1;
                 return true;
             }
@@ -2782,7 +2783,7 @@ pub const RuntimeManifest = struct {
     pub fn failureCount(self: *const RuntimeManifest, desired: ?RegistryWire, limits: Limits, convergence: *const RuntimeConvergence) usize {
         var count: usize = 0;
         for (convergence.results.items) |result| {
-            if (result.outcome == .pending or !convergence.handled(result.target)) continue;
+            if (result.outcome == .pending or result.outcome == .waiting_auth or !convergence.handled(result.target)) continue;
             const target = self.targetFor(result.target.id(), desired, limits) orelse continue;
             if (std.mem.eql(u8, &target.fingerprint, &result.target.fingerprint)) count += 1;
         }
@@ -2812,7 +2813,7 @@ pub const RuntimeManifest = struct {
             if (next_round) {
                 const ledger = convergence orelse break;
                 const eligible_round = for (ledger.results.items) |result| {
-                    if (result.epoch != ledger.epoch and result.round == ledger.round and result.outcome != .pending) break true;
+                    if (result.epoch != ledger.epoch and result.round == ledger.round and result.outcome != .pending and result.outcome != .waiting_auth) break true;
                 } else false;
                 if (!eligible_round) break;
             }

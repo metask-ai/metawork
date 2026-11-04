@@ -135,6 +135,7 @@ fn serverApplyStatus(mcp: *const mcp_state.McpProductState, server: mcp_configur
         if (!std.mem.eql(u8, result.target.id(), server.id) or !std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint)) continue;
         return switch (result.outcome) {
             .pending => .applying,
+            .waiting_auth => .current,
             .rejected => .rejected,
             .failed, .capacity => .failed,
         };

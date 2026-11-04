@@ -75,6 +75,9 @@ pub const McpOauthRefreshBinding = struct {
     consent_epoch: u64,
     token_revision: u64,
 
+    /// Product proof at operation begin; apply shares the durable marker boundary.
+    runtime_loaded: bool = true,
+
     pub fn deinit(self: *McpOauthRefreshBinding) void {
         self.arena.deinit();
         self.* = undefined;
@@ -142,6 +145,10 @@ pub const McpOauthCodeExchangeBeginOutcome = union(enum) {
 pub const McpOauthExpiry = struct {
     server_id: []const u8,
     expires_at_unix_ms: u64,
+    refresh: bool = true,
+    runtime_loaded: bool = true,
+    consent_epoch: u64 = 0,
+    token_revision: u64 = 0,
 };
 
 pub const McpRuntimeAuthorizationFailure = struct {

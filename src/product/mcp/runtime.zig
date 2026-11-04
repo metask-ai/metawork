@@ -834,6 +834,16 @@ pub const Runtime = struct {
             .add => try members.append(self.allocator, state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable),
         }
         try management.convergence.prepare(self.allocator, selected);
+        if (selected.kind != .remove) {
+            const server = state_module.findMcpServer(desired.servers, selected.id()) orelse return error.McpManagementUnavailable;
+            if (server.auth.oauth) |oauth| if (oauth.grant) |grant| if (grant.expires_at_unix_ms) |expiry| if (self.ports.unix_clock.nowMs()) |now_ms| {
+                if (now_ms >= expiry) {
+                    management.convergence.reject(selected, .waiting_auth);
+                    self.markChanged();
+                    return self.prepareConfigurationStep(expected_generation, .automatic);
+                }
+            };
+        }
         var step = configuration.RuntimeApplyStep.init(self.allocator, desired, members.items, selected, management.limits) catch |err| {
             // A rejected composition has no Core effect, but is still a processed
             // attempt. Keep R intact and let the next candidate make progress.
@@ -1686,6 +1696,7 @@ pub const Runtime = struct {
         };
         defer preparation.deinit();
         var binding = try policy.buildOauthRefreshBinding(self.allocator, preparation.target());
+        binding.runtime_loaded = policy.runtimeOauthLoaded(&self.state, server);
         var binding_owned = true;
         defer if (binding_owned) binding.deinit();
         return switch (try self.commitOauthOperationBegin(&preparation)) {
@@ -2200,9 +2211,11 @@ const TestHarness = struct {
 };
 
 const OauthTestEffects = struct {
+    const StoredSecret = struct { locator: [64]u8 = undefined, locator_len: usize = 0, value: [64]u8 = undefined, value_len: usize = 0 };
     entropy: u8 = 0,
     deleted: usize = 0,
     registry_effect: configuration.PersistenceEffect = .committed,
+    created_secrets: [16]StoredSecret = .{StoredSecret{}} ** 16,
 
     fn fill(raw: ?*anyopaque, output: *[16]u8) bool {
         const self: *@This() = @ptrCast(@alignCast(raw.?));
@@ -2223,8 +2236,23 @@ const OauthTestEffects = struct {
     fn probe(_: ?*anyopaque, _: []const u8) configuration.CredentialPresence {
         return .missing;
     }
-    fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
-        return true;
+    fn create(raw: ?*anyopaque, locator: []const u8, secret: []const u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        for (&self.created_secrets) |*entry| if (entry.locator_len == 0) {
+            if (locator.len > entry.locator.len or secret.len > entry.value.len) return false;
+            @memcpy(entry.locator[0..locator.len], locator);
+            @memcpy(entry.value[0..secret.len], secret);
+            entry.locator_len = locator.len;
+            entry.value_len = secret.len;
+            return true;
+        };
+        return false;
+    }
+    fn resolve(raw: ?*anyopaque, allocator: std.mem.Allocator, locator: []const u8) configuration.CredentialResolution {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        for (self.created_secrets) |entry| if (std.mem.eql(u8, entry.locator[0..entry.locator_len], locator))
+            return .{ .value = allocator.dupe(u8, entry.value[0..entry.value_len]) catch return .out_of_memory };
+        return .missing;
     }
     fn delete(raw: ?*anyopaque, _: []const u8) bool {
         const self: *@This() = @ptrCast(@alignCast(raw.?));
@@ -2281,6 +2309,97 @@ const OauthTestEffects = struct {
     }
 };
 
+fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, refreshable: bool) !Runtime {
+    var runtime = try effects.coldRuntime(harness, "consent_required");
+    errdefer runtime.deinit();
+    var start = (try runtime.beginAuthorization(1, "oauth", "attempt")).?;
+    defer start.deinit();
+    try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_consent));
+    try std.testing.expect((try runtime.authorizeOauth(.{ .attempt_id = 1, .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" })) == .ready);
+    try std.testing.expect(runtime.advanceAuthorization("attempt", .awaiting_browser));
+    const exchange = (try runtime.beginOauthCodeExchange("oauth")).started;
+    try std.testing.expect(runtime.advanceAuthorization("attempt", .exchanging));
+    var access = "access-token".*;
+    var refresh = "refresh-token".*;
+    try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = if (refreshable) &refresh else null, .expires_at_unix_ms = 90_000 }));
+    try std.testing.expect(runtime.finishAuthorization("attempt"));
+    return runtime;
+}
+
+test "Product MCP expired cold grant waits without changing membership and resumes with new credentials" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try testGrantedOauthRuntime(&effects, &harness, true);
+    defer runtime.deinit();
+    harness.unix_seconds = 100;
+    try std.testing.expect((try runtime.prepareConfigurationStep(3, .automatic)) == null);
+    try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+    try std.testing.expectEqual(.idle, runtime.state.configuration_apply_state);
+    try std.testing.expectEqual(.waiting_auth, runtime.state.management.?.convergence.results.items[0].outcome);
+    var binding = (try runtime.beginOauthRefresh("oauth")).started;
+    defer binding.deinit();
+    try std.testing.expect(!binding.runtime_loaded);
+    var new_access = "new-access-token".*;
+    const Commit = struct {
+        called: bool = false,
+        fn commit(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.called = true;
+        }
+    };
+    var commit = Commit{};
+    try std.testing.expectEqual(.saved, try runtime.completeOauthRefresh(.{ .operation_id = binding.operation_id, .server_id = "oauth", .access_token = &new_access, .expires_at_unix_ms = 999_000 }, .{ .context = &commit, .commit_fn = Commit.commit }));
+    try std.testing.expect(commit.called);
+    var step = (try runtime.prepareConfigurationStep(4, .automatic)).?;
+    defer step.deinit();
+    try std.testing.expectEqual(.add, step.target.kind);
+    const desired = runtime.state.management.?.desiredRegistry().?;
+    var buffer: [8192]u8 = undefined;
+    var prepared = try configuration.prepare(std.testing.allocator, try configuration.encode(&buffer, desired, test_limits), true, false, .{ .context = &effects, .available = true, .resolve_fn = OauthTestEffects.resolve }, test_limits);
+    defer prepared.deinit();
+    try std.testing.expectEqual(.eligible, prepared.server_states[0]);
+    var found = false;
+    for (prepared.credentials) |credential| if (std.mem.eql(u8, credential.locator, desired.servers[0].auth.oauth.?.grant.?.access_token_ref)) {
+        try std.testing.expectEqualStrings("new-access-token", credential.secret);
+        found = true;
+    };
+    try std.testing.expect(found);
+}
+
+test "Product MCP expired grant without refresh token schedules reauthorization without an apply loop" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try testGrantedOauthRuntime(&effects, &harness, false);
+    defer runtime.deinit();
+    harness.unix_seconds = 100;
+    const expiry = runtime.nextOauthExpiry().?;
+    try std.testing.expect(!expiry.refresh);
+    try std.testing.expectEqual(@as(u64, 90_000), expiry.expires_at_unix_ms);
+    try std.testing.expect((try runtime.prepareConfigurationStep(3, .automatic)) == null);
+    try std.testing.expectEqual(.applied, try runtime.requireOauthReauthorization(.{ .server_id = expiry.server_id, .consent_epoch = expiry.consent_epoch, .token_revision = expiry.token_revision, .challenge_scopes = &.{}, .challenge_scopes_complete = false }));
+    try std.testing.expectEqualStrings("reauth_required", runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.status);
+    try std.testing.expect(runtime.nextOauthExpiry() == null);
+    try std.testing.expect((try runtime.prepareConfigurationStep(4, .automatic)) == null);
+    try std.testing.expect(runtime.canBeginAuthorization(4, "oauth"));
+}
+
+test "Product MCP token expiry never becomes a loaded member removal" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try testGrantedOauthRuntime(&effects, &harness, true);
+    defer runtime.deinit();
+    var step = (try runtime.prepareConfigurationStep(3, .automatic)).?;
+    defer step.deinit();
+    var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &step.preparation)).?;
+    try std.testing.expect(runtime.completeConfigurationApply(3, &step.preparation, &manifest, null, null, false));
+    step.preparation = .{ .allocator = std.testing.allocator, .state = .empty };
+    harness.unix_seconds = 100;
+    try std.testing.expect((try runtime.prepareConfigurationStep(3, .automatic)) == null);
+    try std.testing.expect(runtime.state.management.?.runtime_manifest.?.entries[0].state == .loaded);
+    try std.testing.expect(runtime.nextOauthExpiry().?.runtime_loaded);
+    try std.testing.expectEqual(.current, runtime.state.management.?.inspect().runtime_alignment);
+}
+
 test "cold absence supports consent DCR with a secret and reauthorization through token commit" {
     for ([_][]const u8{ "consent_required", "client_registration_required", "reauth_required" }) |initial_status| {
         var effects = OauthTestEffects{};
@@ -2313,10 +2432,10 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
         const deadline = runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000);
         try std.testing.expectEqual(@as(u64, 67_750), deadline);
-        try std.testing.expect(runtime.nextOauthExpiry() == null);
+        try std.testing.expectEqual(deadline, runtime.nextOauthExpiry().?.expires_at_unix_ms);
         harness.unix_seconds = 80;
         try std.testing.expectEqual(deadline, runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000));
-        try std.testing.expect(runtime.nextOauthExpiry() == null);
+        try std.testing.expectEqual(deadline, runtime.nextOauthExpiry().?.expires_at_unix_ms);
         try std.testing.expectEqual(@as(?u64, 90_000), current.servers[0].auth.oauth.?.grant.?.expires_at_unix_ms);
         harness.unix_seconds = 1;
         // Tokens now require real configuration apply; absence cannot pretend loaded.
