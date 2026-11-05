@@ -3873,6 +3873,15 @@ pub const Runtime = struct {
         );
     }
 
+    /// Removes only the project entry, retaining Task authority and identity.
+    pub fn removeProjectAtEpoch(self: *Runtime, workspace_id: u64, expected_workspace_epoch: u64) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const previous = try self.workspace.setProjectRemoved(workspace_id, expected_workspace_epoch, true);
+        errdefer _ = self.workspace.setProjectRemoved(workspace_id, expected_workspace_epoch, previous) catch unreachable;
+        try self.commitTaskStateBestEffort();
+        self.bumpRevision();
+    }
+
     /// Removes a Workspace from navigation, makes future Run admission fail
     /// closed, and starts closing every live Task Session in that Workspace.
     /// Task history and files remain owned by their original systems.
@@ -8553,6 +8562,7 @@ pub const Runtime = struct {
                 .canonical_root = workspace.canonical_root,
                 .display_name = workspace.display_name,
                 .visible = workspace.visible,
+                .project_removed = workspace.project_removed,
                 .recent_order = workspace.recent_order,
             }, self.workspaceStorage()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -8691,6 +8701,7 @@ pub const Runtime = struct {
                 .canonical_root = workspace.canonical_root,
                 .display_name = workspace.display_name,
                 .visible = workspace.visible,
+                .project_removed = workspace.project_removed,
                 .recent_order = workspace.recent_order,
             };
             workspace_index += 1;
@@ -12899,6 +12910,88 @@ test "Workspace upsert unknown outcome stays usable and heals on retry" {
         .trust = .explicitly_trusted,
     });
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+}
+
+test "Project removal and re-addition preserve empty Workspace identity and existing authorization" {
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, .{ .max_workspaces = 1, .max_tasks = 1 }, .{});
+    defer control.deinit();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const id = try control.openWorkspace(.{ .workspace_root = root, .trust = .{ .temporary = root } });
+    try std.testing.expectError(error.WorkspaceEpochMismatch, control.removeProjectAtEpoch(id, 2));
+    try std.testing.expect(!control.workspace.facts(id).?.project_removed);
+    try control.removeProjectAtEpoch(id, 1);
+    const removed = control.workspace.facts(id).?;
+    try std.testing.expect(removed.project_removed);
+    try std.testing.expect(removed.visible);
+    try std.testing.expectEqual(WorkspaceAuthorization.available, removed.authorization);
+    try std.testing.expectEqual(@as(u64, 1), removed.epoch);
+    try std.testing.expectEqualStrings(root, removed.trust.temporary);
+    try std.testing.expectEqual(id, try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    const restored = control.workspace.facts(id).?;
+    try std.testing.expect(!restored.project_removed);
+    try std.testing.expectEqual(@as(u64, 1), restored.epoch);
+    try std.testing.expectEqualStrings(root, restored.trust.temporary);
+    try std.testing.expectEqual(@as(usize, 1), control.workspace.count(.manual));
+}
+
+test "Project removal survives Host restart while Workspace authority remains available" {
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence = TestTaskPersistence{ .storage = storage };
+    const limits: Limits = .{ .max_workspaces = 1, .max_tasks = 1 };
+    {
+        var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{ .task_persistence = persistence.capability(null) });
+        defer control.deinit();
+        const id = try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted });
+        try control.removeProjectAtEpoch(id, 1);
+    }
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{ .task_persistence = persistence.capability(persistence.storage[0..persistence.len]) });
+    defer restored.deinit();
+    const workspace = restored.workspace.facts(1).?;
+    try std.testing.expect(workspace.project_removed);
+    try std.testing.expectEqual(@as(u64, 1), workspace.epoch);
+    try std.testing.expectEqual(WorkspaceAuthorization.available, workspace.authorization);
+    try std.testing.expectEqual(@as(u64, 1), try restored.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    try std.testing.expect(!restored.workspace.facts(1).?.project_removed);
+}
+
+test "Project removal retains running Task state, Workspace epoch and durable Task authority" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence = TestTaskPersistence{ .storage = storage };
+    var control = try testRuntimeWith(.{ .task_persistence = persistence.capability(null) });
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    var before_wire = try control.buildTaskStateWire();
+    defer before_wire.deinit();
+    const before = try std.json.Stringify.valueAlloc(std.testing.allocator, before_wire.state.tasks, .{});
+    defer std.testing.allocator.free(before);
+    const epoch = try control.workspaceEpoch(1);
+    try control.removeProjectAtEpoch(1, epoch);
+    const workspace = control.workspace.facts(1).?;
+    try std.testing.expect(workspace.project_removed);
+    try std.testing.expect(workspace.visible);
+    try std.testing.expectEqual(WorkspaceAuthorization.available, workspace.authorization);
+    try std.testing.expectEqual(epoch, workspace.epoch);
+    try std.testing.expect(control.task_runtime.tasks[0].? == task);
+    _ = try control.workspace.taskRunAuthority(1, epoch);
+    try std.testing.expectEqualStrings(workspace.canonical_root, try control.workspaceDirectoryForOpen(1, epoch));
+    var wire = try control.buildTaskStateWire();
+    defer wire.deinit();
+    try std.testing.expect(wire.state.workspaces[0].project_removed);
+    try std.testing.expectEqual(@as(usize, 1), wire.state.tasks.len);
+    const after = try std.json.Stringify.valueAlloc(std.testing.allocator, wire.state.tasks, .{});
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
 }
 
 test "hidden Workspace record with Task history cannot be reused" {

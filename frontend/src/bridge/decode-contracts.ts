@@ -4156,6 +4156,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "id",
     "epoch",
     "kind",
+    "projectRemoved",
     "displayName",
     "canonicalRoot",
     "redacted",
@@ -4172,6 +4173,10 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "failedOrInterrupted",
   ]);
   const kind = enumValue(item.kind, `${path}.kind`, workspaceKinds);
+  const projectRemoved = booleanValue(
+    item.projectRemoved,
+    `${path}.projectRemoved`,
+  );
   const authorization = enumValue(
     item.authorization,
     `${path}.authorization`,
@@ -4204,7 +4209,8 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     fail(`${path}.recentOrder`, "manual Workspace requires recent order");
   if (
     kind === "automatic" &&
-    (recentOrder !== "0" ||
+    (projectRemoved ||
+      recentOrder !== "0" ||
       authorization !== "available" ||
       lastRemovalFailure !== null)
   )
@@ -4216,6 +4222,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
     kind,
+    projectRemoved,
     displayName: stringValue(item.displayName, `${path}.displayName`),
     canonicalRoot: stringValue(item.canonicalRoot, `${path}.canonicalRoot`),
     redacted: booleanValue(item.redacted, `${path}.redacted`),

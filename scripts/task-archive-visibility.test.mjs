@@ -121,6 +121,7 @@ async function renderApp(
 ) {
   const snapshot = structuredClone(initialSnapshot);
   Object.assign(snapshot.workspaces[0], workspace);
+  snapshot.workspaces[0].projectRemoved = projectHidden;
   const task = snapshot.tasks[0];
   Object.assign(task, {
     title: "Archive target",
@@ -145,6 +146,7 @@ async function renderApp(
   let onRevision;
   let shortcut;
   const deletions = [];
+  const projectRemovals = [];
   const historyReads = [];
   for (const [name, fn] of Object.entries({
     available: () => true,
@@ -156,6 +158,24 @@ async function renderApp(
       deletions.push(taskId);
       snapshot.tasks = snapshot.tasks.filter((task) => task.id !== taskId);
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    },
+    removeProject: async (workspaceId, expectedWorkspaceEpoch) => {
+      projectRemovals.push({ workspaceId, expectedWorkspaceEpoch });
+      snapshot.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      ).projectRemoved = true;
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return {
+        workspaceId,
+        expectedWorkspaceEpoch,
+        accepted: true,
+        reason: null,
+      };
+    },
+    chooseWorkspace: async () => {
+      snapshot.workspaces[0].projectRemoved = false;
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return { selected: true, workspaceId: snapshot.workspaces[0].id };
     },
     onHostSignal: () => () => {},
     onTaskOpen: () => () => {},
@@ -218,6 +238,7 @@ async function renderApp(
     requests,
     renames,
     deletions,
+    projectRemovals,
     historyReads,
     async openRename(taskId = "3", select = true) {
       const row = taskRows(taskId)[0];
@@ -1323,7 +1344,7 @@ async function confirmProjectRemoval(user) {
 
 for (const emptyProject of [false, true])
   test(`project removal hides only its group and preserves Workspace authority; empty=${emptyProject}`, async (ctx) => {
-    const { user, snapshot } = await renderApp(ctx, {
+    const { user, snapshot, projectRemovals } = await renderApp(ctx, {
       emptyProject,
       workspace: { authorization: "reauthorization_required" },
     });
@@ -1338,7 +1359,12 @@ for (const emptyProject of [false, true])
     );
     await confirmProjectRemoval(user);
     assert.deepEqual(calls, []);
+    before.workspaces[0].projectRemoved = true;
+    before.revision = snapshot.revision;
     assert.deepEqual(snapshot, before);
+    assert.deepEqual(projectRemovals, [
+      { workspaceId: "1", expectedWorkspaceEpoch: "1" },
+    ]);
     assert.equal(taskRows("3").length, emptyProject ? 0 : 1);
     if (!emptyProject)
       assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
@@ -1371,6 +1397,8 @@ for (const phase of ["queued", "running", "waiting_ui", "stopping"])
     );
     await confirmProjectRemoval(user);
     assert.deepEqual(calls, []);
+    before.workspaces[0].projectRemoved = true;
+    before.revision = snapshot.revision;
     assert.deepEqual(snapshot, before);
     assert.equal(taskRows("3").length, 1);
     assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
@@ -1380,7 +1408,63 @@ for (const phase of ["queued", "running", "waiting_ui", "stopping"])
     assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
   });
 
-test("removed project stays hidden after remount and explicit Workspace selection restores its group", async (ctx) => {
+test("project removal waits for Host acceptance and allows retry after rejection", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  let resolveRemoval;
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "removeProject", () => {
+    calls++;
+    return new Promise((resolve) => {
+      resolveRemoval = resolve;
+    });
+  });
+  const dialog = await openProjectRemoval(user);
+  const remove = within(dialog).getByRole("button", {
+    name: "Remove project",
+    exact: true,
+  });
+  await user.click(remove);
+  assert.equal(calls, 1);
+  assert.ok(remove.disabled);
+  assert.ok(document.querySelector(".task-project-context"));
+  await user.click(remove);
+  assert.equal(calls, 1);
+  await act(async () =>
+    resolveRemoval({
+      accepted: false,
+      workspaceId: "1",
+      reason: "workspace_changed",
+    }),
+  );
+  await within(dialog).findByRole("alert");
+  assert.ok(document.querySelector(".task-project-context"));
+  await user.click(remove);
+  snapshot.workspaces[0].projectRemoved = true;
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () =>
+    resolveRemoval({ accepted: true, workspaceId: "1", reason: null }),
+  );
+  await waitFor(() =>
+    assert.equal(document.querySelector(".task-project-context"), null),
+  );
+  assert.equal(calls, 2);
+});
+
+test("timed out project removal reconciles the Host state without resending", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "removeProject", async () => {
+    calls++;
+    snapshot.workspaces[0].projectRemoved = true;
+    snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    throw new Error("timeout");
+  });
+  await confirmProjectRemoval(user);
+  assert.equal(calls, 1);
+  assert.equal(taskRows("3").length, 1);
+});
+
+test("Host project removal survives remount and native folder selection restores its group", async (ctx) => {
   const { user } = await renderApp(ctx);
   await confirmProjectRemoval(user);
   cleanup();
@@ -1390,10 +1474,8 @@ test("removed project stays hidden after remount and explicit Workspace selectio
   await remounted.user.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
-  const picker = screen.getByRole("combobox", { name: "Switch workspace" });
-  await remounted.user.click(picker);
   await remounted.user.click(
-    await screen.findByRole("option", { name: /metawork-test/ }),
+    screen.getByRole("button", { name: "Add", exact: true }),
   );
   await screen.findByRole("group", {
     name: "Project actions for metawork-test",
@@ -1402,8 +1484,8 @@ test("removed project stays hidden after remount and explicit Workspace selectio
 });
 
 for (const outcome of ["selected", "cancelled", "superseded"])
-  test(`native folder selection restores a removed project only when current and selected: ${outcome}`, async (ctx) => {
-    const { user, snapshot } = await renderApp(ctx);
+  test(`native folder selection uses Host project state without switching a superseded Task: ${outcome}`, async (ctx) => {
+    const { user, snapshot, publishTask } = await renderApp(ctx);
     await confirmProjectRemoval(user);
     await user.click(
       screen.getByRole("button", { name: "New task", exact: true }),
@@ -1420,6 +1502,7 @@ for (const outcome of ["selected", "cancelled", "superseded"])
     await user.click(screen.getByRole("button", { name: "Add", exact: true }));
     assert.equal(typeof resolveChoice, "function");
     if (outcome === "superseded") await user.click(taskRows("3")[0]);
+    if (outcome !== "cancelled") snapshot.workspaces[0].projectRemoved = false;
     await act(async () =>
       resolveChoice(
         outcome === "cancelled"
@@ -1427,13 +1510,16 @@ for (const outcome of ["selected", "cancelled", "superseded"])
           : { selected: true, workspaceId: snapshot.workspaces[0].id },
       ),
     );
+    if (outcome === "superseded") await publishTask("3", {});
     await waitFor(() =>
-      assert.equal(taskRows("3").length, outcome === "selected" ? 2 : 1),
+      assert.equal(taskRows("3").length, outcome !== "cancelled" ? 2 : 1),
     );
     assert.equal(
       document.querySelector(".task-project-context") !== null,
-      outcome === "selected",
+      outcome !== "cancelled",
     );
+    if (outcome === "superseded")
+      assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
   });
 
 test("project removal menu and confirmation can be operated with the keyboard", async (ctx) => {

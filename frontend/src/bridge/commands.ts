@@ -16,6 +16,7 @@ export const commands = {
   chooseWorkspace: "metawork.workspaces.choose",
   openWorkspace: "metawork.workspaces.open",
   removeWorkspace: "metawork.workspaces.remove",
+  removeProject: "metawork.workspaces.removeProject",
   chooseAutomaticWorkspaceRoot: "metawork.workspaces.chooseAutomaticRoot",
   resetAutomaticWorkspaceRoot: "metawork.workspaces.resetAutomaticRoot",
   retryAutomaticWorkspaceRoot: "metawork.workspaces.retryAutomaticRoot",

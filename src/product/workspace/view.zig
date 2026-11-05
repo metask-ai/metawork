@@ -17,6 +17,7 @@ pub const Projection = struct {
     authorization: workspace.Authorization,
     last_removal_failure: workspace.RemovalFailure,
     recent_order: u64,
+    project_removed: bool = false,
     signals: workspace.Signals,
 };
 
@@ -77,6 +78,7 @@ pub fn copyProjections(
             .authorization = fact.authorization,
             .last_removal_failure = fact.last_removal_failure,
             .recent_order = fact.recent_order,
+            .project_removed = fact.project_removed,
             .signals = provider.signals(fact.id),
         };
         count += 1;
@@ -126,7 +128,8 @@ fn writeObject(
     try provider.writeJson(writer, fact.display_name);
     writer.writeAll(",\"canonicalRoot\":") catch return error.SnapshotTooLarge;
     try provider.writeJson(writer, fact.projected_root);
-    writer.print(",\"redacted\":{},\"authorization\":\"{s}\",\"lastRemovalFailure\":", .{
+    writer.print(",\"projectRemoved\":{},\"redacted\":{},\"authorization\":\"{s}\",\"lastRemovalFailure\":", .{
+        fact.project_removed,
         fact.projection_redacted or
             provider.containsSensitive(fact.display_name) or
             provider.containsSensitive(fact.projected_root),

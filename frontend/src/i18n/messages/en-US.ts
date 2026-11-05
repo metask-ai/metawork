@@ -333,6 +333,7 @@ export const enUS = {
   "workspace.new_conversation": "New conversation",
   "workspace.new_conversation_for": "New conversation in “{title}”",
   "workspace.remove": "Remove project",
+  "workspace.remove_failed": "Could not remove the project. Please try again.",
   "workspace.open": "Open project folder",
   "workspace.open_failed":
     "Could not open the project folder. Check that it is still available and try again.",

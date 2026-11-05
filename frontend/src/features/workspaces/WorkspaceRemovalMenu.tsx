@@ -29,12 +29,14 @@ export function WorkspaceRemovalMenu({
   onOpen: () => Promise<{ opened: boolean }>;
   openDisabled: boolean;
   onNewTask: () => void;
-  onRemove: () => void;
+  onRemove: () => Promise<boolean>;
 }) {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeFailed, setRemoveFailed] = useState(false);
   const [openState, setOpenState] = useState<"idle" | "opening" | "failed">(
     "idle",
   );
@@ -79,6 +81,19 @@ export function WorkspaceRemovalMenu({
       setOpenState((await onOpen()).opened ? "idle" : "failed");
     } catch {
       setOpenState("failed");
+    }
+  }
+  async function removeProject() {
+    if (removing || openDisabled) return;
+    setRemoving(true);
+    setRemoveFailed(false);
+    try {
+      if (await onRemove()) setConfirming(false);
+      else setRemoveFailed(true);
+    } catch {
+      setRemoveFailed(true);
+    } finally {
+      setRemoving(false);
     }
   }
   return (
@@ -163,7 +178,13 @@ export function WorkspaceRemovalMenu({
                 <Icon name="folder-open" />
                 {t("workspace.open")}
               </Menu.Item>
-              <Menu.Item ref={removeItem} onClick={() => setConfirming(true)}>
+              <Menu.Item
+                ref={removeItem}
+                onClick={() => {
+                  setRemoveFailed(false);
+                  setConfirming(true);
+                }}
+              >
                 <Icon name="folder-minus" />
                 {t("workspace.remove")}
               </Menu.Item>
@@ -171,7 +192,12 @@ export function WorkspaceRemovalMenu({
           </Menu.Positioner>
         </Menu.Portal>
       </Menu.Root>
-      <AlertDialog.Root open={confirming} onOpenChange={setConfirming}>
+      <AlertDialog.Root
+        open={confirming}
+        onOpenChange={(open) => {
+          if (!removing) setConfirming(open);
+        }}
+      >
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
           <AlertDialog.Popup
@@ -190,20 +216,20 @@ export function WorkspaceRemovalMenu({
             <AlertDialog.Description>
               {t("workspace.remove_body")}
             </AlertDialog.Description>
+            {removeFailed && <p role="alert">{t("workspace.remove_failed")}</p>}
             <div className="delete-confirmation-actions">
               <Button
                 ref={cancel}
                 variant="secondary"
+                disabled={removing}
                 onClick={() => setConfirming(false)}
               >
                 {t("common.cancel")}
               </Button>
               <Button
                 variant="primary"
-                onClick={() => {
-                  onRemove();
-                  setConfirming(false);
-                }}
+                disabled={removing || openDisabled}
+                onClick={() => void removeProject()}
               >
                 {t("workspace.remove")}
               </Button>

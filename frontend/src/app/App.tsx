@@ -239,7 +239,6 @@ import {
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
 const modelSetupPreferenceKey = "metawork.model-setup-handled";
-const hiddenProjectsPreferenceKey = "metawork.sidebar.hidden-projects";
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -349,24 +348,6 @@ export default function App() {
     Record<string, string>
   >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
-  const [hiddenProjectIds, setHiddenProjectIds] = useState<string[]>(() => {
-    try {
-      const ids: unknown = JSON.parse(
-        readLocalPreference(hiddenProjectsPreferenceKey) ?? "[]",
-      );
-      return Array.isArray(ids) && ids.every((id) => typeof id === "string")
-        ? ids
-        : [];
-    } catch {
-      return [];
-    }
-  });
-  useEffect(() => {
-    writeLocalPreference(
-      hiddenProjectsPreferenceKey,
-      JSON.stringify(hiddenProjectIds),
-    );
-  }, [hiddenProjectIds]);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -2730,9 +2711,6 @@ export default function App() {
       }
       if (outcome.kind === "selected") {
         const { result } = outcome;
-        setHiddenProjectIds((ids) =>
-          ids.filter((id) => id !== result.workspaceId),
-        );
         dispatchWorkbench({
           type: "task.draft.opened",
           workspaceId: result.workspaceId,
@@ -2799,7 +2777,6 @@ export default function App() {
     }
     if (newTaskDraftId === unscopedNewTaskDraftId)
       newTaskDrafts.moveDraft(newTaskDraftId, workspace.id);
-    setHiddenProjectIds((ids) => ids.filter((id) => id !== workspace.id));
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: workspace.id,
@@ -4780,9 +4757,7 @@ export default function App() {
               <TaskList
                 key={bridgeGeneration}
                 tasks={navigableTaskItems}
-                workspaces={snapshot.workspaces.filter(
-                  (workspace) => !hiddenProjectIds.includes(workspace.id),
-                )}
+                workspaces={snapshot.workspaces}
                 activeTaskId={
                   route === "workbench" ? workbench.activeTaskId : null
                 }
@@ -4800,9 +4775,17 @@ export default function App() {
                     onOpen={() =>
                       client.openWorkspace(workspace.id, workspace.epoch)
                     }
-                    onRemove={() =>
-                      setHiddenProjectIds((ids) => [...ids, workspace.id])
-                    }
+                    onRemove={async () => {
+                      try {
+                        const result = await client.removeProject(
+                          workspace.id,
+                          workspace.epoch,
+                        );
+                        return result.accepted;
+                      } finally {
+                        await refreshSnapshot();
+                      }
+                    }}
                   >
                     {heading}
                   </WorkspaceRemovalMenu>

@@ -1260,44 +1260,45 @@ test("Workspace opening sends only identity and epoch and decodes shared Host re
   }
 });
 
-test("Workspace removal sends exact identity and epoch and decodes shared Host results", async () => {
-  const fixture = JSON.parse(
-    readFileSync(
-      new URL("../src/bridge/workspace_removal.fixture", import.meta.url),
-      "utf8",
-    ),
-  );
-  let response = fixture.accepted;
-  const calls = [];
-  const client = new BridgeClient({
-    bridge: bridgeWith(async (command, payload) => {
-      calls.push({ command, payload });
-      return response;
-    }),
-  });
-  assert.deepEqual(await client.removeWorkspace("1", "7"), fixture.accepted);
-  assert.deepEqual(calls, [
-    {
-      command: "metawork.workspaces.remove",
-      payload: { workspaceId: "1", expectedWorkspaceEpoch: "7" },
-    },
-  ]);
-  for (const result of Object.values(fixture)) {
-    response = result;
-    assert.deepEqual(await client.removeWorkspace("1", "7"), result);
-  }
-  for (const invalid of [
-    { ...fixture.accepted, workspaceId: "2" },
-    { ...fixture.accepted, workspaceId: "0" },
-    { ...fixture.accepted, reason: "workspace_changed" },
-    { ...fixture.changed, reason: null },
-    { ...fixture.changed, reason: "unknown" },
-    { ...fixture.accepted, path: "/tmp/project" },
-  ]) {
-    response = invalid;
-    await assert.rejects(
-      client.removeWorkspace("1", "7"),
-      /Invalid Host contract/,
+for (const [method, command] of [
+  ["removeWorkspace", "metawork.workspaces.remove"],
+  ["removeProject", "metawork.workspaces.removeProject"],
+])
+  test(`${method} sends exact identity and epoch and decodes shared Host results`, async () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL("../src/bridge/workspace_removal.fixture", import.meta.url),
+        "utf8",
+      ),
     );
-  }
-});
+    let response = fixture.accepted;
+    const calls = [];
+    const client = new BridgeClient({
+      bridge: bridgeWith(async (command, payload) => {
+        calls.push({ command, payload });
+        return response;
+      }),
+    });
+    assert.deepEqual(await client[method]("1", "7"), fixture.accepted);
+    assert.deepEqual(calls, [
+      {
+        command,
+        payload: { workspaceId: "1", expectedWorkspaceEpoch: "7" },
+      },
+    ]);
+    for (const result of Object.values(fixture)) {
+      response = result;
+      assert.deepEqual(await client[method]("1", "7"), result);
+    }
+    for (const invalid of [
+      { ...fixture.accepted, workspaceId: "2" },
+      { ...fixture.accepted, workspaceId: "0" },
+      { ...fixture.accepted, reason: "workspace_changed" },
+      { ...fixture.changed, reason: null },
+      { ...fixture.changed, reason: "unknown" },
+      { ...fixture.accepted, path: "/tmp/project" },
+    ]) {
+      response = invalid;
+      await assert.rejects(client[method]("1", "7"), /Invalid Host contract/);
+    }
+  });

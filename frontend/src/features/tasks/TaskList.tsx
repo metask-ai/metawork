@@ -55,7 +55,9 @@ export function TaskList({
   const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
   const projects = workspaces
-    .filter((workspace) => workspace.kind === "manual")
+    .filter(
+      (workspace) => workspace.kind === "manual" && !workspace.projectRemoved,
+    )
     .sort((left, right) => {
       const leftOrder = BigInt(left.recentOrder);
       const rightOrder = BigInt(right.recentOrder);

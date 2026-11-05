@@ -396,6 +396,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
+            .{ .name = commands.remove_project, .function = removeProject },
             .{ .name = commands.open_workspace, .function = openWorkspaceDirectory },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
             .{ .name = commands.retry_automatic_workspace_root, .function = retryAutomaticWorkspaceRoot },
@@ -3272,6 +3273,31 @@ pub const Dispatcher = struct {
         const directory = workbench.workspaceDirectoryForOpen(workspace_id, expected_epoch) catch return "{\"opened\":false}";
         self.platform.open_directory_fn(self.platform.context, directory) catch return "{\"opened\":false}";
         return "{\"opened\":true}";
+    }
+
+    fn removeProject(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
+        if (workspace_id == 0 or expected_epoch == 0) return error.InvalidBridgeId;
+        const workbench = try self.requireProductControl();
+        workbench.removeProjectAtEpoch(workspace_id, expected_epoch) catch |err| {
+            const reason: []const u8 = switch (err) {
+                error.UnknownWorkspace => "workspace_unavailable",
+                error.WorkspaceEpochMismatch => "workspace_changed",
+                error.WorkspaceRemovalInProgress => "workspace_removing",
+                error.ProjectionCapacity => "capacity_reached",
+                else => return err,
+            };
+            return std.fmt.bufPrint(output, "{{\"accepted\":false,\"workspaceId\":\"{d}\",\"reason\":\"{s}\"}}", .{ workspace_id, reason });
+        };
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"accepted\":true,\"workspaceId\":\"{d}\",\"reason\":null}}", .{workspace_id});
     }
 
     fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -8927,6 +8953,8 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), "handler_failed") != null);
     const request = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), "handler_failed") != null);
+    const project_request = "{\"id\":\"project\",\"command\":\"metawork.workspaces.removeProject\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(project_request, source, &output), "handler_failed") != null);
     _ = native.dispatch("{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &output);
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, .{ .origin = "zero://app", .window_id = 4 }, &output), "handler_failed") != null);
     for ([_][]const u8{
@@ -8956,6 +8984,19 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     const accepted = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("accepted").?, .{});
     const changed = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("changed").?, .{});
     const unavailable = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("unavailable").?, .{});
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(project_request, .{ .origin = "zero://app", .window_id = 4 }, &output), "handler_failed") != null);
+    const invalid_project = "{\"id\":\"project\",\"command\":\"metawork.workspaces.removeProject\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\",\"path\":\"/outside\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(invalid_project, source, &output), "handler_failed") != null);
+    const stale_project = "{\"id\":\"project\",\"command\":\"metawork.workspaces.removeProject\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale_project, source, &output), changed) != null);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(project_request, source, &output), accepted) != null);
+    var project_projections: [1]product_control.WorkspaceProjection = undefined;
+    const project = (try workbench.copyWorkspaceProjections(&project_projections))[0];
+    try std.testing.expect(project.project_removed);
+    try std.testing.expectEqual(@as(u64, 1), project.epoch);
+    try std.testing.expect(project.authorization == .available);
+    try std.testing.expectEqual(@as(u64, 1), try workbench.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    try std.testing.expect(!(try workbench.copyWorkspaceProjections(&project_projections))[0].project_removed);
     const stale = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale, source, &output), changed) != null);
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), accepted) != null);

@@ -454,6 +454,15 @@ export class BridgeClient {
       workspaceId,
     );
   }
+  async removeProject(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceRemovalResult(
+      await this.invoke(commands.removeProject, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
+    );
+  }
   async chooseAutomaticWorkspaceRoot(expectedGeneration: string) {
     // Native directory pickers are user-controlled modal interactions, so
     // their lifetime must not be mistaken for a wedged Host command.

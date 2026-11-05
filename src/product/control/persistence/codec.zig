@@ -635,6 +635,7 @@ fn writeWorkspace(batch: *Batch, v: wire.WorkspaceWire) !void {
         .canonical_root = b(v.canonical_root),
         .display_name = b(v.display_name),
         .visible = boolean(v.visible),
+        .project_removed = boolean(v.project_removed),
         .recent_order = try batch.u(v.recent_order),
     });
 }
@@ -647,6 +648,7 @@ fn readWorkspace(row: Record) !wire.WorkspaceWire {
     v.canonical_root = try row.b("canonical_root");
     v.display_name = try row.b("display_name");
     v.visible = try row.boolean("visible");
+    v.project_removed = try row.boolean("project_removed");
     v.recent_order = try row.u("recent_order");
     return v;
 }
@@ -913,7 +915,7 @@ fn readCheckpoint(row: Record) !?wire.CheckpointWire {
 comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
-    if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
+    if (std.meta.fields(wire.WorkspaceWire).len != 8) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
     if (std.meta.fields(wire.TaskWire).len != 26) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     // model_error is a nullable typed JSON value read and written with its Run.
