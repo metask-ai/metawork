@@ -5,6 +5,8 @@ import { installWindowChromeBridge } from "./bridge/window-chrome.ts";
 import { I18nProvider } from "./i18n/provider.tsx";
 import "./index.css";
 
+document.addEventListener("contextmenu", (event) => event.preventDefault());
+
 installWindowChromeBridge();
 
 createRoot(document.getElementById("root")!).render(
