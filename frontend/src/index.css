@@ -7029,6 +7029,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
 }
 
+.task-project-context {
+  position: relative;
+}
+
+.task-project-context .task-project-heading {
+  padding-right: 56px;
+}
+
 .task-project-heading {
   margin: 0;
   padding-block: 6px;
@@ -7087,9 +7095,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .sidebar-capability:hover:where(:not(:disabled)),
 .sidebar-capability[data-active="true"],
 .task-project-context:hover,
+.task-project-context:has(.task-list-action:focus-visible),
 .task-project-context[aria-expanded="true"],
 .task-list-entry:hover .task-list-item,
 .task-list-entry:has(.task-list-action:focus-visible) .task-list-item,
+.task-list-item[aria-expanded="true"],
 .task-list-item[aria-current="page"] {
   border-color: transparent;
   color: var(--ui-content-primary);
@@ -7097,6 +7107,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-project-context:hover .task-project-heading,
+.task-project-context:has(.task-list-action:focus-visible)
+  .task-project-heading,
 .task-project-context[aria-expanded="true"] .task-project-heading {
   color: var(--ui-content-primary);
 }
@@ -7122,7 +7134,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   transform: translate(50%, -50%);
 }
 
-.task-list-archive-trigger {
+.task-list-archive-trigger,
+.task-project-new-trigger {
   right: 44px;
 }
 
@@ -7140,6 +7153,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: transparent;
 }
 
+.task-project-context:hover .task-list-action,
+.task-project-context:has(.task-list-action:focus-visible) .task-list-action,
 .task-list-entry:hover .task-list-action,
 .task-list-entry:has(.task-list-action:focus-visible) .task-list-action {
   opacity: 1;

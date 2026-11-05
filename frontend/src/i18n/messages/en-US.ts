@@ -330,6 +330,8 @@ export const enUS = {
   "workspace.access_required_short": "Directory unavailable",
   "workspace.confirm_access": "Select folder again",
   "workspace.actions": "Project actions for {title}",
+  "workspace.new_conversation": "New conversation",
+  "workspace.new_conversation_for": "New conversation in “{title}”",
   "workspace.remove": "Remove project",
   "workspace.open": "Open project folder",
   "workspace.open_failed":

@@ -4793,6 +4793,10 @@ export default function App() {
                   <WorkspaceRemovalMenu
                     workspace={workspace}
                     openDisabled={workbenchMutationDisabled}
+                    onNewTask={() => {
+                      beginNewTask();
+                      setDraftWorkspaceById(workspace.id);
+                    }}
                     onOpen={() =>
                       client.openWorkspace(workspace.id, workspace.epoch)
                     }

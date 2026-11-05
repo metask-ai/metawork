@@ -1054,6 +1054,15 @@ test("task ellipsis supports keyboard navigation, anchors to its button, and res
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
   await waitFor(() => assert.equal(document.activeElement, trigger));
+  await user.keyboard(" ");
+  const reopened = await screen.findByRole("menuitem", {
+    name: "Rename",
+    exact: true,
+  });
+  await waitFor(() => assert.ok(document.activeElement === reopened));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
 });
 
 test("task quick archive uses the existing archive flow once and preserves the current draft", async (ctx) => {
@@ -1110,6 +1119,102 @@ test("task quick archive and menu share the running Task restriction", async (ct
 });
 
 for (const emptyProject of [false, true])
+  test(`project new conversation opens its own draft without creating a Task and preserves other drafts; empty=${emptyProject}`, async (ctx) => {
+    const { user, snapshot } = await renderApp(ctx, { emptyProject });
+    const before = structuredClone(snapshot);
+    let hostCalls = 0;
+    for (const command of ["chooseWorkspace", "createTask", "sendInput"])
+      ctx.mock.method(BridgeClient.prototype, command, async () => {
+        hostCalls++;
+      });
+    const newConversation = screen.getByRole("button", {
+      name: "New conversation in “metawork-test”",
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Skills", exact: true }),
+    );
+    await act(async () => newConversation.focus());
+    await user.keyboard("{Enter}");
+    let editor = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    await waitFor(() => assert.ok(document.activeElement === editor));
+    assert.equal(
+      document.querySelector(".composer-workspace-trigger").textContent,
+      snapshot.workspaces[0].canonicalRoot,
+    );
+    assert.equal(editor.value, "");
+    fireEvent.change(editor, { target: { value: "Saved project draft" } });
+    const newTask = screen.getByRole("button", {
+      name: "New task",
+      exact: true,
+    });
+    await user.click(newTask);
+    editor = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    assert.equal(editor.value, "");
+    fireEvent.change(editor, { target: { value: "Saved automatic draft" } });
+    if (!emptyProject) {
+      await user.click(taskRows("3")[0]);
+      editor = await screen.findByPlaceholderText(
+        "Describe the outcome you need…",
+      );
+      fireEvent.change(editor, {
+        target: { value: "Saved existing Task draft" },
+      });
+    }
+    await user.click(newConversation);
+    editor = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    assert.equal(editor.value, "Saved project draft");
+    assert.equal(
+      document.querySelector(".composer-workspace-trigger").textContent,
+      snapshot.workspaces[0].canonicalRoot,
+    );
+    assert.ok(
+      [...taskRows("3")].every(
+        (row) => row.getAttribute("aria-current") === null,
+      ),
+    );
+    assert.equal(screen.queryByRole("menu"), null);
+    await user.click(newTask);
+    assert.equal(
+      (await screen.findByPlaceholderText("Describe the outcome you need…"))
+        .value,
+      "Saved automatic draft",
+    );
+    if (!emptyProject) {
+      await user.click(taskRows("3")[0]);
+      assert.equal(
+        (await screen.findByPlaceholderText("Describe the outcome you need…"))
+          .value,
+        "Saved existing Task draft",
+      );
+    }
+    assert.equal(hostCalls, 0);
+    assert.deepEqual(snapshot, before);
+  });
+
+for (const authorization of ["reauthorization_required", "removing"])
+  test(`project new conversation is disabled for ${authorization} directories`, async (ctx) => {
+    const { user } = await renderApp(ctx, { workspace: { authorization } });
+    const editor = document.querySelector(".ai-composer textarea");
+    fireEvent.change(editor, {
+      target: { value: "Preserve the current draft" },
+    });
+    const trigger = screen.getByRole("button", {
+      name: "New conversation in “metawork-test”",
+    });
+    assert.equal(trigger.disabled, true);
+    await user.click(trigger);
+    assert.ok(document.querySelector(".ai-composer textarea") === editor);
+    assert.equal(editor.value, "Preserve the current draft");
+    assert.equal(screen.queryByRole("menu"), null);
+  });
+
+for (const emptyProject of [false, true])
   test(`project menu opens its own directory without changing the selected Task; empty=${emptyProject}`, async (ctx) => {
     const { user, snapshot } = await renderApp(ctx, { emptyProject });
     if (!emptyProject) await user.click(taskRows("3")[0]);
@@ -1123,8 +1228,8 @@ for (const emptyProject of [false, true])
         return { opened: true };
       },
     );
-    fireEvent.contextMenu(
-      screen.getByRole("group", { name: "Project actions for metawork-test" }),
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for metawork-test" }),
     );
     await user.click(
       await screen.findByRole("menuitem", { name: "Open project folder" }),
@@ -1371,21 +1476,167 @@ test("project removal menu and confirmation can be operated with the keyboard", 
   await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
 });
 
-test("project heading has no dropdown button and opens its menu with right click or the menu key", async (ctx) => {
+test("project ellipsis shares the heading context menu without selecting a Task or changing its draft", async (ctx) => {
   const { user } = await renderApp(ctx);
+  const editor = document.querySelector(".ai-composer textarea");
+  fireEvent.change(editor, {
+    target: { value: "Keep the project menu draft" },
+  });
   const heading = screen.getByRole("group", {
     name: "Project actions for metawork-test",
   });
-  assert.equal(within(heading).queryByRole("button"), null);
+  const trigger = within(heading).getByRole("button", {
+    name: "Project actions for metawork-test",
+  });
+  const expected = ["Open project folder", "Remove project"];
   await user.click(heading);
   assert.equal(screen.queryByRole("menu"), null);
-  fireEvent.contextMenu(heading);
-  await screen.findByRole("menuitem", { name: "Remove project", exact: true });
+  await user.click(trigger);
+  let menu = await screen.findByRole("menu");
+  assert.deepEqual(
+    within(menu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+    expected,
+  );
+  assert.ok(
+    [...taskRows("3")].every(
+      (row) => row.getAttribute("aria-current") === null,
+    ),
+  );
+  assert.equal(document.querySelector(".ai-composer textarea"), editor);
+  assert.equal(editor.value, "Keep the project menu draft");
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  fireEvent.contextMenu(heading);
+  menu = await screen.findByRole("menu");
+  assert.deepEqual(
+    within(menu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+    expected,
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, heading));
   fireEvent.keyDown(heading, { key: "ContextMenu" });
   await screen.findByRole("menuitem", { name: "Remove project", exact: true });
 });
+
+test("project ellipsis anchors its menu, supports keyboard navigation and restores focus after confirmation", async (ctx) => {
+  mockContextMenuGeometry(ctx);
+  const { user } = await renderApp(ctx);
+  await act(
+    async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
+  );
+  const trigger = screen.getByRole("button", {
+    name: "Project actions for metawork-test",
+  });
+  ctx.mock.method(trigger, "getBoundingClientRect", () => ({
+    x: 250,
+    y: 100,
+    left: 250,
+    top: 100,
+    right: 274,
+    bottom: 132,
+    width: 24,
+    height: 32,
+  }));
+  await act(async () => trigger.focus());
+  await user.keyboard("{Enter}");
+  const open = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+    exact: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, open));
+  await waitFor(() =>
+    assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+  );
+  await user.keyboard("{ArrowDown}");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      screen.getByRole("menuitem", { name: "Remove project", exact: true }),
+    ),
+  );
+  await user.keyboard("{Enter}");
+  const dialog = await screen.findByRole("alertdialog");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    ),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await screen.findByRole("menu");
+  await waitFor(() =>
+    assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await user.keyboard(" ");
+  const reopened = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+    exact: true,
+  });
+  await waitFor(() => assert.ok(document.activeElement === reopened));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+});
+
+for (const kind of ["project", "task"])
+  test(`${kind} ellipsis mouse click keeps items unhighlighted and preserves button positioning`, async (ctx) => {
+    mockContextMenuGeometry(ctx);
+    const { user } = await renderApp(ctx);
+    const trigger =
+      kind === "project"
+        ? screen.getByRole("button", {
+            name: "Project actions for metawork-test",
+          })
+        : taskRows("3")[0].parentElement.querySelector(
+            ".task-list-menu-trigger",
+          );
+    ctx.mock.method(trigger, "getBoundingClientRect", () => ({
+      x: 250,
+      y: 100,
+      left: 250,
+      top: 100,
+      right: 274,
+      bottom: 132,
+      width: 24,
+      height: 32,
+    }));
+    await user.click(trigger);
+    const menu = await screen.findByRole("menu");
+    await act(
+      async () =>
+        new Promise((resolve) =>
+          window.requestAnimationFrame(() =>
+            window.requestAnimationFrame(resolve),
+          ),
+        ),
+    );
+    const items = within(menu).getAllByRole("menuitem");
+    assert.ok(
+      document.activeElement === menu,
+      "mouse opening focuses the popup, not its first item",
+    );
+    assert.ok(items.every((item) => !item.hasAttribute("data-highlighted")));
+    await waitFor(() =>
+      assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+    );
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => assert.equal(document.activeElement, items[0]));
+    await user.keyboard("{Escape}");
+    await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+    await waitFor(() => assert.equal(document.activeElement, trigger));
+  });
 
 function mockContextMenuGeometry(ctx) {
   const overrides = [

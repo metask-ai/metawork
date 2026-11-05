@@ -1,4 +1,10 @@
-import { useRef, useState, type ReactNode } from "react";
+import {
+  useRef,
+  useState,
+  type ReactNode,
+  type MouseEvent,
+  type KeyboardEvent,
+} from "react";
 import type { WorkspaceView } from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
@@ -14,6 +20,7 @@ export function WorkspaceRemovalMenu({
   workspace,
   onOpen,
   openDisabled,
+  onNewTask,
   onRemove,
   children,
 }: {
@@ -21,6 +28,7 @@ export function WorkspaceRemovalMenu({
   workspace: WorkspaceView;
   onOpen: () => Promise<{ opened: boolean }>;
   openDisabled: boolean;
+  onNewTask: () => void;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
@@ -31,7 +39,7 @@ export function WorkspaceRemovalMenu({
     "idle",
   );
   const cancel = useRef<HTMLButtonElement>(null);
-  const trigger = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLElement>(null);
   const removeItem = useRef<HTMLElement>(null);
   const openItem = useRef<HTMLElement>(null);
   const keyboardOpen = useRef(false);
@@ -40,6 +48,30 @@ export function WorkspaceRemovalMenu({
     openState === "opening" ||
     workspace.redacted ||
     workspace.authorization !== "available";
+  function openMenu(
+    event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
+    anchorToElement = false,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    trigger.current = event.currentTarget;
+    keyboardOpen.current =
+      !("clientX" in event) || (anchorToElement && event.detail === 0);
+    setMenuAnchor(
+      "clientX" in event && !anchorToElement
+        ? createContextMenuAnchor(
+            event.currentTarget,
+            event.clientX,
+            event.clientY,
+          )
+        : event.currentTarget,
+    );
+    setMenuOpen(true);
+  }
+  function handleMenuKey(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))
+      openMenu(event);
+  }
   async function openDirectory() {
     if (cannotOpen) return;
     setOpenState("opening");
@@ -52,38 +84,41 @@ export function WorkspaceRemovalMenu({
   return (
     <>
       <div
-        ref={trigger}
         className="task-project-context focus-ring"
         role="group"
         tabIndex={0}
         aria-label={t("workspace.actions", { title: workspace.displayName })}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          keyboardOpen.current = false;
-          setMenuAnchor(
-            createContextMenuAnchor(
-              event.currentTarget,
-              event.clientX,
-              event.clientY,
-            ),
-          );
-          setMenuOpen(true);
-        }}
-        onKeyDown={(event) => {
-          if (
-            event.key !== "ContextMenu" &&
-            !(event.shiftKey && event.key === "F10")
-          )
-            return;
-          event.preventDefault();
-          keyboardOpen.current = true;
-          setMenuAnchor(event.currentTarget);
-          setMenuOpen(true);
-        }}
+        onContextMenu={openMenu}
+        onKeyDown={handleMenuKey}
       >
         {children}
+        <button
+          type="button"
+          className="icon-button task-list-action task-project-new-trigger focus-ring"
+          aria-label={t("workspace.new_conversation_for", {
+            title: workspace.displayName,
+          })}
+          title={t("workspace.new_conversation")}
+          disabled={openDisabled || workspace.authorization !== "available"}
+          onClick={onNewTask}
+        >
+          <Icon name="new-task" />
+        </button>
+        <button
+          type="button"
+          className="icon-button task-list-action task-project-menu-trigger focus-ring"
+          aria-label={t("workspace.actions", { title: workspace.displayName })}
+          title={t("workspace.actions", { title: workspace.displayName })}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={(event) => openMenu(event, true)}
+          onContextMenu={openMenu}
+          onKeyDown={handleMenuKey}
+        >
+          <Icon name="more" />
+        </button>
       </div>
       {openState === "failed" && (
         <p className="task-list-empty" role="alert">
@@ -109,7 +144,7 @@ export function WorkspaceRemovalMenu({
             sticky
             side="bottom"
             align="start"
-            sideOffset={keyboardOpen.current ? 2 : 0}
+            sideOffset={menuAnchor instanceof HTMLElement ? 2 : 0}
             alignOffset={0}
             arrowPadding={0}
             collisionPadding={8}

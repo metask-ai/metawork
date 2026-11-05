@@ -85,7 +85,8 @@ export function TaskList({
     event.preventDefault();
     openingDialog.current = false;
     menuTrigger.current = event.currentTarget;
-    keyboardOpen.current = anchorToElement || !("clientX" in event);
+    keyboardOpen.current =
+      !("clientX" in event) || (anchorToElement && event.detail === 0);
     setMenuAnchor(
       "clientX" in event && !anchorToElement
         ? createContextMenuAnchor(
@@ -257,7 +258,7 @@ export function TaskList({
             sticky
             side="bottom"
             align="start"
-            sideOffset={keyboardOpen.current ? 2 : 0}
+            sideOffset={menuAnchor instanceof HTMLElement ? 2 : 0}
             alignOffset={0}
             arrowPadding={0}
             collisionPadding={8}

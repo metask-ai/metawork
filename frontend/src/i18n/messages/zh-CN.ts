@@ -276,6 +276,8 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.access_required_short": "目录不可用",
   "workspace.confirm_access": "重新选择目录",
   "workspace.actions": "项目“{title}”的操作",
+  "workspace.new_conversation": "新建会话",
+  "workspace.new_conversation_for": "在项目“{title}”中新建会话",
   "workspace.remove": "移除项目",
   "workspace.open": "打开项目目录",
   "workspace.open_failed": "无法打开项目目录，请确认目录仍然可用后重试。",
