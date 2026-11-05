@@ -956,6 +956,159 @@ async function openProjectRemoval(user) {
   return screen.findByRole("alertdialog");
 }
 
+test("task ellipsis entries reuse the context menu without selecting a Task or changing its draft", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  const editor = document.querySelector(".ai-composer textarea");
+  assert.ok(editor);
+  fireEvent.change(editor, { target: { value: "Keep the new Task draft" } });
+  const rows = [...taskRows("3")];
+  assert.equal(rows.length, 2);
+  const expected = ["Rename", "Archive", "Permanently delete"];
+  for (const row of rows) {
+    assert.equal(
+      row.querySelector("button"),
+      null,
+      "interactive buttons must not be nested",
+    );
+    const trigger = row.parentElement.querySelector(".task-list-menu-trigger");
+    assert.equal(
+      trigger.getAttribute("aria-label"),
+      "Actions for “Archive target”",
+    );
+    await user.click(trigger);
+    const menu = await screen.findByRole("menu", { name: "Task actions" });
+    assert.deepEqual(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+      expected,
+    );
+    assert.ok(
+      rows.every((entry) => entry.getAttribute("aria-current") === null),
+    );
+    assert.equal(document.querySelector(".ai-composer textarea"), editor);
+    assert.equal(editor.value, "Keep the new Task draft");
+    await user.keyboard("{Escape}");
+    await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+    await waitFor(() => assert.equal(document.activeElement, trigger));
+  }
+  fireEvent.contextMenu(rows[0]);
+  const contextMenu = await screen.findByRole("menu", { name: "Task actions" });
+  assert.deepEqual(
+    within(contextMenu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+    expected,
+  );
+  await user.keyboard("{Escape}");
+  await user.click(
+    rows[0].parentElement.querySelector(".task-list-menu-trigger"),
+  );
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Rename", exact: true }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "Rename task" });
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Task name" }).value,
+    "Archive target",
+  );
+});
+
+test("task ellipsis supports keyboard navigation, anchors to its button, and restores focus", async (ctx) => {
+  mockContextMenuGeometry(ctx);
+  const { user } = await renderApp(ctx);
+  // Finish the initial Composer focus before starting a keyboard interaction.
+  await act(
+    async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
+  );
+  const trigger = taskRows("3")[0].parentElement.querySelector(
+    ".task-list-menu-trigger",
+  );
+  ctx.mock.method(trigger, "getBoundingClientRect", () => ({
+    x: 250,
+    y: 100,
+    left: 250,
+    top: 100,
+    right: 282,
+    bottom: 132,
+    width: 32,
+    height: 32,
+  }));
+  await act(async () => trigger.focus());
+  await user.keyboard("{Enter}");
+  const rename = await screen.findByRole("menuitem", {
+    name: "Rename",
+    exact: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, rename));
+  await waitFor(() =>
+    assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+  );
+  await user.keyboard("{ArrowDown}");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      screen.getByRole("menuitem", { name: "Archive", exact: true }),
+    ),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+});
+
+test("task quick archive uses the existing archive flow once and preserves the current draft", async (ctx) => {
+  const app = await renderApp(ctx);
+  const editor = document.querySelector(".ai-composer textarea");
+  assert.ok(editor);
+  fireEvent.change(editor, {
+    target: { value: "Keep this draft while archiving" },
+  });
+  const row = taskRows("3")[1];
+  const archive = row.parentElement.querySelector(".task-list-archive-trigger");
+  assert.equal(archive.getAttribute("aria-label"), "Archive “Archive target”");
+  await app.user.dblClick(archive);
+  await waitFor(() => assert.equal(app.requests.length, 1));
+  assert.deepEqual(
+    { taskId: app.requests[0].taskId, archived: app.requests[0].archived },
+    { taskId: "3", archived: true },
+  );
+  assert.equal(screen.queryByRole("menu"), null);
+  assert.ok(
+    [...taskRows("3")].every(
+      (entry) => entry.getAttribute("aria-current") === null,
+    ),
+  );
+  assert.equal(editor.value, "Keep this draft while archiving");
+  await app.settle({ archived: true });
+  await waitFor(() => assert.equal(taskRows("3").length, 0));
+  assert.equal(document.querySelector(".ai-composer textarea"), editor);
+  assert.equal(editor.value, "Keep this draft while archiving");
+});
+
+test("task quick archive and menu share the running Task restriction", async (ctx) => {
+  const run = structuredClone(initialSnapshot.tasks[0].runs[0]);
+  run.phase = "running";
+  const app = await renderApp(ctx, {
+    historyRuns: [run],
+    projectTask: {
+      activeOperation: { kind: "run", id: run.id },
+      currentRunId: run.id,
+      currentRunPhase: "running",
+    },
+  });
+  const row = taskRows("3")[0];
+  const archive = row.parentElement.querySelector(".task-list-archive-trigger");
+  assert.equal(archive.disabled, true);
+  await app.user.click(archive);
+  assert.equal(app.requests.length, 0);
+  fireEvent.contextMenu(row);
+  const menuArchive = await screen.findByRole("menuitem", {
+    name: "Archive",
+    exact: true,
+  });
+  assert.equal(menuArchive.getAttribute("aria-disabled"), "true");
+});
+
 for (const emptyProject of [false, true])
   test(`project menu opens its own directory without changing the selected Task; empty=${emptyProject}`, async (ctx) => {
     const { user, snapshot } = await renderApp(ctx, { emptyProject });
