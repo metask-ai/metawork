@@ -671,7 +671,10 @@ test("unarchived Task deletes directly after one fixed-target confirmation", asy
   const app = await renderApp(ctx);
   fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+    await screen.findByRole("menuitem", {
+      name: "Permanently delete",
+      exact: true,
+    }),
   );
   await screen.findByRole("alertdialog");
   assert.ok(
@@ -680,7 +683,7 @@ test("unarchived Task deletes directly after one fixed-target confirmation", asy
   assert.deepEqual(app.requests, []);
   assert.deepEqual(app.deletions, []);
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await waitFor(() => assert.deepEqual(app.deletions, ["3"]));
   assert.equal(app.requests.length, 0);
@@ -690,11 +693,11 @@ test("settings deletes an archived Task without leaving settings or restoring it
   const app = await renderApp(ctx);
   await app.openArchives();
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await screen.findByRole("alertdialog");
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await waitFor(() => assert.deepEqual(app.deletions, ["4"]));
   await screen.findByText("Archived tasks will appear here.");
@@ -877,8 +880,10 @@ test("newer-version archived history remains readable without mutation controls"
     true,
   );
   assert.equal(
-    within(list).getByRole("button", { name: "Delete record", exact: true })
-      .disabled,
+    within(list).getByRole("button", {
+      name: "Permanently delete",
+      exact: true,
+    }).disabled,
     true,
   );
   assert.equal(
@@ -892,11 +897,11 @@ test("deleting another Task in settings preserves the selected conversation", as
   await app.user.click(taskRows("3")[0]);
   await app.openArchives();
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await screen.findByRole("alertdialog");
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await screen.findByText("Archived tasks will appear here.");
   await app.user.click(
@@ -912,7 +917,10 @@ test("delete confirmation defaults to cancel and cancelling has no effect", asyn
   const app = await renderApp(ctx);
   fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+    await screen.findByRole("menuitem", {
+      name: "Permanently delete",
+      exact: true,
+    }),
   );
   await screen.findByRole("alertdialog");
   await waitFor(() =>
@@ -1297,7 +1305,7 @@ for (const dialog of ["delete", "rename"]) {
       fireEvent.contextMenu(taskRows("3")[0]);
       await app.user.click(
         await screen.findByRole("menuitem", {
-          name: "Delete record",
+          name: "Permanently delete",
           exact: true,
         }),
       );
@@ -1327,7 +1335,7 @@ for (const dialog of ["delete", "rename"]) {
     } else {
       await screen.findByRole("alertdialog");
       await app.user.click(
-        screen.getByRole("button", { name: "Delete record", exact: true }),
+        screen.getByRole("button", { name: "Permanently delete", exact: true }),
       );
       await waitFor(() => assert.deepEqual(app.deletions, ["3"]));
     }
@@ -1340,7 +1348,10 @@ test("a loaded empty index confirms the last Task removal and closes its deletio
   await app.publishTask("3", {});
   fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+    await screen.findByRole("menuitem", {
+      name: "Permanently delete",
+      exact: true,
+    }),
   );
   await screen.findByRole("alertdialog");
   await app.publishTask("3", null);

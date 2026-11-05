@@ -770,7 +770,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.rename_unconfirmed": "重命名结果尚未确认，请核对当前任务名称后再保存。",
   "task.archive": "归档",
   "task.restore": "恢复",
-  "task.delete": "删除记录",
+  "task.delete": "永久删除",
   "task.delete_retry": "重试删除",
   "task.delete_confirm_title": "删除任务“{title}”？",
   "task.delete_confirm_body":

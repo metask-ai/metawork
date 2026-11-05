@@ -7205,7 +7205,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   display: grid;
   width: 180px;
   z-index: 50;
-  padding: 5px 0;
+  padding: 5px;
   border: 1px solid var(--ui-border);
   border-radius: 10px;
   background: var(--ui-surface-panel);
@@ -7213,19 +7213,27 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-menu-item {
+  display: flex;
   min-height: 32px;
   padding: 0 9px;
+  align-items: center;
+  gap: 8px;
   border: 0;
-  border-radius: 0;
+  border-radius: 6px;
   color: var(--ui-content-primary);
   background: transparent;
   font-size: var(--text-label);
   text-align: left;
 }
 
+.task-menu-item > svg {
+  width: 14px;
+  height: 14px;
+}
+
 .task-menu-item:hover:not(:disabled),
 .task-menu-item[data-highlighted] {
-  background: var(--metask-primary-soft);
+  background: var(--ui-action-hover-surface);
 }
 
 .task-menu-item.is-danger {

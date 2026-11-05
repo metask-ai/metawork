@@ -3,6 +3,7 @@ import type { WorkspaceView } from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import {
   createContextMenuAnchor,
   type ContextMenuAnchor,
@@ -126,6 +127,7 @@ export function WorkspaceRemovalMenu({
                   setConfirming(true);
                 }}
               >
+                <Icon name="folder-minus" />
                 {t("workspace.remove")}
               </Menu.Item>
             </Menu.Popup>

@@ -12,6 +12,7 @@ import {
   Clock3,
   Copy,
   Folder,
+  FolderMinus,
   FolderUp,
   FileText,
   Pencil,
@@ -64,6 +65,7 @@ type IconName =
   | "stop"
   | "send"
   | "workspace"
+  | "folder-minus"
   | "search"
   | "plus"
   | "settings"
@@ -117,6 +119,7 @@ const icons: Record<IconName, LucideIcon> = {
   stop: Square,
   send: ArrowUp,
   workspace: Folder,
+  "folder-minus": FolderMinus,
   search: Search,
   plus: Plus,
   settings: Settings,

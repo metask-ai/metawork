@@ -245,6 +245,7 @@ export function TaskList({
                       onTaskAction(menuTask, "rename");
                     }}
                   >
+                    <Icon name="edit" />
                     {t("task.rename")}
                   </Menu.Item>
                   <Menu.Item
@@ -257,6 +258,7 @@ export function TaskList({
                     }
                     onClick={() => onTaskAction(menuTask, "archive")}
                   >
+                    <Icon name="archive" />
                     {menuTask.archived ? t("task.restore") : t("task.archive")}
                   </Menu.Item>
                   <Menu.Item
@@ -274,6 +276,7 @@ export function TaskList({
                       onTaskAction(menuTask, "delete");
                     }}
                   >
+                    <Icon name="trash" />
                     {t(
                       menuTask.deletionStatus === "failed"
                         ? "task.delete_retry"

@@ -876,7 +876,7 @@ export const enUS = {
     "The rename result is unconfirmed. Check the current task name before saving again.",
   "task.archive": "Archive",
   "task.restore": "Restore",
-  "task.delete": "Delete record",
+  "task.delete": "Permanently delete",
   "task.delete_retry": "Retry deletion",
   "task.delete_confirm_title": "Delete task “{title}”?",
   "task.delete_confirm_body":
