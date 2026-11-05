@@ -276,6 +276,7 @@ summary::-webkit-details-marker {
   padding: 10px 14px 0;
   flex: 1;
   flex-direction: column;
+  container-type: inline-size;
 }
 
 .sidebar-capabilities {
@@ -283,17 +284,22 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-capability,
-.task-project-heading {
+.task-project-heading,
+.task-list-item {
   display: grid;
+  min-height: 36px;
+  align-items: center;
+}
+
+.sidebar-capability,
+.task-project-heading {
   grid-template-columns: 22px minmax(0, 1fr);
   padding-inline: 8px 10px;
-  align-items: center;
   gap: 7px;
 }
 
 .sidebar-capability {
   width: 100%;
-  min-height: 36px;
   padding-block: 0;
   border: 0;
   color: var(--ui-content-muted);
@@ -365,10 +371,8 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-navigation .task-list {
-  margin-top: 0;
-}
-
-.sidebar-navigation .task-list {
+  /* Keep row widths aligned with fixed navigation when a scrollbar is present. */
+  width: 100cqw;
   margin-top: 0;
 }
 
@@ -7073,7 +7077,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-list-item {
-  display: block;
   width: 100%;
   padding: 6px 56px 6px 10px;
   border: 1px solid transparent;

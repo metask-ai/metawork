@@ -144,7 +144,7 @@ export function WorkspaceRemovalMenu({
             sticky
             side="bottom"
             align="start"
-            sideOffset={menuAnchor instanceof HTMLElement ? 2 : 0}
+            sideOffset={menuAnchor && !("contextElement" in menuAnchor) ? 2 : 0}
             alignOffset={0}
             arrowPadding={0}
             collisionPadding={8}

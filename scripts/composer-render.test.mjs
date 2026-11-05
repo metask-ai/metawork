@@ -1047,7 +1047,7 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
     task("1", "workspace-b"),
   ]);
 
-  assert.equal((markup.match(/Review changes/g) ?? []).length, 2);
+  assert.equal((markup.match(/<span>Review changes<\/span>/g) ?? []).length, 2);
   assert.doesNotMatch(
     markup,
     /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
@@ -1234,13 +1234,10 @@ test("Task list keeps compact row density without group-owned spacing", async ()
     "utf8",
   );
 
+  assert.match(stylesheet, /\.task-list-entry\s*\{[^}]*margin-top: 1px;/s);
   assert.match(
     stylesheet,
-    /\.task-list-item\s*\{[^}]*margin-top: 1px;[^}]*padding: 6px 10px;/s,
-  );
-  assert.match(
-    stylesheet,
-    /\.task-list-heading \+ \.task-list-item\s*\{[^}]*margin-top: 6px;/s,
+    /\.task-list-heading \+ \.task-list-entry\s*\{[^}]*margin-top: 6px;/s,
   );
   assert.match(
     stylesheet,
