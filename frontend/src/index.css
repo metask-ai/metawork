@@ -282,17 +282,20 @@ summary::-webkit-details-marker {
   margin-top: 8px;
 }
 
-.sidebar-capability {
-  position: relative;
+.sidebar-capability,
+.task-project-heading {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
-  width: 100%;
-  min-height: 36px;
-  padding: 0 10px 0 8px;
+  padding-inline: 8px 10px;
   align-items: center;
   gap: 7px;
+}
+
+.sidebar-capability {
+  width: 100%;
+  min-height: 36px;
+  padding-block: 0;
   border: 0;
-  border-radius: 7px;
   color: var(--ui-content-muted);
   background: transparent;
   font-size: var(--text-control);
@@ -306,35 +309,6 @@ summary::-webkit-details-marker {
 
 .sidebar-capability-mark svg {
   font-size: var(--text-lead);
-}
-
-.sidebar-capability::before {
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: -4px;
-  width: 2px;
-  border-radius: 2px;
-  background: transparent;
-  content: "";
-}
-
-.sidebar-capability:hover:not(:disabled) {
-  color: var(--ui-content-primary);
-  background: color-mix(
-    in srgb,
-    var(--ui-action-primary-hover) 6%,
-    transparent
-  );
-}
-
-.sidebar-capability[data-active="true"] {
-  color: var(--ui-action-primary-hover);
-  background: var(--metask-primary-soft);
-}
-
-.sidebar-capability[data-active="true"]::before {
-  background: var(--ui-action-primary);
 }
 
 .sidebar-capability-mark {
@@ -7056,11 +7030,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-project-heading {
-  display: flex;
   margin: 0;
-  padding: 6px 0;
-  align-items: center;
-  gap: 8px;
+  padding-block: 6px;
   color: var(--ui-content-muted);
   font-size: var(--text-control);
   font-weight: 500;
@@ -7070,7 +7041,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-project-heading svg {
   width: 16px;
   height: 16px;
-  flex: 0 0 auto;
+  margin-left: 2px;
 }
 
 .task-project-heading > span {
@@ -7080,11 +7051,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-project-items .task-list-item {
-  padding-left: 23px;
+  padding-left: 36px;
 }
 
 .task-project-items .task-list-empty {
-  margin: 4px 24px;
+  margin: 4px 37px;
   font-size: var(--text-label);
 }
 
@@ -7094,7 +7065,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 1px;
   padding: 6px 10px;
   border: 1px solid transparent;
-  border-radius: 8px;
   color: var(--ui-content-primary);
   background: transparent;
   text-align: left;
@@ -7104,13 +7074,26 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 6px;
 }
 
-.task-list-item:hover {
-  background: color-mix(in srgb, var(--ui-surface-panel) 65%, transparent);
+.sidebar-capability,
+.task-project-context,
+.task-list-item {
+  border-radius: 8px;
 }
 
+.sidebar-capability:hover:where(:not(:disabled)),
+.sidebar-capability[data-active="true"],
+.task-project-context:hover,
+.task-project-context[aria-expanded="true"],
+.task-list-item:hover,
 .task-list-item[aria-current="page"] {
   border-color: transparent;
+  color: var(--ui-content-primary);
   background: var(--ui-surface-panel);
+}
+
+.task-project-context:hover .task-project-heading,
+.task-project-context[aria-expanded="true"] .task-project-heading {
+  color: var(--ui-content-primary);
 }
 
 .task-list-row > span:first-child {
