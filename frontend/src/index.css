@@ -24,6 +24,41 @@ html[data-metawork-renderer-window-controls="true"] {
   box-sizing: border-box;
 }
 
+:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-track,
+:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-content-primary) 15%, transparent);
+}
+
+:is(
+    .sidebar-navigation,
+    .ai-conversation-viewport
+  )::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--ui-content-primary) 30%, transparent);
+}
+
+:is(
+    .sidebar-navigation,
+    .ai-conversation-viewport
+  )::-webkit-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--ui-content-primary) 40%, transparent);
+}
+
+:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 html,
 body,
 #root {
@@ -312,10 +347,9 @@ summary::-webkit-details-marker {
 
 .sidebar-navigation {
   min-height: 0;
-  margin: 18px -4px 0;
-  padding: 0 4px 20px;
+  margin: 18px -12px 0 -4px;
+  padding: 0 12px 20px 4px;
   overflow: hidden auto;
-  scrollbar-gutter: stable;
 }
 
 .task-persistence-error {
