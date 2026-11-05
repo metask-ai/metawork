@@ -118,7 +118,7 @@ export function WorkspaceRemovalMenu({
             >
               <Menu.Item
                 ref={removeItem}
-                className="task-menu-item is-danger"
+                variant="danger"
                 disabled={unavailable}
                 onClick={() => {
                   openingDialog.current = true;

@@ -234,7 +234,6 @@ export function TaskList({
               {menuTask && (
                 <>
                   <Menu.Item
-                    className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
                       menuTaskReadOnly ||
@@ -249,7 +248,6 @@ export function TaskList({
                     {t("task.rename")}
                   </Menu.Item>
                   <Menu.Item
-                    className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
                       menuTaskReadOnly ||
@@ -262,7 +260,7 @@ export function TaskList({
                     {menuTask.archived ? t("task.restore") : t("task.archive")}
                   </Menu.Item>
                   <Menu.Item
-                    className="task-menu-item is-danger"
+                    variant="danger"
                     disabled={
                       taskMutationDisabled ||
                       menuTaskReadOnly ||

@@ -496,19 +496,12 @@ summary::-webkit-details-marker {
 }
 
 .account-menu {
-  display: grid;
   width: min(224px, calc(100vw - 24px));
-  padding: 5px;
-  border: 1px solid var(--ui-border);
-  border-radius: 10px;
-  background: var(--ui-surface-panel);
-  box-shadow: var(--ui-shadow-overlay);
 }
 
 .account-menu-heading {
   min-width: 0;
-  padding: 8px 9px 9px;
-  border-bottom: 1px solid var(--ui-border);
+  padding: 8px 9px 5px;
 }
 
 .account-menu-heading strong {
@@ -520,33 +513,6 @@ summary::-webkit-details-marker {
 
 .account-menu-heading strong {
   font-size: var(--text-label);
-}
-
-.account-menu-item {
-  display: flex;
-  min-height: 32px;
-  margin-top: 2px;
-  padding: 0 9px;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  color: var(--ui-content-primary);
-  background: transparent;
-  font-size: var(--text-label);
-  text-align: left;
-}
-
-.account-menu-item:hover:not(:disabled) {
-  background: var(--metask-primary-soft);
-}
-
-.account-menu-item[data-highlighted] {
-  background: var(--metask-primary-soft);
-}
-
-.account-menu-item.is-attention {
-  color: var(--ui-content-warning);
 }
 
 .about-dialog {
@@ -7235,47 +7201,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-menu-popover {
-  display: grid;
   width: 180px;
-  z-index: 50;
-  padding: 5px;
-  border: 1px solid var(--ui-border);
-  border-radius: 10px;
-  background: var(--ui-surface-panel);
-  box-shadow: var(--ui-shadow-overlay);
-}
-
-.task-menu-item {
-  display: flex;
-  min-height: 32px;
-  padding: 0 9px;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  color: var(--ui-content-primary);
-  background: transparent;
-  font-size: var(--text-label);
-  text-align: left;
-}
-
-.task-menu-item > svg {
-  width: 14px;
-  height: 14px;
-}
-
-.task-menu-item:hover:not(:disabled),
-.task-menu-item[data-highlighted] {
-  background: var(--ui-action-hover-surface);
-}
-
-.task-menu-item.is-danger {
-  color: var(--metask-state-error);
-}
-
-.task-menu-item:disabled,
-.task-menu-item[data-disabled] {
-  opacity: 0.4;
 }
 
 .delete-confirmation {
