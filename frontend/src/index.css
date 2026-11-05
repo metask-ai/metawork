@@ -280,7 +280,7 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-capabilities {
-  margin-top: 8px;
+  margin-top: 12px;
 }
 
 .sidebar-capability,
@@ -327,7 +327,7 @@ summary::-webkit-details-marker {
 
 .sidebar-navigation {
   min-height: 0;
-  margin: 18px -12px 0 -4px;
+  margin: 24px -12px 0 -4px;
   padding: 0 12px 20px 4px;
   overflow: hidden auto;
 }
@@ -383,7 +383,7 @@ summary::-webkit-details-marker {
   position: relative;
   padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--ui-border);
-  background: color-mix(in srgb, var(--ui-surface-panel) 96%, transparent);
+  background: transparent;
 }
 
 .account-identity-trigger {
@@ -401,14 +401,6 @@ summary::-webkit-details-marker {
   color: var(--ui-content-primary);
   background: transparent;
   text-align: left;
-}
-
-.account-identity-trigger:hover {
-  background: color-mix(in srgb, var(--ui-surface-panel) 65%, transparent);
-}
-
-.account-identity-trigger[data-active="true"] {
-  background: var(--ui-surface-panel);
 }
 
 .account-update-trigger {
@@ -3502,7 +3494,7 @@ button.run-process-tool:hover {
   left: 0;
   width: var(--left-column);
   border-right: 1px solid var(--ui-border);
-  background: var(--ui-surface-panel-2);
+  background: var(--ui-surface-canvas);
   content: "";
   pointer-events: none;
 }
@@ -3931,7 +3923,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   flex: 0 0 var(--left-column);
   padding: 0;
   border-right: 1px solid var(--ui-border);
-  background: var(--ui-surface-panel-2);
+  background: var(--ui-surface-canvas);
   overflow: hidden;
 }
 
@@ -7011,6 +7003,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 24px;
 }
 
+.task-list .section-label {
+  padding-left: 10px;
+}
+
 .task-list-heading,
 .task-list-row {
   display: flex;
@@ -7029,7 +7025,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-project {
-  margin-top: 12px;
+  margin-top: 8px;
   min-width: 0;
 }
 
@@ -7095,6 +7091,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-radius: 8px;
 }
 
+.account-identity-trigger:hover,
+.account-identity-trigger[data-active="true"],
 .sidebar-capability:hover:where(:not(:disabled)),
 .sidebar-capability[data-active="true"],
 .task-project-context:hover,
@@ -7106,7 +7104,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-list-item[aria-current="page"] {
   border-color: transparent;
   color: var(--ui-content-primary);
-  background: var(--ui-surface-panel);
+  background: color-mix(
+    in srgb,
+    var(--ui-surface-panel-2) 96%,
+    var(--ui-content-primary)
+  );
 }
 
 .task-project-context:hover .task-project-heading,
