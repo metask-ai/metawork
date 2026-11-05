@@ -115,10 +115,13 @@ async function renderApp(
     workspace = {},
     emptyProject = false,
     historyRuns = [],
+    projectTask = {},
+    projectHidden = false,
   } = {},
 ) {
   const snapshot = structuredClone(initialSnapshot);
   Object.assign(snapshot.workspaces[0], workspace);
+  snapshot.workspaces[0].projectRemoved = projectHidden;
   const task = snapshot.tasks[0];
   Object.assign(task, {
     title: "Archive target",
@@ -127,6 +130,7 @@ async function renderApp(
     activeOperation: null,
     inputReady: true,
     runs: historyRuns,
+    ...projectTask,
   });
   snapshot.tasks.push({
     ...structuredClone(task),
@@ -142,6 +146,7 @@ async function renderApp(
   let onRevision;
   let shortcut;
   const deletions = [];
+  const projectRemovals = [];
   const historyReads = [];
   for (const [name, fn] of Object.entries({
     available: () => true,
@@ -153,6 +158,24 @@ async function renderApp(
       deletions.push(taskId);
       snapshot.tasks = snapshot.tasks.filter((task) => task.id !== taskId);
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    },
+    removeProject: async (workspaceId, expectedWorkspaceEpoch) => {
+      projectRemovals.push({ workspaceId, expectedWorkspaceEpoch });
+      snapshot.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      ).projectRemoved = true;
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return {
+        workspaceId,
+        expectedWorkspaceEpoch,
+        accepted: true,
+        reason: null,
+      };
+    },
+    chooseWorkspace: async () => {
+      snapshot.workspaces[0].projectRemoved = false;
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return { selected: true, workspaceId: snapshot.workspaces[0].id };
     },
     onHostSignal: () => () => {},
     onTaskOpen: () => () => {},
@@ -203,9 +226,11 @@ async function renderApp(
       createElement(App),
     ),
   );
-  await screen.findByRole("group", {
-    name: "Project actions for metawork-test",
-  });
+  if (projectHidden) await waitFor(() => assert.equal(taskRows("3").length, 1));
+  else
+    await screen.findByRole("group", {
+      name: "Project actions for metawork-test",
+    });
   const user = userEvent.setup({ document });
   return {
     user,
@@ -213,6 +238,7 @@ async function renderApp(
     requests,
     renames,
     deletions,
+    projectRemovals,
     historyReads,
     async openRename(taskId = "3", select = true) {
       const row = taskRows(taskId)[0];
@@ -671,7 +697,10 @@ test("unarchived Task deletes directly after one fixed-target confirmation", asy
   const app = await renderApp(ctx);
   fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+    await screen.findByRole("menuitem", {
+      name: "Permanently delete",
+      exact: true,
+    }),
   );
   await screen.findByRole("alertdialog");
   assert.ok(
@@ -680,7 +709,7 @@ test("unarchived Task deletes directly after one fixed-target confirmation", asy
   assert.deepEqual(app.requests, []);
   assert.deepEqual(app.deletions, []);
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await waitFor(() => assert.deepEqual(app.deletions, ["3"]));
   assert.equal(app.requests.length, 0);
@@ -690,11 +719,11 @@ test("settings deletes an archived Task without leaving settings or restoring it
   const app = await renderApp(ctx);
   await app.openArchives();
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await screen.findByRole("alertdialog");
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await waitFor(() => assert.deepEqual(app.deletions, ["4"]));
   await screen.findByText("Archived tasks will appear here.");
@@ -877,8 +906,10 @@ test("newer-version archived history remains readable without mutation controls"
     true,
   );
   assert.equal(
-    within(list).getByRole("button", { name: "Delete record", exact: true })
-      .disabled,
+    within(list).getByRole("button", {
+      name: "Permanently delete",
+      exact: true,
+    }).disabled,
     true,
   );
   assert.equal(
@@ -892,11 +923,11 @@ test("deleting another Task in settings preserves the selected conversation", as
   await app.user.click(taskRows("3")[0]);
   await app.openArchives();
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await screen.findByRole("alertdialog");
   await app.user.click(
-    screen.getByRole("button", { name: "Delete record", exact: true }),
+    screen.getByRole("button", { name: "Permanently delete", exact: true }),
   );
   await screen.findByText("Archived tasks will appear here.");
   await app.user.click(
@@ -912,7 +943,10 @@ test("delete confirmation defaults to cancel and cancelling has no effect", asyn
   const app = await renderApp(ctx);
   fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+    await screen.findByRole("menuitem", {
+      name: "Permanently delete",
+      exact: true,
+    }),
   );
   await screen.findByRole("alertdialog");
   await waitFor(() =>
@@ -943,6 +977,338 @@ async function openProjectRemoval(user) {
   return screen.findByRole("alertdialog");
 }
 
+test("task ellipsis entries reuse the context menu without selecting a Task or changing its draft", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  const editor = document.querySelector(".ai-composer textarea");
+  assert.ok(editor);
+  fireEvent.change(editor, { target: { value: "Keep the new Task draft" } });
+  const rows = [...taskRows("3")];
+  assert.equal(rows.length, 2);
+  const expected = ["Rename", "Archive", "Permanently delete"];
+  for (const row of rows) {
+    assert.equal(
+      row.querySelector("button"),
+      null,
+      "interactive buttons must not be nested",
+    );
+    const trigger = row.parentElement.querySelector(".task-list-menu-trigger");
+    assert.equal(
+      trigger.getAttribute("aria-label"),
+      "Actions for “Archive target”",
+    );
+    await user.click(trigger);
+    const menu = await screen.findByRole("menu", { name: "Task actions" });
+    assert.deepEqual(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+      expected,
+    );
+    assert.ok(
+      rows.every((entry) => entry.getAttribute("aria-current") === null),
+    );
+    assert.equal(document.querySelector(".ai-composer textarea"), editor);
+    assert.equal(editor.value, "Keep the new Task draft");
+    await user.keyboard("{Escape}");
+    await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+    await waitFor(() => assert.equal(document.activeElement, trigger));
+  }
+  fireEvent.contextMenu(rows[0]);
+  const contextMenu = await screen.findByRole("menu", { name: "Task actions" });
+  assert.deepEqual(
+    within(contextMenu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+    expected,
+  );
+  await user.keyboard("{Escape}");
+  await user.click(
+    rows[0].parentElement.querySelector(".task-list-menu-trigger"),
+  );
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Rename", exact: true }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "Rename task" });
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Task name" }).value,
+    "Archive target",
+  );
+});
+
+test("task ellipsis supports keyboard navigation, anchors to its button, and restores focus", async (ctx) => {
+  mockContextMenuGeometry(ctx);
+  const { user } = await renderApp(ctx);
+  // Finish the initial Composer focus before starting a keyboard interaction.
+  await act(
+    async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
+  );
+  const trigger = taskRows("3")[0].parentElement.querySelector(
+    ".task-list-menu-trigger",
+  );
+  ctx.mock.method(trigger, "getBoundingClientRect", () => ({
+    x: 250,
+    y: 100,
+    left: 250,
+    top: 100,
+    right: 282,
+    bottom: 132,
+    width: 32,
+    height: 32,
+  }));
+  await act(async () => trigger.focus());
+  await user.keyboard("{Enter}");
+  const rename = await screen.findByRole("menuitem", {
+    name: "Rename",
+    exact: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, rename));
+  await waitFor(() =>
+    assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+  );
+  await user.keyboard("{ArrowDown}");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      screen.getByRole("menuitem", { name: "Archive", exact: true }),
+    ),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await user.keyboard(" ");
+  const reopened = await screen.findByRole("menuitem", {
+    name: "Rename",
+    exact: true,
+  });
+  await waitFor(() => assert.ok(document.activeElement === reopened));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+});
+
+test("task quick archive uses the existing archive flow once and preserves the current draft", async (ctx) => {
+  const app = await renderApp(ctx);
+  const editor = document.querySelector(".ai-composer textarea");
+  assert.ok(editor);
+  fireEvent.change(editor, {
+    target: { value: "Keep this draft while archiving" },
+  });
+  const row = taskRows("3")[1];
+  const archive = row.parentElement.querySelector(".task-list-archive-trigger");
+  assert.equal(archive.getAttribute("aria-label"), "Archive “Archive target”");
+  await app.user.dblClick(archive);
+  await waitFor(() => assert.equal(app.requests.length, 1));
+  assert.deepEqual(
+    { taskId: app.requests[0].taskId, archived: app.requests[0].archived },
+    { taskId: "3", archived: true },
+  );
+  assert.equal(screen.queryByRole("menu"), null);
+  assert.ok(
+    [...taskRows("3")].every(
+      (entry) => entry.getAttribute("aria-current") === null,
+    ),
+  );
+  assert.equal(editor.value, "Keep this draft while archiving");
+  await app.settle({ archived: true });
+  await waitFor(() => assert.equal(taskRows("3").length, 0));
+  assert.equal(document.querySelector(".ai-composer textarea"), editor);
+  assert.equal(editor.value, "Keep this draft while archiving");
+});
+
+test("task quick archive and menu share the running Task restriction", async (ctx) => {
+  const run = structuredClone(initialSnapshot.tasks[0].runs[0]);
+  run.phase = "running";
+  const app = await renderApp(ctx, {
+    historyRuns: [run],
+    projectTask: {
+      activeOperation: { kind: "run", id: run.id },
+      currentRunId: run.id,
+      currentRunPhase: "running",
+    },
+  });
+  const row = taskRows("3")[0];
+  const archive = row.parentElement.querySelector(".task-list-archive-trigger");
+  assert.equal(archive.disabled, true);
+  await app.user.click(archive);
+  assert.equal(app.requests.length, 0);
+  fireEvent.contextMenu(row);
+  const menuArchive = await screen.findByRole("menuitem", {
+    name: "Archive",
+    exact: true,
+  });
+  assert.equal(menuArchive.getAttribute("aria-disabled"), "true");
+});
+
+for (const emptyProject of [false, true])
+  test(`project new conversation opens its own draft without creating a Task and preserves other drafts; empty=${emptyProject}`, async (ctx) => {
+    const { user, snapshot } = await renderApp(ctx, { emptyProject });
+    const before = structuredClone(snapshot);
+    let hostCalls = 0;
+    for (const command of ["chooseWorkspace", "createTask", "sendInput"])
+      ctx.mock.method(BridgeClient.prototype, command, async () => {
+        hostCalls++;
+      });
+    const newConversation = screen.getByRole("button", {
+      name: "New conversation in “metawork-test”",
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Skills", exact: true }),
+    );
+    await act(async () => newConversation.focus());
+    await user.keyboard("{Enter}");
+    let editor = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    await waitFor(() => assert.ok(document.activeElement === editor));
+    assert.equal(
+      document.querySelector(".composer-workspace-trigger").textContent,
+      snapshot.workspaces[0].canonicalRoot,
+    );
+    assert.equal(editor.value, "");
+    fireEvent.change(editor, { target: { value: "Saved project draft" } });
+    const newTask = screen.getByRole("button", {
+      name: "New task",
+      exact: true,
+    });
+    await user.click(newTask);
+    editor = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    assert.equal(editor.value, "");
+    fireEvent.change(editor, { target: { value: "Saved automatic draft" } });
+    if (!emptyProject) {
+      await user.click(taskRows("3")[0]);
+      editor = await screen.findByPlaceholderText(
+        "Describe the outcome you need…",
+      );
+      fireEvent.change(editor, {
+        target: { value: "Saved existing Task draft" },
+      });
+    }
+    await user.click(newConversation);
+    editor = await screen.findByPlaceholderText(
+      "Describe the outcome you need…",
+    );
+    assert.equal(editor.value, "Saved project draft");
+    assert.equal(
+      document.querySelector(".composer-workspace-trigger").textContent,
+      snapshot.workspaces[0].canonicalRoot,
+    );
+    assert.ok(
+      [...taskRows("3")].every(
+        (row) => row.getAttribute("aria-current") === null,
+      ),
+    );
+    assert.equal(screen.queryByRole("menu"), null);
+    await user.click(newTask);
+    assert.equal(
+      (await screen.findByPlaceholderText("Describe the outcome you need…"))
+        .value,
+      "Saved automatic draft",
+    );
+    if (!emptyProject) {
+      await user.click(taskRows("3")[0]);
+      assert.equal(
+        (await screen.findByPlaceholderText("Describe the outcome you need…"))
+          .value,
+        "Saved existing Task draft",
+      );
+    }
+    assert.equal(hostCalls, 0);
+    assert.deepEqual(snapshot, before);
+  });
+
+for (const authorization of ["reauthorization_required", "removing"])
+  test(`project new conversation is disabled for ${authorization} directories`, async (ctx) => {
+    const { user } = await renderApp(ctx, { workspace: { authorization } });
+    const editor = document.querySelector(".ai-composer textarea");
+    fireEvent.change(editor, {
+      target: { value: "Preserve the current draft" },
+    });
+    const trigger = screen.getByRole("button", {
+      name: "New conversation in “metawork-test”",
+    });
+    assert.equal(trigger.disabled, true);
+    await user.click(trigger);
+    assert.ok(document.querySelector(".ai-composer textarea") === editor);
+    assert.equal(editor.value, "Preserve the current draft");
+    assert.equal(screen.queryByRole("menu"), null);
+  });
+
+for (const emptyProject of [false, true])
+  test(`project menu opens its own directory without changing the selected Task; empty=${emptyProject}`, async (ctx) => {
+    const { user, snapshot } = await renderApp(ctx, { emptyProject });
+    if (!emptyProject) await user.click(taskRows("3")[0]);
+    const before = structuredClone(snapshot);
+    const calls = [];
+    ctx.mock.method(
+      BridgeClient.prototype,
+      "openWorkspace",
+      async (...args) => {
+        calls.push(args);
+        return { opened: true };
+      },
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Project actions for metawork-test" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Open project folder" }),
+    );
+    assert.deepEqual(calls, [
+      [snapshot.workspaces[0].id, snapshot.workspaces[0].epoch],
+    ]);
+    assert.deepEqual(snapshot, before);
+    if (!emptyProject)
+      assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+    assert.equal(taskRows("3").length, emptyProject ? 0 : 2);
+    assert.equal(screen.queryByRole("alertdialog"), null);
+  });
+
+test("unavailable project directory cannot be opened but its entry can still be removed", async (ctx) => {
+  const { user } = await renderApp(ctx, {
+    workspace: { authorization: "reauthorization_required" },
+  });
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "openWorkspace", async () => {
+    calls++;
+    return { opened: true };
+  });
+  fireEvent.contextMenu(
+    screen.getByRole("group", { name: "Project actions for metawork-test" }),
+  );
+  const open = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+  });
+  assert.equal(open.getAttribute("aria-disabled"), "true");
+  await user.click(open);
+  assert.equal(calls, 0);
+  await user.click(
+    screen.getByRole("menuitem", { name: "Remove project", exact: true }),
+  );
+  assert.ok(await screen.findByRole("alertdialog"));
+});
+
+for (const failure of ["unavailable", "rejected"])
+  test(`project folder opening reports ${failure} without removing its group`, async (ctx) => {
+    const { user } = await renderApp(ctx);
+    ctx.mock.method(BridgeClient.prototype, "openWorkspace", async () => {
+      if (failure === "rejected") throw new Error("Host unavailable");
+      return { opened: false };
+    });
+    fireEvent.contextMenu(
+      screen.getByRole("group", { name: "Project actions for metawork-test" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Open project folder" }),
+    );
+    assert.match(
+      (await screen.findByRole("alert")).textContent,
+      /Could not open the project folder/,
+    );
+    assert.equal(taskRows("3").length, 2);
+  });
+
 test("project removal requires confirmation and Cancel restores focus without a command", async (ctx) => {
   const { user } = await renderApp(ctx);
   let calls = 0;
@@ -950,7 +1316,7 @@ test("project removal requires confirmation and Cancel restores focus without a 
     calls++;
   });
   const dialog = await openProjectRemoval(user);
-  assert.match(dialog.textContent, /Local files and task history will be kept/);
+  assert.match(dialog.textContent, /tasks in progress are unaffected/);
   const cancel = within(dialog).getByRole("button", { name: "Cancel" });
   await waitFor(() => assert.ok(document.activeElement === cancel));
   await user.click(cancel);
@@ -966,123 +1332,195 @@ test("project removal requires confirmation and Cancel restores focus without a 
   );
 });
 
-for (const emptyProject of [false, true])
-  test(`project removal syncs navigation and preserves history; empty=${emptyProject}`, async (ctx) => {
-    const { user, snapshot } = await renderApp(ctx, {
-      emptyProject,
-      workspace: { authorization: "reauthorization_required" },
-    });
-    if (!emptyProject) await user.click(taskRows("3")[0]);
-    const historyCount = snapshot.tasks.length;
-    const calls = [];
-    let finish;
-    ctx.mock.method(
-      BridgeClient.prototype,
-      "removeWorkspace",
-      async (id, epoch) => {
-        calls.push({ id, epoch });
-        await new Promise((resolve) => {
-          finish = resolve;
-        });
-        snapshot.workspaces = [];
-        snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-        return { accepted: true, workspaceId: id, reason: null };
-      },
-    );
-    const dialog = await openProjectRemoval(user);
-    await user.click(
-      within(dialog).getByRole("button", {
-        name: "Remove project",
-        exact: true,
-      }),
-    );
-    await waitFor(() => assert.equal(calls.length, 1));
-    assert.deepEqual(calls, [{ id: "1", epoch: "1" }]);
-    assert.equal(
-      within(dialog).getByRole("button", { name: "Removing" }).disabled,
-      true,
-    );
-    await act(async () => finish());
-    await waitFor(() =>
-      assert.equal(
-        screen.queryByRole("group", {
-          name: "Project actions for metawork-test",
-        }),
-        null,
-      ),
-    );
-    assert.equal(snapshot.tasks.length, historyCount);
-    assert.equal(taskRows("3").length, 0);
-  });
-
-test("project close failure remains visible and an explicit retry uses the refreshed epoch", async (ctx) => {
-  const { user, snapshot } = await renderApp(ctx);
-  const epochs = [];
-  ctx.mock.method(
-    BridgeClient.prototype,
-    "removeWorkspace",
-    async (id, epoch) => {
-      epochs.push(epoch);
-      snapshot.workspaces[0].epoch = "2";
-      snapshot.workspaces[0].lastRemovalFailure = "task_close_failed";
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      return { accepted: false, workspaceId: id, reason: "task_close_failed" };
-    },
-  );
+async function confirmProjectRemoval(user) {
   const dialog = await openProjectRemoval(user);
   await user.click(
     within(dialog).getByRole("button", { name: "Remove project", exact: true }),
   );
-  await within(dialog).findByRole("alert");
-  assert.equal(epochs.length, 1);
-  assert.ok(document.querySelector(".task-project-context"));
-  await user.click(
-    within(dialog).getByRole("button", { name: "Remove project", exact: true }),
+  await waitFor(() =>
+    assert.ok(!document.querySelector(".task-project-context")),
   );
-  await waitFor(() => assert.deepEqual(epochs, ["1", "2"]));
+}
+
+for (const emptyProject of [false, true])
+  test(`project removal hides only its group and preserves Workspace authority; empty=${emptyProject}`, async (ctx) => {
+    const { user, snapshot, projectRemovals } = await renderApp(ctx, {
+      emptyProject,
+      workspace: { authorization: "reauthorization_required" },
+    });
+    if (!emptyProject) await user.click(taskRows("3")[0]);
+    const before = structuredClone(snapshot);
+    const calls = [];
+    ctx.mock.method(BridgeClient.prototype, "removeWorkspace", async () =>
+      calls.push("remove"),
+    );
+    ctx.mock.method(BridgeClient.prototype, "stopTask", async () =>
+      calls.push("stop"),
+    );
+    await confirmProjectRemoval(user);
+    assert.deepEqual(calls, []);
+    before.workspaces[0].projectRemoved = true;
+    before.revision = snapshot.revision;
+    assert.deepEqual(snapshot, before);
+    assert.deepEqual(projectRemovals, [
+      { workspaceId: "1", expectedWorkspaceEpoch: "1" },
+    ]);
+    assert.equal(taskRows("3").length, emptyProject ? 0 : 1);
+    if (!emptyProject)
+      assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+  });
+
+for (const phase of ["queued", "running", "waiting_ui", "stopping"])
+  test(`removing a project leaves its ${phase} Task and current draft untouched`, async (ctx) => {
+    const run = structuredClone(initialSnapshot.tasks[0].runs[0]);
+    run.phase = phase;
+    const { user, snapshot } = await renderApp(ctx, {
+      historyRuns: [run],
+      projectTask: {
+        activeOperation: { kind: "run", id: run.id },
+        currentRunId: run.id,
+        currentRunPhase: phase,
+      },
+    });
+    await user.click(taskRows("3")[0]);
+    const editor = document.querySelector(".ai-composer textarea");
+    if (editor && !editor.disabled)
+      fireEvent.change(editor, { target: { value: "Keep this draft" } });
+    const draft = editor?.value;
+    const before = structuredClone(snapshot);
+    const calls = [];
+    ctx.mock.method(BridgeClient.prototype, "removeWorkspace", async () =>
+      calls.push("remove"),
+    );
+    ctx.mock.method(BridgeClient.prototype, "stopTask", async () =>
+      calls.push("stop"),
+    );
+    await confirmProjectRemoval(user);
+    assert.deepEqual(calls, []);
+    before.workspaces[0].projectRemoved = true;
+    before.revision = snapshot.revision;
+    assert.deepEqual(snapshot, before);
+    assert.equal(taskRows("3").length, 1);
+    assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+    assert.equal(document.querySelector(".ai-composer textarea"), editor);
+    assert.equal(editor?.value, draft);
+    await user.click(taskRows("3")[0]);
+    assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+  });
+
+test("project removal waits for Host acceptance and allows retry after rejection", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  let resolveRemoval;
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "removeProject", () => {
+    calls++;
+    return new Promise((resolve) => {
+      resolveRemoval = resolve;
+    });
+  });
+  const dialog = await openProjectRemoval(user);
+  const remove = within(dialog).getByRole("button", {
+    name: "Remove project",
+    exact: true,
+  });
+  await user.click(remove);
+  assert.equal(calls, 1);
+  assert.ok(remove.disabled);
+  assert.ok(document.querySelector(".task-project-context"));
+  await user.click(remove);
+  assert.equal(calls, 1);
+  await act(async () =>
+    resolveRemoval({
+      accepted: false,
+      workspaceId: "1",
+      reason: "workspace_changed",
+    }),
+  );
+  await within(dialog).findByRole("alert");
+  assert.ok(document.querySelector(".task-project-context"));
+  await user.click(remove);
+  snapshot.workspaces[0].projectRemoved = true;
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () =>
+    resolveRemoval({ accepted: true, workspaceId: "1", reason: null }),
+  );
+  await waitFor(() =>
+    assert.equal(document.querySelector(".task-project-context"), null),
+  );
+  assert.equal(calls, 2);
 });
 
-for (const committed of [true, false])
-  test(`project removal timeout reconciles without resending; committed=${committed}`, async (ctx) => {
-    const { user, snapshot } = await renderApp(ctx);
-    let calls = 0;
-    ctx.mock.method(BridgeClient.prototype, "removeWorkspace", async () => {
-      calls++;
-      if (committed) snapshot.workspaces = [];
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      throw new BridgeCommandTimeoutError("metawork.workspaces.remove", 10000);
-    });
-    const dialog = await openProjectRemoval(user);
-    await user.click(
-      within(dialog).getByRole("button", {
-        name: "Remove project",
-        exact: true,
-      }),
-    );
-    if (committed)
-      await waitFor(() =>
-        assert.equal(document.querySelector(".task-project-context"), null),
-      );
-    else
-      assert.match(
-        (await within(dialog).findByRole("alert")).textContent,
-        /could not be confirmed/,
-      );
-    assert.equal(calls, 1);
+test("timed out project removal reconciles the Host state without resending", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "removeProject", async () => {
+    calls++;
+    snapshot.workspaces[0].projectRemoved = true;
+    snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    throw new Error("timeout");
   });
+  await confirmProjectRemoval(user);
+  assert.equal(calls, 1);
+  assert.equal(taskRows("3").length, 1);
+});
 
-test("pending project removal disables duplicate actions", async (ctx) => {
-  const { user } = await renderApp(ctx, {
-    workspace: { authorization: "removing" },
-  });
-  const trigger = screen.getByRole("group", {
+test("Host project removal survives remount and native folder selection restores its group", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  await confirmProjectRemoval(user);
+  cleanup();
+  const remounted = await renderApp(ctx, { projectHidden: true });
+  assert.equal(document.querySelector(".task-project-context"), null);
+  assert.equal(taskRows("3").length, 1);
+  await remounted.user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await remounted.user.click(
+    screen.getByRole("button", { name: "Add", exact: true }),
+  );
+  await screen.findByRole("group", {
     name: "Project actions for metawork-test",
   });
-  assert.equal(trigger.getAttribute("aria-disabled"), "true");
-  fireEvent.contextMenu(trigger);
-  assert.equal(screen.queryByRole("menu"), null);
-  assert.ok(screen.getByText("Removing"));
+  assert.equal(taskRows("3").length, 2);
 });
+
+for (const outcome of ["selected", "cancelled", "superseded"])
+  test(`native folder selection uses Host project state without switching a superseded Task: ${outcome}`, async (ctx) => {
+    const { user, snapshot, publishTask } = await renderApp(ctx);
+    await confirmProjectRemoval(user);
+    await user.click(
+      screen.getByRole("button", { name: "New task", exact: true }),
+    );
+    let resolveChoice;
+    ctx.mock.method(
+      BridgeClient.prototype,
+      "chooseWorkspace",
+      () =>
+        new Promise((resolve) => {
+          resolveChoice = resolve;
+        }),
+    );
+    await user.click(screen.getByRole("button", { name: "Add", exact: true }));
+    assert.equal(typeof resolveChoice, "function");
+    if (outcome === "superseded") await user.click(taskRows("3")[0]);
+    if (outcome !== "cancelled") snapshot.workspaces[0].projectRemoved = false;
+    await act(async () =>
+      resolveChoice(
+        outcome === "cancelled"
+          ? { selected: false }
+          : { selected: true, workspaceId: snapshot.workspaces[0].id },
+      ),
+    );
+    if (outcome === "superseded") await publishTask("3", {});
+    await waitFor(() =>
+      assert.equal(taskRows("3").length, outcome !== "cancelled" ? 2 : 1),
+    );
+    assert.equal(
+      document.querySelector(".task-project-context") !== null,
+      outcome !== "cancelled",
+    );
+    if (outcome === "superseded")
+      assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+  });
 
 test("project removal menu and confirmation can be operated with the keyboard", async (ctx) => {
   const { user } = await renderApp(ctx);
@@ -1096,6 +1534,12 @@ test("project removal menu and confirmation can be operated with the keyboard", 
     "project menu trigger owns keyboard focus",
   );
   await user.keyboard("{Shift>}{F10}{/Shift}");
+  const open = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+    exact: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, open));
+  await user.keyboard("{ArrowDown}");
   const remove = await screen.findByRole("menuitem", {
     name: "Remove project",
     exact: true,
@@ -1103,7 +1547,7 @@ test("project removal menu and confirmation can be operated with the keyboard", 
   await waitFor(() =>
     assert.ok(
       document.activeElement === remove,
-      "project menu item receives keyboard focus",
+      `project menu item receives keyboard focus; current=${document.activeElement?.textContent}`,
     ),
   );
   await user.keyboard("{Enter}");
@@ -1118,21 +1562,167 @@ test("project removal menu and confirmation can be operated with the keyboard", 
   await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
 });
 
-test("project heading has no dropdown button and opens its menu with right click or the menu key", async (ctx) => {
+test("project ellipsis shares the heading context menu without selecting a Task or changing its draft", async (ctx) => {
   const { user } = await renderApp(ctx);
+  const editor = document.querySelector(".ai-composer textarea");
+  fireEvent.change(editor, {
+    target: { value: "Keep the project menu draft" },
+  });
   const heading = screen.getByRole("group", {
     name: "Project actions for metawork-test",
   });
-  assert.equal(within(heading).queryByRole("button"), null);
+  const trigger = within(heading).getByRole("button", {
+    name: "Project actions for metawork-test",
+  });
+  const expected = ["Open project folder", "Remove project"];
   await user.click(heading);
   assert.equal(screen.queryByRole("menu"), null);
-  fireEvent.contextMenu(heading);
-  await screen.findByRole("menuitem", { name: "Remove project", exact: true });
+  await user.click(trigger);
+  let menu = await screen.findByRole("menu");
+  assert.deepEqual(
+    within(menu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+    expected,
+  );
+  assert.ok(
+    [...taskRows("3")].every(
+      (row) => row.getAttribute("aria-current") === null,
+    ),
+  );
+  assert.equal(document.querySelector(".ai-composer textarea"), editor);
+  assert.equal(editor.value, "Keep the project menu draft");
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  fireEvent.contextMenu(heading);
+  menu = await screen.findByRole("menu");
+  assert.deepEqual(
+    within(menu)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+    expected,
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, heading));
   fireEvent.keyDown(heading, { key: "ContextMenu" });
   await screen.findByRole("menuitem", { name: "Remove project", exact: true });
 });
+
+test("project ellipsis anchors its menu, supports keyboard navigation and restores focus after confirmation", async (ctx) => {
+  mockContextMenuGeometry(ctx);
+  const { user } = await renderApp(ctx);
+  await act(
+    async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
+  );
+  const trigger = screen.getByRole("button", {
+    name: "Project actions for metawork-test",
+  });
+  ctx.mock.method(trigger, "getBoundingClientRect", () => ({
+    x: 250,
+    y: 100,
+    left: 250,
+    top: 100,
+    right: 274,
+    bottom: 132,
+    width: 24,
+    height: 32,
+  }));
+  await act(async () => trigger.focus());
+  await user.keyboard("{Enter}");
+  const open = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+    exact: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, open));
+  await waitFor(() =>
+    assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+  );
+  await user.keyboard("{ArrowDown}");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      screen.getByRole("menuitem", { name: "Remove project", exact: true }),
+    ),
+  );
+  await user.keyboard("{Enter}");
+  const dialog = await screen.findByRole("alertdialog");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    ),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await screen.findByRole("menu");
+  await waitFor(() =>
+    assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await user.keyboard(" ");
+  const reopened = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+    exact: true,
+  });
+  await waitFor(() => assert.ok(document.activeElement === reopened));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+});
+
+for (const kind of ["project", "task"])
+  test(`${kind} ellipsis mouse click keeps items unhighlighted and preserves button positioning`, async (ctx) => {
+    mockContextMenuGeometry(ctx);
+    const { user } = await renderApp(ctx);
+    const trigger =
+      kind === "project"
+        ? screen.getByRole("button", {
+            name: "Project actions for metawork-test",
+          })
+        : taskRows("3")[0].parentElement.querySelector(
+            ".task-list-menu-trigger",
+          );
+    ctx.mock.method(trigger, "getBoundingClientRect", () => ({
+      x: 250,
+      y: 100,
+      left: 250,
+      top: 100,
+      right: 274,
+      bottom: 132,
+      width: 24,
+      height: 32,
+    }));
+    await user.click(trigger);
+    const menu = await screen.findByRole("menu");
+    await act(
+      async () =>
+        new Promise((resolve) =>
+          window.requestAnimationFrame(() =>
+            window.requestAnimationFrame(resolve),
+          ),
+        ),
+    );
+    const items = within(menu).getAllByRole("menuitem");
+    assert.ok(
+      document.activeElement === menu,
+      "mouse opening focuses the popup, not its first item",
+    );
+    assert.ok(items.every((item) => !item.hasAttribute("data-highlighted")));
+    await waitFor(() =>
+      assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
+    );
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => assert.equal(document.activeElement, items[0]));
+    await user.keyboard("{Escape}");
+    await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+    await waitFor(() => assert.equal(document.activeElement, trigger));
+  });
 
 function mockContextMenuGeometry(ctx) {
   const overrides = [
@@ -1297,7 +1887,7 @@ for (const dialog of ["delete", "rename"]) {
       fireEvent.contextMenu(taskRows("3")[0]);
       await app.user.click(
         await screen.findByRole("menuitem", {
-          name: "Delete record",
+          name: "Permanently delete",
           exact: true,
         }),
       );
@@ -1327,7 +1917,7 @@ for (const dialog of ["delete", "rename"]) {
     } else {
       await screen.findByRole("alertdialog");
       await app.user.click(
-        screen.getByRole("button", { name: "Delete record", exact: true }),
+        screen.getByRole("button", { name: "Permanently delete", exact: true }),
       );
       await waitFor(() => assert.deepEqual(app.deletions, ["3"]));
     }
@@ -1340,7 +1930,10 @@ test("a loaded empty index confirms the last Task removal and closes its deletio
   await app.publishTask("3", {});
   fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+    await screen.findByRole("menuitem", {
+      name: "Permanently delete",
+      exact: true,
+    }),
   );
   await screen.findByRole("alertdialog");
   await app.publishTask("3", null);

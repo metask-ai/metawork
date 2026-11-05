@@ -89,6 +89,7 @@ import {
   decodeAttachmentCancelResult,
   decodeAutomaticWorkspaceRootMutationResult,
   decodeExternalLinkOpenResult,
+  decodeWorkspaceOpenResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { ViewCache } from "./snapshot/view-cache.ts";
@@ -436,9 +437,26 @@ export class BridgeClient {
       await this.bridge().invoke(commands.chooseWorkspace, {}),
     );
   }
+  async openWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceOpenResult(
+      await this.invoke(commands.openWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+    );
+  }
   async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
     return decodeWorkspaceRemovalResult(
       await this.invoke(commands.removeWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
+    );
+  }
+  async removeProject(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceRemovalResult(
+      await this.invoke(commands.removeProject, {
         workspaceId,
         expectedWorkspaceEpoch,
       }),

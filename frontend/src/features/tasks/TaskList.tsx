@@ -55,7 +55,9 @@ export function TaskList({
   const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
   const projects = workspaces
-    .filter((workspace) => workspace.kind === "manual")
+    .filter(
+      (workspace) => workspace.kind === "manual" && !workspace.projectRemoved,
+    )
     .sort((left, right) => {
       const leftOrder = BigInt(left.recentOrder);
       const rightOrder = BigInt(right.recentOrder);
@@ -68,16 +70,27 @@ export function TaskList({
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
   const menuTaskReadOnly = menuTask?.historyReadOnly === true;
 
+  function archiveDisabled(task: TaskSummary) {
+    return (
+      taskMutationDisabled ||
+      task.historyReadOnly === true ||
+      task.activeOperation !== null ||
+      task.lifecycle === "closing"
+    );
+  }
+
   function openTaskMenu(
     event: MouseEvent<HTMLButtonElement> | KeyboardEvent<HTMLButtonElement>,
     taskId: string,
+    anchorToElement = false,
   ) {
     event.preventDefault();
     openingDialog.current = false;
     menuTrigger.current = event.currentTarget;
-    keyboardOpen.current = !("clientX" in event);
+    keyboardOpen.current =
+      !("clientX" in event) || (anchorToElement && event.detail === 0);
     setMenuAnchor(
-      "clientX" in event
+      "clientX" in event && !anchorToElement
         ? createContextMenuAnchor(
             event.currentTarget,
             event.clientX,
@@ -90,31 +103,60 @@ export function TaskList({
 
   function renderTask(task: TaskSummary) {
     return (
-      <button
-        key={task.id}
-        data-task-id={task.id}
-        className="task-list-item focus-ring"
-        aria-current={activeTaskId === task.id ? "page" : undefined}
-        onClick={() => onSelectTask(task.id)}
-        onContextMenu={(event) => openTaskMenu(event, task.id)}
-        aria-haspopup="menu"
-        onKeyDown={(event) => {
-          if (
-            event.key === "ContextMenu" ||
-            (event.shiftKey && event.key === "F10")
-          )
-            openTaskMenu(event, task.id);
-        }}
-      >
-        <span className="task-list-row">
-          <span>{task.title || t("task.item", { id: task.id })}</span>
-          <TaskSignals
-            task={task}
-            synchronized={synchronized}
-            completionSuppressed={suppressedCompletionTaskId === task.id}
-          />
-        </span>
-      </button>
+      <div key={task.id} className="task-list-entry">
+        <button
+          data-task-id={task.id}
+          className="task-list-item focus-ring"
+          aria-current={activeTaskId === task.id ? "page" : undefined}
+          onClick={() => onSelectTask(task.id)}
+          onContextMenu={(event) => openTaskMenu(event, task.id)}
+          aria-haspopup="menu"
+          aria-expanded={menuTaskId === task.id}
+          onKeyDown={(event) => {
+            if (
+              event.key === "ContextMenu" ||
+              (event.shiftKey && event.key === "F10")
+            )
+              openTaskMenu(event, task.id);
+          }}
+        >
+          <span className="task-list-row">
+            <span>{task.title || t("task.item", { id: task.id })}</span>
+            <TaskSignals
+              task={task}
+              synchronized={synchronized}
+              completionSuppressed={suppressedCompletionTaskId === task.id}
+            />
+          </span>
+        </button>
+        <button
+          type="button"
+          className="icon-button task-list-action task-list-archive-trigger focus-ring"
+          aria-label={t("task.archive_for", {
+            title: task.title || t("task.item", { id: task.id }),
+          })}
+          title={t("task.archive")}
+          disabled={archiveDisabled(task)}
+          onClick={() => onTaskAction(task, "archive")}
+          onContextMenu={(event) => openTaskMenu(event, task.id)}
+        >
+          <Icon name="archive" />
+        </button>
+        <button
+          type="button"
+          className="icon-button task-list-action task-list-menu-trigger focus-ring"
+          aria-label={t("task.actions_for", {
+            title: task.title || t("task.item", { id: task.id }),
+          })}
+          title={t("task.actions")}
+          aria-haspopup="menu"
+          aria-expanded={menuTaskId === task.id}
+          onClick={(event) => openTaskMenu(event, task.id, true)}
+          onContextMenu={(event) => openTaskMenu(event, task.id)}
+        >
+          <Icon name="more" />
+        </button>
+      </div>
     );
   }
 
@@ -195,11 +237,15 @@ export function TaskList({
       <Menu.Root
         onOpenChangeComplete={(open) => {
           if (open && keyboardOpen.current)
-            menuPopup.current
-              ?.querySelector<HTMLElement>(
-                '[role="menuitem"]:not([aria-disabled="true"]):not([data-disabled])',
-              )
-              ?.focus();
+            window.requestAnimationFrame(() => {
+              if (menuTrigger.current?.getAttribute("aria-expanded") !== "true")
+                return;
+              menuPopup.current
+                ?.querySelector<HTMLElement>(
+                  '[role="menuitem"]:not([aria-disabled="true"]):not([data-disabled])',
+                )
+                ?.focus();
+            });
         }}
         open={menuTask !== null}
         onOpenChange={(open) => {
@@ -214,7 +260,7 @@ export function TaskList({
             sticky
             side="bottom"
             align="start"
-            sideOffset={keyboardOpen.current ? 2 : 0}
+            sideOffset={menuAnchor && !("contextElement" in menuAnchor) ? 2 : 0}
             alignOffset={0}
             arrowPadding={0}
             collisionPadding={8}
@@ -234,7 +280,6 @@ export function TaskList({
               {menuTask && (
                 <>
                   <Menu.Item
-                    className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
                       menuTaskReadOnly ||
@@ -245,22 +290,18 @@ export function TaskList({
                       onTaskAction(menuTask, "rename");
                     }}
                   >
+                    <Icon name="edit" />
                     {t("task.rename")}
                   </Menu.Item>
                   <Menu.Item
-                    className="task-menu-item"
-                    disabled={
-                      taskMutationDisabled ||
-                      menuTaskReadOnly ||
-                      menuTask.activeOperation !== null ||
-                      menuTask.lifecycle === "closing"
-                    }
+                    disabled={archiveDisabled(menuTask)}
                     onClick={() => onTaskAction(menuTask, "archive")}
                   >
+                    <Icon name="archive" />
                     {menuTask.archived ? t("task.restore") : t("task.archive")}
                   </Menu.Item>
                   <Menu.Item
-                    className="task-menu-item is-danger"
+                    variant="danger"
                     disabled={
                       taskMutationDisabled ||
                       menuTaskReadOnly ||
@@ -274,6 +315,7 @@ export function TaskList({
                       onTaskAction(menuTask, "delete");
                     }}
                   >
+                    <Icon name="trash" />
                     {t(
                       menuTask.deletionStatus === "failed"
                         ? "task.delete_retry"

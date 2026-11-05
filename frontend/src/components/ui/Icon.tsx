@@ -12,6 +12,8 @@ import {
   Clock3,
   Copy,
   Folder,
+  FolderOpen,
+  FolderMinus,
   FolderUp,
   FileText,
   Pencil,
@@ -64,6 +66,8 @@ type IconName =
   | "stop"
   | "send"
   | "workspace"
+  | "folder-minus"
+  | "folder-open"
   | "search"
   | "plus"
   | "settings"
@@ -101,6 +105,7 @@ type IconName =
   | "sunrise";
 
 const icons: Record<IconName, LucideIcon> = {
+  "folder-open": FolderOpen,
   more: Ellipsis,
   sidebar: PanelLeft,
   minimize: Minus,
@@ -117,6 +122,7 @@ const icons: Record<IconName, LucideIcon> = {
   stop: Square,
   send: ArrowUp,
   workspace: Folder,
+  "folder-minus": FolderMinus,
   search: Search,
   plus: Plus,
   settings: Settings,

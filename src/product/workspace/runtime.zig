@@ -53,6 +53,7 @@ pub const Facts = struct {
     last_removal_failure: RemovalFailure,
     visible: bool,
     recent_order: u64,
+    project_removed: bool = false,
 };
 
 pub const Binding = struct {
@@ -85,6 +86,7 @@ pub const HistoryFact = struct {
     display_name: []const u8,
     visible: bool,
     recent_order: u64,
+    project_removed: bool = false,
 };
 
 pub const RestoreFact = HistoryFact;
@@ -175,14 +177,17 @@ const Record = struct {
     last_removal_failure: RemovalFailure = .none,
     visible: bool = true,
     recent_order: u64,
+    project_removed: bool = false,
 };
 
 const ExistingState = struct {
     trust: Trust,
+    trust_replaced: bool,
     authorization: Authorization,
     visible: bool,
     epoch: u64,
     recent_order: u64,
+    project_removed: bool,
 };
 
 pub const OpenPreparation = struct {
@@ -451,6 +456,7 @@ pub const Runtime = struct {
             .display_name = record.display_name_storage[0..record.display_name_len],
             .visible = record.visible,
             .recent_order = record.recent_order,
+            .project_removed = record.project_removed,
         };
     }
 
@@ -631,23 +637,29 @@ pub const Runtime = struct {
             const reopening_removed = !record.visible;
             if (reopening_removed and record.epoch == std.math.maxInt(u64))
                 return error.WorkspaceEpochExhausted;
-            const next_temporary = if (canonical_temporary) |root|
-                try storage.copy(root, self.max_workspace_bytes)
+            const retain_authorization = record.visible and record.authorization == .available;
+            const next_temporary = if (!retain_authorization and canonical_temporary != null)
+                try storage.copy(canonical_temporary.?, self.max_workspace_bytes)
             else
                 null;
             const previous = ExistingState{
                 .trust = record.trust,
+                .trust_replaced = !retain_authorization,
                 .authorization = record.authorization,
                 .visible = record.visible,
                 .epoch = record.epoch,
                 .recent_order = record.recent_order,
+                .project_removed = record.project_removed,
             };
-            record.trust = if (next_temporary) |root|
-                .{ .temporary = root }
-            else
-                .explicitly_trusted;
+            if (!retain_authorization) {
+                record.trust = if (next_temporary) |root|
+                    .{ .temporary = root }
+                else
+                    .explicitly_trusted;
+            }
             record.authorization = .available;
             record.visible = true;
+            record.project_removed = false;
             record.recent_order = recent_order;
             if (reopening_removed) record.epoch += 1;
             return .{
@@ -734,10 +746,11 @@ pub const Runtime = struct {
         switch (preparation.previous) {
             .existing => |previous| {
                 const record = &self.records[preparation.index].?;
-                if (record.trust == .temporary) storage.free(record.trust.temporary);
+                if (previous.trust_replaced and record.trust == .temporary) storage.free(record.trust.temporary);
                 record.trust = previous.trust;
                 record.authorization = previous.authorization;
                 record.visible = previous.visible;
+                record.project_removed = previous.project_removed;
                 record.epoch = previous.epoch;
                 record.recent_order = previous.recent_order;
             },
@@ -762,7 +775,7 @@ pub const Runtime = struct {
         std.debug.assert(preparation.active);
         const displaced = switch (preparation.previous) {
             .existing => |previous| blk: {
-                if (previous.trust == .temporary) storage.free(previous.trust.temporary);
+                if (previous.trust_replaced and previous.trust == .temporary) storage.free(previous.trust.temporary);
                 break :blk null;
             },
             .created => |previous| if (previous.replaced) |value| blk: {
@@ -774,6 +787,17 @@ pub const Runtime = struct {
         };
         preparation.active = false;
         return displaced;
+    }
+
+    pub fn setProjectRemoved(self: *Runtime, id: u64, expected_epoch: u64, removed: bool) Error!bool {
+        const index = self.findIndex(id) orelse return error.UnknownWorkspace;
+        const record = &self.records[index].?;
+        if (record.kind != .manual or !record.visible) return error.UnknownWorkspace;
+        if (expected_epoch == 0 or record.epoch != expected_epoch) return error.WorkspaceEpochMismatch;
+        if (record.authorization == .removing) return error.WorkspaceRemovalInProgress;
+        const previous = record.project_removed;
+        record.project_removed = removed;
+        return previous;
     }
 
     pub fn prepareRemoval(
@@ -1082,6 +1106,7 @@ pub const Runtime = struct {
             .authorization = authorization,
             .visible = fact.visible,
             .recent_order = fact.recent_order,
+            .project_removed = fact.project_removed,
         };
     }
 
@@ -1199,6 +1224,7 @@ fn factsFromRecord(record: *const Record) Facts {
         .last_removal_failure = record.last_removal_failure,
         .visible = record.visible,
         .recent_order = record.recent_order,
+        .project_removed = record.project_removed,
     };
 }
 

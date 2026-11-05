@@ -1417,6 +1417,7 @@ export type WorkspaceView = {
   id: string;
   epoch: string;
   kind: "manual" | "automatic";
+  projectRemoved: boolean;
   displayName: string;
   canonicalRoot: string;
   redacted: boolean;

@@ -265,6 +265,7 @@ pub const Adapter = struct {
             .window_chrome_refresh_fn = windowChromeRefresh,
             .window_chrome_control_fn = windowChromeControl,
             .open_external_url_fn = openExternalUrl,
+            .open_directory_fn = openDirectory,
             .now_fn = now,
             .on_main_thread_fn = onMainThread,
         };
@@ -376,6 +377,31 @@ pub const Adapter = struct {
         const services_value = self.platform_services orelse return false;
         services_value.openExternalUrl(url) catch return false;
         return true;
+    }
+
+    fn openDirectory(context: ?*anyopaque, root: []const u8) !void {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return error.RuntimeUnavailable));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.WrongThread;
+        if (self.native_runtime == null) return error.RuntimeUnavailable;
+        var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const canonical = try canonicalizeDirectory(self, root, &canonical_storage);
+        if (!std.mem.eql(u8, canonical, root)) return error.InvalidPath;
+
+        var path = canonical_storage[0..canonical.len];
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        if (builtin.os.tag == .windows) {
+            if (std.mem.startsWith(u8, path, "//?/UNC/")) {
+                path = path[6..];
+                path[0] = '/';
+            } else if (std.mem.startsWith(u8, path, "//?/")) path = path[4..];
+        }
+        var url_storage: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
+        var url = std.Io.Writer.fixed(&url_storage);
+        try url.writeAll(if (std.mem.startsWith(u8, path, "//")) "file:" else "file://");
+        if (path[0] != '/') try url.writeByte('/');
+        try (std.Uri.Component{ .raw = path }).formatPath(&url);
+        const services_value = self.platform_services orelse return error.RuntimeUnavailable;
+        try services_value.openExternalUrl(url.buffered());
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) !void {
@@ -759,6 +785,50 @@ const ExternalUrlTest = struct {
         if (fail) return error.InjectedHandlerFailure;
     }
 };
+
+test "SDK consumption project directory opening uses an encoded local URL and preserves navigation policy" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var fail = false;
+        fn open(_: ?*anyopaque, value: []const u8) anyerror!void {
+            calls += 1;
+            const uri = try std.Uri.parse(value);
+            try std.testing.expectEqualStrings("file", uri.scheme);
+            try std.testing.expect(uri.user == null and uri.password == null and uri.query == null and uri.fragment == null);
+            try std.testing.expect(std.mem.endsWith(u8, value, "/project%20%E7%A9%BA%E6%A0%BC%20%23%25"));
+            if (fail) return error.InjectedOpenFailure;
+        }
+    };
+    Spy.calls = 0;
+    Spy.fail = false;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const folder = "project 空格 #%";
+    try tmp.dir.createDir(std.testing.io, folder, .default_dir);
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPathFile(std.testing.io, folder, &root_storage);
+    const root = root_storage[0..root_len];
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.open_external_url_fn = Spy.open;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try adapter.start(&harness.runtime);
+    defer adapter.stop(&harness.runtime);
+    try Adapter.openDirectory(&adapter, root);
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    try std.testing.expectEqual(native_sdk.security.ExternalLinkAction.deny, harness.runtime.options.security.navigation.external_links.action);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.options.security.navigation.external_links.allowed_urls.len);
+    Spy.fail = true;
+    try std.testing.expectError(error.InjectedOpenFailure, Adapter.openDirectory(&adapter, root));
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+    Spy.fail = false;
+    adapter.main_thread_id +%= 1;
+    try std.testing.expectError(error.WrongThread, Adapter.openDirectory(&adapter, root));
+    adapter.main_thread_id -%= 1;
+    try tmp.dir.deleteDir(std.testing.io, folder);
+    if (Adapter.openDirectory(&adapter, root)) |_| return error.ExpectedMissingDirectory else |_| {}
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}
 
 test "SDK consumption MCP Host handoff preserves deny policy and exact target" {
     const T = ExternalUrlTest;

@@ -33,6 +33,10 @@ Windows 窗口按钮执行前读取 SDK 当前窗口事实：connect/refresh 要
 
 `metawork.workspaces.remove` 只接受 `{ workspaceId, expectedWorkspaceEpoch }` 两个非零 wire ID。Host 校验连接、窗口、Manual Workspace identity 与 epoch 后调用既有移除事务；不接受路径，不删除目录或任务历史。结果精确为 `{ accepted, workspaceId, reason }`，成功 reason 为 null；预期拒绝为 `workspace_unavailable | workspace_changed | workspace_removing | task_close_failed | capacity_reached`。结构、来源、窗口和连接错误仍为 Bridge error。accepted 仅表示受理，进度和关闭失败以 Workspace Snapshot 为准，命令超时先对账，不自动重发。
 
+`metawork.workspaces.removeProject` 只接受 `{ workspaceId, expectedWorkspaceEpoch }` 两个非零 canonical decimal u64 string。Host 校验当前连接、窗口、Manual Workspace identity 与 epoch，仅更新项目入口状态，不调用上述 Workspace 授权移除事务。结果精确为 `{ accepted, workspaceId, reason }`；成功 reason 为 null，预期拒绝为 `workspace_unavailable | workspace_changed | workspace_removing | capacity_reached`，结构或连接错误仍为 Bridge error。成功表示 Host 已更新入口状态，持久化遵循 Product history 的健康语义。Snapshot 的 `workspaces[].projectRemoved` 是必需 boolean，Automatic Workspace 必须为 false；该字段仅供项目入口呈现，被移除的 Manual Workspace 仍向 Task 和目录授权消费者投影。Renderer 在命令结束或超时后刷新 Snapshot，不自动重放。
+
+`metawork.workspaces.open` 只接受 `{ workspaceId, expectedWorkspaceEpoch }` 两个非零 canonical decimal u64 string，不接受路径、URL 或系统命令。Host 校验当前连接、窗口与主线程，再由 Product Control 校验可见 Manual Workspace、epoch、当前授权与未脱敏状态；Application 重新验证精确 canonical root 仍为目录后，在 Native 主线程经 SDK 的公开系统交接能力打开目录。结果精确为 `{ opened: boolean }`；true 仅表示系统 handler 接收请求，不证明文件管理器已显示；Workspace 不可用、过期、目录缺失或系统交接失败返回 false，结构或连接错误仍为 Bridge error。不改变 Product 状态，不自动重试或重放，不扩大外部链接或 WebView 导航权限。
+
 ## 2. ProductDelivery 与 Snapshot transport
 
 ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、实时上下文、当前 Task、有界历史和已挂载管理视图。范围是闭合的 typed 产品请求，不允许任意字段选择、raw CoreEvent、通用 JSON patch 或第二套 transport。工作台摘要不携带所有 Task 的 Run、Tool 和正文；读取当前 Task 不处理其他 Task 的历史。历史按稳定 Run identity 有界读取，范围和页大小不得缩小产品实际可访问容量。

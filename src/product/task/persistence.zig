@@ -687,6 +687,7 @@ pub const WorkspaceWire = struct {
     display_name: []const u8,
     visible: bool,
     recent_order: u64,
+    project_removed: bool = false,
 };
 
 pub const TaskWire = struct {
@@ -3538,7 +3539,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
         return error.Invalid;
     for (state.workspaces) |workspace| {
         if (!std.mem.eql(u8, workspace.kind, "automatic")) continue;
-        if (workspace.visible or workspace.recent_order != 0)
+        if (workspace.visible or workspace.recent_order != 0 or workspace.project_removed)
             return error.Invalid;
         var task_count: usize = 0;
         for (state.tasks) |task|

@@ -330,16 +330,18 @@ export const enUS = {
   "workspace.access_required_short": "Directory unavailable",
   "workspace.confirm_access": "Select folder again",
   "workspace.actions": "Project actions for {title}",
+  "workspace.new_conversation": "New conversation",
+  "workspace.new_conversation_for": "New conversation in “{title}”",
   "workspace.remove": "Remove project",
-  "workspace.remove_title": "Remove “{title}”?",
+  "workspace.remove_failed": "Could not remove the project. Please try again.",
+  "workspace.open": "Open project folder",
+  "workspace.open_failed":
+    "Could not open the project folder. Check that it is still available and try again.",
+  "workspace.remove_title": "Remove project “{title}”?",
   "workspace.remove_body":
-    "This project and its tasks will be hidden from the list. Running tasks will stop. Local files and task history will be kept. Add the same folder again to reopen the project.",
-  "workspace.remove_failed":
-    "Could not remove this project. Check its current status and try again.",
+    "Tasks and their history will be kept, and tasks in progress are unaffected. You can add the project again at any time.",
   "workspace.remove_close_failed":
-    "Could not stop all tasks in this project. Try removing it again.",
-  "workspace.remove_unconfirmed":
-    "The result could not be confirmed. Check the project list before trying again.",
+    "Some tasks could not be closed. Folder access has been retained.",
   "workspace.removing_short": "Removing",
   "task.list": "Tasks",
   "task.recent": "Recent",
@@ -869,14 +871,16 @@ export const enUS = {
   "task.signal.completed": "New completion",
   "task.signal.archived": "Archived",
   "task.actions": "Task actions",
+  "task.actions_for": "Actions for “{title}”",
   "task.rename": "Rename",
   "task.rename_title": "Rename task",
   "task.rename_name": "Task name",
   "task.rename_unconfirmed":
     "The rename result is unconfirmed. Check the current task name before saving again.",
   "task.archive": "Archive",
+  "task.archive_for": "Archive “{title}”",
   "task.restore": "Restore",
-  "task.delete": "Delete record",
+  "task.delete": "Permanently delete",
   "task.delete_retry": "Retry deletion",
   "task.delete_confirm_title": "Delete task “{title}”?",
   "task.delete_confirm_body":

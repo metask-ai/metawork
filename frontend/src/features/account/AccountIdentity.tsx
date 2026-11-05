@@ -78,16 +78,18 @@ export function AccountIdentity({
                 aria-label={t("app.account_and_application_menu")}
               >
                 {authenticated && (
-                  <div className="account-menu-heading">
-                    <strong title={identityName}>{identityName}</strong>
-                  </div>
+                  <>
+                    <div className="account-menu-heading">
+                      <strong title={identityName}>{identityName}</strong>
+                    </div>
+                    <Menu.Separator />
+                  </>
                 )}
                 {(account.state === "signed_out" ||
                   (authenticated &&
                     account.errorCode !== "none" &&
                     account.errorCode !== "refresh_schedule_failed")) && (
                   <Menu.Item
-                    className="account-menu-item focus-ring"
                     disabled={disabled}
                     onClick={() => choose(onBeginLogin)}
                   >
@@ -97,7 +99,6 @@ export function AccountIdentity({
                 )}
                 {account.state === "authorizing" && account.canCancel && (
                   <Menu.Item
-                    className="account-menu-item focus-ring"
                     disabled={cancelDisabled}
                     onClick={() => choose(onCancel)}
                   >
@@ -112,15 +113,11 @@ export function AccountIdentity({
                   (account.state === "authorizing" && account.canCancel)) && (
                   <Menu.Separator />
                 )}
-                <Menu.Item
-                  className="account-menu-item focus-ring"
-                  onClick={() => choose(onOpenSettings)}
-                >
+                <Menu.Item onClick={() => choose(onOpenSettings)}>
                   <Icon name="settings" />
                   {t("settings.title")}
                 </Menu.Item>
                 <Menu.Item
-                  className="account-menu-item focus-ring"
                   onClick={() =>
                     choose(() => {
                       aboutReturnFocus.current = trigger.current;
@@ -135,7 +132,6 @@ export function AccountIdentity({
                   <>
                     <Menu.Separator />
                     <Menu.Item
-                      className="account-menu-item focus-ring"
                       disabled={disabled}
                       onClick={() => choose(() => setConfirmSignOut(true))}
                     >

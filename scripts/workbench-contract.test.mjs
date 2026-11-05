@@ -58,6 +58,22 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test("project entry removal is a strict fact independent of Task directory and Workspace authorization", () => {
+  const value = clone(fixture);
+  value.workspaces[0].projectRemoved = true;
+  const decoded = decodeWorkbenchSnapshot(value);
+  assert.equal(decoded.workspaces[0].projectRemoved, true);
+  assert.equal(
+    decoded.workspaces[0].authorization,
+    fixture.workspaces[0].authorization,
+  );
+  assert.equal(decoded.tasks[0].workspaceId, fixture.tasks[0].workspaceId);
+  for (const invalid of [undefined, null, "true", 1]) {
+    value.workspaces[0].projectRemoved = invalid;
+    assert.throws(() => decodeWorkbenchSnapshot(value), /projectRemoved/);
+  }
+});
+
 test("approval mode defaults and captured Task mode remain separate strict facts", () => {
   const value = clone(fixture);
   value.permissions.defaultMode = "auto_review";

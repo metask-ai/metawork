@@ -211,7 +211,6 @@ import {
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { WorkspaceRemovalMenu } from "../features/workspaces/WorkspaceRemovalMenu.tsx";
-import type { WorkspaceView } from "../bridge/contracts.ts";
 import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
@@ -3700,40 +3699,6 @@ export default function App() {
       endTaskPendingOperation(scope, generation);
     }
   }
-  async function removeWorkspace(
-    workspace: WorkspaceView,
-  ): Promise<MessageId | null> {
-    if (workbenchMutationDisabled || workspaceBusyRef.current)
-      return "workspace.remove_failed";
-    const generation = bridgeGenerationRef.current;
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const result = await client.removeWorkspace(
-        workspace.id,
-        workspace.epoch,
-      );
-      if (bridgeGenerationRef.current !== generation)
-        return "workspace.remove_unconfirmed";
-      await refreshSnapshot();
-      if (!result.accepted)
-        return result.reason === "task_close_failed"
-          ? "workspace.remove_close_failed"
-          : "workspace.remove_failed";
-      return null;
-    } catch (error) {
-      if (bridgeGenerationRef.current !== generation)
-        return "workspace.remove_unconfirmed";
-      if (await refreshAfterTimeout(error))
-        return "workspace.remove_unconfirmed";
-      await refreshSnapshot().catch(() => undefined);
-      return "workspace.remove_failed";
-    } finally {
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
-  }
-
   async function deleteTask(
     task: TaskSummary | TaskView | null = deleteTarget,
   ) {
@@ -4802,8 +4767,25 @@ export default function App() {
                 renderWorkspaceHeading={(workspace, heading) => (
                   <WorkspaceRemovalMenu
                     workspace={workspace}
-                    disabled={workbenchMutationDisabled || workspaceBusy}
-                    onRemove={removeWorkspace}
+                    openDisabled={workbenchMutationDisabled}
+                    onNewTask={() => {
+                      beginNewTask();
+                      setDraftWorkspaceById(workspace.id);
+                    }}
+                    onOpen={() =>
+                      client.openWorkspace(workspace.id, workspace.epoch)
+                    }
+                    onRemove={async () => {
+                      try {
+                        const result = await client.removeProject(
+                          workspace.id,
+                          workspace.epoch,
+                        );
+                        return result.accepted;
+                      } finally {
+                        await refreshSnapshot();
+                      }
+                    }}
                   >
                     {heading}
                   </WorkspaceRemovalMenu>

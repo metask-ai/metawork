@@ -90,7 +90,7 @@ test "model error migration upgrades published v1 records to null and rejects th
             var markers: std.ArrayList(u8) = .empty;
             var params: std.ArrayList(sql.Value) = .empty;
             for (row.columns, row.values) |column, value| {
-                if (std.mem.eql(u8, column, "model_error_json")) continue;
+                if (std.mem.eql(u8, column, "model_error_json") or std.mem.eql(u8, column, "project_removed")) continue;
                 if (params.items.len != 0) {
                     try columns.append(a, ',');
                     try markers.append(a, ',');
@@ -114,6 +114,33 @@ test "model error migration upgrades published v1 records to null and rejects th
         try std.testing.expect(loaded.tasks[0].runs[0].model_error == null);
     }
     try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]));
+}
+
+test "Project removal survives SQL restart without changing Workspace or Task authority" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    state.workspaces[0].project_removed = true;
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    try expectSame(a, database.capability(), state);
+    for ([_][]const u8{
+        "UPDATE workspaces SET project_removed=2",
+        "UPDATE workspaces SET project_removed='invalid'",
+        "UPDATE workspaces SET project_removed=NULL",
+    }) |statement| {
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
+    }
+    try expectSame(a, database.capability(), state);
 }
 
 test "model error history survives restart and credential sanitization with exact integer facts" {
