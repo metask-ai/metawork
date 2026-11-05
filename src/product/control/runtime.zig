@@ -3824,6 +3824,15 @@ pub const Runtime = struct {
         return workspace.epoch;
     }
 
+    pub fn workspaceDirectoryForOpen(self: *const Runtime, workspace_id: u64, expected_epoch: u64) Error![]const u8 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const workspace = self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace;
+        if (workspace.kind != .manual or !workspace.visible or workspace.authorization != .available or workspace.projection_redacted)
+            return error.WorkspaceUnavailable;
+        if (workspace.epoch != expected_epoch) return error.WorkspaceEpochMismatch;
+        return workspace.canonical_root;
+    }
+
     pub fn workspaceKind(
         self: *const Runtime,
         workspace_id: u64,

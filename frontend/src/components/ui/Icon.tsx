@@ -12,6 +12,7 @@ import {
   Clock3,
   Copy,
   Folder,
+  FolderOpen,
   FolderMinus,
   FolderUp,
   FileText,
@@ -66,6 +67,7 @@ type IconName =
   | "send"
   | "workspace"
   | "folder-minus"
+  | "folder-open"
   | "search"
   | "plus"
   | "settings"
@@ -103,6 +105,7 @@ type IconName =
   | "sunrise";
 
 const icons: Record<IconName, LucideIcon> = {
+  "folder-open": FolderOpen,
   more: Ellipsis,
   sidebar: PanelLeft,
   minimize: Minus,

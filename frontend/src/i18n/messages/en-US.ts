@@ -331,6 +331,9 @@ export const enUS = {
   "workspace.confirm_access": "Select folder again",
   "workspace.actions": "Project actions for {title}",
   "workspace.remove": "Remove project",
+  "workspace.open": "Open project folder",
+  "workspace.open_failed":
+    "Could not open the project folder. Check that it is still available and try again.",
   "workspace.remove_title": "Remove project “{title}”?",
   "workspace.remove_body":
     "Tasks and their history will be kept, and tasks in progress are unaffected. You can add the project again at any time.",

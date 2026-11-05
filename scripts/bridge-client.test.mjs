@@ -1222,6 +1222,44 @@ test("Skill import commands bind targets and revisions without source authority 
   ]);
 });
 
+test("Workspace opening sends only identity and epoch and decodes shared Host results", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/workspace_open.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  let response = fixture.opened;
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return response;
+    }),
+  });
+  assert.deepEqual(await client.openWorkspace("1", "7"), fixture.opened);
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.workspaces.open",
+      payload: { workspaceId: "1", expectedWorkspaceEpoch: "7" },
+    },
+  ]);
+  response = fixture.unavailable;
+  assert.deepEqual(await client.openWorkspace("1", "7"), fixture.unavailable);
+  for (const invalid of [
+    { opened: "true" },
+    { opened: true, path: "C:/outside" },
+    {},
+    { outcome: "opened" },
+  ]) {
+    response = invalid;
+    await assert.rejects(
+      client.openWorkspace("1", "7"),
+      /Invalid Host contract/,
+    );
+  }
+});
+
 test("Workspace removal sends exact identity and epoch and decodes shared Host results", async () => {
   const fixture = JSON.parse(
     readFileSync(

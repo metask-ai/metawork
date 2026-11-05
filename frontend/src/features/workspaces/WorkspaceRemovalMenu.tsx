@@ -12,21 +12,43 @@ import { useI18n } from "../../i18n/context.ts";
 
 export function WorkspaceRemovalMenu({
   workspace,
+  onOpen,
+  openDisabled,
   onRemove,
   children,
 }: {
   children: ReactNode;
   workspace: WorkspaceView;
+  onOpen: () => Promise<{ opened: boolean }>;
+  openDisabled: boolean;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [openState, setOpenState] = useState<"idle" | "opening" | "failed">(
+    "idle",
+  );
   const cancel = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLDivElement>(null);
   const removeItem = useRef<HTMLElement>(null);
+  const openItem = useRef<HTMLElement>(null);
   const keyboardOpen = useRef(false);
+  const cannotOpen =
+    openDisabled ||
+    openState === "opening" ||
+    workspace.redacted ||
+    workspace.authorization !== "available";
+  async function openDirectory() {
+    if (cannotOpen) return;
+    setOpenState("opening");
+    try {
+      setOpenState((await onOpen()).opened ? "idle" : "failed");
+    } catch {
+      setOpenState("failed");
+    }
+  }
   return (
     <>
       <div
@@ -63,11 +85,21 @@ export function WorkspaceRemovalMenu({
       >
         {children}
       </div>
+      {openState === "failed" && (
+        <p className="task-list-empty" role="alert">
+          {t("workspace.open_failed")}
+        </p>
+      )}
       <Menu.Root
         open={menuOpen}
         onOpenChange={setMenuOpen}
         onOpenChangeComplete={(open) => {
-          if (open && keyboardOpen.current) removeItem.current?.focus();
+          if (open && keyboardOpen.current)
+            // Let the menu register its items before focusing one for keyboard navigation.
+            window.requestAnimationFrame(() => {
+              if (trigger.current?.getAttribute("aria-expanded") === "true")
+                (cannotOpen ? removeItem : openItem).current?.focus();
+            });
         }}
       >
         <Menu.Portal>
@@ -88,6 +120,14 @@ export function WorkspaceRemovalMenu({
                 confirming ? false : (trigger.current ?? false)
               }
             >
+              <Menu.Item
+                ref={openItem}
+                disabled={cannotOpen}
+                onClick={() => void openDirectory()}
+              >
+                <Icon name="folder-open" />
+                {t("workspace.open")}
+              </Menu.Item>
               <Menu.Item ref={removeItem} onClick={() => setConfirming(true)}>
                 <Icon name="folder-minus" />
                 {t("workspace.remove")}

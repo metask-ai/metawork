@@ -94,6 +94,7 @@ pub const Platform = struct {
         ?*anyopaque,
         []const u8,
     ) anyerror!void = unavailableExternalUrl,
+    open_directory_fn: *const fn (?*anyopaque, []const u8) anyerror!void = unavailableExternalUrl,
     now_fn: *const fn (?*anyopaque) u64,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
@@ -395,6 +396,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
+            .{ .name = commands.open_workspace, .function = openWorkspaceDirectory },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
             .{ .name = commands.retry_automatic_workspace_root, .function = retryAutomaticWorkspaceRoot },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
@@ -3254,6 +3256,22 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         self.grants.invalidate();
         try self.beginDialog(invocation, responder, .workspace, .{ .open = .{ .title = "Choose a workspace", .allow_directories = true } });
+    }
+
+    fn openWorkspaceDirectory(context: *anyopaque, invocation: native_sdk.bridge.Invocation, _: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
+        if (workspace_id == 0 or expected_epoch == 0) return error.InvalidBridgeId;
+        const workbench = try self.requireProductControl();
+        const directory = workbench.workspaceDirectoryForOpen(workspace_id, expected_epoch) catch return "{\"opened\":false}";
+        self.platform.open_directory_fn(self.platform.context, directory) catch return "{\"opened\":false}";
+        return "{\"opened\":true}";
     }
 
     fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -8834,9 +8852,17 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
     try std.testing.expectEqual(@as(usize, 80), host.cancellations);
 }
 
-test "Workspace removal Bridge validates authority and preserves files with shared Renderer results" {
+test "Workspace opening and removal Bridge validate authority and preserve files with shared Renderer results" {
     const fixture = @import("lifecycle_fixture");
     const Host = struct {
+        var expected_root: []const u8 = "";
+        var opens: usize = 0;
+        var fail_open = false;
+        fn openDirectory(_: ?*anyopaque, path: []const u8) anyerror!void {
+            try std.testing.expectEqualStrings(expected_root, path);
+            opens += 1;
+            if (fail_open) return error.InjectedOpenFailure;
+        }
         fn wake(_: ?*anyopaque) anyerror!void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
         fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
@@ -8859,6 +8885,9 @@ test "Workspace removal Bridge validates authority and preserves files with shar
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPathFile(std.testing.io, "project", &root_buffer);
     const root = root_buffer[0..root_len];
+    Host.expected_root = root;
+    Host.opens = 0;
+    Host.fail_open = false;
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
@@ -8872,6 +8901,7 @@ test "Workspace removal Bridge validates authority and preserves files with shar
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
         .canonicalize_directory_fn = undefined,
+        .open_directory_fn = Host.openDirectory,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
         .window_chrome_control_fn = undefined,
@@ -8887,9 +8917,35 @@ test "Workspace removal Bridge validates authority and preserves files with shar
     const native = dispatcher.register(@import("policy.zig").product(.release));
     const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
     var output: [4096]u8 = undefined;
+    var open_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("workspace_open.fixture"), .{});
+    defer open_wire.deinit();
+    const opened = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("opened").?, .{});
+    defer std.testing.allocator.free(opened);
+    const not_opened = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("unavailable").?, .{});
+    defer std.testing.allocator.free(not_opened);
+    const open_request = "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), "handler_failed") != null);
     const request = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), "handler_failed") != null);
     _ = native.dispatch("{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, .{ .origin = "zero://app", .window_id = 4 }, &output), "handler_failed") != null);
+    for ([_][]const u8{
+        "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"0\",\"expectedWorkspaceEpoch\":\"1\"}}",
+        "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\",\"path\":\"C:/outside\"}}",
+    }) |invalid_open| try std.testing.expect(std.mem.indexOf(u8, native.dispatch(invalid_open, source, &output), "handler_failed") != null);
+    for ([_][]const u8{
+        "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}",
+        "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"99\",\"expectedWorkspaceEpoch\":\"1\"}}",
+    }) |stale_open| try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale_open, source, &output), not_opened) != null);
+    try std.testing.expectEqual(@as(usize, 0), Host.opens);
+    const before_open = workbench.currentRevision();
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), opened) != null);
+    try std.testing.expectEqual(before_open, workbench.currentRevision());
+    try std.testing.expectEqual(@as(usize, 1), Host.opens);
+    Host.fail_open = true;
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), not_opened) != null);
+    try std.testing.expectEqual(@as(usize, 2), Host.opens);
+    Host.fail_open = false;
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, .{ .origin = "zero://app", .window_id = 4 }, &output), "handler_failed") != null);
     const invalid = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\",\"path\":\"/tmp/project\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(invalid, source, &output), "handler_failed") != null);
@@ -8903,6 +8959,8 @@ test "Workspace removal Bridge validates authority and preserves files with shar
     const stale = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale, source, &output), changed) != null);
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), accepted) != null);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), not_opened) != null);
+    try std.testing.expectEqual(@as(usize, 2), Host.opens);
     _ = try tmp.dir.statFile(std.testing.io, "project/keep.txt", .{});
     var projections: [1]product_control.WorkspaceProjection = undefined;
     try std.testing.expectEqual(@as(usize, 0), (try workbench.copyWorkspaceProjections(&projections)).len);

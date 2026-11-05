@@ -956,6 +956,80 @@ async function openProjectRemoval(user) {
   return screen.findByRole("alertdialog");
 }
 
+for (const emptyProject of [false, true])
+  test(`project menu opens its own directory without changing the selected Task; empty=${emptyProject}`, async (ctx) => {
+    const { user, snapshot } = await renderApp(ctx, { emptyProject });
+    if (!emptyProject) await user.click(taskRows("3")[0]);
+    const before = structuredClone(snapshot);
+    const calls = [];
+    ctx.mock.method(
+      BridgeClient.prototype,
+      "openWorkspace",
+      async (...args) => {
+        calls.push(args);
+        return { opened: true };
+      },
+    );
+    fireEvent.contextMenu(
+      screen.getByRole("group", { name: "Project actions for metawork-test" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Open project folder" }),
+    );
+    assert.deepEqual(calls, [
+      [snapshot.workspaces[0].id, snapshot.workspaces[0].epoch],
+    ]);
+    assert.deepEqual(snapshot, before);
+    if (!emptyProject)
+      assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+    assert.equal(taskRows("3").length, emptyProject ? 0 : 2);
+    assert.equal(screen.queryByRole("alertdialog"), null);
+  });
+
+test("unavailable project directory cannot be opened but its entry can still be removed", async (ctx) => {
+  const { user } = await renderApp(ctx, {
+    workspace: { authorization: "reauthorization_required" },
+  });
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "openWorkspace", async () => {
+    calls++;
+    return { opened: true };
+  });
+  fireEvent.contextMenu(
+    screen.getByRole("group", { name: "Project actions for metawork-test" }),
+  );
+  const open = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+  });
+  assert.equal(open.getAttribute("aria-disabled"), "true");
+  await user.click(open);
+  assert.equal(calls, 0);
+  await user.click(
+    screen.getByRole("menuitem", { name: "Remove project", exact: true }),
+  );
+  assert.ok(await screen.findByRole("alertdialog"));
+});
+
+for (const failure of ["unavailable", "rejected"])
+  test(`project folder opening reports ${failure} without removing its group`, async (ctx) => {
+    const { user } = await renderApp(ctx);
+    ctx.mock.method(BridgeClient.prototype, "openWorkspace", async () => {
+      if (failure === "rejected") throw new Error("Host unavailable");
+      return { opened: false };
+    });
+    fireEvent.contextMenu(
+      screen.getByRole("group", { name: "Project actions for metawork-test" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Open project folder" }),
+    );
+    assert.match(
+      (await screen.findByRole("alert")).textContent,
+      /Could not open the project folder/,
+    );
+    assert.equal(taskRows("3").length, 2);
+  });
+
 test("project removal requires confirmation and Cancel restores focus without a command", async (ctx) => {
   const { user } = await renderApp(ctx);
   let calls = 0;
@@ -1116,6 +1190,12 @@ test("project removal menu and confirmation can be operated with the keyboard", 
     "project menu trigger owns keyboard focus",
   );
   await user.keyboard("{Shift>}{F10}{/Shift}");
+  const open = await screen.findByRole("menuitem", {
+    name: "Open project folder",
+    exact: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, open));
+  await user.keyboard("{ArrowDown}");
   const remove = await screen.findByRole("menuitem", {
     name: "Remove project",
     exact: true,
@@ -1123,7 +1203,7 @@ test("project removal menu and confirmation can be operated with the keyboard", 
   await waitFor(() =>
     assert.ok(
       document.activeElement === remove,
-      "project menu item receives keyboard focus",
+      `project menu item receives keyboard focus; current=${document.activeElement?.textContent}`,
     ),
   );
   await user.keyboard("{Enter}");

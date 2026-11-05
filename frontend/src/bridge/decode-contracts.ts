@@ -163,6 +163,10 @@ export function decodeExternalLinkOpenResult(value: unknown) {
     ] as const),
   };
 }
+export function decodeWorkspaceOpenResult(value: unknown) {
+  const item = object(value, "$", ["opened"]);
+  return { opened: booleanValue(item.opened, "$.opened") };
+}
 const taskLifecycles = ["open", "closing"] as const;
 const runPhases = [
   "queued",

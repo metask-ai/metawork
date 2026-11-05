@@ -102,6 +102,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器中；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent 或重新授权入口，但其 owning Task 仍可导航；
 - New task 路径控件负责选择、添加和重新授权 Manual Workspace；设置页只提供 Automatic Workspace 上级目录的全局存储策略，不承担 Workspace 列表、打开、迁移、清理或重新授权。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
 - 用户可以从左栏移除 Manual Workspace 对应的项目分组：只修改本机导航显示偏好，不停止或修改任何 Task、Run 或 Session，不撤销目录授权；已有任务继续在全局“最近”列表显示，排队、执行中与等待处理的任务保持原状态并可继续使用。该偏好随本机界面偏好保存，重新在 New task 路径控件选择同一目录可恢复项目分组；目录不可用不阻止移除分组。Automatic Workspace 仍随 owning Task 管理。
+- 用户可以从项目右键菜单在系统文件管理器中直接打开该项目目录，不是打开父目录后选中文件夹；不切换当前 Task，不改变目录授权、任务状态或历史。只允许打开当前可用且未脱敏的已授权 Manual Workspace；目录缺失、身份变化或系统打开失败须明确反馈，不自动重试。
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - automatic root 配置缺失时初始化为 system default；读取失败、损坏或未知 schema、配置提交结果不确定、以及已保存路径不可用时必须保留原事实并 fail closed，不得静默回退到 system default。这些故障只关闭 `automaticWorkspaces` capability 并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
 - bounded Task/Workspace 产品历史跨 Host 重启恢复，但恢复后的 Task 只读且不得伪造 Agent Session 或 Conversation；Run、Task 删除、shutdown 和重启后 Automatic Workspace 目录保留，但不扫描目录恢复或猜测 Task/Workspace，目录浏览和磁盘清理属于后续独立能力；

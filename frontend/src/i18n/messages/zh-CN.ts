@@ -277,6 +277,8 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.confirm_access": "重新选择目录",
   "workspace.actions": "项目“{title}”的操作",
   "workspace.remove": "移除项目",
+  "workspace.open": "打开项目目录",
+  "workspace.open_failed": "无法打开项目目录，请确认目录仍然可用后重试。",
   "workspace.remove_title": "移除项目“{title}”？",
   "workspace.remove_body":
     "移除项目后，任务及其历史记录仍会保留，正在执行的任务不受影响。你可以随时重新添加项目。",

@@ -4792,6 +4792,10 @@ export default function App() {
                 renderWorkspaceHeading={(workspace, heading) => (
                   <WorkspaceRemovalMenu
                     workspace={workspace}
+                    openDisabled={workbenchMutationDisabled}
+                    onOpen={() =>
+                      client.openWorkspace(workspace.id, workspace.epoch)
+                    }
                     onRemove={() =>
                       setHiddenProjectIds((ids) => [...ids, workspace.id])
                     }
