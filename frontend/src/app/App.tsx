@@ -211,7 +211,6 @@ import {
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { WorkspaceRemovalMenu } from "../features/workspaces/WorkspaceRemovalMenu.tsx";
-import type { WorkspaceView } from "../bridge/contracts.ts";
 import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
@@ -240,6 +239,7 @@ import {
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
 const modelSetupPreferenceKey = "metawork.model-setup-handled";
+const hiddenProjectsPreferenceKey = "metawork.sidebar.hidden-projects";
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -349,6 +349,24 @@ export default function App() {
     Record<string, string>
   >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
+  const [hiddenProjectIds, setHiddenProjectIds] = useState<string[]>(() => {
+    try {
+      const ids: unknown = JSON.parse(
+        readLocalPreference(hiddenProjectsPreferenceKey) ?? "[]",
+      );
+      return Array.isArray(ids) && ids.every((id) => typeof id === "string")
+        ? ids
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    writeLocalPreference(
+      hiddenProjectsPreferenceKey,
+      JSON.stringify(hiddenProjectIds),
+    );
+  }, [hiddenProjectIds]);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -2712,6 +2730,9 @@ export default function App() {
       }
       if (outcome.kind === "selected") {
         const { result } = outcome;
+        setHiddenProjectIds((ids) =>
+          ids.filter((id) => id !== result.workspaceId),
+        );
         dispatchWorkbench({
           type: "task.draft.opened",
           workspaceId: result.workspaceId,
@@ -2778,6 +2799,7 @@ export default function App() {
     }
     if (newTaskDraftId === unscopedNewTaskDraftId)
       newTaskDrafts.moveDraft(newTaskDraftId, workspace.id);
+    setHiddenProjectIds((ids) => ids.filter((id) => id !== workspace.id));
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: workspace.id,
@@ -3700,40 +3722,6 @@ export default function App() {
       endTaskPendingOperation(scope, generation);
     }
   }
-  async function removeWorkspace(
-    workspace: WorkspaceView,
-  ): Promise<MessageId | null> {
-    if (workbenchMutationDisabled || workspaceBusyRef.current)
-      return "workspace.remove_failed";
-    const generation = bridgeGenerationRef.current;
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      const result = await client.removeWorkspace(
-        workspace.id,
-        workspace.epoch,
-      );
-      if (bridgeGenerationRef.current !== generation)
-        return "workspace.remove_unconfirmed";
-      await refreshSnapshot();
-      if (!result.accepted)
-        return result.reason === "task_close_failed"
-          ? "workspace.remove_close_failed"
-          : "workspace.remove_failed";
-      return null;
-    } catch (error) {
-      if (bridgeGenerationRef.current !== generation)
-        return "workspace.remove_unconfirmed";
-      if (await refreshAfterTimeout(error))
-        return "workspace.remove_unconfirmed";
-      await refreshSnapshot().catch(() => undefined);
-      return "workspace.remove_failed";
-    } finally {
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
-  }
-
   async function deleteTask(
     task: TaskSummary | TaskView | null = deleteTarget,
   ) {
@@ -4792,7 +4780,9 @@ export default function App() {
               <TaskList
                 key={bridgeGeneration}
                 tasks={navigableTaskItems}
-                workspaces={snapshot.workspaces}
+                workspaces={snapshot.workspaces.filter(
+                  (workspace) => !hiddenProjectIds.includes(workspace.id),
+                )}
                 activeTaskId={
                   route === "workbench" ? workbench.activeTaskId : null
                 }
@@ -4802,8 +4792,9 @@ export default function App() {
                 renderWorkspaceHeading={(workspace, heading) => (
                   <WorkspaceRemovalMenu
                     workspace={workspace}
-                    disabled={workbenchMutationDisabled || workspaceBusy}
-                    onRemove={removeWorkspace}
+                    onRemove={() =>
+                      setHiddenProjectIds((ids) => [...ids, workspace.id])
+                    }
                   >
                     {heading}
                   </WorkspaceRemovalMenu>

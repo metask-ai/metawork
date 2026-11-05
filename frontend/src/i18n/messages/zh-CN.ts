@@ -277,13 +277,10 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.confirm_access": "重新选择目录",
   "workspace.actions": "项目“{title}”的操作",
   "workspace.remove": "移除项目",
-  "workspace.remove_title": "移除“{title}”？",
+  "workspace.remove_title": "移除项目“{title}”？",
   "workspace.remove_body":
-    "此项目及其任务将从列表隐藏，正在运行的任务会停止。本地文件和任务历史会保留，重新添加同一文件夹即可打开项目。",
-  "workspace.remove_failed": "未能移除此项目，请核对当前状态后重试。",
-  "workspace.remove_close_failed": "未能停止此项目的全部任务，请重试移除。",
-  "workspace.remove_unconfirmed":
-    "暂时无法确认移除结果，请核对项目列表后再试。",
+    "移除项目后，任务及其历史记录仍会保留，正在执行的任务不受影响。你可以随时重新添加项目。",
+  "workspace.remove_close_failed": "上次关闭任务未完成，目录访问权限已保留。",
   "workspace.removing_short": "正在移除",
   "task.list": "任务",
   "task.recent": "最近",

@@ -8,48 +8,25 @@ import {
   createContextMenuAnchor,
   type ContextMenuAnchor,
 } from "../../components/ui/context-menu-anchor.ts";
-import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { useI18n } from "../../i18n/context.ts";
 
 export function WorkspaceRemovalMenu({
   workspace,
-  disabled,
   onRemove,
   children,
 }: {
   children: ReactNode;
   workspace: WorkspaceView;
-  disabled: boolean;
-  onRemove: (workspace: WorkspaceView) => Promise<MessageId | null>;
+  onRemove: () => void;
 }) {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<MessageId | null>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLDivElement>(null);
-  const openingDialog = useRef(false);
   const removeItem = useRef<HTMLElement>(null);
   const keyboardOpen = useRef(false);
-  const unavailable =
-    disabled || busy || workspace.authorization === "removing";
-
-  async function remove() {
-    if (unavailable) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const failure = await onRemove(workspace);
-      if (failure) setError(failure);
-      else setConfirming(false);
-    } catch {
-      setError("workspace.remove_failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <>
       <div
@@ -60,11 +37,8 @@ export function WorkspaceRemovalMenu({
         aria-label={t("workspace.actions", { title: workspace.displayName })}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        aria-disabled={unavailable}
         onContextMenu={(event) => {
           event.preventDefault();
-          if (unavailable) return;
-          openingDialog.current = false;
           keyboardOpen.current = false;
           setMenuAnchor(
             createContextMenuAnchor(
@@ -82,8 +56,6 @@ export function WorkspaceRemovalMenu({
           )
             return;
           event.preventDefault();
-          if (unavailable) return;
-          openingDialog.current = false;
           keyboardOpen.current = true;
           setMenuAnchor(event.currentTarget);
           setMenuOpen(true);
@@ -113,20 +85,10 @@ export function WorkspaceRemovalMenu({
             <Menu.Popup
               className="task-menu-popover"
               finalFocus={() =>
-                openingDialog.current ? false : (trigger.current ?? false)
+                confirming ? false : (trigger.current ?? false)
               }
             >
-              <Menu.Item
-                ref={removeItem}
-                variant="danger"
-                disabled={unavailable}
-                onClick={() => {
-                  openingDialog.current = true;
-                  setError(null);
-                  setMenuOpen(false);
-                  setConfirming(true);
-                }}
-              >
+              <Menu.Item ref={removeItem} onClick={() => setConfirming(true)}>
                 <Icon name="folder-minus" />
                 {t("workspace.remove")}
               </Menu.Item>
@@ -134,14 +96,7 @@ export function WorkspaceRemovalMenu({
           </Menu.Positioner>
         </Menu.Portal>
       </Menu.Root>
-      <AlertDialog.Root
-        open={confirming}
-        onOpenChange={(open) => {
-          if (busy) return;
-          setConfirming(open);
-          if (!open) openingDialog.current = false;
-        }}
-      >
+      <AlertDialog.Root open={confirming} onOpenChange={setConfirming}>
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
           <AlertDialog.Popup
@@ -160,26 +115,22 @@ export function WorkspaceRemovalMenu({
             <AlertDialog.Description>
               {t("workspace.remove_body")}
             </AlertDialog.Description>
-            {error && <p role="alert">{t(error)}</p>}
             <div className="delete-confirmation-actions">
               <Button
                 ref={cancel}
-                autoFocus
                 variant="secondary"
-                disabled={busy}
-                onClick={() => {
-                  openingDialog.current = false;
-                  setConfirming(false);
-                }}
+                onClick={() => setConfirming(false)}
               >
                 {t("common.cancel")}
               </Button>
               <Button
-                variant="danger"
-                disabled={unavailable}
-                onClick={() => void remove()}
+                variant="primary"
+                onClick={() => {
+                  onRemove();
+                  setConfirming(false);
+                }}
               >
-                {t(busy ? "workspace.removing_short" : "workspace.remove")}
+                {t("workspace.remove")}
               </Button>
             </div>
           </AlertDialog.Popup>

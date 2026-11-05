@@ -115,6 +115,8 @@ async function renderApp(
     workspace = {},
     emptyProject = false,
     historyRuns = [],
+    projectTask = {},
+    projectHidden = false,
   } = {},
 ) {
   const snapshot = structuredClone(initialSnapshot);
@@ -127,6 +129,7 @@ async function renderApp(
     activeOperation: null,
     inputReady: true,
     runs: historyRuns,
+    ...projectTask,
   });
   snapshot.tasks.push({
     ...structuredClone(task),
@@ -203,9 +206,11 @@ async function renderApp(
       createElement(App),
     ),
   );
-  await screen.findByRole("group", {
-    name: "Project actions for metawork-test",
-  });
+  if (projectHidden) await waitFor(() => assert.equal(taskRows("3").length, 1));
+  else
+    await screen.findByRole("group", {
+      name: "Project actions for metawork-test",
+    });
   const user = userEvent.setup({ document });
   return {
     user,
@@ -958,7 +963,7 @@ test("project removal requires confirmation and Cancel restores focus without a 
     calls++;
   });
   const dialog = await openProjectRemoval(user);
-  assert.match(dialog.textContent, /Local files and task history will be kept/);
+  assert.match(dialog.textContent, /tasks in progress are unaffected/);
   const cancel = within(dialog).getByRole("button", { name: "Cancel" });
   await waitFor(() => assert.ok(document.activeElement === cancel));
   await user.click(cancel);
@@ -974,123 +979,130 @@ test("project removal requires confirmation and Cancel restores focus without a 
   );
 });
 
+async function confirmProjectRemoval(user) {
+  const dialog = await openProjectRemoval(user);
+  await user.click(
+    within(dialog).getByRole("button", { name: "Remove project", exact: true }),
+  );
+  await waitFor(() =>
+    assert.ok(!document.querySelector(".task-project-context")),
+  );
+}
+
 for (const emptyProject of [false, true])
-  test(`project removal syncs navigation and preserves history; empty=${emptyProject}`, async (ctx) => {
+  test(`project removal hides only its group and preserves Workspace authority; empty=${emptyProject}`, async (ctx) => {
     const { user, snapshot } = await renderApp(ctx, {
       emptyProject,
       workspace: { authorization: "reauthorization_required" },
     });
     if (!emptyProject) await user.click(taskRows("3")[0]);
-    const historyCount = snapshot.tasks.length;
+    const before = structuredClone(snapshot);
     const calls = [];
-    let finish;
-    ctx.mock.method(
-      BridgeClient.prototype,
-      "removeWorkspace",
-      async (id, epoch) => {
-        calls.push({ id, epoch });
-        await new Promise((resolve) => {
-          finish = resolve;
-        });
-        snapshot.workspaces = [];
-        snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-        return { accepted: true, workspaceId: id, reason: null };
+    ctx.mock.method(BridgeClient.prototype, "removeWorkspace", async () =>
+      calls.push("remove"),
+    );
+    ctx.mock.method(BridgeClient.prototype, "stopTask", async () =>
+      calls.push("stop"),
+    );
+    await confirmProjectRemoval(user);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(snapshot, before);
+    assert.equal(taskRows("3").length, emptyProject ? 0 : 1);
+    if (!emptyProject)
+      assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+  });
+
+for (const phase of ["queued", "running", "waiting_ui", "stopping"])
+  test(`removing a project leaves its ${phase} Task and current draft untouched`, async (ctx) => {
+    const run = structuredClone(initialSnapshot.tasks[0].runs[0]);
+    run.phase = phase;
+    const { user, snapshot } = await renderApp(ctx, {
+      historyRuns: [run],
+      projectTask: {
+        activeOperation: { kind: "run", id: run.id },
+        currentRunId: run.id,
+        currentRunPhase: phase,
       },
-    );
-    const dialog = await openProjectRemoval(user);
-    await user.click(
-      within(dialog).getByRole("button", {
-        name: "Remove project",
-        exact: true,
-      }),
-    );
-    await waitFor(() => assert.equal(calls.length, 1));
-    assert.deepEqual(calls, [{ id: "1", epoch: "1" }]);
-    assert.equal(
-      within(dialog).getByRole("button", { name: "Removing" }).disabled,
-      true,
-    );
-    await act(async () => finish());
-    await waitFor(() =>
-      assert.equal(
-        screen.queryByRole("group", {
-          name: "Project actions for metawork-test",
-        }),
-        null,
-      ),
-    );
-    assert.equal(snapshot.tasks.length, historyCount);
-    assert.equal(taskRows("3").length, 0);
-  });
-
-test("project close failure remains visible and an explicit retry uses the refreshed epoch", async (ctx) => {
-  const { user, snapshot } = await renderApp(ctx);
-  const epochs = [];
-  ctx.mock.method(
-    BridgeClient.prototype,
-    "removeWorkspace",
-    async (id, epoch) => {
-      epochs.push(epoch);
-      snapshot.workspaces[0].epoch = "2";
-      snapshot.workspaces[0].lastRemovalFailure = "task_close_failed";
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      return { accepted: false, workspaceId: id, reason: "task_close_failed" };
-    },
-  );
-  const dialog = await openProjectRemoval(user);
-  await user.click(
-    within(dialog).getByRole("button", { name: "Remove project", exact: true }),
-  );
-  await within(dialog).findByRole("alert");
-  assert.equal(epochs.length, 1);
-  assert.ok(document.querySelector(".task-project-context"));
-  await user.click(
-    within(dialog).getByRole("button", { name: "Remove project", exact: true }),
-  );
-  await waitFor(() => assert.deepEqual(epochs, ["1", "2"]));
-});
-
-for (const committed of [true, false])
-  test(`project removal timeout reconciles without resending; committed=${committed}`, async (ctx) => {
-    const { user, snapshot } = await renderApp(ctx);
-    let calls = 0;
-    ctx.mock.method(BridgeClient.prototype, "removeWorkspace", async () => {
-      calls++;
-      if (committed) snapshot.workspaces = [];
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      throw new BridgeCommandTimeoutError("metawork.workspaces.remove", 10000);
     });
-    const dialog = await openProjectRemoval(user);
-    await user.click(
-      within(dialog).getByRole("button", {
-        name: "Remove project",
-        exact: true,
-      }),
+    await user.click(taskRows("3")[0]);
+    const editor = document.querySelector(".ai-composer textarea");
+    if (editor && !editor.disabled)
+      fireEvent.change(editor, { target: { value: "Keep this draft" } });
+    const draft = editor?.value;
+    const before = structuredClone(snapshot);
+    const calls = [];
+    ctx.mock.method(BridgeClient.prototype, "removeWorkspace", async () =>
+      calls.push("remove"),
     );
-    if (committed)
-      await waitFor(() =>
-        assert.equal(document.querySelector(".task-project-context"), null),
-      );
-    else
-      assert.match(
-        (await within(dialog).findByRole("alert")).textContent,
-        /could not be confirmed/,
-      );
-    assert.equal(calls, 1);
+    ctx.mock.method(BridgeClient.prototype, "stopTask", async () =>
+      calls.push("stop"),
+    );
+    await confirmProjectRemoval(user);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(snapshot, before);
+    assert.equal(taskRows("3").length, 1);
+    assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
+    assert.equal(document.querySelector(".ai-composer textarea"), editor);
+    assert.equal(editor?.value, draft);
+    await user.click(taskRows("3")[0]);
+    assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
   });
 
-test("pending project removal disables duplicate actions", async (ctx) => {
-  const { user } = await renderApp(ctx, {
-    workspace: { authorization: "removing" },
-  });
-  const trigger = screen.getByRole("group", {
+test("removed project stays hidden after remount and explicit Workspace selection restores its group", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  await confirmProjectRemoval(user);
+  cleanup();
+  const remounted = await renderApp(ctx, { projectHidden: true });
+  assert.equal(document.querySelector(".task-project-context"), null);
+  assert.equal(taskRows("3").length, 1);
+  await remounted.user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  const picker = screen.getByRole("combobox", { name: "Switch workspace" });
+  await remounted.user.click(picker);
+  await remounted.user.click(
+    await screen.findByRole("option", { name: /metawork-test/ }),
+  );
+  await screen.findByRole("group", {
     name: "Project actions for metawork-test",
   });
-  assert.equal(trigger.getAttribute("aria-disabled"), "true");
-  fireEvent.contextMenu(trigger);
-  assert.equal(screen.queryByRole("menu"), null);
-  assert.ok(screen.getByText("Removing"));
+  assert.equal(taskRows("3").length, 2);
 });
+
+for (const outcome of ["selected", "cancelled", "superseded"])
+  test(`native folder selection restores a removed project only when current and selected: ${outcome}`, async (ctx) => {
+    const { user, snapshot } = await renderApp(ctx);
+    await confirmProjectRemoval(user);
+    await user.click(
+      screen.getByRole("button", { name: "New task", exact: true }),
+    );
+    let resolveChoice;
+    ctx.mock.method(
+      BridgeClient.prototype,
+      "chooseWorkspace",
+      () =>
+        new Promise((resolve) => {
+          resolveChoice = resolve;
+        }),
+    );
+    await user.click(screen.getByRole("button", { name: "Add", exact: true }));
+    assert.equal(typeof resolveChoice, "function");
+    if (outcome === "superseded") await user.click(taskRows("3")[0]);
+    await act(async () =>
+      resolveChoice(
+        outcome === "cancelled"
+          ? { selected: false }
+          : { selected: true, workspaceId: snapshot.workspaces[0].id },
+      ),
+    );
+    await waitFor(() =>
+      assert.equal(taskRows("3").length, outcome === "selected" ? 2 : 1),
+    );
+    assert.equal(
+      document.querySelector(".task-project-context") !== null,
+      outcome === "selected",
+    );
+  });
 
 test("project removal menu and confirmation can be operated with the keyboard", async (ctx) => {
   const { user } = await renderApp(ctx);
