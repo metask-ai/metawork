@@ -158,14 +158,16 @@ export function TaskList({
               openTaskMenu(event, task.id);
           }}
         >
-          <span className="task-list-row">
-            <span>{task.title || t("task.item", { id: task.id })}</span>
-            <TaskSignals
-              task={task}
-              synchronized={synchronized}
-              completionSuppressed={suppressedCompletionTaskId === task.id}
-            />
+          <span className="task-list-title">
+            <span className="task-list-title-text">
+              {task.title || t("task.item", { id: task.id })}
+            </span>
           </span>
+          <TaskSignals
+            task={task}
+            synchronized={synchronized}
+            completionSuppressed={suppressedCompletionTaskId === task.id}
+          />
         </button>
         <button
           type="button"

@@ -1047,7 +1047,11 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
     task("1", "workspace-b"),
   ]);
 
-  assert.equal((markup.match(/<span>Review changes<\/span>/g) ?? []).length, 2);
+  assert.equal(
+    (markup.match(/class="task-list-title-text">Review changes<\/span>/g) ?? [])
+      .length,
+    2,
+  );
   assert.doesNotMatch(
     markup,
     /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
@@ -1194,13 +1198,10 @@ test("Sidebar typography reserves bold weight for the product identity", async (
   assert.match(stylesheet, /\.sidebar-capability\s*\{[^}]*font-weight: 500/s);
   assert.doesNotMatch(stylesheet, /\.task-group/);
   assert.match(stylesheet, /\.section-label\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.task-list-title\s*\{[^}]*font-weight: 400/s);
   assert.match(
     stylesheet,
-    /\.task-list-row > span:first-child\s*\{[^}]*font-weight: 400/s,
-  );
-  assert.match(
-    stylesheet,
-    /\.task-list-item\[aria-current="page"\] \.task-list-row > span:first-child\s*\{[^}]*font-weight: 500/s,
+    /\.task-list-item\[aria-current="page"\] \.task-list-title\s*\{[^}]*font-weight: 500/s,
   );
   assert.match(
     stylesheet,
@@ -1239,10 +1240,7 @@ test("Task list keeps compact row density without group-owned spacing", async ()
     stylesheet,
     /\.task-list-heading \+ \.task-list-entry\s*\{[^}]*margin-top: 6px;/s,
   );
-  assert.match(
-    stylesheet,
-    /\.task-list-row > span:first-child\s*\{[^}]*line-height: 18px;/s,
-  );
+  assert.match(stylesheet, /\.task-list-title\s*\{[^}]*line-height: 18px;/s);
   assert.doesNotMatch(stylesheet, /\.task-group/);
 });
 

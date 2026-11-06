@@ -7007,8 +7007,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding-left: 10px;
 }
 
-.task-list-heading,
-.task-list-row {
+.task-list-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -7097,6 +7096,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .task-list-item {
   width: 100%;
+  grid-template-columns: minmax(0, 1fr);
   padding: 6px 56px 6px 10px;
   border: 1px solid transparent;
   color: var(--ui-content-primary);
@@ -7142,17 +7142,48 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-primary);
 }
 
-.task-list-row > span:first-child {
+.task-list-title {
+  display: block;
+  container-type: inline-size;
   overflow: hidden;
   font-size: var(--text-control);
   font-weight: 400;
   line-height: 18px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.task-list-item[aria-current="page"] .task-list-row > span:first-child {
+.task-list-title-text {
+  /* Fade only when the text is wider than its clipping area. */
+  --task-title-fade: clamp(0px, calc((100% - 100cqw) * 16), 16px);
+  display: block;
+  width: max-content;
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(100cqw - var(--task-title-fade)),
+    transparent 100cqw
+  );
+}
+
+.task-list-item[aria-current="page"] .task-list-title {
   font-weight: 500;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .task-list-item:is(:hover, :focus-visible) .task-list-title-text {
+    animation: task-list-title-scroll 3s linear 500ms forwards;
+  }
+}
+
+@keyframes task-list-title-scroll {
+  from {
+    mask-image: none;
+    transform: translateX(0);
+  }
+
+  to {
+    mask-image: none;
+    transform: translateX(min(0px, calc(100cqw - 100%)));
+  }
 }
 
 .task-list-action,
@@ -7215,7 +7246,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   height: 8px;
   border-radius: 999px;
   background: currentColor;
-  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent);
 }
 
 .task-signal[data-signal="running"] {
