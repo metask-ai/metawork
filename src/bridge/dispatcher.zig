@@ -411,6 +411,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.uninstall_skill, .function = uninstallSkill },
             .{ .name = commands.retry_skill, .function = retrySkill },
             .{ .name = commands.skill_detail, .function = skillDetail },
+            .{ .name = commands.mcp_dismiss_install_proposal, .function = dismissMcpInstallProposal },
             .{ .name = commands.mcp_create_stdio_server, .function = createMcpStdioServer },
             .{ .name = commands.mcp_create_http_server, .function = createMcpHttpServer },
             .{ .name = commands.mcp_update_stdio_connection, .function = updateMcpStdioConnection },
@@ -4228,6 +4229,20 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
+    fn dismissMcpInstallProposal(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.McpInstallProposalIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null;
+        const workbench = try self.requireProductControl();
+        const dismissed = workbench.dismissMcpInstallProposal(id);
+        if (dismissed) self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{if (dismissed) @as([]const u8, "dismissed") else "stale_proposal"});
+    }
+
     fn createMcpStdioServer(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -4252,6 +4267,7 @@ pub const Dispatcher = struct {
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireProductControl();
         const outcome = try workbench.createMcpStdioServer(expected, .{
+            .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
@@ -4261,7 +4277,7 @@ pub const Dispatcher = struct {
             .auth_mode = if (parsed.value.environmentNames.len == 0) .none else .static,
             .environment_names = parsed.value.environmentNames,
         });
-        return self.finishMcpMutation(workbench, output, outcome);
+        return self.finishMcpCreate(workbench, output, outcome);
     }
 
     fn createMcpHttpServer(
@@ -4276,7 +4292,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayloadWithLimit(
             handlers.McpCreateHttpServer,
             invocation.request.payload,
-            8 * 1024,
+            256 * 1024,
         );
         defer parsed.deinit();
         try validateMcpConnectionFields(
@@ -4290,6 +4306,7 @@ pub const Dispatcher = struct {
         const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
             if (parsed.value.headerNames.len != 0) return error.InvalidBridgePayload;
             break :oauth try workbench.createMcpOauthHttpServer(expected, .{
+                .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
                 .display_name = parsed.value.displayName,
                 .negotiation = parsed.value.negotiation,
                 .timeout_ms = parsed.value.timeoutMs,
@@ -4297,6 +4314,7 @@ pub const Dispatcher = struct {
                 .client = try mcpOauthClientPlan(parsed.value.registration),
             });
         } else try workbench.createMcpHttpServer(expected, .{
+            .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
@@ -4308,7 +4326,7 @@ pub const Dispatcher = struct {
             ),
             .header_names = parsed.value.headerNames,
         });
-        return self.finishMcpMutation(workbench, output, outcome);
+        return self.finishMcpCreate(workbench, output, outcome);
     }
 
     fn updateMcpStdioConnection(
@@ -4745,6 +4763,15 @@ pub const Dispatcher = struct {
         const outcome = try host.apply_fn(host.context, intent);
         if (outcome == .started) self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
+    }
+
+    fn finishMcpCreate(self: *Dispatcher, workbench: *product_control.Runtime, output: []u8, result: mcp_configuration.CreateResult) ![]const u8 {
+        const base = try self.finishMcpMutation(workbench, output, result.outcome);
+        const suffix = if (result.server_id) |id|
+            try std.fmt.bufPrint(output[base.len - 1 ..], ",\"serverId\":\"{s}\"}}", .{id})
+        else
+            try std.fmt.bufPrint(output[base.len - 1 ..], ",\"serverId\":null}}", .{});
+        return output[0 .. base.len - 1 + suffix.len];
     }
 
     fn finishMcpMutation(
@@ -6031,6 +6058,21 @@ fn decodeUiResponse(request: handlers.UiResponseRequest) !product_control.UiResp
         } };
     }
     return error.InvalidUiResponse;
+}
+
+test "MCP Bridge create rejection shares the strict Renderer receipt fixture" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+    };
+    // This boundary only needs the management inspection and notification port.
+    var control: product_control.Runtime = undefined;
+    control.mcp = null;
+    var boundary: Dispatcher = undefined;
+    boundary.platform.context = null;
+    boundary.platform.wake_fn = Host.wake;
+    var output: [256]u8 = undefined;
+    const result = try boundary.finishMcpCreate(&control, &output, .{ .outcome = .rejected });
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @embedFile("testdata/mcp-create-rejected.json"), "\r\n"), result);
 }
 
 test "MCP Bridge keeps OAuth client authentication explicit and bounded" {

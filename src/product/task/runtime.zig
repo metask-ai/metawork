@@ -399,6 +399,7 @@ pub const OperationEffects = struct {
     /// The pointer is callback-scoped and cleared from retained effects.
     image_execution: ?*?task_state.OwnedImageExecution = null,
     file_delivery: ?*?task_state.OwnedFileDelivery = null,
+    mcp_installation: ?agent.McpInstallationInput = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
     model_target: ?models_contract.SourceCandidateInput = null,
     text: TextProjection,
@@ -1642,6 +1643,18 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn mcpInstallationSourceAvailable(self: *const Runtime, task_id: u64, run_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        if (task.deletion != .idle) return false;
+        if (task.runtime.active_run_id == run_id and task.runtime.cancel_requested) return false;
+        for (task.durable.runs) |entry| if (entry) |run| {
+            if (run.id != run_id) continue;
+            const phase = task_state.runPhase(&run);
+            return phase != .stopped and phase != .cancelled and phase != .stopping and phase != .interrupted;
+        };
+        return false;
+    }
+
     pub fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
@@ -2471,7 +2484,9 @@ pub const Runtime = struct {
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts, null);
         const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
         const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
-        const run_id = try access.prepareRunWithTools(agent_input, image, delivery);
+        var mcp_installation = effects.mcp_installation;
+        if (mcp_installation) |*value| value.task_id = task.durable.id;
+        const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -8466,6 +8481,7 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     clean.prepared_input = null;
     clean.image_execution = null;
     clean.file_delivery = null;
+    clean.mcp_installation = null;
     return clean;
 }
 

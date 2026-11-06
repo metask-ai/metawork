@@ -214,6 +214,30 @@ const server = createServer(async (request, response) => {
       schema: declaration?.input_schema,
       results: images.length ? "[image result verified]" : results,
     });
+    if (mode === "mcp-proposal") {
+      const tool = payload.tools.find(
+        (entry) => entry.name === "ProposeMcpServer",
+      );
+      if (!tool || tool.input_schema.additionalProperties !== false)
+        throw Error("proposal schema");
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(
+        results.length
+          ? protocolTextSse("anthropic", "proposal fixture completed")
+          : protocolToolSse(
+              "anthropic",
+              payload.messages.length,
+              "ProposeMcpServer",
+              {
+                displayName: "Fixture MCP",
+                transport: "stdio",
+                command: "node",
+                arguments: ["--filter=$HOME", ""],
+                authMode: "none",
+              },
+            ),
+      );
+    }
     if (mode === "delivery" || mode === "delivery-xlsx") {
       const delivery = payload.tools.find(
         (tool) => tool.name === "DeliverFile",

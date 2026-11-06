@@ -174,6 +174,7 @@ pub const AgentEventConsumer = struct {
 
 pub const McpManagementPort = struct {
     context: *anyopaque,
+    observe_process_fn: *const fn (*anyopaque, mcp_contract.ProcessObservation) anyerror!bool,
     inspect_fn: *const fn (*anyopaque) ?mcp_contract.ManagementInspection,
     write_desired_fn: *const fn (*anyopaque, u64, []u8) anyerror![]const u8,
     begin_connection_test_fn: *const fn (*anyopaque, []const u8) anyerror!void,
@@ -199,6 +200,9 @@ pub const McpManagementPort = struct {
     clear_oauth_operation_fn: *const fn (*anyopaque, []const u8) anyerror!mcp_contract.ManagementOutcome,
     recover_oauth_operation_fn: *const fn (*anyopaque, []const u8) anyerror!mcp_contract.ManagementOutcome,
 
+    pub fn observeMcpProcess(self: McpManagementPort, observation: mcp_contract.ProcessObservation) !bool {
+        return self.observe_process_fn(self.context, observation);
+    }
     pub fn inspectMcpDesiredConfiguration(self: McpManagementPort) ?mcp_contract.ManagementInspection {
         return self.inspect_fn(self.context);
     }

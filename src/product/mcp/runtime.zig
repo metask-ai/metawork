@@ -11,6 +11,7 @@ const policy = @import("product_mcp_policy");
 const ports_module = @import("product_mcp_ports");
 const refresh_job = @import("product_mcp_refresh_job");
 const view = @import("product_mcp_view");
+const installation = @import("installation.zig");
 
 pub const Error = agent.Error || std.mem.Allocator.Error || error{
     ExecutorShuttingDown,
@@ -169,6 +170,9 @@ pub const Runtime = struct {
     /// Aggregate-owned MCP state. Production composition consumes it only
     /// through Runtime typed operations; direct access is test-seam only.
     state: state_module.McpProductState,
+    installation_mailbox: installation.Mailbox,
+    installation_proposal: ?installation.Payload = null,
+    installation_notice: bool = false,
     refresh_job: ?*refresh_job.Job = null,
     runtime_auth_delivery_pending: bool = false,
     shutting_down: bool = false,
@@ -183,6 +187,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .ports = ports,
             .state = initial_state,
+            .installation_mailbox = .{ .allocator = allocator, .notifier = ports.notifier },
         };
         runtime.observeOauthTime();
         return runtime;
@@ -200,6 +205,8 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        if (self.installation_proposal) |*value| value.deinit();
+        self.installation_mailbox.deinit();
         std.debug.assert(self.refresh_job == null);
         self.ports.timer.cancel();
         self.state.deinit();
@@ -1015,40 +1022,124 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn installationInput(self: *Runtime, io: std.Io) ?agent.McpInstallationInput {
+        if (self.shutting_down) return null;
+        const management = if (self.state.management) |*value| value else return null;
+        if (management.inspect().health != .ready) return null;
+        return self.installation_mailbox.input(io);
+    }
+    pub fn takeInstallation(self: *Runtime, io: std.Io) bool {
+        const incoming = self.installation_mailbox.take(io) orelse return false;
+        std.debug.assert(self.installation_proposal == null);
+        self.installation_proposal = incoming;
+        self.installation_notice = false;
+        self.markChanged();
+        return true;
+    }
+    pub fn pendingInstallation(self: *const Runtime) ?struct { id: u64, task_id: u64, run_id: u64, json: []const u8 } {
+        const value = self.installation_proposal orelse return null;
+        return .{ .id = value.id, .task_id = value.task_id, .run_id = value.run_id, .json = value.draft.json };
+    }
+    pub fn dismissInstallation(self: *Runtime, io: std.Io, id: u64, rejected: bool) bool {
+        const value = if (self.installation_proposal) |*value| value else return false;
+        if (id == 0 or value.id != id) return false;
+        value.deinit();
+        self.installation_proposal = null;
+        _ = self.installation_mailbox.release(io, id);
+        self.installation_notice = rejected;
+        self.markChanged();
+        return true;
+    }
+    pub fn closeInstallation(self: *Runtime, io: std.Io) void {
+        self.installation_mailbox.close(io);
+        if (self.installation_proposal) |*value| value.deinit();
+        self.installation_proposal = null;
+        self.installation_notice = false;
+    }
+    pub fn dismissInstallationNotice(self: *Runtime) bool {
+        if (!self.installation_notice) return false;
+        self.installation_notice = false;
+        self.markChanged();
+        return true;
+    }
+    pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer) ViewError!void {
+        writer.writeAll("{\"proposal\":") catch return error.SnapshotTooLarge;
+        if (self.installation_proposal) |value| {
+            writer.print("{{\"id\":\"{d}\",\"taskId\":\"{d}\",\"runId\":\"{d}\",\"draft\":", .{ value.id, value.task_id, value.run_id }) catch return error.SnapshotTooLarge;
+            writer.writeAll(value.draft.json) catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(if (self.installation_notice) ",\"notice\":\"proposal_rejected\"}" else ",\"notice\":null}") catch return error.SnapshotTooLarge;
+    }
+
+    pub fn observeProcess(self: *Runtime, observation: configuration.ProcessObservation) Error!bool {
+        if (self.shutting_down or observation.attempt == 0) return false;
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        const server = state_module.findMcpServer(registry.servers, observation.server_id) orelse return false;
+        if (!server.enabled or !std.mem.eql(u8, server.transport.kind, "stdio") or !std.mem.eql(u8, &observation.source, &configuration.runtimeDescriptorFingerprint(server))) return false;
+        var index: usize = 0;
+        while (index < self.state.process_observations.items.len) {
+            const old = self.state.process_observations.items[index];
+            const current = state_module.findMcpServer(registry.servers, old.server_id);
+            if (current == null or !std.mem.eql(u8, &old.source, &configuration.runtimeDescriptorFingerprint(current.?))) {
+                self.allocator.free(old.server_id);
+                _ = self.state.process_observations.swapRemove(index);
+            } else index += 1;
+        }
+        for (self.state.process_observations.items) |*old| {
+            if (!std.mem.eql(u8, old.server_id, observation.server_id)) continue;
+            if (observation.attempt < old.attempt or (observation.attempt > old.attempt and observation.fact != .pending)) return false;
+            if (old.attempt == observation.attempt and old.fact == observation.fact) return false;
+            old.attempt = observation.attempt;
+            old.fact = observation.fact;
+            self.markChanged();
+            return true;
+        }
+        if (observation.fact != .pending or self.state.process_observations.items.len >= management.limits.max_servers) return false;
+        const owned_id = try self.allocator.dupe(u8, observation.server_id);
+        errdefer self.allocator.free(owned_id);
+        var owned = observation;
+        owned.server_id = owned_id;
+        try self.state.process_observations.append(self.allocator, owned);
+        self.markChanged();
+        return true;
+    }
+
     pub fn createHttpServer(
         self: *Runtime,
         expected_generation: u64,
         input: configuration.CreateHttpServerInput,
-    ) Error!configuration.ManagementOutcome {
+    ) Error!configuration.CreateResult {
         const management = self.mutableManagement(expected_generation, null) orelse
-            return self.generationOutcome(expected_generation);
+            return .{ .outcome = self.generationOutcome(expected_generation) };
         var preparation = try management.prepareCreateHttpServer(expected_generation, input);
-        return self.commitPreparedMutation(&preparation);
+        return self.commitPreparedCreate(&preparation);
     }
 
     pub fn createOauthHttpServer(
         self: *Runtime,
         expected_generation: u64,
         input: configuration.CreateOauthHttpServerInput,
-    ) Error!configuration.ManagementOutcome {
+    ) Error!configuration.CreateResult {
         const management = self.mutableManagement(expected_generation, null) orelse
-            return self.generationOutcome(expected_generation);
+            return .{ .outcome = self.generationOutcome(expected_generation) };
         var preparation = try management.prepareCreateOauthHttpServer(
             expected_generation,
             input,
         );
-        return self.commitPreparedMutation(&preparation);
+        return self.commitPreparedCreate(&preparation);
     }
 
     pub fn createStdioServer(
         self: *Runtime,
         expected_generation: u64,
         input: configuration.CreateStdioServerInput,
-    ) Error!configuration.ManagementOutcome {
+    ) Error!configuration.CreateResult {
         const management = self.mutableManagement(expected_generation, null) orelse
-            return self.generationOutcome(expected_generation);
+            return .{ .outcome = self.generationOutcome(expected_generation) };
         var preparation = try management.prepareCreateStdioServer(expected_generation, input);
-        return self.commitPreparedMutation(&preparation);
+        return self.commitPreparedCreate(&preparation);
     }
 
     pub fn updateHttpConnection(
@@ -1190,6 +1281,21 @@ pub const Runtime = struct {
         if (!policy.expectedGenerationMatches(management, expected_generation))
             return .stale_generation;
         return .rejected;
+    }
+
+    fn commitPreparedCreate(self: *Runtime, preparation: *configuration.MutationPreparation) Error!configuration.CreateResult {
+        const identity: ?[configuration.created_identity_bytes]u8 = switch (preparation.*) {
+            .prepared => |*mutation| identity: {
+                // Creation appends its generated server to the prepared target.
+                const servers = mutation.target().servers;
+                const id = servers[servers.len - 1].id;
+                std.debug.assert(id.len == configuration.created_identity_bytes);
+                break :identity id[0..configuration.created_identity_bytes].*;
+            },
+            else => null,
+        };
+        const outcome = try self.commitPreparedMutation(preparation);
+        return .{ .outcome = outcome, .server_id = if (outcome == .saved or outcome == .saved_recovery_required) identity else null };
     }
 
     fn commitPreparedMutation(
@@ -2742,7 +2848,7 @@ test "Product MCP manual recovery distinguishes HTTP auth refusal from network f
         harness.executeQueued();
         try std.testing.expect(runtime.syncRefreshJob());
         try std.testing.expect(runtime.nextOauthExpiry() == null);
-        try std.testing.expectEqual(.saved, try runtime.createHttpServer(4, .{ .display_name = "Unrelated", .url = "https://other.example.test/mcp" }));
+        try std.testing.expectEqual(.saved, (try runtime.createHttpServer(4, .{ .display_name = "Unrelated", .url = "https://other.example.test/mcp" })).outcome);
         try std.testing.expect(runtime.nextOauthExpiry() == null);
         try std.testing.expect(runtime.canBeginAuthorization(5, "oauth"));
         // Exercise an actual unrelated add/remove, including the membership
@@ -3222,10 +3328,10 @@ test "Product MCP Runtime releases a prepared mutation rejected during apply" {
     try std.testing.expect(try runtime.beginConfigurationApply(1));
     try std.testing.expectEqual(
         configuration.ManagementOutcome.rejected,
-        try runtime.createHttpServer(1, .{
+        (try runtime.createHttpServer(1, .{
             .display_name = "Prepared while applying",
             .url = "https://mcp.example.test/rpc",
-        }),
+        })).outcome,
     );
     try std.testing.expectEqual(@as(u64, 1), runtime.state.management.?.inspect().desired_generation);
 }
@@ -3409,7 +3515,7 @@ test "Product MCP obsolete add failures clear after disable or delete without an
         var harness = TestHarness{};
         var runtime = try effects.coldRuntime(&harness, "consent_required");
         defer runtime.deinit();
-        try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Unavailable", .url = "https://unavailable.example.test/mcp" }));
+        try std.testing.expectEqual(.saved, (try runtime.createHttpServer(1, .{ .display_name = "Unavailable", .url = "https://unavailable.example.test/mcp" })).outcome);
         var step = (try runtime.prepareConfigurationStep(2, .automatic)).?;
         defer step.deinit();
         const id = step.target.id();
@@ -3431,8 +3537,8 @@ test "Product MCP later apply success preserves another current target failure" 
     var harness = TestHarness{};
     var runtime = try effects.coldRuntime(&harness, "consent_required");
     defer runtime.deinit();
-    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" }));
-    try std.testing.expectEqual(.saved, try runtime.createHttpServer(2, .{ .display_name = "Second", .url = "https://second.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" })).outcome);
+    try std.testing.expectEqual(.saved, (try runtime.createHttpServer(2, .{ .display_name = "Second", .url = "https://second.example.test/mcp" })).outcome);
     var first = (try runtime.prepareConfigurationStep(3, .automatic)).?;
     defer first.deinit();
     try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
@@ -3451,7 +3557,7 @@ test "Product MCP rejected replacement settles admission without waiting for cat
     var harness = TestHarness{};
     var runtime = try effects.coldRuntime(&harness, "consent_required");
     defer runtime.deinit();
-    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Original", .url = "https://original.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try runtime.createHttpServer(1, .{ .display_name = "Original", .url = "https://original.example.test/mcp" })).outcome);
     var original = (try runtime.prepareConfigurationStep(2, .automatic)).?;
     defer original.deinit();
     var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &original.preparation)).?;
@@ -3467,4 +3573,48 @@ test "Product MCP rejected replacement settles admission without waiting for cat
     try std.testing.expectEqual(.activation_unavailable, runtime.state.admission.blocked);
     try std.testing.expectEqual(.failed, runtime.state.configuration_apply_state);
     try std.testing.expect(harness.queued == null);
+}
+
+test "MCP create receipts only expose committed identity and own it across mutations" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    const first = try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" });
+    try std.testing.expectEqual(.saved, first.outcome);
+    const identity = first.server_id.?;
+    try std.testing.expectEqualStrings(&identity, runtime.state.management.?.desiredRegistry().?.servers[1].id);
+    const stale = try runtime.createHttpServer(1, .{ .display_name = "Stale", .url = "https://stale.example.test/mcp" });
+    try std.testing.expectEqual(.stale_generation, stale.outcome);
+    try std.testing.expect(stale.server_id == null);
+    try std.testing.expectEqual(.saved, try runtime.renameServer(2, .{ .server_id = &identity, .display_name = "Renamed" }));
+    try std.testing.expectEqualStrings(&identity, runtime.state.management.?.desiredRegistry().?.servers[1].id);
+}
+
+test "MCP process observations reject old attempts and changed sources" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    const created = try runtime.createStdioServer(1, .{ .display_name = "Local", .command = "node" });
+    const id = created.server_id.?;
+    const server = runtime.state.management.?.desiredRegistry().?.servers[1];
+    var observation: configuration.ProcessObservation = .{ .server_id = &id, .source = configuration.runtimeDescriptorFingerprint(server), .attempt = 1, .fact = .pending };
+    try std.testing.expect(try runtime.observeProcess(observation));
+    observation.fact = .executable_missing;
+    try std.testing.expect(try runtime.observeProcess(observation));
+    try std.testing.expect(!try runtime.observeProcess(observation));
+    observation.attempt = 2;
+    observation.fact = .pending;
+    try std.testing.expect(try runtime.observeProcess(observation));
+    observation.attempt = 1;
+    observation.fact = .stdio_closed;
+    try std.testing.expect(!try runtime.observeProcess(observation));
+    observation.attempt = 2;
+    observation.source = @splat(0);
+    try std.testing.expect(!try runtime.observeProcess(observation));
+    try std.testing.expectEqual(configuration.ProcessFact.pending, runtime.state.process_observations.items[0].fact);
+    observation.source = configuration.runtimeDescriptorFingerprint(server);
+    try std.testing.expectEqual(.saved, try runtime.updateStdioConnection(2, .{ .server_id = &id, .display_name = "Local", .command = "other-node", .negotiation = "automatic", .timeout_ms = 30000, .auth_mode = .none }));
+    try std.testing.expect(!try runtime.observeProcess(observation));
 }

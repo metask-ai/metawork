@@ -525,6 +525,7 @@ pub const OauthClientPlan = union(enum) {
 };
 
 pub const CreateOauthHttpServerInput = struct {
+    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -627,6 +628,7 @@ const SecretCandidateSource = struct {
 };
 
 pub const CreateStdioServerInput = struct {
+    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -638,6 +640,7 @@ pub const CreateStdioServerInput = struct {
 };
 
 pub const CreateHttpServerInput = struct {
+    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -939,6 +942,31 @@ pub const ManagementOutcome = enum {
     indeterminate,
 };
 
+/// An owned create receipt. Identity is copied before preparation is released.
+/// Only confirmed canonical saves carry an identity; no allocation follows commit.
+pub const created_identity_bytes = 24;
+/// Host observations are ephemeral and are never encoded into the registry.
+pub const ProcessFact = enum(u8) {
+    pending,
+    spawned,
+    executable_missing,
+    access_denied,
+    invalid_executable,
+    spawn_failed,
+    host_resource_unavailable,
+    stdio_closed,
+};
+pub const ProcessObservation = struct {
+    server_id: []const u8,
+    source: [32]u8,
+    attempt: u64,
+    fact: ProcessFact,
+};
+pub const CreateResult = struct {
+    outcome: ManagementOutcome,
+    server_id: ?[created_identity_bytes]u8 = null,
+};
+
 pub const PreparedMutation = struct {
     allocator: std.mem.Allocator,
     plan: MutationPlan,
@@ -1179,7 +1207,7 @@ pub const ManagementPort = struct {
         if (!self.mutationReady(expected_generation) or
             base_servers.len >= self.limits.max_servers)
             return .rejected;
-        var identity_storage: [24]u8 = undefined;
+        var identity_storage: [created_identity_bytes]u8 = undefined;
         var namespace_storage: [24]u8 = undefined;
         const generated = generated: {
             var attempts: usize = 0;

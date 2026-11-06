@@ -4021,7 +4021,7 @@ test "restart recovery revalidates live authority and continues the same Convers
             .argument_values = &.{},
         } }),
     );
-    try std.testing.expectEqual(@as(usize, 12), fake_core.last_restored_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 13), fake_core.last_restored_allowed_tool_count);
 
     _ = try runPreparedTask(&restored, task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(

@@ -391,6 +391,37 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.timeout": "超时（毫秒）",
   "mcp.add.timeoutHelp":
     "每次请求的等待时限。连接和目录管理最多 {limit} 毫秒，工具调用保留配置值。",
+  "mcp.add.structured_command": "程序与参数",
+  "mcp.add.executable": "可执行文件",
+  "mcp.add.argument": "参数",
+  "mcp.add.add_argument": "添加参数",
+  "mcp.add.remove_argument": "删除参数",
+  "mcp.add.edit_command_line": "编辑完整启动命令",
+  "mcp.import.review_values":
+    "部分环境变量或标头值也出现在公开连接字段中，请在添加前核对。",
+  "mcp.proposal.title": "MCP 服务提议",
+  "mcp.proposal.body":
+    "查看公开配置后添加服务、完成认证并选择工具。后续新任务可以使用选定工具。",
+  "mcp.proposal.review": "查看 MCP 配置",
+  "mcp.proposal.detached":
+    "来源任务已停止或删除。公开字段已保留为普通添加表单，请核对后自行提交。",
+  "mcp.proposal.expired":
+    "提议已失效，未自动重试。请关闭表单，核对实际保存的连接后再添加。",
+  "mcp.proposal.rejected":
+    "MCP 提议未能接纳。请核对公开配置，凭据仅通过密码字段或 OAuth 提交。",
+  "mcp.import.title": "粘贴配置",
+  "mcp.import.paste": "在此粘贴 mcpServers JSON",
+  "mcp.import.help":
+    "粘贴严格 JSON。凭据仅留在本次表单中，逐个查看并添加服务。",
+  "mcp.import.review": "查看并添加",
+  "mcp.import.invalid": "配置无效，请重新粘贴严格 JSON。",
+  "mcp.import.unsupported": "不支持的配置字段或传输方式。",
+  "mcp.import.variables": "请提供具体值，不支持配置插值表达式。",
+  "mcp.import.permissions_ignored":
+    "未采用导入的权限设置。连接后请选择允许的工具。",
+  "mcp.import.credential": "凭据",
+  "mcp.import.capture_failed":
+    "服务已保存，但剩余凭据未能保存。请在连接详情中重新填写。",
   "mcp.add.command": "启动命令",
   "mcp.add.command_help":
     "粘贴你通常会执行的命令。MetaWork 不会执行管道、重定向或变量替换。",
@@ -413,7 +444,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息、查询参数和 fragment。",
   "mcp.add.defaults":
-    "凭证由 MetaWork 单独安全采集，不会进入此表单。保存后，页面只显示当前需要完成的下一项操作。",
+    "凭据仅通过独立密码字段提交。保存后，页面显示此连接需要完成的下一项操作。",
   "mcp.add.submit": "添加服务",
   "mcp.add.adding": "正在添加…",
   "mcp.rename.action": "保存名称",

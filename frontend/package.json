@@ -12,6 +12,7 @@
     "@base-ui/react": "1.6.0",
     "@lobehub/icons-static-svg": "1.101.0",
     "clsx": "2.1.1",
+    "jsonc-parser": "3.3.1",
     "lucide-react": "1.28.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",

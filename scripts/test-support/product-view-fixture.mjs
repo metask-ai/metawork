@@ -85,6 +85,7 @@ export function productViewFixture(
     reusedBlocks: ignoredReused,
     ...context
   } = structuredClone(state);
+  context.mcpInstallation ??= { proposal: null, notice: null };
   const selected = tasks.find((task) => task.id === scope.taskId);
   const taskPage = selected
     ? {

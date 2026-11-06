@@ -133,6 +133,14 @@ pub fn build(b: *std.Build) void {
     const image_unit_run = b.addRunArtifact(image_tests);
     b.step("test-generate-image-unit", "Run GenerateImage codec and argument tests").dependOn(&image_unit_run.step);
     artifacts.tests.step.dependOn(&image_unit_run.step);
+    const mcp_install_unit = b.createModule(.{
+        .root_source_file = b.path("src/agent/mcp_install.zig"),
+        .target = test_modules.agent.resolved_target,
+        .optimize = test_modules.agent.optimize,
+    });
+    const mcp_install_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-mcp-installation", .root_module = mcp_install_unit }));
+    b.step("test-mcp-installation", "Run strict public MCP proposal codec tests").dependOn(&mcp_install_tests.step);
+    artifacts.tests.step.dependOn(&mcp_install_tests.step);
     const image_codec_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/image_generation.zig"),
         .target = test_modules.agent.resolved_target,
@@ -1195,6 +1203,7 @@ fn addMcpInteropTests(
         @panic("Node.js is required for deterministic MCP interoperability tests");
     const fixture_options = b.addOptions();
     fixture_options.addOption([]const u8, "node_path", node_path);
+    fixture_options.addOption(bool, "npx_release_probe", b.option(bool, "mcp-npx-release-probe", "Also download and activate the pinned public MCP reference server in an isolated npx cache") orelse false);
     fixture_options.addOption(
         ?[]const u8,
         "windows_system_root",
@@ -1243,6 +1252,8 @@ fn addMcpInteropTests(
         "test-mcp-interop",
         "Run deterministic real-server MCP interoperability tests",
     ).dependOn(&run.step);
+    const npx_tests = b.addTest(.{ .name = "metawork-mcp-npx", .root_module = cases, .filters = &.{"canonical MCP uses bare npx"} });
+    b.step("test-mcp-npx", "Verify real npx/shim MCP activation with an offline package and optional pinned release probe").dependOn(&b.addRunArtifact(npx_tests).step);
     return &run.step;
 }
 

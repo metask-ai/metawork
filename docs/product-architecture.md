@@ -284,7 +284,13 @@ macOS 首次新建 Node 需要已准备的固定私有 Python，通过其标准�
 
 ### 2.5 MCP authority
 
+Product MCP 拥有容量一的进程内安装提议信箱与主线程待处理提议；Run admission 冻结窄 capability，Task owner 校验来源 Task/Run 有效性。Agent 在锁外解码有界公开草稿，callback 只 try-lock 转移 owner 并保留名额，解锁后 RequiredWake，不等待主线程。主线程取走仍占名额；已知凭据检查在接管及每次投影前执行，拒绝时释放并发布安全提示。用户 Add 在同一主线程事务内先核对可选 proposal id，确定保存后原子消费并返回 server id；失败不复活或自动重放。完成 Run 可保留建议，取消、删除和关闭清理；关闭先关 ingress，再取消/join Executor 和 Session，callback 静止后释放 owner，锁不跨唤醒或 join。提议不持久化，不依赖 Tool 展示槽，snapshot 容量独立预留其公开上限及结构开销。
+
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。
+
+Product Control 在 MCP 全部创建和替换连接入口复用 Host 已知凭据 predicate，在持久化与 effect 前拒绝敏感公开字段；不以名称、熵值或全部 env 值扩展凭据集合，也不改写既有记录。创建回执在 preparation 释放前持有确认 target 的稳定 identity，只有确定保存结果可以返回它；后续凭据捕获仍由当前 generation、server、auth mode 与 slot 校验，不通过 snapshot 猜测 identity。
+
+STDIO 启动诊断由 Application 的具体 transport owner 发布有界安全事实，绑定公开 server id、连接来源指纹与本次正式 apply attempt；引用计数保护其跨 worker/transport 生命周期，callback 只写原子事实并非阻塞唤醒，不持有或修改 Product。主线程通过窄 MCP port 接纳，与当前 Desired source 和已开始的 attempt 不符的晚到事实拒绝，隔离测试不进入正式诊断。Product 按成员保留事实，配置变化使旧事实失效；不把原始 stderr、系统错误文本或未确认退出码写入 snapshot、历史或 registry。EOF 仅证明 STDIO 关闭，不为取得诊断等待仍运行的 child；既有 Core failure ABI 与进程关闭协议不变。
 
 Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事实：
 

@@ -1321,7 +1321,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     preparation_owned = false;
     manifest_owned = false;
     defer control.deinit();
-    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(0, .{ .display_name = "Candidate", .url = "https://candidate.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(0, .{ .display_name = "Candidate", .url = "https://candidate.example.test/mcp" })).outcome);
     // The sole completion notification is already being consumed. Product
     // still owns this finished job until the main-loop lifecycle drain.
     const product = &control.mcp.?;
@@ -1381,7 +1381,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     host.now_ms = 30_000;
     try App.event(&composition, undefined, .effects_wake);
     try std.testing.expectEqual(@as(usize, 2), host.maintenances);
-    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(1, .{ .display_name = "Second", .url = "https://second.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(1, .{ .display_name = "Second", .url = "https://second.example.test/mcp" })).outcome);
     host.now_ms = 60_000;
     _ = composition.mcp_oauth_refresh.?.onTimer();
     try std.testing.expectEqual(@as(usize, 2), host.maintenances);
@@ -1392,7 +1392,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     try Effects.waitForApply(&composition);
     try App.event(&composition, undefined, .effects_wake);
     try std.testing.expectEqual(@as(usize, 3), host.maintenances);
-    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(2, .{ .display_name = "Third", .url = "https://third.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(2, .{ .display_name = "Third", .url = "https://third.example.test/mcp" })).outcome);
     host.loaded = true;
     host.now_ms = 90_000;
     fixture.fake_core.forceNextMcpApplyDisposition(fixture.wire.MCP_APPLY_REJECTED);
