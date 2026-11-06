@@ -452,6 +452,12 @@ export const enUS = {
   "mcp.add.timeout": "Timeout (ms)",
   "mcp.add.timeoutHelp":
     "Per-request timeout. Connection and catalog management are limited to {limit} ms; tool calls keep the configured timeout.",
+  "mcp.add.structured_command": "Program and arguments",
+  "mcp.add.executable": "Executable",
+  "mcp.add.argument": "Argument",
+  "mcp.add.add_argument": "Add argument",
+  "mcp.add.remove_argument": "Remove argument",
+  "mcp.add.edit_command_line": "Edit as launch command",
   "mcp.add.command": "Launch command",
   "mcp.add.command_help":
     "Paste the command you would normally run. Shell operators and substitutions are not executed.",

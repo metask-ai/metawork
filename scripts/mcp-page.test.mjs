@@ -717,8 +717,8 @@ test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", (
     name: "Edit connection settings",
   });
   assert.equal(
-    within(dialog).getByRole("textbox", { name: /Launch command/ }).value,
-    "/usr/local/bin/filesystem-server --root /workspace",
+    within(dialog).getByRole("textbox", { name: "Executable" }).value,
+    "/usr/local/bin/filesystem-server",
   );
   assert.equal(
     within(dialog).getByRole("textbox", {
@@ -726,6 +726,65 @@ test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", (
     }).value,
     "/workspace",
   );
+});
+
+test("MCP unmodified structured Edit submits literal argv and supports independent argument editing", async () => {
+  const calls = [];
+  const original = [
+    "",
+    "--filter=$HOME",
+    "`literal`",
+    "C:\\Data Files\\",
+    'a"b',
+  ];
+  const server = {
+    ...servers[2],
+    connection: {
+      ...servers[2].connection,
+      command: "C:\\Program Files\\mcp.exe",
+      arguments: original,
+    },
+  };
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "7",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [server],
+      },
+      "",
+      {
+        onUpdateStdio: async (...args) => {
+          calls.push(args);
+          return { outcome: "rejected" };
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
+  const form = screen.getByRole("dialog", { name: "Edit connection settings" });
+  const save = within(form).getByRole("button", { name: "Save connection" });
+  assert.equal(save.disabled, false);
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0][2].command, server.connection.command);
+  assert.deepEqual(calls[0][2].arguments, original);
+  fireEvent.change(within(form).getByRole("textbox", { name: "Argument 2" }), {
+    target: { value: "changed $literal" },
+  });
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(calls.length, 2));
+  assert.deepEqual(calls[1][2].arguments, [
+    "",
+    "changed $literal",
+    ...original.slice(2),
+  ]);
+  assert.equal(calls[1][2].cwd, server.connection.cwd);
 });
 
 test("MCP tests a saved connection without refreshing the current Runtime", async () => {

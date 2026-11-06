@@ -30,6 +30,12 @@ import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import {
+  commandLineToken,
+  parseMcpCommandLine,
+  validMcpArgv,
+} from "./configuration-input.ts";
+export { parseMcpCommandLine } from "./configuration-input.ts";
 
 type McpServer = McpManagementView["servers"][number];
 type PaneState =
@@ -147,74 +153,6 @@ export function validMcpHttpEndpoint(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-export function parseMcpCommandLine(value: string): string[] | null {
-  const tokens: string[] = [];
-  let token = "";
-  let quote: "single" | "double" | null = null;
-  let escaped = false;
-  let started = false;
-
-  for (const character of value.trim()) {
-    if (escaped) {
-      token += character;
-      escaped = false;
-      started = true;
-      continue;
-    }
-    if (quote === "single") {
-      if (character === "'") quote = null;
-      else token += character;
-      started = true;
-      continue;
-    }
-    if (quote === "double") {
-      if (character === '"') quote = null;
-      else if (character === "\\") escaped = true;
-      else if (character === "`" || character === "$") return null;
-      else token += character;
-      started = true;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (started) {
-        tokens.push(token);
-        token = "";
-        started = false;
-      }
-      continue;
-    }
-    if (character === "'") {
-      quote = "single";
-      started = true;
-      continue;
-    }
-    if (character === '"') {
-      quote = "double";
-      started = true;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      started = true;
-      continue;
-    }
-    if (/[|&;<>`$]/.test(character)) return null;
-    token += character;
-    started = true;
-  }
-  if (quote !== null || escaped) return null;
-  if (started) tokens.push(token);
-  return tokens.length > 0 && tokens.every((entry) => validMcpPublicText(entry))
-    ? tokens
-    : null;
-}
-
-function commandLineToken(value: string): string {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
-    ? value
-    : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
 function validMcpDisplayName(value: string): boolean {
@@ -697,6 +635,7 @@ export function McpPage({
   >("automatic");
   const [timeoutMs, setTimeoutMs] = useState("30000");
   const [commandLine, setCommandLine] = useState("");
+  const [structuredArgv, setStructuredArgv] = useState<string[] | null>(null);
   const [cwd, setCwd] = useState("");
   const [environmentNames, setEnvironmentNames] = useState<string[]>([]);
   const [stdioAuthMode, setStdioAuthMode] = useState<"none" | "static">("none");
@@ -781,7 +720,9 @@ export function McpPage({
     validMcpDisplayName(displayName) &&
     /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
     (transport === "stdio"
-      ? parseMcpCommandLine(commandLine) !== null &&
+      ? (structuredArgv !== null
+          ? validMcpArgv(structuredArgv)
+          : parseMcpCommandLine(commandLine) !== null) &&
         validMcpPublicText(cwd, false) &&
         validMcpNames(environmentNames) &&
         ((stdioAuthMode === "none" && environmentNames.length === 0) ||
@@ -830,6 +771,7 @@ export function McpPage({
     setNegotiation("automatic");
     setTimeoutMs("30000");
     setCommandLine("");
+    setStructuredArgv(null);
     setCwd("");
     setEnvironmentNames([]);
     setStdioAuthMode("none");
@@ -850,12 +792,11 @@ export function McpPage({
     setTransport(server.transport);
     setNegotiation(server.negotiation);
     setTimeoutMs(String(server.timeoutMs));
-    setCommandLine(
+    setCommandLine("");
+    setStructuredArgv(
       connection.kind === "stdio"
         ? [connection.command, ...connection.arguments]
-            .map(commandLineToken)
-            .join(" ")
-        : "",
+        : null,
     );
     setCwd(connection.kind === "stdio" ? (connection.cwd ?? "") : "");
     setEnvironmentNames(
@@ -996,7 +937,8 @@ export function McpPage({
       const input =
         transport === "stdio"
           ? (() => {
-              const parsedCommand = parseMcpCommandLine(commandLine);
+              const parsedCommand =
+                structuredArgv ?? parseMcpCommandLine(commandLine);
               if (parsedCommand === null) throw new Error("invalid command");
               return {
                 ...shared,
@@ -1763,18 +1705,96 @@ export function McpPage({
                   </label>
                   {transport === "stdio" ? (
                     <>
-                      <label>
-                        <span>{t("mcp.add.command")}</span>
-                        <Input
-                          autoComplete="off"
-                          value={commandLine}
-                          placeholder="npx -y @modelcontextprotocol/server-filesystem /workspace"
-                          onChange={(event) =>
-                            setCommandLine(event.target.value)
-                          }
-                        />
-                        <small>{t("mcp.add.command_help")}</small>
-                      </label>
+                      {structuredArgv === null ? (
+                        <label>
+                          <span>{t("mcp.add.command")}</span>
+                          <Input
+                            autoComplete="off"
+                            value={commandLine}
+                            placeholder="npx -y @modelcontextprotocol/server-filesystem /workspace"
+                            onChange={(event) =>
+                              setCommandLine(event.target.value)
+                            }
+                          />
+                          <small>{t("mcp.add.command_help")}</small>
+                        </label>
+                      ) : (
+                        <fieldset className="mcp-structured-command">
+                          <legend>{t("mcp.add.structured_command")}</legend>
+                          <label>
+                            <span>{t("mcp.add.executable")}</span>
+                            <Input
+                              autoComplete="off"
+                              value={structuredArgv[0]}
+                              onChange={(event) =>
+                                setStructuredArgv([
+                                  event.target.value,
+                                  ...structuredArgv.slice(1),
+                                ])
+                              }
+                            />
+                          </label>
+                          {structuredArgv.slice(1).map((argument, index) => (
+                            <div className="mcp-argument-row" key={index}>
+                              <label>
+                                <span>
+                                  {t("mcp.add.argument")} {index + 1}
+                                </span>
+                                <Input
+                                  autoComplete="off"
+                                  value={argument}
+                                  onChange={(event) =>
+                                    setStructuredArgv(
+                                      structuredArgv.map((value, position) =>
+                                        position === index + 1
+                                          ? event.target.value
+                                          : value,
+                                      ),
+                                    )
+                                  }
+                                />
+                              </label>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                onClick={() =>
+                                  setStructuredArgv(
+                                    structuredArgv.filter(
+                                      (_, position) => position !== index + 1,
+                                    ),
+                                  )
+                                }
+                              >
+                                {t("mcp.add.remove_argument")}
+                              </Button>
+                            </div>
+                          ))}
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={structuredArgv.length > 128}
+                            onClick={() =>
+                              setStructuredArgv([...structuredArgv, ""])
+                            }
+                          >
+                            {t("mcp.add.add_argument")}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            onClick={() => {
+                              setCommandLine(
+                                structuredArgv
+                                  .map((value) => commandLineToken(value))
+                                  .join(" "),
+                              );
+                              setStructuredArgv(null);
+                            }}
+                          >
+                            {t("mcp.add.edit_command_line")}
+                          </Button>
+                        </fieldset>
+                      )}
                       <label>
                         <span>{t("mcp.add.cwd")}</span>
                         <Input

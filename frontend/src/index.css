@@ -5676,6 +5676,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0;
 }
 
+.mcp-structured-command {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.mcp-structured-command > legend {
+  margin-bottom: 7px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
+.mcp-argument-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 7px;
+}
+
 .mcp-text-rows {
   display: grid;
   width: 100%;

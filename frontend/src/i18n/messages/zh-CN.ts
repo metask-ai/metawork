@@ -392,6 +392,12 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.timeout": "超时（毫秒）",
   "mcp.add.timeoutHelp":
     "每次请求的等待时限。连接和目录管理最多 {limit} 毫秒，工具调用保留配置值。",
+  "mcp.add.structured_command": "程序与参数",
+  "mcp.add.executable": "可执行文件",
+  "mcp.add.argument": "参数",
+  "mcp.add.add_argument": "添加参数",
+  "mcp.add.remove_argument": "删除参数",
+  "mcp.add.edit_command_line": "编辑完整启动命令",
   "mcp.add.command": "启动命令",
   "mcp.add.command_help":
     "粘贴你通常会执行的命令。MetaWork 不会执行管道、重定向或变量替换。",
