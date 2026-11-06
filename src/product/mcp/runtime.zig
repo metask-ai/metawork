@@ -469,7 +469,7 @@ pub const Runtime = struct {
                 try writeQuotedListItem(&writer, slot.name);
         } else {
             try writer.writeAll("Transport: Streamable HTTP\n");
-            try writeQuotedField(&writer, "Endpoint", server.transport.url.?);
+            try writeQuotedField(&writer, "Endpoint", configuration.endpointDisplay(server.transport));
             try writer.writeAll("Header names:\n");
             for (server.transport.headers) |slot|
                 try writeQuotedListItem(&writer, slot.name);
@@ -2411,7 +2411,7 @@ const OauthTestEffects = struct {
         const approval = configuration.connectionFingerprint(server);
         server.connection_approval = .{ .fingerprint = &approval };
         var servers = [_]configuration.ServerWire{server};
-        const initial: configuration.RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+        const initial: configuration.RegistryWire = .{ .schema_version = configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers };
         var buffer: [8192]u8 = undefined;
         var preparation = try configuration.prepare(allocator, try configuration.encode(&buffer, initial, test_limits), true, false, .{}, test_limits);
         errdefer preparation.deinit();

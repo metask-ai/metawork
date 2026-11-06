@@ -797,7 +797,7 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
         consents[index] = config.oauthConsentFingerprint(server.*, server.auth.oauth.?.consent.?).?;
         server.auth.oauth.?.consent.?.fingerprint = &consents[index];
     }
-    const desired: config.RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+    const desired: config.RegistryWire = .{ .schema_version = config.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers };
     var buffer: [8192]u8 = undefined;
     var preparation = try config.prepare(allocator, try config.encode(&buffer, desired, limits), true, false, .{ .available = true, .resolve_fn = Fixture.resolve }, limits);
     var manifest = (try config.RuntimeManifest.candidate(allocator, &preparation)).?;

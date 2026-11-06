@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 const mcp_http_protocol = @import("agent_mcp_http_protocol");
 const grant_schedule = @import("grant_schedule.zig");
 
-pub const schema_version: u8 = 2;
+pub const schema_version: u8 = 3;
 pub const transaction_schema_version: u8 = 1;
 pub const file_name = "registry.json";
 pub const transaction_file_name = "transaction.json";
@@ -189,8 +189,60 @@ pub const TransportWire = struct {
     cwd: ?[]const u8 = null,
     environment: []SecretSlotWire = &.{},
     url: ?[]const u8 = null,
+    sensitive_endpoint: ?SensitiveEndpointWire = null,
     headers: []SecretSlotWire = &.{},
 };
+
+/// Only the public origin and a Host-generated identity are configuration.
+/// Every ordered URL part, including template literals, lives in credential storage.
+pub const SensitiveEndpointWire = struct {
+    origin: []const u8,
+    identity: []const u8,
+    credential_refs: []const []const u8,
+};
+
+pub fn endpointDisplay(transport: TransportWire) []const u8 {
+    if (transport.sensitive_endpoint) |endpoint| return endpoint.origin;
+    return transport.url orelse "";
+}
+
+pub fn endpointOrigin(value: []const u8, max_bytes: usize) ?[]const u8 {
+    if (!validEndpoint(value, max_bytes)) return null;
+    const scheme = std.mem.indexOf(u8, value, "://") orelse return null;
+    const end = std.mem.indexOfAnyPos(u8, value, scheme + 3, "/?") orelse value.len;
+    return value[0..end];
+}
+
+/// The caller owns and must clear the complete private URL after use.
+pub fn resolveEndpoint(
+    allocator: std.mem.Allocator,
+    transport: TransportWire,
+    credentials: []const ResolvedCredential,
+    max_bytes: usize,
+) (std.mem.Allocator.Error || error{InvalidEndpoint})![]u8 {
+    if (transport.sensitive_endpoint) |endpoint| {
+        var length: usize = 0;
+        for (endpoint.credential_refs) |locator| {
+            const part = resolvedCredential(credentials, locator) orelse return error.InvalidEndpoint;
+            length = std.math.add(usize, length, part.len) catch return error.InvalidEndpoint;
+            if (length > max_bytes) return error.InvalidEndpoint;
+        }
+        const value = try allocator.alloc(u8, length);
+        errdefer secureFree(allocator, value);
+        var offset: usize = 0;
+        for (endpoint.credential_refs) |locator| {
+            const part = resolvedCredential(credentials, locator).?;
+            @memcpy(value[offset..][0..part.len], part);
+            offset += part.len;
+        }
+        const origin = endpointOrigin(value, max_bytes) orelse return error.InvalidEndpoint;
+        if (!std.mem.eql(u8, origin, endpoint.origin)) return error.InvalidEndpoint;
+        return value;
+    }
+    const value = transport.url orelse return error.InvalidEndpoint;
+    if (!validEndpoint(value, max_bytes)) return error.InvalidEndpoint;
+    return allocator.dupe(u8, value);
+}
 
 /// Exactly one field must be present. `literal` is ordinary configuration;
 /// credential material must be represented by `credential_ref`.
@@ -645,6 +697,7 @@ pub const CreateHttpServerInput = struct {
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
     url: []const u8,
+    sensitive_endpoint: bool = false,
     auth_mode: StaticAuthMode = .none,
     header_names: []const []const u8 = &.{},
 };
@@ -667,6 +720,7 @@ pub const UpdateHttpConnectionInput = struct {
     negotiation: []const u8,
     timeout_ms: u32,
     url: []const u8,
+    sensitive_endpoint: bool = false,
     auth_mode: StaticAuthMode,
     header_names: []const []const u8 = &.{},
 };
@@ -1115,18 +1169,24 @@ pub const ManagementPort = struct {
             .http_header,
         );
         defer self.allocator.free(headers);
-        return self.prepareCreateServer(
+        const public_url = if (input.sensitive_endpoint)
+            endpointOrigin(input.url, self.limits.max_url_bytes) orelse return .rejected
+        else
+            input.url;
+        var preparation = try self.prepareCreateServer(
             expected_generation,
             input.display_name,
             input.negotiation,
             input.timeout_ms,
             .{
                 .kind = "streamable_http",
-                .url = input.url,
+                .url = public_url,
                 .headers = headers,
             },
             input.auth_mode,
         );
+        if (!input.sensitive_endpoint) return preparation;
+        return self.secureEndpointPreparation(&preparation, null, input.url);
     }
 
     pub fn prepareCreateOauthHttpServer(
@@ -1281,10 +1341,14 @@ pub const ManagementPort = struct {
         if (!std.mem.eql(u8, base.servers[index].transport.kind, "streamable_http"))
             return .rejected;
         const existing = base.servers[index];
+        const public_url = if (input.sensitive_endpoint)
+            endpointOrigin(input.url, self.limits.max_url_bytes) orelse return .rejected
+        else
+            input.url;
         const preserve_credentials =
             staticCredentialDestinationEqual(existing, .{
                 .kind = "streamable_http",
-                .url = input.url,
+                .url = public_url,
             }, input.auth_mode);
         const headers = try secretSlotsFromNames(
             self.allocator,
@@ -1299,16 +1363,18 @@ pub const ManagementPort = struct {
         replacement.timeout_ms = input.timeout_ms;
         replacement.transport = .{
             .kind = "streamable_http",
-            .url = input.url,
+            .url = public_url,
             .headers = headers,
         };
         replacement.auth = staticAuth(input.auth_mode);
-        return self.prepareConnectionReplacement(
+        var preparation = try self.prepareConnectionReplacement(
             expected_generation,
             base,
             index,
             replacement,
         );
+        if (!input.sensitive_endpoint) return preparation;
+        return self.secureEndpointPreparation(&preparation, input.server_id, input.url);
     }
 
     pub fn prepareUpdateOauthHttpConnection(
@@ -1446,6 +1512,45 @@ pub const ManagementPort = struct {
             .oauth_operation = base.oauth_operation,
             .servers = servers,
         });
+    }
+
+    /// Replaces an effect-free public draft with one credential-journal target.
+    /// No public-origin intermediate configuration is ever committed or connected.
+    fn secureEndpointPreparation(self: *ManagementPort, preparation: *MutationPreparation, server_id: ?[]const u8, endpoint: []const u8) std.mem.Allocator.Error!MutationPreparation {
+        defer switch (preparation.*) {
+            .prepared => |*value| value.deinit(),
+            else => {},
+        };
+        const origin = endpointOrigin(endpoint, self.limits.max_url_bytes) orelse return .rejected;
+        var target = switch (preparation.*) {
+            .prepared => |*value| value.target(),
+            .unchanged => if (self.desired) |value| blk: {
+                var next = value.value;
+                next.generation += 1;
+                break :blk next;
+            } else return .rejected,
+            .rejected => return .rejected,
+        };
+        target.servers = try self.allocator.dupe(ServerWire, target.servers);
+        defer self.allocator.free(target.servers);
+        const index = if (server_id) |id| findServerIndex(target.servers, id) orelse return .rejected else target.servers.len - 1;
+        var locator_storage: [35]u8 = undefined;
+        const locator = self.freshCredentialLocator(target, &locator_storage) orelse return .rejected;
+        const refs = [_][]const u8{locator};
+        var server = &target.servers[index];
+        server.transport.url = null;
+        server.transport.sensitive_endpoint = .{ .origin = origin, .identity = locator, .credential_refs = &refs };
+        const fingerprint = connectionFingerprint(server.*);
+        server.connection_approval = .{ .fingerprint = &fingerprint };
+        var plan = (planMutation(self.allocator, if (self.desired) |value| value.value else null, target, if (self.desired) |value| value.value.generation else 0, &refs, self.limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        }) orelse return .unchanged;
+        errdefer plan.deinit();
+        const candidates = try self.allocator.alloc(CandidateCredential, 1);
+        errdefer self.allocator.free(candidates);
+        candidates[0] = .{ .locator = plan.transaction.candidate_locators[0], .secret = try self.allocator.dupe(u8, endpoint) };
+        return .{ .prepared = .{ .allocator = self.allocator, .plan = plan, .candidates = candidates } };
     }
 
     pub fn prepareApproveConnection(
@@ -2556,7 +2661,8 @@ fn staticCredentialDestinationEqual(
         !std.mem.eql(u8, existing.transport.kind, replacement.kind))
         return false;
     if (std.mem.eql(u8, replacement.kind, "streamable_http"))
-        return optionalTextEqual(existing.transport.url, replacement.url);
+        return optionalTextEqual(existing.transport.url, replacement.url) and
+            sensitiveEndpointEqual(existing.transport.sensitive_endpoint, replacement.sensitive_endpoint);
     if (!std.mem.eql(u8, replacement.kind, "stdio") or
         !optionalTextEqual(existing.transport.command, replacement.command) or
         !optionalTextEqual(existing.transport.cwd, replacement.cwd) or
@@ -3025,6 +3131,7 @@ pub fn connectionFingerprint(server: ServerWire) [64]u8 {
     hashInteger(&hash, server.transport.environment.len);
     for (server.transport.environment) |entry| hashField(&hash, entry.name);
     hashOptionalField(&hash, server.transport.url);
+    hashSensitiveEndpoint(&hash, server.transport.sensitive_endpoint);
     hashInteger(&hash, server.transport.headers.len);
     for (server.transport.headers) |entry| hashField(&hash, entry.name);
     var digest: [32]u8 = undefined;
@@ -3119,6 +3226,8 @@ fn authenticationFingerprint(server: ServerWire) DescriptorFingerprint {
     hashField(&hash, "metawork.mcp.authentication-absence/v1");
     hashField(&hash, server.auth.kind);
     hashInteger(&hash, credentialReferenceCount(server));
+    if (server.transport.sensitive_endpoint) |endpoint|
+        for (endpoint.credential_refs) |locator| hashField(&hash, locator);
     for (server.transport.arguments) |argument| {
         if (argument.credential_ref) |locator| hashField(&hash, locator);
     }
@@ -3155,10 +3264,22 @@ fn hashTransport(hash: *Sha256, transport: TransportWire) void {
         hashOptionalField(hash, entry.credential_ref);
     }
     hashOptionalField(hash, transport.url);
+    hashSensitiveEndpoint(hash, transport.sensitive_endpoint);
     hashInteger(hash, transport.headers.len);
     for (transport.headers) |entry| {
         hashField(hash, entry.name);
         hashOptionalField(hash, entry.credential_ref);
+    }
+}
+
+fn hashSensitiveEndpoint(hash: *Sha256, endpoint: ?SensitiveEndpointWire) void {
+    // Preserve existing public connection fingerprints during schema migration.
+    if (endpoint) |value| {
+        hashField(hash, "sensitive-endpoint/v1");
+        hashField(hash, value.origin);
+        hashField(hash, value.identity);
+        hashInteger(hash, value.credential_refs.len);
+        for (value.credential_refs) |locator| hashField(hash, locator);
     }
 }
 
@@ -3319,6 +3440,9 @@ fn pruneUnusedCredentials(
 }
 
 fn serverReferencesCredential(server: ServerWire, locator: []const u8) bool {
+    if (server.transport.sensitive_endpoint) |endpoint|
+        for (endpoint.credential_refs) |candidate|
+            if (std.mem.eql(u8, candidate, locator)) return true;
     for (server.transport.arguments) |value|
         if (value.credential_ref) |candidate|
             if (std.mem.eql(u8, candidate, locator)) return true;
@@ -3350,6 +3474,10 @@ fn resolveServerCredentials(
     credentials: *std.ArrayList(ResolvedCredential),
 ) ResolveError!bool {
     var ready = true;
+    if (server.transport.sensitive_endpoint) |endpoint|
+        for (endpoint.credential_refs) |locator| {
+            ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
+        };
     for (server.transport.arguments) |value| {
         if (value.credential_ref) |locator| {
             ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
@@ -3443,6 +3571,18 @@ fn validateResolvedServerCredentials(
             }
         }
     } else if (std.mem.eql(u8, server.transport.kind, "streamable_http")) {
+        if (server.transport.sensitive_endpoint) |endpoint| {
+            const resolved = resolveEndpoint(allocator, server.transport, credentials, limits.max_url_bytes) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidEndpoint => return .unusable,
+            };
+            defer secureFree(allocator, resolved);
+            for (endpoint.credential_refs) |locator| {
+                const secret = resolvedCredential(credentials, locator) orelse return .unusable;
+                if (try appendUniqueSecret(allocator, &unique_secrets, secret))
+                    total_bytes = std.math.add(usize, total_bytes, secret.len) catch return .capacity_exceeded;
+            }
+        }
         for (server.transport.headers) |entry| {
             const locator = entry.credential_ref orelse return .unusable;
             const secret = resolvedCredential(credentials, locator) orelse return .unusable;
@@ -3529,9 +3669,23 @@ pub fn decode(
 ) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
     return switch (try registrySourceSchemaVersion(allocator, input)) {
         schema_version => decodeCurrent(allocator, input, limits),
+        2 => migrateSchemaTwo(allocator, input, limits),
         1 => migrateLegacyRegistry(allocator, input, limits),
         else => error.RegistryCorrupt,
     };
+}
+
+fn migrateSchemaTwo(allocator: std.mem.Allocator, input: []const u8, limits: Limits) (Error || std.mem.Allocator.Error)!std.json.Parsed(RegistryWire) {
+    var parsed = std.json.parseFromSlice(RegistryWire, allocator, input, .{ .ignore_unknown_fields = false, .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.RegistryCorrupt,
+    };
+    errdefer parsed.deinit();
+    // Schema 2 never had the private endpoint representation.
+    for (parsed.value.servers) |server| if (server.transport.sensitive_endpoint != null) return error.RegistryCorrupt;
+    parsed.value.schema_version = schema_version;
+    validateRegistryIdentity(&parsed.value, limits) catch return error.RegistryCorrupt;
+    return parsed;
 }
 
 pub fn registrySourceSchemaVersion(
@@ -4014,6 +4168,10 @@ fn collectCredentialReferences(
     limits: Limits,
 ) std.mem.Allocator.Error!void {
     for (registry.servers) |server| {
+        if (server.transport.sensitive_endpoint) |endpoint|
+            for (endpoint.credential_refs) |locator|
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
         for (server.transport.arguments) |value|
             if (value.credential_ref) |locator|
                 if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
@@ -4200,6 +4358,7 @@ fn transportWireEqual(left: TransportWire, right: TransportWire) bool {
         !optionalTextEqual(left.command, right.command) or
         !optionalTextEqual(left.cwd, right.cwd) or
         !optionalTextEqual(left.url, right.url) or
+        !sensitiveEndpointEqual(left.sensitive_endpoint, right.sensitive_endpoint) or
         left.arguments.len != right.arguments.len or
         left.environment.len != right.environment.len or
         left.headers.len != right.headers.len)
@@ -4211,6 +4370,13 @@ fn transportWireEqual(left: TransportWire, right: TransportWire) bool {
     for (left.headers, right.headers) |left_entry, right_entry|
         if (!secretSlotEqual(left_entry, right_entry)) return false;
     return true;
+}
+
+fn sensitiveEndpointEqual(left: ?SensitiveEndpointWire, right: ?SensitiveEndpointWire) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?.origin, right.?.origin) and
+        std.mem.eql(u8, left.?.identity, right.?.identity) and
+        stringSlicesEqual(left.?.credential_refs, right.?.credential_refs);
 }
 
 fn secretSlotEqual(left: SecretSlotWire, right: SecretSlotWire) bool {
@@ -4588,6 +4754,7 @@ fn credentialReferenceCount(server: ServerWire) usize {
 
 fn transportCredentialReferenceCount(transport: TransportWire) usize {
     var count: usize = 0;
+    if (transport.sensitive_endpoint) |endpoint| count += endpoint.credential_refs.len;
     for (transport.arguments) |value| if (value.credential_ref != null) {
         count += 1;
     };
@@ -4603,7 +4770,7 @@ fn transportCredentialReferenceCount(transport: TransportWire) usize {
 fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
     if (std.mem.eql(u8, transport.kind, "stdio")) {
         const command = transport.command orelse return .invalid_transport;
-        if (transport.url != null or transport.headers.len != 0 or
+        if (transport.url != null or transport.sensitive_endpoint != null or transport.headers.len != 0 or
             !validText(command, limits.max_command_bytes, false) or
             std.mem.indexOfScalar(u8, command, 0) != null or
             transport.arguments.len > limits.max_argument_count or
@@ -4639,12 +4806,23 @@ fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
     }
     if (!std.mem.eql(u8, transport.kind, "streamable_http"))
         return .invalid_transport;
-    const url = transport.url orelse return .invalid_transport;
     if (transport.command != null or transport.arguments.len != 0 or
         transport.cwd != null or transport.environment.len != 0 or
-        transport.headers.len > limits.max_header_count or
-        !validEndpoint(url, limits.max_url_bytes))
+        transport.headers.len > limits.max_header_count)
         return .invalid_transport;
+    if (transport.sensitive_endpoint) |endpoint| {
+        if (transport.url != null or
+            !validText(endpoint.identity, limits.max_identity_bytes, false) or
+            endpoint.credential_refs.len == 0 or endpoint.credential_refs.len > limits.max_credential_locators)
+            return .invalid_transport;
+        const origin = endpointOrigin(endpoint.origin, limits.max_url_bytes) orelse return .invalid_transport;
+        if (!std.mem.eql(u8, origin, endpoint.origin)) return .invalid_transport;
+        for (endpoint.credential_refs) |locator|
+            if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return .invalid_credential_locator;
+    } else {
+        const url = transport.url orelse return .invalid_transport;
+        if (!validEndpoint(url, limits.max_url_bytes)) return .invalid_transport;
+    }
     for (transport.headers, 0..) |entry, index| {
         if (!validHeaderName(entry.name) or reservedHttpHeader(entry.name))
             return .invalid_transport;
@@ -4688,16 +4866,16 @@ fn validEndpoint(value: []const u8, max_bytes: usize) bool {
     if (!validText(value, max_bytes, false)) return false;
     for (value) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\')
         return false;
-    if (std.mem.indexOfAny(u8, value, "?#") != null)
+    if (std.mem.indexOfScalar(u8, value, '#') != null)
         return false;
     const uri = std.Uri.parse(value) catch return false;
-    if (uri.user != null or uri.password != null or uri.query != null or
+    if (uri.user != null or uri.password != null or
         uri.fragment != null or uri.host == null)
         return false;
     const scheme_suffix = value[uri.scheme.len..];
     if (!std.mem.startsWith(u8, scheme_suffix, "://")) return false;
     const authority_and_path = scheme_suffix[3..];
-    const authority_end = std.mem.indexOfScalar(u8, authority_and_path, '/') orelse
+    const authority_end = std.mem.indexOfAny(u8, authority_and_path, "/?") orelse
         authority_and_path.len;
     const authority = parseEndpointAuthority(authority_and_path[0..authority_end]) orelse
         return false;
@@ -5397,7 +5575,7 @@ test "OAuth deadlines freeze per grant and bounded retry does not extend credent
     second.id = "b";
     second.auth.oauth.?.grant.?.expires_at_unix_ms = 111_000;
     var servers = [_]ServerWire{ server, second };
-    const registry: RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+    const registry: RegistryWire = .{ .schema_version = schema_version, .generation = 1, .oauth_operation = null, .servers = &servers };
     var schedule = try OauthRefreshSchedule.init(std.testing.allocator, test_limits);
     defer schedule.deinit();
     schedule.reconcile(registry);
@@ -5619,6 +5797,75 @@ test "registry enforces the shared MCP HTTP endpoint contract" {
         try std.testing.expect(validEndpoint(endpoint, 4096));
     for (parsed.value.rejected) |endpoint|
         try std.testing.expect(!validEndpoint(endpoint, 4096));
+}
+
+test "sensitive endpoint creation journals its complete URL without a public intermediate" {
+    const Entropy = struct {
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, 0xab);
+            return true;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+    };
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = .{ .available = true },
+        .credentials = .{ .available = true, .probe_fn = Entropy.probe },
+        .identity_generator = .{ .available = true, .fill_fn = Entropy.fill },
+        .locator_generator = .{ .available = true, .fill_fn = Entropy.fill },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    const private_url = "https://mcp.example.test/k/synthetic-key?route=private";
+    var mutation = switch (try management.prepareCreateHttpServer(0, .{
+        .display_name = "Private endpoint",
+        .url = private_url,
+        .sensitive_endpoint = true,
+    })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer mutation.deinit();
+    try std.testing.expect(management.desiredRegistry() == null);
+    const target = mutation.target();
+    const transport = target.servers[0].transport;
+    try std.testing.expect(transport.url == null);
+    try std.testing.expectEqualStrings("https://mcp.example.test", endpointDisplay(transport));
+    try std.testing.expectEqual(@as(usize, 1), mutation.candidates.len);
+    try std.testing.expectEqualStrings(private_url, mutation.candidates[0].secret);
+    try std.testing.expectEqualStrings(transport.sensitive_endpoint.?.credential_refs[0], mutation.plan.transaction.candidate_locators[0]);
+    var buffer: [max_store_bytes]u8 = undefined;
+    const encoded = try encode(&buffer, target, test_limits);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "route=private") == null);
+    const credentials = [_]ResolvedCredential{.{ .locator = mutation.candidates[0].locator, .secret = mutation.candidates[0].secret }};
+    const resolved = try resolveEndpoint(std.testing.allocator, transport, &credentials, 4096);
+    defer secureFree(std.testing.allocator, resolved);
+    try std.testing.expectEqualStrings(private_url, resolved);
+    var changed = transport;
+    var private = changed.sensitive_endpoint.?;
+    private.origin = "https://other.example.test";
+    changed.sensitive_endpoint = private;
+    try std.testing.expectError(error.InvalidEndpoint, resolveEndpoint(std.testing.allocator, changed, &credentials, 4096));
+    try std.testing.expectError(error.InvalidEndpoint, resolveEndpoint(std.testing.allocator, transport, &.{}, 4096));
+}
+
+test "schema two migration preserves approved public connections and tool grants" {
+    const old =
+        \\{"schema_version":2,"generation":8,"oauth_operation":null,"servers":[{"id":"remote","namespace":"remote","display_name":"Remote","enabled":true,"negotiation":"automatic","timeout_ms":30000,"transport":{"kind":"streamable_http","url":"https://mcp.example.test/mcp"},"auth":{"kind":"none","oauth":null},"connection_approval":{"fingerprint":"e7fd88fc9bfb80b164aaa354e7ed4fe8992f942d608d51da74b8f232406578a7"},"tools":["search"]}]}
+    ;
+    var migrated = try decode(std.testing.allocator, old, test_limits);
+    defer migrated.deinit();
+    try std.testing.expectEqual(schema_version, migrated.value.schema_version);
+    try std.testing.expectEqual(@as(u64, 8), migrated.value.generation);
+    const server = migrated.value.servers[0];
+    try std.testing.expect(server.enabled);
+    try std.testing.expectEqualStrings("search", server.tools[0]);
+    try std.testing.expectEqualStrings(server.connection_approval.?.fingerprint, &connectionFingerprint(server));
+    try std.testing.expect(serverProblem(server, test_limits) == null);
+    try std.testing.expect(server.transport.sensitive_endpoint == null);
+    try std.testing.expectEqualStrings("https://mcp.example.test/mcp", server.transport.url.?);
 }
 
 test "registry file store atomically replaces bytes under one writer lock" {

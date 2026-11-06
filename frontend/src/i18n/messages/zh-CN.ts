@@ -443,7 +443,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.remove_row": "删除此行",
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
-    "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息、查询参数和 fragment。",
+    "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息和 fragment。",
   "mcp.add.defaults":
     "凭据仅通过独立密码字段提交。保存后，页面显示此连接需要完成的下一项操作。",
   "mcp.add.submit": "添加服务",

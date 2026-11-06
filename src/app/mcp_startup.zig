@@ -109,7 +109,7 @@ pub fn prepare(
     defer if (restored_registry) |*registry| registry.deinit();
     if (registry_corrupt) {
         if (source_schema_version) |version| {
-            if (version != 1 and version != mcp_configuration.schema_version)
+            if (version != 1 and version != 2 and version != mcp_configuration.schema_version)
                 return unavailable(.corrupt, .recovery_required, .unrecognized_format);
         }
         configuration_store.quarantine(std.heap.c_allocator, .registry, empty_registry) catch |err| switch (err) {
@@ -155,7 +155,7 @@ pub fn prepare(
             diagnostic = .journal_recovery_failed;
         },
     };
-    if (!recovery_failed and restored_bytes != null and source_schema_version == 1) {
+    if (!recovery_failed and restored_bytes != null and source_schema_version != mcp_configuration.schema_version) {
         var migrated = mcp_configuration.decode(
             std.heap.c_allocator,
             restored_bytes.?,
@@ -346,7 +346,7 @@ test "MCP startup classifies registry and journal together without deleting quar
         .{ .registry = current, .transaction = "{broken-journal\r\n", .generation = 4 },
         .{ .registry = current, .transaction = journal, .generation = 4 },
         .{ .registry = null, .transaction = "{\"schema_version\":1,\"base_generation\":5,\"target_generation\":6,\"candidate_locators\":[\"orphan\"],\"retired_locators\":[]}", .generation = null },
-        .{ .registry = "{\"schema_version\":3,\"generation\":4,\"servers\":[]}", .transaction = journal, .generation = null, .ready = false, .isolated = false, .diagnostic = .unrecognized_format },
+        .{ .registry = "{\"schema_version\":4,\"generation\":4,\"servers\":[]}", .transaction = journal, .generation = null, .ready = false, .isolated = false, .diagnostic = .unrecognized_format },
         .{ .registry = current, .transaction = "{\"schema_version\":2}", .generation = null, .ready = false, .isolated = false, .diagnostic = .unrecognized_format },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});

@@ -6,7 +6,10 @@
     "http://localhost:3000/mcp",
     "http://LOCALHOST/mcp",
     "http://127.0.0.1/mcp",
-    "http://[::1]:3000/mcp"
+    "http://[::1]:3000/mcp",
+    "https://example.com/mcp?",
+    "https://example.com/mcp?token=x",
+    "https://example.com?route=mcp"
   ],
   "rejected": [
     "http://192.168.1.2/mcp",
@@ -21,11 +24,9 @@
     "https://example.com:+443/mcp",
     "http://localhost:70000/mcp",
     "https:example.com/mcp",
-    "https://example.com/mcp?",
     "https://example.com/mcp#",
     "https://@example.com/mcp",
     "https://user@example.com/mcp",
-    "https://example.com/mcp?token=x",
     "https://exa mple.com/mcp",
     "https://example.com/a\\b",
     "https://%65xample.com/mcp",

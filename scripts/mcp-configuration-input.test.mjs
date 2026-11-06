@@ -81,7 +81,7 @@ test("import rejects conflicting fields, reserved slots, invalid endpoints and c
     { command: "node", args: [1] },
     { command: "node", env: { Path: "bad" } },
     { command: "node", env: { A: "a", a: "b" } },
-    { url: "https://example.test?key=secret" },
+    { url: "https://example.test/mcp#fragment" },
     { url: "https://example.test", headers: { Host: "bad" } },
     { command: "node", env: { TOKEN: "界".repeat(4) } },
   ])
@@ -93,6 +93,15 @@ test("import rejects conflicting fields, reserved slots, invalid endpoints and c
       ).entries.length,
       0,
     );
+});
+
+test("HTTP configuration preserves endpoint query bytes", () => {
+  const url = "https://example.test?key=synthetic%2Bvalue&route=mcp";
+  const result = parseMcpConfiguration(
+    JSON.stringify({ mcpServers: { query: { url } } }),
+  );
+  assert.equal(result.issues.length, 0);
+  assert.equal(result.entries[0].draft.endpoint, url);
 });
 
 test("Windows commands preserve drive, UNC and quoted paths", () => {

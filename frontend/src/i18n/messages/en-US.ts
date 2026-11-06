@@ -504,7 +504,7 @@ export const enUS = {
   "mcp.add.remove_row": "Remove row",
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
-    "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
+    "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
   "mcp.add.defaults":
     "Credentials use separate password fields. After saving, MetaWork shows the next action this connection needs.",
   "mcp.add.submit": "Add server",

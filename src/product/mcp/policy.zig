@@ -757,7 +757,7 @@ test "OAuth operation remains excluded from every rebuilt Admission target" {
     };
     var servers = [_]mcp_configuration.ServerWire{ oauth_server, other };
     var registry: mcp_configuration.RegistryWire = .{
-        .schema_version = 2,
+        .schema_version = mcp_configuration.schema_version,
         .generation = 7,
         .oauth_operation = .{
             .id = "refresh-1",

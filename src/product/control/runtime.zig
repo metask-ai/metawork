@@ -6708,7 +6708,8 @@ pub const Runtime = struct {
             for (input.arguments) |value| if (self.containsKnownCredential(value)) return true;
             for (input.environment_names) |value| if (self.containsKnownCredential(value)) return true;
         } else {
-            if (self.containsKnownCredential(input.url)) return true;
+            const private_endpoint = if (@hasField(@TypeOf(input), "sensitive_endpoint")) input.sensitive_endpoint else false;
+            if (!private_endpoint and self.containsKnownCredential(input.url)) return true;
             if (@hasField(@TypeOf(input), "header_names")) {
                 for (input.header_names) |value| if (self.containsKnownCredential(value)) return true;
             } else switch (input.client) {
@@ -20534,7 +20535,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         oversized_server,
     };
     const registry: mcp_configuration.RegistryWire = .{
-        .schema_version = 2,
+        .schema_version = mcp_configuration.schema_version,
         .generation = 4,
         .oauth_operation = null,
         .servers = &servers,
@@ -20853,6 +20854,16 @@ test "empty MCP startup commits a proven manageable runtime" {
     const leaking_http = try control.createMcpHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL" });
     try std.testing.expectEqual(.rejected, leaking_http.outcome);
     try std.testing.expect(leaking_http.server_id == null);
+    try std.testing.expect(!control.mcpPublicInputContainsSensitive(mcp_configuration.CreateHttpServerInput{
+        .display_name = "Private endpoint",
+        .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL",
+        .sensitive_endpoint = true,
+    }));
+    try std.testing.expect(control.mcpPublicInputContainsSensitive(mcp_configuration.CreateHttpServerInput{
+        .display_name = "SYNTHETIC-MCP-CREDENTIAL",
+        .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL",
+        .sensitive_endpoint = true,
+    }));
     try std.testing.expectEqual(.rejected, (try control.createMcpStdioServer(0, .{ .display_name = "Bad", .command = "node", .arguments = &.{"SYNTHETIC-MCP-CREDENTIAL"} })).outcome);
     try std.testing.expectEqual(.rejected, (try control.createMcpOauthHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/mcp", .client = .{ .pre_registered = .{ .client_id = "SYNTHETIC-MCP-CREDENTIAL" } } })).outcome);
     try std.testing.expectEqual(@as(?u64, null), control.inspectMcpDesiredConfiguration().?.desired_generation);
