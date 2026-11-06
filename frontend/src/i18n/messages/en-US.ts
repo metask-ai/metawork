@@ -317,7 +317,7 @@ export const enUS = {
   "workspace.label": "Workspace",
   "workspace.select": "Choose working directory",
   "workspace.add": "Open local folder",
-  "workspace.none": "No workspace selected",
+  "workspace.working_directory": "Working directory",
   "workspace.automatic_directory": "No working directory",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",

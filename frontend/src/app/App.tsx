@@ -1563,8 +1563,7 @@ export default function App() {
     (workspace) => workspace.id === composerWorkspaceId,
   );
   const composerWorkspaceLabel =
-    composerWorkspace?.canonicalRoot ??
-    t(newTaskDraftActive ? "workspace.select" : "workspace.none");
+    composerWorkspace?.canonicalRoot || t("workspace.select");
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
     ? composerWorkspace?.authorization === "available"
     : snapshot.capabilities.automaticWorkspaces;
@@ -4273,7 +4272,6 @@ export default function App() {
           composerWorkspace &&
           composerWorkspace.authorization !== "available",
         )}
-        workspaceMissing={Boolean(!newTaskDraftActive && !composerWorkspace)}
         workspaceLabel={composerWorkspaceLabel}
         workspaceTitle={composerWorkspaceLabel}
         workspaceDiagnostic={
@@ -4521,6 +4519,18 @@ export default function App() {
                 key={activeTask.id}
                 task={activeTask}
                 models={snapshot.models}
+                workspace={composerWorkspace}
+                workspaceOpenDisabled={workbenchMutationDisabled}
+                onOpenWorkspace={
+                  composerWorkspace
+                    ? () =>
+                        client.openWorkspace(
+                          composerWorkspace.id,
+                          composerWorkspace.epoch,
+                        )
+                    : undefined
+                }
+                workspaceDiagnostic={composerCatalogFeedback?.diagnostic}
                 permissionProfilesEnabled={
                   snapshot.capabilities.permissionProfiles
                 }

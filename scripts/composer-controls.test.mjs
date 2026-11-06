@@ -1763,7 +1763,6 @@ function renderComposer(overrides = {}) {
       canSubmit: true,
       runInFlight: false,
       accessRequired: false,
-      workspaceMissing: false,
       workspaceLabel: "metawork",
       workspaceTitle: "/repo/metawork",
       workspaceOptions: [],

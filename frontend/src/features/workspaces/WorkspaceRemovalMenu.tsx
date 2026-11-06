@@ -15,6 +15,7 @@ import {
   type ContextMenuAnchor,
 } from "../../components/ui/context-menu-anchor.ts";
 import { useI18n } from "../../i18n/context.ts";
+import { useWorkspaceDirectoryOpen } from "./useWorkspaceDirectoryOpen.ts";
 
 export function WorkspaceRemovalMenu({
   workspace,
@@ -37,8 +38,10 @@ export function WorkspaceRemovalMenu({
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeFailed, setRemoveFailed] = useState(false);
-  const [openState, setOpenState] = useState<"idle" | "opening" | "failed">(
-    "idle",
+  const { cannotOpen, openDirectory, openFailed } = useWorkspaceDirectoryOpen(
+    workspace,
+    onOpen,
+    openDisabled,
   );
   const cancel = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -46,11 +49,6 @@ export function WorkspaceRemovalMenu({
   const removeItem = useRef<HTMLElement>(null);
   const openItem = useRef<HTMLElement>(null);
   const keyboardOpen = useRef(false);
-  const cannotOpen =
-    openDisabled ||
-    openState === "opening" ||
-    workspace.redacted ||
-    workspace.authorization !== "available";
   function openMenu(
     event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
     anchorToElement = false,
@@ -73,15 +71,6 @@ export function WorkspaceRemovalMenu({
   function handleMenuKey(event: KeyboardEvent<HTMLElement>) {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))
       openMenu(event);
-  }
-  async function openDirectory() {
-    if (cannotOpen) return;
-    setOpenState("opening");
-    try {
-      setOpenState((await onOpen()).opened ? "idle" : "failed");
-    } catch {
-      setOpenState("failed");
-    }
   }
   async function removeProject() {
     if (removing || openDisabled) return;
@@ -129,7 +118,7 @@ export function WorkspaceRemovalMenu({
           <Icon name="more" />
         </button>
       </div>
-      {openState === "failed" && (
+      {openFailed && (
         <p className="task-list-empty" role="alert">
           {t("workspace.open_failed")}
         </p>

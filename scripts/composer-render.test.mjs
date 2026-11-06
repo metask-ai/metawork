@@ -62,7 +62,6 @@ const base = {
   canSubmit: false,
   runInFlight: false,
   accessRequired: false,
-  workspaceMissing: false,
   workspaceLabel: "Choose working directory",
   workspaceTitle: "Choose working directory",
   workspaceOptions: [
@@ -821,7 +820,6 @@ test("a new Task draft is editable before its first send", () => {
   const markup = render({
     draft: { kind: "text", text: "Ship the release" },
     canSubmit: true,
-    workspaceMissing: false,
     workspaceLabel: "alpha",
     workspaceTitle: "/repo/alpha",
     workspaceOptions: [
@@ -894,7 +892,6 @@ test("an unavailable workspace preserves editable text and offers folder reselec
   const markup = render({
     draft: { kind: "text", text: "Keep this draft" },
     accessRequired: true,
-    workspaceMissing: false,
     workspaceLabel: "/repo/alpha",
     workspaceTitle: "/repo/alpha",
   });
@@ -907,7 +904,7 @@ test("an unavailable workspace preserves editable text and offers folder reselec
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("Composer puts Workspace selection before the model and the bound path below the input", () => {
+test("Composer puts Workspace selection before the model only for a new Task", () => {
   const draft = render();
   const toolbar = draft.indexOf('class="composer-context-actions"');
   const selection = draft.indexOf('class="composer-workspace-context"');
@@ -919,14 +916,10 @@ test("Composer puts Workspace selection before the model and the bound path belo
     workspaceLabel: "/repo/metawork",
     workspaceTitle: "/repo/metawork",
   });
-  const send = conversation.indexOf('class="composer-model-actions"');
-  const path = conversation.indexOf('class="composer-workspace-context"');
-  assert.ok(send >= 0 && send < path);
-  assert.match(
+  assert.doesNotMatch(
     conversation,
-    /composer-workspace-readonly[^>]*title="\/repo\/metawork"/,
+    /composer-workspace-context|\/repo\/metawork/,
   );
-  assert.doesNotMatch(conversation, /composer-workspace-trigger/);
 });
 
 test("only non-composable Task states disable the Composer", () => {

@@ -19,25 +19,21 @@ type WorkspaceOption = {
 
 export function WorkspaceContextSelector({
   accessRequired,
-  missing,
   label,
   title,
   diagnostic,
   options,
   selectedId,
-  editable,
   disabled,
   onConfirmAccess,
   onSelect,
 }: {
   accessRequired: boolean;
-  missing: boolean;
   label: string;
   title: string;
   diagnostic?: string;
   options: WorkspaceOption[];
   selectedId: string;
-  editable: boolean;
   disabled: boolean;
   onConfirmAccess: () => void;
   onSelect: (workspaceId: string) => void;
@@ -83,39 +79,26 @@ export function WorkspaceContextSelector({
   return (
     <div
       className="composer-workspace-context"
-      data-state={
-        missing
-          ? "missing"
-          : accessRequired
-            ? "reauthorization-required"
-            : "ready"
-      }
+      data-state={accessRequired ? "reauthorization-required" : "ready"}
       role="group"
       aria-label={t("workspace.label")}
     >
-      {editable ? (
-        <SelectionMenu
-          value={selectedId}
-          options={menuOptions}
-          placeholder={label}
-          ariaLabel={t("workspace.select")}
-          title={title}
-          disabled={disabled}
-          compact
-          leading={<Icon name={accessRequired ? "warning" : "workspace"} />}
-          triggerClassName="composer-workspace-trigger w-auto"
-          contentClassName="composer-workspace-menu"
-          onValueChange={(value) => {
-            if (value === openLocalFolder) onConfirmAccess();
-            else onSelect(value);
-          }}
-        />
-      ) : (
-        <strong className="composer-workspace-readonly" title={title}>
-          <Icon name="workspace" />
-          <span>{label}</span>
-        </strong>
-      )}
+      <SelectionMenu
+        value={selectedId}
+        options={menuOptions}
+        placeholder={label}
+        ariaLabel={t("workspace.select")}
+        title={title}
+        disabled={disabled}
+        compact
+        leading={<Icon name={accessRequired ? "warning" : "workspace"} />}
+        triggerClassName="composer-workspace-trigger w-auto"
+        contentClassName="composer-workspace-menu"
+        onValueChange={(value) => {
+          if (value === openLocalFolder) onConfirmAccess();
+          else onSelect(value);
+        }}
+      />
       {diagnostic && (
         <Popover.Root>
           <Popover.Trigger

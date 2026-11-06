@@ -8939,40 +8939,25 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .composer-workspace-context {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   min-height: 30px;
-  margin-top: 6px;
-  padding: 0 7px;
   align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
+  gap: 4px;
   color: var(--ui-content-muted);
   font-size: var(--text-label);
 }
 
-.composer-context-actions .composer-workspace-context {
-  min-width: 0;
-  max-width: 100%;
-  margin: 0;
-  padding: 0;
-  gap: 4px;
-}
-
-.composer-workspace-context[data-state="missing"],
 .composer-workspace-context[data-state="reauthorization-required"] {
   color: var(--ui-content-warning);
 }
 
-.composer-workspace-trigger,
-.composer-workspace-readonly {
+.composer-workspace-trigger {
   display: inline-flex;
   min-width: 0;
-  max-width: 100%;
+  max-width: min(220px, 100%);
   align-items: center;
   gap: 6px;
-}
-
-.composer-workspace-trigger {
-  max-width: min(220px, 100%);
   height: 28px;
   padding: 0 6px;
   border-radius: 7px;
@@ -8986,18 +8971,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .composer-workspace-trigger[data-popup-open] {
   color: var(--ui-content-primary);
   background: var(--ui-surface-panel-2);
-}
-
-.composer-workspace-readonly {
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  font-weight: 400;
-}
-
-.composer-workspace-readonly span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .composer-workspace-menu
@@ -9614,6 +9587,32 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   text-align: right;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
+}
+
+.task-workspace-fact dt {
+  flex-shrink: 0;
+}
+
+.task-workspace-directory {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.task-workspace-directory .icon-button {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  font-size: 16px;
+}
+
+.task-workspace-directory .icon-button:disabled {
+  opacity: 0.5;
+}
+
+.task-workspace-error {
+  color: var(--ui-content-warning);
 }
 
 .task-permission-fact {

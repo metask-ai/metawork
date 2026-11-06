@@ -265,7 +265,7 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.label": "工作区",
   "workspace.select": "选择工作目录",
   "workspace.add": "打开本地文件夹",
-  "workspace.none": "尚未选择工作区",
+  "workspace.working_directory": "工作目录",
   "workspace.automatic_directory": "不使用工作目录",
   "workspace.grant_ready": "可以在这个已信任的工作区中开始任务。",
   "workspace.selection_cancelled": "已取消选择工作区。",

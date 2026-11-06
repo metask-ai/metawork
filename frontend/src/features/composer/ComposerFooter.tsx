@@ -124,7 +124,6 @@ export function ComposerFooter({
   canSubmit,
   runInFlight,
   accessRequired,
-  workspaceMissing,
   workspaceLabel,
   workspaceTitle,
   workspaceDiagnostic,
@@ -183,7 +182,6 @@ export function ComposerFooter({
   canSubmit: boolean;
   runInFlight: boolean;
   accessRequired: boolean;
-  workspaceMissing: boolean;
   workspaceLabel: string;
   workspaceTitle: string;
   workspaceDiagnostic?: string;
@@ -647,13 +645,11 @@ export function ComposerFooter({
   const workspaceContext = (
     <WorkspaceContextSelector
       accessRequired={accessRequired}
-      missing={workspaceMissing}
       label={workspaceLabel}
       title={workspaceTitle}
       diagnostic={workspaceDiagnostic}
       options={workspaceOptions}
       selectedId={selectedWorkspaceOptionId}
-      editable={workspaceEditable}
       disabled={actionDisabled || workspaceSelectionPending}
       onConfirmAccess={onConfirmAccess}
       onSelect={onSelectWorkspace}
@@ -1086,7 +1082,6 @@ export function ComposerFooter({
             })}
           </p>
         )}
-        {!workspaceEditable && workspaceContext}
       </div>
       {modelNotice}
       {sendDisabledReason && (

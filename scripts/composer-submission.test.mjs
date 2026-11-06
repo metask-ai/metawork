@@ -1273,7 +1273,36 @@ test("App late send result preserves another Task's draft and focus", async (ctx
   assert.equal(document.activeElement, next);
 });
 
-test("App keeps Workspace selection in the toolbar until the bound path is published", async (ctx) => {
+test("Task information shows the directory name and opens the bound Workspace by identity", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const user = userEvent.setup({ document });
+  const workspace = fixture.snapshot.workspaces[0];
+  const openWorkspace = ctx.mock.method(
+    BridgeClient.prototype,
+    "openWorkspace",
+    async () => ({ opened: false }),
+  );
+  await user.click(screen.getByRole("button", { name: "Task information" }));
+  const directory = screen.getByText("Working directory").parentElement;
+  assert.equal(
+    directory.querySelector("dd").textContent,
+    workspace.displayName,
+  );
+  assert.ok(!screen.queryByText(workspace.canonicalRoot));
+  await user.click(screen.getByRole("button", { name: "Open project folder" }));
+  assert.deepEqual(openWorkspace.mock.calls[0].arguments, [
+    workspace.id,
+    workspace.epoch,
+  ]);
+  await screen.findByText(/Could not open the project folder/);
+  openWorkspace.mock.mockImplementation(async () => ({ opened: true }));
+  await user.click(screen.getByRole("button", { name: "Open project folder" }));
+  assert.equal(openWorkspace.mock.callCount(), 2);
+  assert.ok(!screen.queryByText(/Could not open the project folder/));
+});
+
+test("App keeps Workspace selection in the draft toolbar and hides the automatic path after creation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
   const selector = await screen.findByRole("combobox", {
@@ -1293,7 +1322,6 @@ test("App keeps Workspace selection in the toolbar until the bound path is publi
   await waitFor(() => assert.equal(fixture.creations(), 1));
   assert.equal(selector.disabled, true);
   assert.ok(selector.closest(".ai-composer-toolbar"));
-  assert.equal(document.querySelector(".composer-workspace-readonly"), null);
 
   const path = "/data/workspaces/deadbeefdeadbeef";
   Object.assign(fixture.snapshot.workspaces[0], {
@@ -1305,13 +1333,14 @@ test("App keeps Workspace selection in the toolbar until the bound path is publi
   fixture.snapshot.tasks = [fixture.task];
   await fixture.publish();
 
-  const boundPath = await screen.findByText(path);
-  assert.ok(boundPath.closest(".composer-workspace-readonly"));
-  assert.equal(boundPath.closest(".ai-composer"), null);
-  assert.equal(
-    screen.queryByRole("combobox", { name: "Choose working directory" }),
-    null,
+  await waitFor(() =>
+    assert.ok(!document.querySelector(".composer-workspace-trigger")),
   );
+  assert.ok(!screen.queryByText(path));
+  assert.ok(!document.querySelector(".composer-workspace-context"));
+  await user.click(screen.getByRole("button", { name: "Task information" }));
+  assert.ok(!screen.queryByText("Working directory"));
+  assert.ok(!screen.queryByText(path));
   await fixture.settle();
 });
 
