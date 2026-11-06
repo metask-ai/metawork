@@ -491,6 +491,14 @@ const cases = [_]Case{
         .expected = .allow_once,
     },
     .{
+        .id = "install-link-host-credential-plan",
+        .tool_namespace = "host",
+        .tool_name = "InstallMcpServer",
+        .current = "https://example.com/i/demo#agent-install",
+        .arguments = "{\"sourceUrl\":\"https://example.com/i/demo#agent-install\",\"connection\":{\"displayName\":\"knowledge\",\"transport\":\"streamable_http\",\"endpoint\":\"https://example.com/api/mcp/k/{credential:key}\",\"authMode\":\"none\"},\"credentials\":[{\"slot\":\"key\",\"kind\":\"http_json\",\"url\":\"https://example.com/i/demo/key\",\"jsonPointer\":\"/data/key\",\"target\":\"endpoint\"}]}",
+        .expected = .allow_once,
+    },
+    .{
         .id = "host-install-known-local-stdio",
         .tool_namespace = "host",
         .tool_name = "InstallMcpServer",
