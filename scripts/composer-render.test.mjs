@@ -1247,7 +1247,7 @@ test("Task list keeps compact row density without group-owned spacing", async ()
   assert.match(stylesheet, /\.task-list-entry\s*\{[^}]*margin-top: 1px;/s);
   assert.match(
     stylesheet,
-    /\.task-list-heading \+ \.task-list-entry\s*\{[^}]*margin-top: 6px;/s,
+    /\.task-list-heading \+ \.task-list-entry\s*\{[^}]*margin-top: 4px;/s,
   );
   assert.match(stylesheet, /\.task-list-title\s*\{[^}]*line-height: 18px;/s);
   assert.doesNotMatch(stylesheet, /\.task-group/);

@@ -280,15 +280,23 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-capabilities {
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .sidebar-capability,
 .task-project-heading,
 .task-list-item {
   display: grid;
-  min-height: 36px;
+  min-height: 32px;
   align-items: center;
+}
+
+@media (pointer: coarse) {
+  .sidebar-capability,
+  .task-project-heading,
+  .task-list-item {
+    min-height: 44px;
+  }
 }
 
 .sidebar-capability,
@@ -327,8 +335,8 @@ summary::-webkit-details-marker {
 
 .sidebar-navigation {
   min-height: 0;
-  margin: 24px -12px 0 -4px;
-  padding: 0 12px 20px 4px;
+  margin: 16px -12px 0 -4px;
+  padding: 0 12px 12px 4px;
   overflow: hidden auto;
 }
 
@@ -3488,7 +3496,7 @@ button.run-process-tool:hover {
   }
 
   .sidebar-navigation {
-    margin-top: 16px;
+    margin-top: 12px;
   }
 }
 
@@ -7064,11 +7072,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-projects {
-  margin-bottom: 24px;
+  margin-bottom: 14px;
 }
 
 .task-project {
-  margin-top: 8px;
+  margin-top: 4px;
   min-width: 0;
 }
 
@@ -7149,7 +7157,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-list-heading + .task-list-entry {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .sidebar-capability,
