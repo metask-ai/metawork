@@ -3,13 +3,15 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 
-// Run the actual evaluation executable against a local service. A failure must
-// stop paid sampling, preserve its cause and leave full coverage unclaimed.
+// Run the actual evaluator: isolated failures continue without retries, while
+// unusable credentials stop sampling. Complete attempts do not imply quality.
 const executable = process.argv[2];
 assert.ok(executable);
 for (const scenario of [
-  { name: "overloaded", calls: 1, error: "EvaluationTechnicalFailures" },
-  { name: "invalid-json", calls: 1, error: "EvaluationTechnicalFailures" },
+  { name: "overloaded", calls: "full", error: "EvaluationAcceptanceFailed" },
+  { name: "invalid-json", calls: "full", error: "EvaluationAcceptanceFailed" },
+  { name: "all-invalid-json", calls: "full", error: "EvaluationUnjudgedCases" },
+  { name: "unauthorized", calls: 1, error: "EvaluationTerminalFailure" },
   {
     name: "bounded-success",
     calls: 2,
@@ -40,12 +42,20 @@ for (const scenario of [
     }
     calls++;
     response.setHeader("content-type", "application/json");
-    if (failure === "overloaded") {
+    if (failure === "unauthorized") {
+      response.writeHead(401);
+      response.end(
+        '{"error":{"type":"authentication_error","message":"private fixture diagnostic"}}',
+      );
+    } else if (failure === "overloaded" && calls === 1) {
       response.writeHead(503);
       response.end(
         '{"error":{"type":"overloaded_error","message":"private fixture diagnostic"}}',
       );
-    } else if (failure === "bounded-success") {
+    } else if (
+      failure === "bounded-success" ||
+      (failure !== "all-invalid-json" && calls > 1)
+    ) {
       response.end(
         JSON.stringify({
           type: "message",
@@ -89,7 +99,7 @@ for (const scenario of [
       env,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 15_000,
+      timeout: 45_000,
     });
     let output = "";
     let errors = "";
@@ -103,12 +113,8 @@ for (const scenario of [
     assert.equal(signal, null, errors);
     assert.notEqual(code, 0);
     assert.ok(errors.includes(scenario.error), errors);
-    assert.equal(
-      calls,
-      scenario.calls,
-      "evaluation must obey its failure or diagnostic boundary",
-    );
     if (scenario.calls === 0) {
+      assert.equal(calls, 0);
       assert.equal(output.trim(), "");
       process.stdout.write(
         `permission evaluation ${failure}: rejected before HTTP\n`,
@@ -119,12 +125,19 @@ for (const scenario of [
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
+    const coverage = rows.find((row) => row.kind === "sampling_status");
+    const configuration = rows.find((row) => row.kind === "configuration");
+    const expectedCalls =
+      scenario.calls === "full"
+        ? configuration.case_count * configuration.repeats * 2
+        : scenario.calls;
+    assert.equal(calls, expectedCalls, "no retry or premature stop");
     const samples = rows.filter((row) => row.kind === "sample");
-    assert.equal(samples.length, scenario.calls);
+    assert.equal(samples.length, expectedCalls);
     const sample = samples[0];
     assert.equal(
       sample.technical_failure,
-      failure === "overloaded"
+      failure === "overloaded" || failure === "unauthorized"
         ? "completion"
         : failure === "bounded-success"
           ? null
@@ -134,19 +147,49 @@ for (const scenario of [
       assert.equal(sample.transport.provider_error_type, "overloaded_error");
     else if (failure === "invalid-json")
       assert.ok(sample.transport.json_parse_error);
-    const coverage = rows.find((row) => row.kind === "sampling_status");
-    const configuration = rows.find((row) => row.kind === "configuration");
-    assert.equal(coverage.completed_attempts, scenario.calls);
+    assert.equal(coverage.completed_attempts, expectedCalls);
     assert.equal(
       coverage.expected_attempts,
       configuration.case_count * configuration.repeats * 2,
     );
     assert.ok(coverage.expected_attempts > 1);
-    assert.equal(coverage.coverage_complete, false);
+    assert.equal(coverage.coverage_complete, scenario.calls === "full");
     assert.equal(
-      coverage.stopped_after_technical_failure,
-      failure !== "bounded-success",
+      coverage.stopped_after_terminal_failure,
+      failure === "unauthorized",
     );
+    const summaries = rows.filter((row) => row.kind === "summary");
+    const expectedFailures =
+      failure === "bounded-success"
+        ? 0
+        : failure === "all-invalid-json"
+          ? expectedCalls
+          : 1;
+    assert.equal(
+      summaries.reduce((sum, row) => sum + row.metrics.technical_failures, 0),
+      expectedFailures,
+    );
+    assert.equal(
+      summaries.reduce((sum, row) => sum + row.metrics.manual_interruptions, 0),
+      expectedFailures,
+    );
+    if (scenario.calls === "full") {
+      assert.equal(configuration.quality_eligible, true);
+      assert.equal(
+        coverage.case_coverage_complete,
+        failure !== "all-invalid-json",
+      );
+      if (failure !== "all-invalid-json") {
+        assert.equal(samples[1].decision, "allow_once");
+        const firstSummary = summaries.find(
+          (row) => row.variant === samples[0].variant,
+        );
+        assert.ok(
+          firstSummary.metrics.authorized_attempts >
+            firstSummary.metrics.authorized_allows,
+        );
+      }
+    }
     if (failure === "bounded-success") {
       assert.equal(configuration.quality_eligible, false);
       assert.equal(configuration.deadline_ms, 120000);
@@ -155,7 +198,7 @@ for (const scenario of [
     }
     assert.equal(output.includes("private fixture diagnostic"), false);
     process.stdout.write(
-      `permission evaluation ${failure}: ${scenario.calls} requests, incomplete, rejected as required\n`,
+      `permission evaluation ${failure}: ${expectedCalls} requests, coverage=${coverage.coverage_complete}, rejected as required\n`,
     );
   } finally {
     server.closeAllConnections();
