@@ -839,7 +839,7 @@ Composer 输入历史只召回当前 Task 中 Host 已确认接收且可安全�
 Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非空白字符为 `/` 时，输入框上方打开与 Composer 等宽的候选面；不位于首 token 的 `/`，以及 token 内仍含 `/` 的 URL、路径和代码片段不触发。单段绝对路径与 Slash identifier 在语法上不可区分，若未命中候选则按 unknown Slash 禁止发送，用户需要补充正文语境或改写。候选只有两处真值：
 
 - `Commands` 来自 Renderer 单一 registry，只注册当前产品真实存在且适合从 Composer 发起的动作；
-- `Skills` 来自 owning Workspace current catalog，表示下一轮候选；打开候选面时自动检查目录。Session 已安装的执行快照不要求用户手动推进；Renderer 只消费 Host 提供的逻辑 policy key 和已授权目录，不扫描或合并来源。
+- `Skills` 表示下一轮候选。已选工作目录的草稿和已有任务使用对应 Workspace current catalog。未选工作目录的新任务草稿使用 personal catalog，包含已启用的内置与个人 Skill。打开候选面时自动刷新对应范围，只有发送才创建 Task 和 Automatic Workspace。Session 已安装的执行快照不要求用户手动推进；Renderer 只消费 Host 提供的逻辑 policy key 和已授权目录，不扫描或合并来源。
 
 菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，使用确定性的大小写不敏感 prefix/substring 过滤；裸 `ArrowUp / ArrowDown` 移动，裸 `Enter` 选择当前可用候选，裸 `Escape` 关闭但保留可见文本。裸 `Tab` 只在当前候选真实可用时选择，否则关闭候选并正常移动焦点；`Shift+Tab` 关闭候选并正常反向移动焦点，`Shift+Enter` 保留换行，修饰方向键保留原生光标与选区操作。目录刷新后高亮候选失效也遵守该规则。菜单打开时 Enter 不得提交普通 Text，即使没有可用候选或带提交修饰键；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
 

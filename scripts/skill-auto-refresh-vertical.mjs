@@ -1,6 +1,108 @@
 import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
-import { readFile, writeFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
+
+export async function runAutomaticFirstSkillVertical({
+  invoke,
+  snapshot,
+  poll,
+  provider,
+  textSse,
+  canonicalHome,
+}) {
+  const name = "first-message-review";
+  const marker = "METAWORK_FIRST_MESSAGE_PERSONAL_SKILL";
+  const skillDir = join(canonicalHome, ".agents", "skills", name);
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, "SKILL.md"),
+    `---\nname: ${name}\ndescription: Review the first message\n---\n${marker}\n`,
+  );
+  await invoke("metawork.skills.refreshCatalog", {});
+  const before = await poll(
+    async () => {
+      const state = await snapshot();
+      return state.skillCatalog.skills.some(
+        (skill) => skill.invocationName === name,
+      )
+        ? state
+        : null;
+    },
+    20_000,
+    "personal Skill before creating a Task",
+  );
+  assert.equal(before.tasks.length, 0);
+  assert.equal(before.workspaces.length, 0);
+  assert.ok(
+    before.skillCatalog.skills.some(
+      (skill) => skill.invocationName === "docx" && skill.enabled,
+    ),
+  );
+  const catalog = before.skillCatalog;
+  const skill = catalog.skills.find(
+    (candidate) => candidate.invocationName === name,
+  );
+  assert.equal(skill.enabled, true);
+  const request = {
+    workspace: { kind: "automatic" },
+    modelSelection: fixtureModelSelection(before),
+    expectedSkillCatalogRevision: catalog.revision,
+    expectedSkillSelectionRevision: catalog.selectionRevision,
+    approvalMode: "manual",
+  };
+  const stale = await invoke("metawork.tasks.create", {
+    ...request,
+    expectedSkillCatalogRevision: "stale-catalog",
+  });
+  assert.equal(stale.reason, "stale_catalog");
+  assert.equal((await snapshot()).workspaces.length, 0);
+  const created = await invoke("metawork.tasks.create", request);
+  assert.equal(created.accepted, true, JSON.stringify(created));
+  const requestsBefore = provider.requests.length;
+  provider.enqueue((payload) => {
+    assert.ok(JSON.stringify(payload.messages).includes(marker));
+    return textSse("first-personal-skill", "First Skill complete.");
+  });
+  const result = await invoke("metawork.tasks.sendInput", {
+    operationId: "first-personal-skill",
+    taskId: created.taskId,
+    input: {
+      kind: "skill",
+      skillId: skill.skillId,
+      catalogRevision: catalog.revision,
+      selectionRevision: catalog.selectionRevision,
+      argumentValues: [],
+    },
+  });
+  assert.equal(result.outcome, "accepted", JSON.stringify(result));
+  const task = await poll(
+    async () => {
+      if (provider.error) throw provider.error;
+      const state = await snapshot();
+      const task = state.tasks.find(
+        (candidate) => candidate.id === created.taskId,
+      );
+      const failed = task?.inputSubmissions.find(
+        (input) => input.state === "failed",
+      );
+      assert.equal(failed, undefined, JSON.stringify(failed));
+      if (!task?.runs[0]?.terminal) return null;
+      assert.equal(
+        state.workspaces.find((workspace) => workspace.id === task.workspaceId)
+          ?.kind,
+        "automatic",
+      );
+      return task;
+    },
+    30_000,
+    "personal Skill completes as the first Run",
+  );
+  assert.equal(task.runs.length, 1);
+  assert.equal(task.runs[0].input.kind, "skill");
+  assert.equal(task.runs[0].terminal.outcome, "completed");
+  assert.equal(provider.requests.length, requestsBefore + 1);
+}
 
 // Real Desktop → Bridge → Product → canonical AgentCore; only model replies
 // are scripted. Every message is sent once, including while a Run is active.

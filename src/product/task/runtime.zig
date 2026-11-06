@@ -2028,6 +2028,8 @@ pub const Runtime = struct {
         if (!hasWaitingInputs(task) and self.inputContinuation(task_id) == null)
             task.skill_preparation = null;
         task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload });
+        if (task.initial_personal_catalog) |catalog| self.allocator.free(catalog.revision);
+        task.initial_personal_catalog = null;
         self.pending_input_bytes += payload.bytes.len;
         if (task.deletion == .failed) task.deletion = .idle;
         task.durable.recent_order = self.takeRecentOrder();
@@ -9597,6 +9599,7 @@ fn deinitTask(
     }
     task.input_submissions.deinit(self.allocator);
     task.input_submissions = .empty;
+    if (task.initial_personal_catalog) |catalog| self.allocator.free(catalog.revision);
     releaseAttachmentNoFail(self, task, effects, .cold_start);
     for (task.durable.runs) |*entry| if (entry.*) |*run| {
         deinitRun(self, effects, run);

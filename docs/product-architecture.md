@@ -242,7 +242,7 @@ Enablement mutation 先构造受影响 authority 的完整 candidate，再提交
 
 交互 Task 的 Skill authority 在每个新 Run 的准备边界自动更新。Product Control 在消息接收、必要的 Conversation 恢复或模型切换完成后，以 owning Workspace 的 root/home/epoch 查询当前目录并应用 committed policy；只有 Session 空闲、原 Run 等共享 Session 的 operation 已收口时才原子绑定 catalog 和 grants，再创建 Run。已经接纳的 Run 与其插话保留原绑定；排队输入和自动接续形成新 Run 时重新准备。相同 catalog/selection 不重复绑定。Conversation recovery 不以 Skill readiness 为资格，恢复事务保持原有能力上限，新的运行准备在恢复安装完成后独立进行。Schedule 不因此取得 Skill 或启动 catalog job。
 
-Composer 的下一轮候选来自 owning Workspace current authority；Session 的 pinned snapshot 只表示当前安装的执行绑定，不要求用户手动推进。显式 Skill 消息先按用户看到的 revision pair 和 concrete identity 验证，再捕获 Core 提供的逻辑 policy key、参数定义与 owned 参数；运行准备从当前 resolved winners 编译该逻辑选择，不根据显示名称或文件路径猜测。内容更新或无关目录变化可自动跟随；参数定义改变须保留输入并要求检查，禁用、删除或冲突不得执行。历史 Run 保存实际执行的身份与 revision，不重写旧历史，也不恢复或重放未执行的原文。
+Composer 的下一轮候选来自 owning Workspace current authority。未选工作目录的新任务草稿使用 personal current authority 发现候选。带 Skill 版本对的 Automatic Task 创建请求先校验该 personal 版本对，再分配工作区。Task 仅在进程内保留该版本对，首条接纳的消息消耗它。匹配该版本对的首条 Skill 消息以当前 personal catalog 验真并捕获逻辑选择，随后按已有 Run 准备流程在 owning Workspace 下查询、重新校验并绑定执行授权。Session 的 pinned snapshot 只表示当前安装的执行绑定，不要求用户手动推进。显式 Skill 消息先按用户看到的 revision pair 和 concrete identity 验证，再捕获 Core 提供的逻辑 policy key、参数定义与 owned 参数；运行准备从当前 resolved winners 编译该逻辑选择，不根据显示名称或文件路径猜测。内容更新或无关目录变化可自动跟随；参数定义改变须保留输入并要求检查，禁用、删除或冲突不得执行。历史 Run 保存实际执行的身份与 revision，不重写旧历史，也不恢复或重放未执行的原文。
 
 每条待执行输入只登记一次有界准备，按 Task/binding、Workspace epoch、来源与 policy 代次接纳查询完成；过期结果只释放。查询失败不能把 last-good 绑定当成更新成功：显式 Skill 输入失败并保留安全展示，普通 Text/multimodal 只有在可靠撤去 Skill grants 后才可继续；Session mutation 的合同失败按其真实生命周期收口。空 grants 是授权收缩，不伪造查询成功的空 catalog。停止、删除与 shutdown 撤销准备意图并收口 jobs/leases，不分配虚假 Run identity。
 

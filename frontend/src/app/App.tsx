@@ -1583,7 +1583,11 @@ export default function App() {
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
     ? composerWorkspace?.authorization === "available"
     : snapshot.capabilities.automaticWorkspaces;
-  const skillCatalog = composerWorkspace?.skillCatalog ?? {
+  const personalComposerCatalog =
+    newTaskDraftActive && workbench.draftWorkspaceId === null;
+  const skillCatalog = (personalComposerCatalog
+    ? snapshot.skillCatalog
+    : composerWorkspace?.skillCatalog) ?? {
     availability: "unavailable" as const,
     redacted: false,
     revision: null,
@@ -3344,23 +3348,27 @@ export default function App() {
     };
   }
   async function refreshComposerSkillCatalog() {
-    if (bridgeUnavailable || !composerWorkspace || !composerWorkspaceId) return;
-    const key = `${bridgeGenerationRef.current}:${composerWorkspaceId}:${composerWorkspace.epoch}`;
+    if (bridgeUnavailable) return;
+    const workspace = personalComposerCatalog ? null : composerWorkspace;
+    if (!personalComposerCatalog && !workspace) return;
+    const key = `${bridgeGenerationRef.current}:${workspace ? `${workspace.id}:${workspace.epoch}` : "personal"}`;
     if (composerCatalogRefreshPending.current.has(key)) return;
     composerCatalogRefreshPending.current.add(key);
     const audience: StatusAudience = {
       scope: "workspace",
-      workspaceId: composerWorkspaceId,
+      workspaceId: workspace?.id ?? null,
     };
     const feedbackToken = beginOperationFeedback(
       `composer-catalog:${composerDraftScope}`,
       audience,
     );
     try {
-      const result = await client.refreshWorkspaceSkillCatalog(
-        composerWorkspaceId,
-        composerWorkspace.epoch,
-      );
+      const result = workspace
+        ? await client.refreshWorkspaceSkillCatalog(
+            workspace.id,
+            workspace.epoch,
+          )
+        : await client.refreshSkillCatalog();
       if (!result.accepted && result.reason !== "catalog_loading") {
         settleOperationFeedback(
           feedbackToken,

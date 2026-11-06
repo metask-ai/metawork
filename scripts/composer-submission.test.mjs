@@ -314,6 +314,62 @@ async function renderSubmissionApp(
   };
 }
 
+test("App lists and sends a personal Skill from the first unscoped draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const refresh = ctx.mock.method(
+    BridgeClient.prototype,
+    "refreshSkillCatalog",
+    async () => ({ accepted: true, reason: null }),
+  );
+  const skill = (id, displayName, enabled = true) => ({
+    skillId: id,
+    skillPolicyKey: id,
+    invocationName: id,
+    displayName,
+    description: "Fixture Skill",
+    argumentNames: [],
+    maxValues: 0,
+    enabled,
+  });
+  fixture.snapshot.skillCatalog = {
+    availability: "ready",
+    redacted: false,
+    revision: "personal-catalog",
+    selectionRevision: "1",
+    skills: [
+      skill("docx", "Built-in Word"),
+      skill("review", "Personal Review"),
+      skill("disabled", "Disabled Skill", false),
+    ],
+    issues: [],
+  };
+  await fixture.publish();
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "/");
+  assert.ok(await screen.findByRole("option", { name: /Built-in Word/ }));
+  assert.equal(screen.queryByRole("option", { name: /Disabled Skill/ }), null);
+  assert.equal(refresh.mock.callCount(), 1);
+  await user.click(screen.getByRole("option", { name: /Personal Review/ }));
+  assert.equal(fixture.creations(), 0);
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  assert.equal(fixture.creations(), 1);
+  assert.deepEqual(fixture.createRequests[0][0], { kind: "automatic" });
+  assert.deepEqual(fixture.createRequests[0].slice(2, 4), [
+    "personal-catalog",
+    "1",
+  ]);
+  await fixture.created();
+  assert.deepEqual(fixture.inputs[0][2], {
+    kind: "skill",
+    skillId: "review",
+    catalogRevision: "personal-catalog",
+    selectionRevision: "1",
+    argumentValues: [],
+  });
+  await fixture.settle();
+});
+
 test("App image paste shares staging, rejects overlapping paste and sends the latest draft with existing images", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx);
   fixture.snapshot.capabilities.attachments.enabled = true;
