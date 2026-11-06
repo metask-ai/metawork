@@ -1009,7 +1009,7 @@ pub fn buildRuntime(
             allocator.destroy(owner);
             return err;
         };
-        owner.* = catalog_budget.wrapTransport(allocator, owner, server.timeout_ms, host_environment.catalog_budget) catch |err| {
+        owner.* = catalog_budget.wrapTransport(allocator, owner, server.timeout_ms, host_environment.catalog_budget, mcp_configuration.initialInstallation(server) and host_environment.catalog_budget != null) catch |err| {
             owner.deinit();
             allocator.destroy(owner);
             return err;
@@ -1038,7 +1038,7 @@ pub fn buildRuntime(
             .namespace = server.namespace,
             .client_name = client_name,
             .client_version = client_version,
-            .timeout_ms = server.timeout_ms,
+            .timeout_ms = if (mcp_configuration.initialInstallation(server) and host_environment.catalog_budget != null) @max(server.timeout_ms, mcp_configuration.initial_installation_timeout_ms) else server.timeout_ms,
             .configuration_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             .allowed_tools = server.tools,
         };

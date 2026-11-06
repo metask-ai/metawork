@@ -1073,7 +1073,7 @@ fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
     preparation.registry.?.value.servers[0].timeout_ms = 350;
     var initial = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
     defer initial.deinit();
-    try budget.begin(0);
+    try budget.begin(0, false);
     const initial_result = runtime.applyMcpConfiguration(&initial.input.?) catch |err| {
         budget.end();
         return err;
@@ -1098,7 +1098,7 @@ fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
     defer candidate.deinit();
     var input = try runtime.prepareMcpMembership(2, &candidate.input.?, &.{ "deterministic-http", "candidate-http" });
     defer input.deinit();
-    try budget.begin(2);
+    try budget.begin(2, false);
     defer budget.end();
     const started = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
     const result = try runtime.applyMcpConfiguration(&input);
@@ -4171,7 +4171,7 @@ test "production candidate budget admits a slow healthy source beside four exist
     defer first.deinit();
     try std.testing.expectEqual(std.math.maxInt(u32), first.input.?.servers.?.descriptors[0].timeout_ms);
     try std.testing.expectEqual(std.math.maxInt(u32), servers[0].timeout_ms);
-    try budget.begin(0);
+    try budget.begin(0, false);
     try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&first.input.?));
     budget.applied();
     @memset(preparation.server_states, .disabled);
@@ -4181,7 +4181,7 @@ test "production candidate budget admits a slow healthy source beside four exist
     defer candidate.deinit();
     var input = try runtime.prepareMcpMembership(2, &candidate.input.?, &ids);
     defer input.deinit();
-    try budget.begin(4);
+    try budget.begin(4, false);
     defer budget.end();
     const start = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
     try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&input));

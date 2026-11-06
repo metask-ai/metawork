@@ -92,6 +92,12 @@ pub const ServerWire = struct {
 
 /// Durable, secret-free progress attached to the exact installed server.
 /// Only the Product installation path can create or advance this record.
+pub const initial_installation_timeout_ms: u32 = 180_000;
+pub fn initialInstallation(server: ServerWire) bool {
+    const operation = server.installation orelse return false;
+    return std.mem.eql(u8, server.transport.kind, "stdio") and operation.phase == .connecting and operation.initial_grant_pending;
+}
+
 pub const installation_active_budget_ms = 300_000;
 
 pub const InstallationPhase = enum {

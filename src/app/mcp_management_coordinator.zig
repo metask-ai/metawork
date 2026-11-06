@@ -488,6 +488,7 @@ const ConfigurationApplyJob = struct {
     allowlists: []agent.McpServerAllowlist,
     budget: ?*mcp_platform.CatalogBudget = null,
     existing_member_count: usize = 0,
+    initial_installation: bool = false,
     product_state_installed: bool = false,
     result: ConfigurationApplyResult = .pending,
     finished: std.atomic.Value(bool) = .init(false),
@@ -498,7 +499,7 @@ const ConfigurationApplyJob = struct {
     }
 
     fn run(self: *ConfigurationApplyJob) void {
-        if (self.budget) |budget| budget.begin(self.existing_member_count) catch {
+        if (self.budget) |budget| budget.begin(self.existing_member_count, self.initial_installation) catch {
             self.publish(.failed);
             return;
         };
@@ -932,6 +933,10 @@ pub const Coordinator = struct {
             .allowlists = allowlists,
             .budget = self.host_environment.catalog_budget,
             .existing_member_count = step.member_ids.len - @intFromBool(step.target.kind == .add),
+            .initial_installation = if (step.preparation.registry) |registry| blk: {
+                for (registry.value.servers) |server| if (std.mem.eql(u8, server.id, step.target.id()) and mcp_configuration.initialInstallation(server)) break :blk true;
+                break :blk false;
+            } else false,
         };
         // Ownership has moved even if thread creation fails.
         processes_owned = false;
