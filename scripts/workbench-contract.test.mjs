@@ -4055,3 +4055,22 @@ test("handoff history keeps model advice separate from user and cancellation att
   record.review = { outcome: "failed", cause: "timeout", reason: null };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
 });
+
+test("rejection-limit handoff keeps the model reason and no new approval mode", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.approvalMode = "auto_review";
+  task.permissionReviewState = "needs_user";
+  task.permissionReviewExplanation = {
+    cause: "rejection_limit",
+    reason: "Confirm this operation.",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  task.permissionReviewExplanation.reason = "bad\nreason";
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+  task.permissionReviewExplanation = {
+    cause: "timeout",
+    reason: "Not a model reason",
+  };
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+});

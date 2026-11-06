@@ -1206,6 +1206,7 @@ export const zhCN: Record<MessageId, string> = {
   "approval.command_unavailable": "暂时无法显示命令，请查看具体操作。",
   "approval.full_request": "查看具体操作",
   "approval.hide_request": "收起具体操作",
+  "approval.handoff.rejection_limit": "连续审核未通过，请确认本次操作。处理后将恢复自动审批。",
   "approval.handoff.unavailable": "自动审核未能完成，需要你确认。",
   "approval.handoff.reviewer_concern": "自动审核提出了需要你确认的事项。",
   "approval.handoff.context_incomplete": "自动审核缺少必要信息，需要你确认。",

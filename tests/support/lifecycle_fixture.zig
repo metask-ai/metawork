@@ -483,6 +483,7 @@ pub const FakeCore = struct {
     ui_answered_callbacks: usize = 0,
     permission_callback_count: usize = 0,
     permission_arguments_json: []const u8 = "{}",
+    repeated_permission_count: usize = 2,
     permission_tool_namespace: []const u8 = "builtin",
     permission_tool_name: []const u8 = "Bash",
     permission_session_choices: bool = true,
@@ -2279,7 +2280,7 @@ pub fn sessionRunInput(
         }
     }
 
-    const ui_request_count: usize = if (plan == .ui_wait_repeated) 2 else 1;
+    const ui_request_count: usize = if (plan == .ui_wait_repeated) fake_core.repeated_permission_count else 1;
     for (0..ui_request_count) |_| {
         if ((plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated) and
             !(plan == .ui_wait_twice and session.permission_session_granted) or

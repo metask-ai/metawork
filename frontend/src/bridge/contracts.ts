@@ -934,6 +934,7 @@ export type PermissionChoice =
 export type PermissionReviewCause =
   | "unavailable"
   | "reviewer_concern"
+  | "rejection_limit"
   | "context_incomplete"
   | "timeout"
   | "call_failed"

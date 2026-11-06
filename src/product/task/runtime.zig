@@ -954,6 +954,13 @@ pub const PreparedUiResponse = struct {
             self.rollback();
             return err;
         };
+        const review = &self.task.runtime.permission_review;
+        const answered_by = self.task.durable.ui_history[self.history_slot].?.answered_by;
+        review.sequence_run_id = self.run_id;
+        review.consecutive_denials = if (answered_by == .reviewer and self.response.permission == .deny_once)
+            (if (self.previous_review_state.sequence_run_id == self.run_id) self.previous_review_state.consecutive_denials else 0) + 1
+        else
+            0;
         self.access.deinit();
         self.active = false;
     }
@@ -1311,6 +1318,7 @@ pub const Runtime = struct {
         const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
         if (revision == task.durable.approval_revision) return revision;
         _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
+        task.runtime.permission_review.consecutive_denials = 0;
         task.runtime.permission_review.invalidate();
         if (target == .manual and task.runtime.pending_ui_request_id != 0) {
             task.runtime.permission_review.phase = .needs_user;
@@ -2904,6 +2912,10 @@ pub const Runtime = struct {
         if (task.runtime.permission_review.identity) |identity| {
             if (identity.request_id == observation.request_id) return null;
         }
+        if (task.runtime.permission_review.sequence_run_id != run.id) {
+            task.runtime.permission_review.sequence_run_id = run.id;
+            task.runtime.permission_review.consecutive_denials = 0;
+        }
         task.runtime.permission_review.invalidate();
         errdefer |err| task.runtime.permission_review.settle(observation.request_id, .{ .cause = switch (@as(anyerror, err)) {
             error.ReviewInputLimit, error.ReviewIntentUnavailable, error.WriteFailed => .context_incomplete,
@@ -3071,8 +3083,10 @@ pub const Runtime = struct {
         if (projected.truncated or !validReviewReason(projected.value)) {
             return false;
         }
-        if (choice == null) {
-            _ = self.finishPermissionReview(identity, .{ .cause = .reviewer_concern, .reason = projected.value });
+        const rejection_limit = suggestion.decision == .deny and
+            task.runtime.permission_review.consecutive_denials >= task_attachment.PermissionReviewState.rejection_limit - 1;
+        if (choice == null or rejection_limit) {
+            _ = self.finishPermissionReview(identity, .{ .cause = if (rejection_limit) .rejection_limit else .reviewer_concern, .reason = projected.value });
             return false;
         }
         var audit = task_attachment.PermissionReviewState.Audit{ .outcome = if (suggestion.decision == .deny) .deny else .allow_once };
@@ -3728,6 +3742,7 @@ pub const Runtime = struct {
                 return error.ReviewGenerationExhausted;
         }
         if (task.durable.permission_review_delegated == delegated) return false;
+        task.runtime.permission_review.consecutive_denials = 0;
         task.runtime.permission_review.invalidate();
         task.durable.permission_review_delegated = delegated;
         return true;

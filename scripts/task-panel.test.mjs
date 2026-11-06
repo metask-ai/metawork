@@ -8220,6 +8220,7 @@ test("automatic handoffs explain the actual cause before the user decides", () =
     "context_incomplete",
     "invalid_response",
     "capacity",
+    "rejection_limit",
     "input_changed",
     "state_changed",
   ]) {

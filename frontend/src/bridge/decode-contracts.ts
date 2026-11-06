@@ -3271,6 +3271,7 @@ function decodePermissionReview(
   const cause = nullableEnum(item.cause, `${path}.cause`, [
     "unavailable",
     "reviewer_concern",
+    "rejection_limit",
     "context_incomplete",
     "timeout",
     "call_failed",
@@ -3801,6 +3802,7 @@ function decodeTask(
     const cause = enumValue(explanation.cause, `${explanationPath}.cause`, [
       "unavailable",
       "reviewer_concern",
+      "rejection_limit",
       "context_incomplete",
       "timeout",
       "call_failed",
@@ -3816,7 +3818,7 @@ function decodeTask(
     if (
       permissionReviewState !== "needs_user" ||
       (reason !== null &&
-        (cause !== "reviewer_concern" ||
+        ((cause !== "reviewer_concern" && cause !== "rejection_limit") ||
           new TextEncoder().encode(reason).length > 512 ||
           reason.trim().length === 0 ||
           /[\u0000-\u001f\u007f]/u.test(reason)))

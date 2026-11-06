@@ -84,7 +84,8 @@ export function ApprovalPanel({
   const concern =
     task.approvalMode !== "manual" &&
     task.permissionReviewState === "needs_user" &&
-    explanation?.cause === "reviewer_concern"
+    (explanation?.cause === "reviewer_concern" ||
+      explanation?.cause === "rejection_limit")
       ? explanation.reason
       : null;
   const handoffCause =

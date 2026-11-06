@@ -1388,6 +1388,7 @@ export const enUS = {
     "The command is unavailable. View operation details.",
   "approval.full_request": "View operation details",
   "approval.hide_request": "Hide operation details",
+  "approval.handoff.rejection_limit": "Repeated review denials require your decision for this operation. Automatic review resumes afterward.",
   "approval.handoff.unavailable":
     "Automatic review could not finish. Please confirm.",
   "approval.handoff.reviewer_concern":

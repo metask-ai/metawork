@@ -11746,3 +11746,55 @@ test "Task permission handoff reason is copied before cancellation invalidates t
     try std.testing.expectEqual(.needs_user, record.review.?.outcome);
     try std.testing.expectEqualStrings("Confirm this publication.", record.review.?.reasonText().?);
 }
+
+test "Control third consecutive denial keeps only current request manual then resumes automatic review" {
+    for ([_]product_control.PermissionChoice{ .allow_once, .deny_once }) |answer| {
+        fake_core.reset();
+        fake_core.repeated_permission_count = 4;
+        fake_core.setNextPlan(.ui_wait_repeated);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var transport = ReviewerTransport{ .result = "{\"decision\":\"deny\",\"reason\":\"This effect needs confirmation.\"}" };
+        transport.released.store(true, .release);
+        var persistence = TaskPersistenceProbe{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = persistence.capability();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.approval_mode = .auto_review;
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+        try waitInitialTaskCatalog(&control, task_id);
+        try settleWorkspaceSkillQueries(&control, try control.taskWorkspaceId(task_id));
+        _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
+        try waitControlSnapshot(&control, "\"cause\":\"rejection_limit\"");
+        const task = control.task_runtime.find(task_id).?;
+        try std.testing.expectEqual(@as(usize, 3), transport.calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 2), task.durable.ui_history_count);
+        try std.testing.expectEqualStrings("This effect needs confirmation.", task.runtime.permission_review.reason[0..task.runtime.permission_review.reason_len]);
+        const request_id = task.runtime.pending_ui_request_id;
+        try std.testing.expect(request_id != 0);
+        transport.result = "{\"decision\":\"allow_once\",\"reason\":\"Ordinary task implementation.\"}";
+        try control.respondUi(task_id, task.runtime.active_run_id, request_id, .{ .permission = answer });
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (task.durable.ui_history_count == 4) break;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch break;
+        }
+        try std.testing.expectEqual(@as(usize, 4), transport.calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 4), task.durable.ui_history_count);
+        try std.testing.expectEqual(.user, task.durable.ui_history[2].?.answered_by.?);
+        try std.testing.expectEqual(.deny, task.durable.ui_history[2].?.review.?.outcome);
+        try std.testing.expectEqual(.rejection_limit, task.durable.ui_history[2].?.review.?.cause.?);
+        try std.testing.expect(task.durable.ui_history[2].?.reviewReason() == null);
+        try std.testing.expectEqual(.reviewer, task.durable.ui_history[3].?.answered_by.?);
+        try std.testing.expectEqual(.allowed_once, task.durable.ui_history[3].?.state);
+        try std.testing.expectEqual(@as(u8, 0), task.runtime.permission_review.consecutive_denials);
+        try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(task_id));
+    }
+}
