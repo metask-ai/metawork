@@ -1496,12 +1496,14 @@ export const enUS = {
     "Model configuration recovery result not yet confirmed",
   "permission.profile.approval_required": "Request approval",
   "permission.mode.manual": "Manual approval",
-  "permission.mode.manual.help": "Routine edits run; ask when needed.",
+  "permission.mode.manual.help":
+    "Routine edits run automatically and other actions may need approval",
   "permission.mode.auto_review": "Automatic approval",
   "permission.mode.auto_review.help":
-    "Model review; extra cost; asks if unsure.",
+    "The model reviews requests and asks you if unsure",
   "permission.mode.full_access": "Full access",
-  "permission.mode.full_access.help": "No routine prompts; protections apply.",
+  "permission.mode.full_access.help":
+    "Routine actions skip approval while system protections still apply",
   "permission.auto_review.boundary":
     "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Failure returns to manual approval. MCP requests remain manual.",
   "permission.profile.approval_required.help":

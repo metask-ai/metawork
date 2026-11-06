@@ -3860,7 +3860,7 @@ test("new Task approval menu explains each mode only when opened and changes the
       option.querySelector("small")?.textContent.trim(),
     ),
   );
-  assert.match(options[1].textContent, /extra cost/);
+  assert.match(options[1].textContent, /asks you if unsure/);
   assert.equal(document.querySelector(".permission-policy-boundary"), null);
   await user.click(screen.getByRole("option", { name: /^Manual approval/ }));
   assert.deepEqual(choices, ["manual"]);

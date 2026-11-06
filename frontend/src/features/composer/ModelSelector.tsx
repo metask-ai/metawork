@@ -65,6 +65,7 @@ export function ModelSelector({
       helper={contextTitle}
       disabled={disabled}
       busy={pending}
+      compact
       leading={<BrandIcon brand={selected?.vendor} />}
       triggerClassName="composer-model-trigger w-auto"
       contentClassName="composer-model-menu"

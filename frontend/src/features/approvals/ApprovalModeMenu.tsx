@@ -52,7 +52,7 @@ export function ApprovalModeMenu({
             t(`permission.mode.${mode}.help`) +
             (task.activeOperation?.kind === "run" &&
             (mode === "full_access") !== (task.approvalMode === "full_access")
-              ? ` ${t("permission.change.stop_help")}`
+              ? ` · ${t("permission.change.stop_help")}`
               : ""),
           descriptionKind: "text",
           disabled: !task.availableApprovalModes.includes(mode),

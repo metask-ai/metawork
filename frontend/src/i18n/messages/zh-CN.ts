@@ -1306,11 +1306,11 @@ export const zhCN: Record<MessageId, string> = {
   "settings.models_reset_failed": "模型配置恢复结果尚未确认",
   "permission.profile.approval_required": "请求批准",
   "permission.mode.manual": "人工审批",
-  "permission.mode.manual.help": "常规编辑自动执行，其余按需审批。",
+  "permission.mode.manual.help": "常规编辑自动执行，其他操作按需确认",
   "permission.mode.auto_review": "自动审批",
-  "permission.mode.auto_review.help": "模型评审，存疑转人工，额外计费。",
+  "permission.mode.auto_review.help": "模型自动评审，存疑时请你确认",
   "permission.mode.full_access": "完全访问",
-  "permission.mode.full_access.help": "常规操作免审批，系统保护仍生效。",
+  "permission.mode.full_access.help": "常规操作无需审批，系统保护仍生效",
   "permission.auto_review.boundary":
     "自动评审使用任务模型，产生额外调用费用；不是安全保证，仅决定本次操作。评审失败转人工，MCP 请求暂由你处理。",
   "permission.profile.approval_required.help":

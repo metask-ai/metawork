@@ -2289,6 +2289,19 @@ summary::-webkit-details-marker {
   color: var(--ui-content-muted);
 }
 
+.selection-trigger-leading,
+.selection-menu-item-leading {
+  font-size: 16px;
+}
+
+:is(.selection-trigger-leading, .selection-menu-item-leading)
+  .model-vendor-icon {
+  width: 1em;
+  height: 1em;
+  flex-basis: 1em;
+  font-size: inherit;
+}
+
 .selection-trigger-value-slot,
 .selection-trigger-copy,
 .selection-trigger-value,
@@ -2391,7 +2404,7 @@ summary::-webkit-details-marker {
   position: relative;
   display: grid;
   min-height: 44px;
-  padding: 7px 9px 7px 30px;
+  padding: 7px 30px 7px 9px;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
@@ -2421,7 +2434,7 @@ summary::-webkit-details-marker {
 
 .selection-menu-indicator {
   position: absolute;
-  left: 9px;
+  right: 9px;
   display: inline-flex;
   width: 14px;
   align-items: center;
@@ -2443,7 +2456,13 @@ summary::-webkit-details-marker {
 }
 
 .selection-menu-item-copy > span {
-  font-weight: 620;
+  font-weight: 400;
+}
+
+.selection-menu-item:is([data-state="checked"], [data-selected])
+  .selection-menu-item-copy
+  > span {
+  font-weight: 600;
 }
 
 .selection-menu-item-copy > .selection-menu-item-label {
@@ -2479,6 +2498,31 @@ summary::-webkit-details-marker {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   font-weight: 620;
+}
+
+.selection-menu-content[data-compact] {
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+}
+
+.selection-menu-content[data-compact] .selection-menu-viewport {
+  padding: 4px;
+}
+
+.selection-menu-content[data-compact] .selection-menu-label {
+  padding: 5px 8px;
+}
+
+.selection-menu-content[data-compact] .selection-menu-item {
+  min-height: 34px;
+  padding: 4px 26px 4px 8px;
+  gap: 6px;
+}
+
+@media (pointer: coarse) {
+  .selection-menu-content[data-compact] .selection-menu-item {
+    min-height: 44px;
+  }
 }
 
 @keyframes selection-trigger-spin {
@@ -8868,11 +8912,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .composer-model-trigger .selection-trigger-leading {
   color: inherit;
-  font-size: var(--text-body);
-}
-
-.composer-model-menu {
-  width: min(360px, calc(100vw - 24px));
 }
 
 .composer-model-readonly {
@@ -8954,36 +8993,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.composer-workspace-menu {
-  width: min(260px, calc(100vw - 24px));
-}
-
-.composer-workspace-menu .selection-menu-viewport {
-  padding: 4px;
-}
-
-.composer-workspace-menu .selection-menu-item {
-  min-height: 34px;
-  padding: 4px 8px 4px 26px;
-  gap: 6px;
-}
-
-.composer-workspace-menu .selection-menu-item-label {
-  font-weight: 400;
-}
-
-.composer-workspace-menu
-  .selection-menu-item:is([data-state="checked"], [data-selected])
-  .selection-menu-item-label {
-  font-weight: 600;
-}
-
-@media (pointer: coarse) {
-  .composer-workspace-menu .selection-menu-item {
-    min-height: 44px;
-  }
 }
 
 .composer-workspace-menu

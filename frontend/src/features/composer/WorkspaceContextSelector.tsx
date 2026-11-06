@@ -101,6 +101,7 @@ export function WorkspaceContextSelector({
           ariaLabel={t("workspace.select")}
           title={title}
           disabled={disabled}
+          compact
           leading={<Icon name={accessRequired ? "warning" : "workspace"} />}
           triggerClassName="composer-workspace-trigger w-auto"
           contentClassName="composer-workspace-menu"
