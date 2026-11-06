@@ -996,7 +996,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.view_diagnostics": "错误详情",
   "slash.title": "输入区动作",
   "slash.group.commands": "命令",
-  "slash.group.skills": "Skills",
+  "slash.group.skills": "技能",
   "slash.no_description": "未提供说明",
   "slash.no_matches": "没有匹配的命令或 Skill",
   "slash.no_skills": "当前目录中没有匹配的 Skill",

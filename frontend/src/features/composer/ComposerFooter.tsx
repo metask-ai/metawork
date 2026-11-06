@@ -259,6 +259,7 @@ export function ComposerFooter({
     [],
   );
   const footerRef = useRef<HTMLElement>(null);
+  const composerShellRef = useRef<HTMLDivElement>(null);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
   const sendButtonRef = useRef<HTMLButtonElement>(null);
@@ -351,6 +352,21 @@ export function ComposerFooter({
   useEffect(() => {
     if (menuOpen) refreshCatalogRef.current();
   }, [menuOpen, draftScope]);
+
+  useEffect(() => {
+    const shell = composerShellRef.current;
+    if (!menuOpen || !shell) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!event.composedPath().includes(shell)) setMenuDismissed(true);
+    };
+    shell.ownerDocument.addEventListener("pointerdown", onPointerDown, true);
+    return () =>
+      shell.ownerDocument.removeEventListener(
+        "pointerdown",
+        onPointerDown,
+        true,
+      );
+  }, [menuOpen]);
 
   useEffect(() => {
     if (!fileDropEnabled) setFileDragActive(false);
@@ -669,7 +685,11 @@ export function ComposerFooter({
       onPointerDownCapture={keyboard.onPointerDownCapture}
       onChangeCapture={keyboard.onChangeCapture}
     >
-      <div className="composer-shell" data-file-drag-active={fileDragActive}>
+      <div
+        ref={composerShellRef}
+        className="composer-shell"
+        data-file-drag-active={fileDragActive}
+      >
         {fileDragActive && (
           <div className="composer-file-drop" aria-hidden="true">
             <Icon name="paperclip" />

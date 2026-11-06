@@ -2818,6 +2818,27 @@ test("Slash menu is an IME-safe combobox and consumes Command Enter locally", ()
   assert.equal(composer.submissions(), 0);
 });
 
+test("Slash dismisses on pointer down in the Composer gutter and preserves the draft", () => {
+  const { textarea, submissions } = renderComposer({
+    draft: { kind: "text", text: "/" },
+    slashCommands: [{ name: "new", enabled: true, disabledReason: null }],
+  });
+  const menu = screen.getByRole("listbox");
+  fireEvent.pointerDown(textarea);
+  fireEvent.pointerDown(within(menu).getByRole("option"));
+  assert.equal(textarea.getAttribute("aria-expanded"), "true");
+
+  const gutter = textarea.closest(".composer-bar");
+  assert.equal(fireEvent.pointerDown(gutter), true);
+  assert.equal(screen.queryByRole("listbox"), null);
+  assert.equal(textarea.getAttribute("aria-expanded"), "false");
+  assert.equal(textarea.value, "/");
+  assert.equal(submissions(), 0);
+
+  fireEvent.change(textarea, { target: { value: "/n" } });
+  assert.ok(screen.getByRole("listbox"));
+});
+
 test("Slash menu translates command-specific disabled reasons without repeating its group label", () => {
   renderComposer({
     draft: { kind: "text", text: "/" },

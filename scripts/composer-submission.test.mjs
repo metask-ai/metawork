@@ -340,6 +340,7 @@ test("App lists and sends a personal Skill from the first unscoped draft", async
     skills: [
       skill("docx", "Built-in Word"),
       skill("review", "Personal Review"),
+      skill("pptx", "PPTX"),
       skill("disabled", "Disabled Skill", false),
     ],
     issues: [],
@@ -348,6 +349,16 @@ test("App lists and sends a personal Skill from the first unscoped draft", async
   const user = userEvent.setup({ document });
   await user.type(fixture.textarea, "/");
   assert.ok(await screen.findByRole("option", { name: /Built-in Word/ }));
+  const pptx = screen.getByRole("option", { name: /^pptx / });
+  assert.equal(within(pptx).queryByText("PPTX"), null);
+  const menu = screen.getByRole("listbox", { name: "Composer actions" });
+  for (const option of within(menu).getAllByRole("option")) {
+    assert.ok(option.querySelector('svg[aria-hidden="true"]'));
+  }
+  const commands = within(menu).getByRole("group", { name: "Commands" });
+  const [firstCommandIcon, secondCommandIcon] =
+    commands.querySelectorAll("svg");
+  assert.ok(firstCommandIcon.isEqualNode(secondCommandIcon));
   assert.equal(screen.queryByRole("option", { name: /Disabled Skill/ }), null);
   assert.equal(refresh.mock.callCount(), 1);
   await user.click(screen.getByRole("option", { name: /Personal Review/ }));
