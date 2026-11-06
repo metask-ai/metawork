@@ -288,6 +288,8 @@ Product Control 拥有 MCP Desired Registry、connection approval、OAuth consen
 
 Product Control 在 MCP 全部创建和替换连接入口复用 Host 已知凭据 predicate，在持久化与 effect 前拒绝敏感公开字段；不以名称、熵值或全部 env 值扩展凭据集合，也不改写既有记录。创建回执在 preparation 释放前持有确认 target 的稳定 identity，只有确定保存结果可以返回它；后续凭据捕获仍由当前 generation、server、auth mode 与 slot 校验，不通过 snapshot 猜测 identity。
 
+STDIO 启动诊断由 Application 的具体 transport owner 发布有界安全事实，绑定公开 server id、连接来源指纹与本次正式 apply attempt；引用计数保护其跨 worker/transport 生命周期，callback 只写原子事实并非阻塞唤醒，不持有或修改 Product。主线程通过窄 MCP port 接纳，与当前 Desired source 和已开始的 attempt 不符的晚到事实拒绝，隔离测试不进入正式诊断。Product 按成员保留事实，配置变化使旧事实失效；不把原始 stderr、系统错误文本或未确认退出码写入 snapshot、历史或 registry。EOF 仅证明 STDIO 关闭，不为取得诊断等待仍运行的 child；既有 Core failure ABI 与进程关闭协议不变。
+
 Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事实：
 
 - Desired Registry 表达已 durable 提交的用户意图；

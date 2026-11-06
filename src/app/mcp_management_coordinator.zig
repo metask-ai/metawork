@@ -476,6 +476,7 @@ const ConfigurationApplyJob = struct {
     manifest: mcp_configuration.RuntimeManifest,
     input: ?agent.McpRuntimeInput,
     authorizations: mcp_platform.HttpAuthorizations,
+    processes: mcp_platform.StdioObservations,
     allowlists: []agent.McpServerAllowlist,
     budget: ?*mcp_platform.CatalogBudget = null,
     existing_member_count: usize = 0,
@@ -579,6 +580,7 @@ const ConfigurationApplyJob = struct {
         }
         if (self.input) |*input| input.deinit();
         self.authorizations.deinit();
+        self.processes.deinit();
         if (!self.product_state_installed) {
             self.manifest.deinit();
             self.preparation.deinit();
@@ -617,6 +619,8 @@ pub const Coordinator = struct {
     transport_override: ?mcp_oauth.Transport = null,
     flow: ?*Flow = null,
     connection_test_job: ?*ConnectionTestJob = null,
+    active_processes: ?mcp_platform.StdioObservations = null,
+    process_attempt: u64 = 0,
     configuration_apply_job: ?*ConfigurationApplyJob = null,
     apply_pending: bool = false,
     last_cancel_outcome: ?Outcome = null,
@@ -872,8 +876,19 @@ pub const Coordinator = struct {
             self.host.notify();
             return .rejected;
         }
-        var runtime_build = try mcp_platform.buildRuntime(self.io, self.allocator, &credentials, self.host_environment);
+        self.process_attempt = std.math.add(u64, self.process_attempt, 1) catch return .unavailable;
+        var environment = self.host_environment;
+        environment.process_attempt = self.process_attempt;
+        environment.process_notifier = .{ .context = self.host.context, .notify_fn = self.host.notify_fn };
+        var runtime_build = try mcp_platform.buildRuntime(self.io, self.allocator, &credentials, environment);
         defer runtime_build.deinit();
+        const empty_processes: mcp_platform.StdioObservations = .{ .allocator = self.allocator };
+        for ((runtime_build.processes orelse empty_processes).slots) |slot| {
+            _ = try self.control.observeMcpProcess(slot.snapshot());
+        }
+        var processes = try (self.active_processes orelse empty_processes).compose(runtime_build.processes orelse empty_processes, step.member_ids, step.candidate_id);
+        var processes_owned = true;
+        defer if (processes_owned) processes.deinit();
         var input = try self.agent_runtime.prepareMcpMembership(generation, if (runtime_build.input) |*value| value else null, step.member_ids);
         var input_owned = true;
         defer if (input_owned) input.deinit();
@@ -900,11 +915,13 @@ pub const Coordinator = struct {
             .manifest = manifest,
             .input = input,
             .authorizations = authorizations,
+            .processes = processes,
             .allowlists = allowlists,
             .budget = self.host_environment.catalog_budget,
             .existing_member_count = step.member_ids.len - @intFromBool(step.target.kind == .add),
         };
         // Ownership has moved even if thread creation fails.
+        processes_owned = false;
         preparation_owned = false;
         input_owned = false;
         authorizations_owned = false;
@@ -920,9 +937,21 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) bool {
         var changed = false;
+        if (!self.stopping) if (self.active_processes) |processes| for (processes.slots) |slot| {
+            changed = (self.control.observeMcpProcess(slot.snapshot()) catch |err| failed: {
+                std.log.warn("MCP process observation unavailable: {s}", .{@errorName(err)});
+                break :failed false;
+            }) or changed;
+        };
+
         if (self.configuration_apply_job) |apply_job| {
             if (apply_job.finished.load(.acquire)) {
                 apply_job.join();
+                if (!self.stopping) for (apply_job.processes.slots) |slot| {
+                    _ = self.control.observeMcpProcess(slot.snapshot()) catch |err| {
+                        std.log.warn("MCP process observation unavailable: {s}", .{@errorName(err)});
+                    };
+                };
                 switch (apply_job.result) {
                     .applied => |applied| {
                         self.active_authorizations.deinit();
@@ -936,6 +965,10 @@ pub const Coordinator = struct {
                             applied.activation_failed,
                         );
                         if (installed) {
+                            if (self.active_processes) |*old| old.deinit();
+                            self.active_processes = apply_job.processes;
+                            apply_job.processes = .{ .allocator = self.allocator };
+
                             apply_job.product_state_installed = true;
                             apply_job.result = .pending;
                             self.apply_pending = !self.stopping;
@@ -1006,6 +1039,9 @@ pub const Coordinator = struct {
     pub fn shutdown(self: *Coordinator) void {
         if (self.stopping) return;
         self.stopping = true;
+        if (self.active_processes) |*processes| processes.stopNotifications();
+        if (self.configuration_apply_job) |job| job.processes.stopNotifications();
+
         self.cancelConfirmation();
         self.apply_pending = false;
         if (self.configuration_apply_job) |apply_job| {
@@ -1037,6 +1073,7 @@ pub const Coordinator = struct {
     pub fn deinit(self: *Coordinator) void {
         self.shutdown();
         std.debug.assert(self.flow == null);
+        if (self.active_processes) |*processes| processes.deinit();
         self.* = undefined;
     }
 

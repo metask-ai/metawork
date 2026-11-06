@@ -942,6 +942,23 @@ pub const ManagementOutcome = enum {
 /// An owned create receipt. Identity is copied before preparation is released.
 /// Only confirmed canonical saves carry an identity; no allocation follows commit.
 pub const created_identity_bytes = 24;
+/// Host observations are ephemeral and are never encoded into the registry.
+pub const ProcessFact = enum(u8) {
+    pending,
+    spawned,
+    executable_missing,
+    access_denied,
+    invalid_executable,
+    spawn_failed,
+    host_resource_unavailable,
+    stdio_closed,
+};
+pub const ProcessObservation = struct {
+    server_id: []const u8,
+    source: [32]u8,
+    attempt: u64,
+    fact: ProcessFact,
+};
 pub const CreateResult = struct {
     outcome: ManagementOutcome,
     server_id: ?[created_identity_bytes]u8 = null,

@@ -507,6 +507,94 @@ test "canonical AgentCore negotiates the 2026-07-28 stdio fixture" {
     try runCatalogInterop(.modern_only, "2026-07-28", "json");
 }
 
+test "canonical MCP uses bare npx and Windows command shims with an offline local package" {
+    const builtin = @import("builtin");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "package space");
+    try tmp.dir.createDirPath(std.testing.io, "Program Files");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "package space/package.json", .data = "{\"name\":\"metawork-mcp-process-fixture\",\"version\":\"1.0.0\",\"bin\":{\"metawork-mcp-process-fixture\":\"mcp.mjs\"}}" });
+    const fixture_path = try std.json.Stringify.valueAlloc(std.testing.allocator, options.fixture_path, .{});
+    defer std.testing.allocator.free(fixture_path);
+    const script = try std.fmt.allocPrint(std.testing.allocator, "#!/usr/bin/env node\nimport{{pathToFileURL}}from'node:url';await import(pathToFileURL({s}).href);\n", .{fixture_path});
+    defer std.testing.allocator.free(script);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "package space/mcp.mjs", .data = script });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const package = try std.fs.path.join(std.testing.allocator, &.{ root, "package space" });
+    defer std.testing.allocator.free(package);
+    const cache = try std.fs.path.join(std.testing.allocator, &.{ root, "npm-cache" });
+    defer std.testing.allocator.free(cache);
+    const trace = try std.fs.path.join(std.testing.allocator, &.{ root, "trace.jsonl" });
+    defer std.testing.allocator.free(trace);
+    const node_dir = std.fs.path.dirname(options.node_path).?;
+    const npx_cmd = try std.fs.path.join(std.testing.allocator, &.{ node_dir, "npx.cmd" });
+    defer std.testing.allocator.free(npx_cmd);
+    const space_cmd = try std.fs.path.join(std.testing.allocator, &.{ root, "Program Files", "npx.cmd" });
+    defer std.testing.allocator.free(space_cmd);
+    if (builtin.os.tag == .windows) {
+        const wrapper = try std.fmt.allocPrint(std.testing.allocator, "@call \"{s}\" %*\r\n", .{npx_cmd});
+        defer std.testing.allocator.free(wrapper);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Program Files/npx.cmd", .data = wrapper });
+    }
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put(if (builtin.os.tag == .windows) "Path" else "PATH", node_dir);
+    if (options.windows_system_root) |system_root| try environment.put("SystemRoot", system_root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty.npmrc", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-global.npmrc", .data = "" });
+    const global_npmrc = try std.fs.path.join(std.testing.allocator, &.{ root, "empty-global.npmrc" });
+    defer std.testing.allocator.free(global_npmrc);
+    const npmrc = try std.fs.path.join(std.testing.allocator, &.{ root, "empty.npmrc" });
+    defer std.testing.allocator.free(npmrc);
+    const commands: []const []const u8 = if (builtin.os.tag == .windows) &.{ "npx", npx_cmd, space_cmd } else &.{"npx"};
+    for (commands) |command| {
+        const arguments = [_][]const u8{ command, "--offline", "--yes", "--userconfig", npmrc, "--globalconfig", global_npmrc, "--cache", cache, "--package", package, "metawork-mcp-process-fixture", "--protocol", "2026-07-28", "--trace", trace };
+        var owner = try mcp_platform.createStdioTransportOwner(std.testing.io, std.testing.allocator, &arguments, .inherit, &environment);
+        var input = try agent.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{ .id = "npx-fixture", .transport_owner = &owner, .transport = .stdio, .namespace = "fixture", .client_name = "MetaWork", .client_version = "test", .timeout_ms = 20000, .configuration_fingerprint = @splat(1), .negotiation = .modern_only, .allowed_tools = &.{"echo"} }});
+        defer input.deinit();
+        const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &input });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const activation = switch (try runtime.activateMcp()) {
+            .activated => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer activation.deinit();
+        try std.testing.expectEqual(agent.McpActivationState.ready, activation.state());
+        try std.testing.expectEqual(@as(usize, 1), activation.catalogTools().len);
+        try std.testing.expectEqualStrings("echo", activation.catalogTools()[0].name);
+    }
+    if (options.npx_release_probe) {
+        const release_cache = try std.fs.path.join(std.testing.allocator, &.{ root, "release-cache" });
+        defer std.testing.allocator.free(release_cache);
+        const argv = [_][]const u8{ "npx", "--yes", "--userconfig", npmrc, "--globalconfig", global_npmrc, "--cache", release_cache, "--package", "@modelcontextprotocol/server-filesystem@1.0.0", "mcp-server-filesystem", root };
+        var owner = try mcp_platform.createStdioTransportOwner(std.testing.io, std.testing.allocator, &argv, .inherit, &environment);
+        var input = try agent.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{ .id = "npx-release", .transport_owner = &owner, .transport = .stdio, .namespace = "filesystem", .client_name = "MetaWork", .client_version = "test", .timeout_ms = 120000, .configuration_fingerprint = @splat(2), .negotiation = .automatic, .allowed_tools = &.{"list_allowed_directories"} }});
+        defer input.deinit();
+        const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &input });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const activation = switch (try runtime.activateMcp()) {
+            .activated => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer activation.deinit();
+        if (activation.state() != .ready) {
+            std.debug.print("Pinned npx probe: state={s} catalog={d} selected={d} issues={d}\n", .{ @tagName(activation.state()), activation.catalogTools().len, activation.selectedTools().len, activation.catalogIssues().len });
+            for (activation.serverHealth()) |health| std.debug.print("Pinned npx server state={s}\n", .{@tagName(health.state)});
+            for (activation.catalogIssues()) |issue| std.debug.print("Pinned npx catalog issue tool={s}\n", .{issue.tool_name orelse "(server)"});
+        }
+        try std.testing.expectEqual(agent.McpActivationState.ready, activation.state());
+        try std.testing.expect(activation.catalogTools().len > 0);
+        try std.testing.expectEqual(@as(usize, 1), activation.selectedTools().len);
+    }
+}
+
 test "canonical AgentCore negotiates 2025-11-25 and accepts draft-07 tools" {
     try runCatalogInterop(.compat_only, "2025-11-25", "json");
 }

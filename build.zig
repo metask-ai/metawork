@@ -1195,6 +1195,7 @@ fn addMcpInteropTests(
         @panic("Node.js is required for deterministic MCP interoperability tests");
     const fixture_options = b.addOptions();
     fixture_options.addOption([]const u8, "node_path", node_path);
+    fixture_options.addOption(bool, "npx_release_probe", b.option(bool, "mcp-npx-release-probe", "Also download and activate the pinned public MCP reference server in an isolated npx cache") orelse false);
     fixture_options.addOption(
         ?[]const u8,
         "windows_system_root",
@@ -1243,6 +1244,8 @@ fn addMcpInteropTests(
         "test-mcp-interop",
         "Run deterministic real-server MCP interoperability tests",
     ).dependOn(&run.step);
+    const npx_tests = b.addTest(.{ .name = "metawork-mcp-npx", .root_module = cases, .filters = &.{"canonical MCP uses bare npx"} });
+    b.step("test-mcp-npx", "Verify real npx/shim MCP activation with an offline package and optional pinned release probe").dependOn(&b.addRunArtifact(npx_tests).step);
     return &run.step;
 }
 

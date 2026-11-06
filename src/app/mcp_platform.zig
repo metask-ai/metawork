@@ -13,6 +13,8 @@ const product_identity = @import("metawork_product_identity");
 const process_compat = @import("metawork_mcp_process_compat");
 const quarantine_compat = @import("metawork_mcp_quarantine_compat");
 const catalog_budget = @import("mcp_catalog_budget.zig");
+const process_observation = @import("mcp_process_observation.zig");
+pub const StdioObservations = process_observation.Collection;
 pub const CatalogBudget = catalog_budget.Budget;
 
 // Shared by formal connections and disposable test Runtime connections.
@@ -887,10 +889,12 @@ fn runtimeScopeSetsEqual(left: []const []const u8, right: []const []const u8) bo
 pub const RuntimeBuild = struct {
     input: ?agent.McpRuntimeInput = null,
     authorizations: HttpAuthorizations,
+    processes: ?StdioObservations = null,
 
     pub fn deinit(self: *RuntimeBuild) void {
         if (self.input) |*input| input.deinit();
         self.authorizations.deinit();
+        if (self.processes) |*processes| processes.deinit();
         self.* = undefined;
     }
 
@@ -902,6 +906,8 @@ pub const RuntimeBuild = struct {
 };
 
 pub const HostEnvironment = struct {
+    process_attempt: u64 = 0,
+    process_notifier: ?process_observation.Notifier = null,
     catalog_budget: ?*catalog_budget.Budget = null,
     executable_search_path: ?[]const u8 = null,
     windows_system_root: ?[]const u8 = null,
@@ -929,6 +935,7 @@ pub fn buildRuntimeInput(
 ) BuildError!?agent.McpRuntimeInput {
     var build = try buildRuntime(io, allocator, preparation, host_environment);
     defer build.authorizations.deinit();
+    defer if (build.processes) |*processes| processes.deinit();
     return build.input;
 }
 
@@ -938,6 +945,9 @@ pub fn buildRuntime(
     preparation: *const mcp_configuration.Preparation,
     host_environment: HostEnvironment,
 ) BuildError!RuntimeBuild {
+    var process_slots: std.ArrayList(*process_observation.Slot) = .empty;
+    defer process_slots.deinit(allocator);
+    errdefer for (process_slots.items) |slot| slot.release();
     var authorization_list: std.ArrayList(*HttpAuthSlot) = .empty;
     defer authorization_list.deinit(allocator);
     errdefer for (authorization_list.items) |slot| slot.release();
@@ -977,8 +987,21 @@ pub fn buildRuntime(
         if (state != .eligible) continue;
         const owner = try allocator.create(agent.McpTransportOwner);
         var authorization: ?*HttpAuthSlot = null;
+        var observation: ?*process_observation.Slot = null;
+        if (std.mem.eql(u8, server.transport.kind, "stdio")) if (host_environment.process_notifier) |notifier| {
+            const slot = process_observation.Slot.init(allocator, server, host_environment.process_attempt, notifier) catch |err| {
+                allocator.destroy(owner);
+                return err;
+            };
+            process_slots.append(allocator, slot) catch |err| {
+                slot.release();
+                allocator.destroy(owner);
+                return err;
+            };
+            observation = slot;
+        };
         owner.* = (if (std.mem.eql(u8, server.transport.kind, "stdio"))
-            createStdioOwner(io, allocator, server, preparation, host_environment)
+            createStdioOwner(io, allocator, server, preparation, host_environment, observation)
         else if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
             createHttpOwner(io, allocator, server, preparation, &authorization)
         else
@@ -1027,6 +1050,11 @@ pub fn buildRuntime(
         for (slots) |slot| slot.release();
         if (slots.len != 0) allocator.free(slots);
     };
+    const owned_process_slots = try process_slots.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_process_slots) |slot| slot.release();
+        if (owned_process_slots.len != 0) allocator.free(owned_process_slots);
+    }
     const input = agent.McpRuntimeInput.init(
         allocator,
         registry.generation,
@@ -1042,6 +1070,7 @@ pub fn buildRuntime(
     slots_owned = false;
     return .{
         .input = input,
+        .processes = .{ .allocator = allocator, .slots = owned_process_slots },
         .authorizations = .{ .allocator = allocator, .slots = slots },
     };
 }
@@ -1104,6 +1133,7 @@ const StdioContext = struct {
     argv: []const []const u8,
     cwd: std.process.Child.Cwd,
     backend: agent.McpStdioBackend,
+    observation: ?*process_observation.Slot = null,
 
     fn endpoint(self: *StdioContext) agent.McpStdioProcessEndpoint {
         return .{
@@ -1172,11 +1202,12 @@ const StdioContext = struct {
 
     fn open(raw: *anyopaque, _: u32) agent.McpStdioOpenOutcome {
         const self: *StdioContext = @ptrCast(@alignCast(raw));
-        const connection = self.openConnection() catch |err| return .{
-            .failure = switch (err) {
+        const connection = self.openConnection() catch |err| {
+            if (err == error.ResourceUnavailable) if (self.observation) |slot| slot.record(.host_resource_unavailable);
+            return .{ .failure = switch (err) {
                 error.SpawnFailed => .child_exit,
                 error.ResourceUnavailable => .fatal,
-            },
+            } };
         };
         return .{ .connection = connection };
     }
@@ -1201,11 +1232,18 @@ const StdioContext = struct {
             .pgid = if (builtin.os.tag == .windows) null else 0,
             .create_no_window = true,
             .start_suspended = builtin.os.tag == .windows,
-        }) catch {
+        }) catch |err| {
             if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(self.io);
+            if (self.observation) |slot| slot.record(switch (err) {
+                error.FileNotFound => .executable_missing,
+                error.AccessDenied => .access_denied,
+                error.InvalidExe => .invalid_executable,
+                else => .spawn_failed,
+            });
             return error.SpawnFailed;
         };
         if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(self.io);
+        if (self.observation) |slot| slot.record(.spawned);
         errdefer child.kill(self.io);
         if (builtin.os.tag == .windows)
             job.attachAndResume(&child) catch return error.ResourceUnavailable;
@@ -1307,6 +1345,7 @@ const StdioContext = struct {
             const chunk = connection.stdout_reader.interface.peekGreedy(1) catch |err|
                 switch (err) {
                     error.EndOfStream => {
+                        if (connection.context.observation) |slot| slot.record(.stdio_closed);
                         _ = sink.finish_fn(sink.context);
                         return .completed;
                     },
@@ -1419,6 +1458,7 @@ const StdioContext = struct {
         const backend: *agent.McpStdioBackend = @ptrCast(@alignCast(raw));
         const self: *StdioContext = @fieldParentPtr("backend", backend);
         self.backend.deinit() catch @panic("MCP stdio owner released with live connections");
+        if (self.observation) |slot| slot.release();
         secureEnvironmentDeinit(&self.environment);
         self.arena.deinit();
         const allocator = self.allocator;
@@ -1476,6 +1516,7 @@ fn createStdioOwner(
     server: mcp_configuration.ServerWire,
     preparation: *const mcp_configuration.Preparation,
     host_environment: HostEnvironment,
+    observation: ?*process_observation.Slot,
 ) BuildError!agent.McpTransportOwner {
     const context = try allocator.create(StdioContext);
     errdefer allocator.destroy(context);
@@ -1523,6 +1564,10 @@ fn createStdioOwner(
         .allocator = allocator,
         .endpoint = context.endpoint(),
     }) catch return error.InvalidConfig;
+    if (observation) |slot| {
+        slot.retain();
+        context.observation = slot;
+    }
     return agent.McpTransportOwner.init(context.backend.transport(), StdioContext.destroy);
 }
 
@@ -2882,6 +2927,35 @@ test "MCP real process exchange and notify progress without async capacity" {
     try std.testing.expect(StdioContext.exchange(&context, connection, write, &sink) == .completed);
     try std.testing.expectEqual(@as(?agent.McpStdioPortFailure, null), StdioContext.notify(&context, connection, write));
     try std.testing.expect(!connection.dead.load(.acquire));
+}
+
+test "MCP process observations distinguish missing executable from started STDIO closure" {
+    const Host = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var marker: u8 = 0;
+    const server: mcp_configuration.ServerWire = .{ .id = "local", .namespace = "local", .display_name = "Local", .enabled = true, .negotiation = "modern_only", .timeout_ms = 5000, .transport = .{ .kind = "stdio", .command = "node" }, .auth = .{ .kind = "none", .oauth = null }, .connection_approval = null, .tools = &.{} };
+    const slot = try process_observation.Slot.init(std.testing.allocator, server, 1, .{ .context = &marker, .notify_fn = Host.notify });
+    defer slot.release();
+    var missing = try ProcessFixture.context(std.testing.io, &.{"metawork-missing-process-fixture-7ab419"});
+    defer missing.environment.deinit();
+    defer missing.arena.deinit();
+    missing.observation = slot;
+    try std.testing.expect(StdioContext.open(&missing, 5000) == .failure);
+    try std.testing.expectEqual(mcp_configuration.ProcessFact.executable_missing, slot.snapshot().fact);
+    const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", "process.stderr.write('SYNTHETIC-RAW-STDERR');process.exit(7);" };
+    var context = try ProcessFixture.context(std.testing.io, &argv);
+    defer context.environment.deinit();
+    defer context.arena.deinit();
+    context.observation = slot;
+    const connection = try context.openConnection();
+    defer connection.deinit();
+    try std.testing.expectEqual(mcp_configuration.ProcessFact.spawned, slot.snapshot().fact);
+    var sink: agent.McpStdioResponseSink = .{ .context = &context, .feed_fn = ProcessFixture.feed, .finish_fn = ProcessFixture.finish };
+    try std.testing.expect(StdioContext.pumpExchange(connection, &.{}, &sink) == .completed);
+    try std.testing.expectEqual(mcp_configuration.ProcessFact.stdio_closed, slot.snapshot().fact);
+    // EOF is a pipe fact; it did not turn into a fabricated exit status.
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, try connection.child.wait(std.testing.io));
 }
 
 test "MCP concurrent connections close independently" {

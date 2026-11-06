@@ -310,6 +310,23 @@ fn mcpProjectionRedacted(
     return false;
 }
 
+fn processDiagnostic(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) ?[]const u8 {
+    for (mcp.process_observations.items) |value| {
+        if (!std.mem.eql(u8, value.server_id, server.id) or !std.mem.eql(u8, &value.source, &mcp_configuration.runtimeDescriptorFingerprint(server))) continue;
+        return switch (value.fact) {
+            .pending => null,
+            .spawned => "The process started but did not complete the MCP handshake. Check its arguments and dependencies.",
+            .executable_missing => "The executable was not found. Check the command, installation and search path.",
+            .access_denied => "Permission to start the executable was denied. Check file and directory access.",
+            .invalid_executable => "The executable format is invalid for this platform. Check the selected program.",
+            .spawn_failed => "The process could not be started. Check the program and working directory.",
+            .host_resource_unavailable => "Host resources for the process are unavailable. Free resources and retry the connection.",
+            .stdio_closed => "The process started, then its STDIO closed. Check its arguments and dependencies.",
+        };
+    }
+    return null;
+}
+
 fn mcpSecretSlotReady(
     management: *const mcp_configuration.ManagementPort,
     slot: mcp_configuration.SecretSlotWire,
@@ -638,6 +655,8 @@ pub fn writeProjection(
             "Authorization recovery is pending. The connection will retry automatically."
         else if (serverCapacityBlocked(mcp, server))
             "MCP connection capacity is full. Close unused tasks, then retry the connection."
+        else if (status != .ready and status != .disabled and status != .needs_authentication and processDiagnostic(mcp, server) != null)
+            processDiagnostic(mcp, server).?
         else if (mcp.refresh_schedule_failed)
             "Automatic refresh could not be scheduled. Select Refresh to retry."
         else if (mcp.refresh_paused)

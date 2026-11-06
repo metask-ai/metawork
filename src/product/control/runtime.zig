@@ -6320,6 +6320,13 @@ pub const Runtime = struct {
     /// Installs the exact Runtime preparation and authority produced by one
     /// successful declarative AgentCore apply. Every pointer remains owned by
     /// the caller when the generation no longer matches.
+    pub fn observeMcpProcess(self: *Runtime, observation: mcp_configuration.ProcessObservation) Error!bool {
+        const runtime = if (self.mcp) |*value| value else return false;
+        const changed = runtime.observeProcess(observation) catch |err| return @errorCast(err);
+        if (changed) self.bumpRevision();
+        return changed;
+    }
+
     pub fn completeMcpConfigurationApply(
         self: *Runtime,
         expected_generation: u64,
@@ -10402,6 +10409,7 @@ pub const Runtime = struct {
     pub fn mcpManagementPort(self: *Runtime) control_ports.McpManagementPort {
         return .{
             .context = self,
+            .observe_process_fn = controlMcpObserveProcess,
             .inspect_fn = controlMcpInspect,
             .write_desired_fn = controlMcpWriteDesired,
             .begin_connection_test_fn = controlMcpBeginConnectionTest,
@@ -10957,6 +10965,9 @@ fn controlMcpBeginApply(context: *anyopaque, generation: u64) anyerror!void {
 }
 fn controlMcpPrepareApply(context: *anyopaque, generation: u64, intent: mcp_configuration.RuntimeApplyIntent) anyerror!?mcp_configuration.RuntimeApplyStep {
     return controlOwner(context).prepareMcpConfigurationStep(generation, intent);
+}
+fn controlMcpObserveProcess(context: *anyopaque, observation: mcp_configuration.ProcessObservation) !bool {
+    return controlOwner(context).observeMcpProcess(observation);
 }
 fn controlMcpCompleteApply(context: *anyopaque, generation: u64, preparation: *mcp_configuration.Preparation, manifest: *mcp_configuration.RuntimeManifest, activation: ?*lifecycle.McpActivation, selection: ?*lifecycle.McpSelection, activation_failed: bool) bool {
     return controlOwner(context).completeMcpConfigurationApply(generation, preparation, manifest, activation, selection, activation_failed);

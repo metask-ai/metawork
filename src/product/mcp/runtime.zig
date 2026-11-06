@@ -1015,6 +1015,40 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn observeProcess(self: *Runtime, observation: configuration.ProcessObservation) Error!bool {
+        if (self.shutting_down or observation.attempt == 0) return false;
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        const server = state_module.findMcpServer(registry.servers, observation.server_id) orelse return false;
+        if (!server.enabled or !std.mem.eql(u8, server.transport.kind, "stdio") or !std.mem.eql(u8, &observation.source, &configuration.runtimeDescriptorFingerprint(server))) return false;
+        var index: usize = 0;
+        while (index < self.state.process_observations.items.len) {
+            const old = self.state.process_observations.items[index];
+            const current = state_module.findMcpServer(registry.servers, old.server_id);
+            if (current == null or !std.mem.eql(u8, &old.source, &configuration.runtimeDescriptorFingerprint(current.?))) {
+                self.allocator.free(old.server_id);
+                _ = self.state.process_observations.swapRemove(index);
+            } else index += 1;
+        }
+        for (self.state.process_observations.items) |*old| {
+            if (!std.mem.eql(u8, old.server_id, observation.server_id)) continue;
+            if (observation.attempt < old.attempt or (observation.attempt > old.attempt and observation.fact != .pending)) return false;
+            if (old.attempt == observation.attempt and old.fact == observation.fact) return false;
+            old.attempt = observation.attempt;
+            old.fact = observation.fact;
+            self.markChanged();
+            return true;
+        }
+        if (observation.fact != .pending or self.state.process_observations.items.len >= management.limits.max_servers) return false;
+        const owned_id = try self.allocator.dupe(u8, observation.server_id);
+        errdefer self.allocator.free(owned_id);
+        var owned = observation;
+        owned.server_id = owned_id;
+        try self.state.process_observations.append(self.allocator, owned);
+        self.markChanged();
+        return true;
+    }
+
     pub fn createHttpServer(
         self: *Runtime,
         expected_generation: u64,
@@ -3498,4 +3532,32 @@ test "MCP create receipts only expose committed identity and own it across mutat
     try std.testing.expect(stale.server_id == null);
     try std.testing.expectEqual(.saved, try runtime.renameServer(2, .{ .server_id = &identity, .display_name = "Renamed" }));
     try std.testing.expectEqualStrings(&identity, runtime.state.management.?.desiredRegistry().?.servers[1].id);
+}
+
+test "MCP process observations reject old attempts and changed sources" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    const created = try runtime.createStdioServer(1, .{ .display_name = "Local", .command = "node" });
+    const id = created.server_id.?;
+    const server = runtime.state.management.?.desiredRegistry().?.servers[1];
+    var observation: configuration.ProcessObservation = .{ .server_id = &id, .source = configuration.runtimeDescriptorFingerprint(server), .attempt = 1, .fact = .pending };
+    try std.testing.expect(try runtime.observeProcess(observation));
+    observation.fact = .executable_missing;
+    try std.testing.expect(try runtime.observeProcess(observation));
+    try std.testing.expect(!try runtime.observeProcess(observation));
+    observation.attempt = 2;
+    observation.fact = .pending;
+    try std.testing.expect(try runtime.observeProcess(observation));
+    observation.attempt = 1;
+    observation.fact = .stdio_closed;
+    try std.testing.expect(!try runtime.observeProcess(observation));
+    observation.attempt = 2;
+    observation.source = @splat(0);
+    try std.testing.expect(!try runtime.observeProcess(observation));
+    try std.testing.expectEqual(configuration.ProcessFact.pending, runtime.state.process_observations.items[0].fact);
+    observation.source = configuration.runtimeDescriptorFingerprint(server);
+    try std.testing.expectEqual(.saved, try runtime.updateStdioConnection(2, .{ .server_id = &id, .display_name = "Local", .command = "other-node", .negotiation = "automatic", .timeout_ms = 30000, .auth_mode = .none }));
+    try std.testing.expect(!try runtime.observeProcess(observation));
 }
