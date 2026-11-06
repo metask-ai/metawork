@@ -1763,7 +1763,6 @@ function renderComposer(overrides = {}) {
       canSubmit: true,
       runInFlight: false,
       accessRequired: false,
-      workspaceMissing: false,
       workspaceLabel: "metawork",
       workspaceTitle: "/repo/metawork",
       workspaceOptions: [],
@@ -3555,8 +3554,7 @@ test("existing conversation approval selection is Host-controlled and restores k
   trigger.focus();
   await user.keyboard("{Enter}");
   assert.match(
-    (await screen.findByRole("option", { name: /Direct execution/ }))
-      .textContent,
+    (await screen.findByRole("option", { name: /Full access/ })).textContent,
     /Stops the current run/,
   );
   await user.keyboard("{ArrowDown}{Enter}");
@@ -3614,7 +3612,7 @@ test("approval pending, unavailable and unknown states admit no duplicate mode a
     }),
   );
   await user.click(trigger);
-  const full = await screen.findByRole("option", { name: /Direct execution/ });
+  const full = await screen.findByRole("option", { name: /Full access/ });
   assert.equal(full.getAttribute("aria-disabled"), "true");
   await user.click(full);
   assert.equal(selected, 0);
@@ -3782,12 +3780,53 @@ test("a saved Workspace can be selected directly without opening the folder pick
     },
   });
   const user = userEvent.setup();
-  await user.click(screen.getByRole("combobox", { name: "Switch workspace" }));
+  await user.click(
+    screen.getByRole("combobox", { name: "Choose working directory" }),
+  );
   await user.click(await screen.findByRole("option", { name: "/repo/saved" }));
   assert.deepEqual(selected, ["saved"]);
   assert.equal(pickers, 0);
   assert.equal(screen.queryByText("Directory unavailable"), null);
 });
+
+for (const accessRequired of [false, true]) {
+  test(`Workspace menu opens the native folder picker without changing the draft selection; accessRequired=${accessRequired}`, async () => {
+    const user = userEvent.setup();
+    const label = accessRequired ? "Select folder again" : "Open local folder";
+    let pickers = 0;
+    renderComposer({
+      accessRequired,
+      workspaceEditable: true,
+      workspaceOptions: [
+        { id: "automatic", label: "Default", authorization: "available" },
+        {
+          id: "saved",
+          label: "/repo/saved",
+          authorization: "reauthorization_required",
+        },
+      ],
+      selectedWorkspaceOptionId: accessRequired ? "saved" : "automatic",
+      onSelectWorkspace() {
+        assert.fail("Opening the picker must not change the selection");
+      },
+      onConfirmAccess() {
+        pickers++;
+      },
+    });
+    const trigger = screen.getByRole("combobox", {
+      name: "Choose working directory",
+    });
+    const initialLabel = trigger.textContent;
+    assert.equal(screen.queryByText(label), null);
+    await user.click(trigger);
+    const choices = await screen.findAllByRole("option");
+    assert.equal(choices.at(-2).textContent, label);
+    await user.click(screen.getByRole("option", { name: label }));
+    assert.equal(pickers, 1);
+    assert.equal(trigger.textContent, initialLabel);
+    await waitFor(() => assert.equal(screen.queryByRole("listbox"), null));
+  });
+}
 
 test("new Task approval menu explains each mode only when opened and changes the draft choice", async () => {
   const { NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
@@ -3813,14 +3852,14 @@ test("new Task approval menu explains each mode only when opened and changes the
         .querySelector(".selection-menu-item-copy > :first-child")
         .textContent.trim(),
     ),
-    ["Manual approval", "Automatic approval", "Direct execution"],
+    ["Manual approval", "Automatic approval", "Full access"],
   );
   assert.ok(
     options.every((option) =>
       option.querySelector("small")?.textContent.trim(),
     ),
   );
-  assert.match(options[1].textContent, /extra cost/);
+  assert.match(options[1].textContent, /asks you if unsure/);
   assert.equal(document.querySelector(".permission-policy-boundary"), null);
   await user.click(screen.getByRole("option", { name: /^Manual approval/ }));
   assert.deepEqual(choices, ["manual"]);

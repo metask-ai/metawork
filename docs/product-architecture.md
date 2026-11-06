@@ -145,7 +145,7 @@ Provider 删除先提交 credential cleanup tombstone，再删除系统 credenti
 
 Workspace 是 Product Control-owned 产品对象；产品语义和用户操作以[产品需求](requirements.md)为准，wire 以[Renderer Bridge 合同](renderer-bridge-contract.md)为准。本节只定义 Workspace、Task、ExecutionConfig 与 Agent Session 之间的 admission 和提交关系。
 
-Manual Workspace 的项目入口状态由 Workspace owner 独立持有，并进入 Product history；它不具有执行授权语义。项目移除只更新该状态，不删除 Workspace、推进 epoch、改变 trust/authorization、停止 Task 或释放 Session/Skill authority；空项目同样保留目录记录与授权。移除后的 Workspace 仍向 Renderer 投影，供 Task 和目录控件使用，项目分组单独消费入口状态。重新选择同一已授权目录只恢复入口与导航顺序；授权确已不可用时才沿既有目录授权路径恢复。项目入口变更沿用 Product history 的 best-effort 持久化及健康语义，不借入口操作回收底层资源。
+Manual Workspace 的项目入口状态由 Workspace owner 独立持有，并进入 Product history；它不具有执行授权语义。项目移除只更新该状态，不删除 Workspace、推进 epoch、改变 trust/authorization、停止 Task 或释放 Session/Skill authority；空项目同样保留目录记录与授权。移除后的 Workspace 仍向 Renderer 投影，供已绑定的 Task 和草稿使用。左栏项目和 New task 的项目选项消费同一入口状态。重新选择同一已授权目录只恢复入口与导航顺序；授权确已不可用时才沿既有目录授权路径恢复。项目入口变更沿用 Product history 的 best-effort 持久化及健康语义，不借入口操作回收底层资源。
 
 Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Workspace Runtime 当前已安装的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。已严格恢复的可见 Manual record 保留用户先前的目录选择：Workspace owner 重新解析精确 canonical root 并打开目录验证实际可用性，成功恢复为 available，失败保留 record 为不可用供重新选择；不把重启本身视为撤销选择，不恢复已移除记录的可见性、不改变 epoch，也不接受路径已重定向的目录。此检查不代表后续文件访问永久成功，执行仍遵循既有准入和实际 I/O 结果。
 

@@ -315,11 +315,10 @@ export const enUS = {
   "operation.execution": "Updating model settings",
   "operation.account_cancel": "Cancelling the Metask account action",
   "workspace.label": "Workspace",
-  "workspace.select": "Select a workspace",
-  "workspace.add": "Add",
-  "workspace.switch": "Switch workspace",
-  "workspace.none": "No workspace selected",
-  "workspace.default_directory": "Default",
+  "workspace.select": "Choose working directory",
+  "workspace.add": "Open local folder",
+  "workspace.working_directory": "Working directory",
+  "workspace.automatic_directory": "No working directory",
   "workspace.grant_ready": "Ready to start a task in this trusted workspace.",
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed":
@@ -850,11 +849,7 @@ export const enUS = {
   "skills.sources.root.compat.claude.workspace": "Claude · Project directory",
   "skills.sources.root.compat.codex.user": "Codex · Personal directory",
   "skills.sources.root.compat.codex.workspace": "Codex · Project directory",
-  "task.empty_title": "Start with the outcome you want.",
-  "task.empty_body_with_workspace":
-    "Describe a clear outcome. The new task will use the current workspace, and MetaWork will keep the work, decisions, and result together.",
-  "task.empty_body_without_workspace":
-    "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
+  "task.empty_title": "What would you like to accomplish?",
   "task.created_empty_body":
     "This task is ready. Enter its first instruction to begin.",
   "task.conversation_history_excluded":
@@ -957,7 +952,7 @@ export const enUS = {
   "run.submit": "Send",
   "run.input_history_loading": "Loading input history…",
   "run.input_history_failed": "Couldn't load input history. Press ↑ to retry.",
-  "run.placeholder": "Describe the outcome you need…",
+  "run.placeholder": "Enter your instructions…",
   "run.context": "Current execution context",
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
@@ -1330,6 +1325,7 @@ export const enUS = {
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
   "approval.answered_by_reviewer": "Automatic review",
+  "approval.review_approved_count": "Automatic approvals ({count})",
   "approval.action.command": "Allow this command to run?",
   "approval.action.read": "Allow reading “{target}”?",
   "approval.action.write": "Allow writing “{target}”?",
@@ -1528,17 +1524,19 @@ export const enUS = {
     "Model configuration recovery result not yet confirmed",
   "permission.profile.approval_required": "Request approval",
   "permission.mode.manual": "Manual approval",
-  "permission.mode.manual.help": "Routine edits run; ask when needed.",
+  "permission.mode.manual.help":
+    "Routine edits run automatically and other actions may need approval",
   "permission.mode.auto_review": "Automatic approval",
   "permission.mode.auto_review.help":
-    "Model review; extra cost; asks if unsure.",
-  "permission.mode.full_access": "Direct execution",
-  "permission.mode.full_access.help": "No routine prompts; protections apply.",
+    "The model reviews requests and asks you if unsure",
+  "permission.mode.full_access": "Full access",
+  "permission.mode.full_access.help":
+    "Routine actions skip approval while system protections still apply",
   "permission.auto_review.boundary":
     "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Failure returns to manual approval. MCP requests remain manual.",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. Other operations outside this policy require approval.",
-  "permission.profile.full_access": "Direct execution",
+  "permission.profile.full_access": "Full access",
   "permission.profile.full_access.help":
     "MetaWork skips approval for routine tool operations. AgentCore protections and system or service permissions can still block them.",
   "permission.new_task.label": "Approval mode",
@@ -1548,7 +1546,7 @@ export const enUS = {
   "permission.task.help":
     "Shows the current mode of this conversation. Change it in the composer.",
   "permission.task.full_access.help":
-    "This session uses direct execution. Routine approval is skipped; AgentCore and system protections still apply.",
+    "This session uses Full access. Routine approval is skipped; AgentCore and system protections still apply.",
   "permission.task.menu_help":
     "Change approval mode for this conversation, keeping the workspace, attachments and history.",
   "permission.change.stop_help":
@@ -1600,7 +1598,7 @@ export const enUS = {
   "permission.menu_help":
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
-    "Direct execution skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
+    "Full access skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
   "settings.api_key": "API key",
   "settings.custom_provider_protocol": "Protocol",
   "settings.custom_provider_endpoint": "Request URL (Endpoint)",
@@ -1659,7 +1657,6 @@ export const enUS = {
   "settings.custom_provider_credential.invalid": "Credential rejected",
   "settings.catalog_count": "Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.new_task_model_help": "Choose the model for this new task.",
   "settings.new_task_model_invalid":
     "The previously selected model is no longer available. Choose another model before sending.",
   "settings.custom_model_add": "Add model",

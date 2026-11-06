@@ -845,66 +845,100 @@ test("Task only renders a permission card when the current request needs a user"
   }
 });
 
-test("automatic permission decisions keep collapsed audit records without replaying arguments", () => {
+test("automatic approvals are grouped inside the Run process while denials stay inline", () => {
   const waiting = run({ phase: "running", terminal: null });
-  const records = ["allowed_once", "denied"].map((state, index) => ({
-    requestId: `request-history-${index}`,
-    runId: waiting.id,
-    order: String(index + 1),
-    kind: "permission",
-    state,
-    answeredBy: "reviewer",
-    reviewReason:
-      index === 0
-        ? "Only reads the workspace."
-        : "Outside the requested scope.",
-    agentRequestId: `agent-request-${index}`,
-    permission: index === 0 ? { toolName: "Bash" } : null,
-    detail: '{"command":"permission-arguments-must-not-be-replayed"}',
-    itemCount: 1,
-    detailTruncated: false,
-    redacted: false,
-  }));
+  const records = ["allowed_once", "allowed_once", "denied"].map(
+    (state, index) => ({
+      requestId: `request-history-${index}`,
+      runId: waiting.id,
+      order: String(index + 1),
+      kind: "permission",
+      state,
+      answeredBy: "reviewer",
+      reviewReason:
+        state === "denied"
+          ? "Outside the requested scope."
+          : `Approved operation ${index}.`,
+      agentRequestId: `agent-request-${index}`,
+      permission: index === 0 ? { toolName: "Bash" } : null,
+      detail: '{"command":"permission-arguments-must-not-be-replayed"}',
+      itemCount: 1,
+      detailTruncated: false,
+      redacted: false,
+    }),
+  );
   for (const locale of ["en-US", "zh-CN"]) {
-    const container = document.createElement("div");
-    container.innerHTML = renderTaskContent(
-      task({
-        approvalMode: "auto_review",
-        currentRunId: waiting.id,
-        currentRunPhase: "running",
-        runs: [waiting],
-        uiHistory: [
-          ...records,
-          { ...records[0], requestId: "user-history", answeredBy: "user" },
-          { ...records[1], requestId: "other-run-history", runId: "other-run" },
-        ],
-      }),
-      locale,
-    );
-    const reviews = container.querySelectorAll("details.projection-note");
-    assert.equal(reviews.length, 2);
-    for (const [index, review] of reviews.entries()) {
-      assert.equal(review.hasAttribute("open"), false);
-      const summary = review.querySelector("summary").textContent;
-      assert.ok(
-        summary.includes(translate(locale, "approval.answered_by_reviewer")),
+    for (const value of [waiting, run()]) {
+      const { container } = render(
+        taskContentElement(
+          task({
+            approvalMode: "auto_review",
+            currentRunId: value.id,
+            currentRunPhase: value.phase,
+            runs: [value],
+            uiHistory: [
+              ...records,
+              { ...records[0], requestId: "user-history", answeredBy: "user" },
+              {
+                ...records[0],
+                requestId: "other-run-history",
+                runId: "other-run",
+              },
+            ],
+          }),
+          "1",
+          {},
+          locale,
+        ),
       );
-      assert.ok(
-        summary.includes(translate(locale, `ui.state.${records[index].state}`)),
-      );
-      assert.equal(summary.includes("Bash"), index === 0);
+      const process = container.querySelector(".run-process-header");
+      assert.equal(process.getAttribute("aria-expanded"), "false");
       assert.equal(
-        review.querySelector("p").textContent,
-        records[index].reviewReason,
+        container.querySelectorAll("details.projection-note").length,
+        1,
       );
-      assert.ok(!summary.includes(records[index].reviewReason));
+      const denial = container.querySelector("details.projection-note");
+      assert.equal(denial.hasAttribute("open"), false);
+      assert.ok(
+        denial
+          .querySelector("summary")
+          .textContent.includes(translate(locale, "ui.state.denied")),
+      );
+      assert.equal(
+        denial.querySelector("p").textContent,
+        records[2].reviewReason,
+      );
+      assert.equal(container.querySelector(".ai-intervention"), null);
+
+      fireEvent.click(process);
+      const group = container.querySelector(".run-process-body > details");
+      assert.equal(group.hasAttribute("open"), false);
+      assert.equal(
+        group.querySelector("summary").textContent,
+        translate(locale, "approval.review_approved_count", { count: "2" }),
+      );
+      const approvals = group.querySelectorAll("details.projection-note");
+      assert.equal(approvals.length, 2);
+      for (const [index, review] of approvals.entries()) {
+        assert.equal(review.hasAttribute("open"), false);
+        const summary = review.querySelector("summary").textContent;
+        assert.ok(
+          summary.includes(translate(locale, "approval.answered_by_reviewer")),
+        );
+        assert.ok(summary.includes(translate(locale, "ui.state.allowed_once")));
+        assert.equal(summary.includes("Bash"), index === 0);
+        assert.equal(
+          review.querySelector("p").textContent,
+          records[index].reviewReason,
+        );
+      }
+      assert.ok(
+        !container.textContent.includes(
+          "permission-arguments-must-not-be-replayed",
+        ),
+      );
+      cleanup();
     }
-    assert.equal(container.querySelector(".ai-intervention"), null);
-    assert.ok(
-      !container.textContent.includes(
-        "permission-arguments-must-not-be-replayed",
-      ),
-    );
   }
 });
 
@@ -4989,7 +5023,7 @@ test("new Task approval menu selects all three real modes without another confir
       },
     });
   }
-  for (const label of [/Automatic approval/, /Direct execution/]) {
+  for (const label of [/Automatic approval/, /Full access/]) {
     render(
       createElement(
         I18nContext.Provider,
@@ -6044,7 +6078,7 @@ test("task information keeps the full-access boundary visible without a mutation
     ),
   );
   await user.click(screen.getByRole("button", { name: "Task information" }));
-  assert.ok(screen.getByText("Direct execution"));
+  assert.ok(screen.getByText("Full access"));
   assert.match(
     document.body.textContent,
     /Routine approval is skipped.*AgentCore and system protections still apply/,
@@ -6320,7 +6354,9 @@ test("file tree keyboard toggle preserves the active preview DOM and tab selecti
 function recentTaskButton(name) {
   const button = screen
     .getAllByRole("button", { name })
-    .find((candidate) => candidate.closest(".task-list"));
+    .find((candidate) =>
+      candidate.matches(".task-list > .task-list-entry > .task-list-item"),
+    );
   assert.ok(button, "Task must have an entrance in Recent");
   return button;
 }
@@ -6469,10 +6505,15 @@ test("App Workspace selection failure stays by its draft with source diagnostics
   await act(async () =>
     fireEvent.click(screen.getByRole("button", { name: "New task" })),
   );
-  await waitFor(() =>
-    assert.equal(screen.getByRole("button", { name: "Add" }).disabled, false),
+  const user = userEvent.setup({ document: dom.window.document });
+  const workspace = await screen.findByRole("combobox", {
+    name: "Choose working directory",
+  });
+  await waitFor(() => assert.equal(workspace.disabled, false));
+  await user.click(workspace);
+  await user.click(
+    await screen.findByRole("option", { name: "Open local folder" }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Add" }));
   await waitFor(() =>
     assert.ok(document.querySelector(".workspace-selection-feedback")),
   );
@@ -6910,9 +6951,7 @@ test("App switches the current Task only after Host commits and preserves its dr
   fireEvent.change(composer, { target: { value: "Keep this unsent draft" } });
   const trigger = screen.getByRole("combobox", { name: "Approval mode" });
   await user.click(trigger);
-  await user.click(
-    await screen.findByRole("option", { name: /Direct execution/ }),
-  );
+  await user.click(await screen.findByRole("option", { name: /Full access/ }));
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
     source.id,
@@ -6946,7 +6985,7 @@ test("App switches the current Task only after Host commits and preserves its dr
     activeOperation: null,
   });
   await publishAppFixture(fixture);
-  await waitFor(() => assert.match(trigger.textContent, /Direct execution/));
+  await waitFor(() => assert.match(trigger.textContent, /Full access/));
   assert.equal(trigger.disabled, false);
   assert.equal(composer.value, "Keep this unsent draft");
   assert.equal(fixture.snapshot.tasks.length, 2);

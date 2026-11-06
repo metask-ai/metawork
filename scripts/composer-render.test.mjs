@@ -62,13 +62,13 @@ const base = {
   canSubmit: false,
   runInFlight: false,
   accessRequired: false,
-  workspaceMissing: false,
-  workspaceLabel: "Default",
-  workspaceTitle: "Default",
+  workspaceLabel: "Choose working directory",
+  workspaceTitle: "Choose working directory",
   workspaceOptions: [
     {
       id: "automatic",
-      label: "Default",
+      label: "No working directory",
+      triggerLabel: "Choose working directory",
       authorization: "available",
     },
   ],
@@ -107,7 +107,7 @@ test("detached Conversation recovery stays invisible until normal send", () => {
   });
   assert.doesNotMatch(required, /conversation-recovery/);
   assert.doesNotMatch(required, /Restore conversation/);
-  assert.match(required, /placeholder="Describe the outcome you need…"/);
+  assert.match(required, /placeholder="Enter your instructions…"/);
   assert.match(required, /aria-label="Send"/);
 
   const restoring = render({
@@ -117,7 +117,7 @@ test("detached Conversation recovery stays invisible until normal send", () => {
   });
   assert.doesNotMatch(restoring, /Restoring conversation/);
   assert.match(restoring.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(restoring, /placeholder="Describe the outcome you need…"/);
+  assert.match(restoring, /placeholder="Enter your instructions…"/);
 
   const failed = render({
     unavailable: true,
@@ -126,7 +126,7 @@ test("detached Conversation recovery stays invisible until normal send", () => {
     canSubmit: true,
   });
   assert.doesNotMatch(failed, /Try again|Restore conversation/);
-  assert.match(failed, /placeholder="Describe the outcome you need…"/);
+  assert.match(failed, /placeholder="Enter your instructions…"/);
   assert.match(failed, /aria-label="Send"/);
 });
 
@@ -393,8 +393,8 @@ test("New task opens as an editable Composer with its execution context", () => 
   const markup = render();
   assert.match(markup, /<textarea/);
   assert.match(markup, />Claude Sonnet 4</);
-  assert.match(markup, />Default</);
-  assert.doesNotMatch(markup, />Select a workspace</);
+  assert.match(markup, />Choose working directory</);
+  assert.doesNotMatch(markup, />Default</);
   assert.match(markup, /composer-workspace-context/);
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
@@ -740,7 +740,7 @@ test("new Task places the Composer after the outcome prompt", () => {
   const markup = renderNewTaskView(
     createElement("footer", { "data-test": "draft-composer" }, "Composer"),
   );
-  const prompt = markup.indexOf("Start with the outcome");
+  const prompt = markup.indexOf("What would you like to accomplish?");
   const composer = markup.indexOf('data-test="draft-composer"');
   assert.ok(prompt >= 0 && composer > prompt);
   assert.doesNotMatch(markup, /task-examples|task-example/);
@@ -750,7 +750,7 @@ test("new Task keeps its approval choice inside the Composer toolbar without det
   for (const [mode, label] of [
     ["manual", "Manual approval"],
     ["auto_review", "Automatic approval"],
-    ["full_access", "Direct execution"],
+    ["full_access", "Full access"],
   ]) {
     const markup = renderNewTaskView(null, {
       approvalModes: ["manual", "auto_review", "full_access"],
@@ -820,14 +820,12 @@ test("a new Task draft is editable before its first send", () => {
   const markup = render({
     draft: { kind: "text", text: "Ship the release" },
     canSubmit: true,
-    workspaceMissing: false,
     workspaceLabel: "alpha",
     workspaceTitle: "/repo/alpha",
     workspaceOptions: [
       {
         id: "1",
-        label: "/repo/alpha",
-        description: "alpha",
+        label: "alpha",
         authorization: "available",
       },
     ],
@@ -894,12 +892,11 @@ test("an unavailable workspace preserves editable text and offers folder reselec
   const markup = render({
     draft: { kind: "text", text: "Keep this draft" },
     accessRequired: true,
-    workspaceMissing: false,
     workspaceLabel: "/repo/alpha",
     workspaceTitle: "/repo/alpha",
   });
   assert.match(markup, />Keep this draft</);
-  assert.match(markup, />Select folder again</);
+  assert.match(markup, /data-state="reauthorization-required"/);
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,
@@ -907,16 +904,21 @@ test("an unavailable workspace preserves editable text and offers folder reselec
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("Composer keeps Workspace context after its input controls", () => {
-  const markup = render();
-  const composerStart = markup.indexOf('class="ai-composer"');
-  const workspaceContext = markup.indexOf('class="composer-workspace-context"');
-  assert.ok(composerStart >= 0 && workspaceContext > composerStart);
-  assert.ok(
-    markup.indexOf(
-      'class="selection-trigger focus-ring composer-model-trigger',
-      composerStart,
-    ) < workspaceContext,
+test("Composer puts Workspace selection before the model only for a new Task", () => {
+  const draft = render();
+  const toolbar = draft.indexOf('class="composer-context-actions"');
+  const selection = draft.indexOf('class="composer-workspace-context"');
+  const model = draft.indexOf('class="composer-model-actions"');
+  assert.ok(toolbar >= 0 && toolbar < selection && selection < model);
+
+  const conversation = render({
+    workspaceEditable: false,
+    workspaceLabel: "/repo/metawork",
+    workspaceTitle: "/repo/metawork",
+  });
+  assert.doesNotMatch(
+    conversation,
+    /composer-workspace-context|\/repo\/metawork/,
   );
 });
 
@@ -967,7 +969,7 @@ test("a restart-detached Task keeps the Composer ready for send-time recovery", 
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,
   );
-  assert.match(markup, /Describe the outcome you need/);
+  assert.match(markup, /Enter your instructions/);
   assert.doesNotMatch(markup, />Restore conversation</);
   assert.doesNotMatch(markup, /start a new one to continue/);
 });
@@ -1047,7 +1049,11 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
     task("1", "workspace-b"),
   ]);
 
-  assert.equal((markup.match(/<span>Review changes<\/span>/g) ?? []).length, 2);
+  assert.equal(
+    (markup.match(/class="task-list-title-text">Review changes<\/span>/g) ?? [])
+      .length,
+    2,
+  );
   assert.doesNotMatch(
     markup,
     /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
@@ -1194,13 +1200,10 @@ test("Sidebar typography reserves bold weight for the product identity", async (
   assert.match(stylesheet, /\.sidebar-capability\s*\{[^}]*font-weight: 500/s);
   assert.doesNotMatch(stylesheet, /\.task-group/);
   assert.match(stylesheet, /\.section-label\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.task-list-title\s*\{[^}]*font-weight: 400/s);
   assert.match(
     stylesheet,
-    /\.task-list-row > span:first-child\s*\{[^}]*font-weight: 400/s,
-  );
-  assert.match(
-    stylesheet,
-    /\.task-list-item\[aria-current="page"\] \.task-list-row > span:first-child\s*\{[^}]*font-weight: 500/s,
+    /\.task-list-item\[aria-current="page"\] \.task-list-title\s*\{[^}]*font-weight: 500/s,
   );
   assert.match(
     stylesheet,
@@ -1237,12 +1240,9 @@ test("Task list keeps compact row density without group-owned spacing", async ()
   assert.match(stylesheet, /\.task-list-entry\s*\{[^}]*margin-top: 1px;/s);
   assert.match(
     stylesheet,
-    /\.task-list-heading \+ \.task-list-entry\s*\{[^}]*margin-top: 6px;/s,
+    /\.task-list-heading \+ \.task-list-entry\s*\{[^}]*margin-top: 4px;/s,
   );
-  assert.match(
-    stylesheet,
-    /\.task-list-row > span:first-child\s*\{[^}]*line-height: 18px;/s,
-  );
+  assert.match(stylesheet, /\.task-list-title\s*\{[^}]*line-height: 18px;/s);
   assert.doesNotMatch(stylesheet, /\.task-group/);
 });
 

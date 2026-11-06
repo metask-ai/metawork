@@ -1,4 +1,5 @@
 import {
+  useId,
   useRef,
   useState,
   type MouseEvent,
@@ -15,9 +16,35 @@ import {
 } from "../../components/ui/context-menu-anchor.ts";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
-import { orderedTasks, taskSignals } from "../../workbench/selectors.ts";
+import {
+  readLocalPreference,
+  writeLocalPreference,
+} from "../../platform/local-preferences.ts";
+import {
+  orderedProjects,
+  orderedTasks,
+  taskSignals,
+} from "../../workbench/selectors.ts";
 
 export type TaskMenuAction = "rename" | "archive" | "delete";
+
+const collapsedProjectsPreference =
+  "metawork.panel.workspaces.collapsedProjects";
+
+function readCollapsedProjects(): Set<string> {
+  const stored = readLocalPreference(collapsedProjectsPreference);
+  if (stored !== null) {
+    try {
+      const ids: unknown = JSON.parse(stored);
+      if (Array.isArray(ids)) {
+        return new Set(ids.filter((id) => typeof id === "string"));
+      }
+    } catch {
+      // A malformed preference restores the default expanded state.
+    }
+  }
+  return new Set();
+}
 
 export function TaskList({
   tasks,
@@ -46,6 +73,10 @@ export function TaskList({
   retainedTaskCount?: number;
 }) {
   const { locale, t } = useI18n();
+  const projectListId = useId();
+  const [collapsedProjects, setCollapsedProjects] = useState(
+    readCollapsedProjects,
+  );
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
@@ -54,21 +85,24 @@ export function TaskList({
   const openingDialog = useRef(false);
   const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
-  const projects = workspaces
-    .filter(
-      (workspace) => workspace.kind === "manual" && !workspace.projectRemoved,
-    )
-    .sort((left, right) => {
-      const leftOrder = BigInt(left.recentOrder);
-      const rightOrder = BigInt(right.recentOrder);
-      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
-    });
+  const projects = orderedProjects(workspaces);
 
   const menuTask =
     menuTaskId === null
       ? null
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
   const menuTaskReadOnly = menuTask?.historyReadOnly === true;
+
+  function toggleProject(workspaceId: string) {
+    const next = new Set(collapsedProjects);
+    if (next.has(workspaceId)) next.delete(workspaceId);
+    else next.add(workspaceId);
+    writeLocalPreference(
+      collapsedProjectsPreference,
+      JSON.stringify([...next]),
+    );
+    setCollapsedProjects(next);
+  }
 
   function archiveDisabled(task: TaskSummary) {
     return (
@@ -120,14 +154,16 @@ export function TaskList({
               openTaskMenu(event, task.id);
           }}
         >
-          <span className="task-list-row">
-            <span>{task.title || t("task.item", { id: task.id })}</span>
-            <TaskSignals
-              task={task}
-              synchronized={synchronized}
-              completionSuppressed={suppressedCompletionTaskId === task.id}
-            />
+          <span className="task-list-title">
+            <span className="task-list-title-text">
+              {task.title || t("task.item", { id: task.id })}
+            </span>
           </span>
+          <TaskSignals
+            task={task}
+            synchronized={synchronized}
+            completionSuppressed={suppressedCompletionTaskId === task.id}
+          />
         </button>
         <button
           type="button"
@@ -166,20 +202,28 @@ export function TaskList({
         <section className="task-projects" aria-label={t("task.projects")}>
           <p className="section-label">{t("task.projects")}</p>
           {projects.map((workspace) => {
+            const expanded = !collapsedProjects.has(workspace.id);
+            const itemsId = `${projectListId}-project-${workspace.id}`;
             const projectTasks = visibleTasks.filter(
               (task) => task.workspaceId === workspace.id,
             );
             const heading = (
-              <h3
-                className="task-project-heading"
-                title={
-                  workspace.redacted
-                    ? workspace.displayName
-                    : workspace.canonicalRoot
-                }
-              >
-                <Icon name="workspace" />
-                <span>{workspace.displayName}</span>
+              <h3>
+                <button
+                  type="button"
+                  className="task-project-heading focus-ring"
+                  aria-expanded={expanded}
+                  aria-controls={itemsId}
+                  title={
+                    workspace.redacted
+                      ? workspace.displayName
+                      : workspace.canonicalRoot
+                  }
+                  onClick={() => toggleProject(workspace.id)}
+                >
+                  <Icon name="workspace" />
+                  <span>{workspace.displayName}</span>
+                </button>
               </h3>
             );
             return (
@@ -200,15 +244,22 @@ export function TaskList({
                     {t("workspace.remove_close_failed")}
                   </p>
                 )}
-                <div className="task-project-items">
-                  {projectTasks.map(renderTask)}
-                  {projectTasks.length === 0 && (
-                    <p className="task-list-empty">
-                      {tasks.some((task) => task.workspaceId === workspace.id)
-                        ? t("task.archived_hidden")
-                        : t("task.project_empty")}
-                    </p>
-                  )}
+                <div
+                  id={itemsId}
+                  className="task-project-items"
+                  aria-hidden={!expanded}
+                  inert={!expanded}
+                >
+                  <div className="task-project-items-content">
+                    {projectTasks.map(renderTask)}
+                    {projectTasks.length === 0 && (
+                      <p className="task-list-empty">
+                        {tasks.some((task) => task.workspaceId === workspace.id)
+                          ? t("task.archived_hidden")
+                          : t("task.project_empty")}
+                      </p>
+                    )}
+                  </div>
                 </div>
               </section>
             );

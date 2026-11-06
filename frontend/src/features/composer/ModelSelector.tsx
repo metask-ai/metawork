@@ -29,7 +29,7 @@ export function ModelSelector({
   editable: boolean;
   disabled: boolean;
   pending: boolean;
-  contextTitle: string;
+  contextTitle?: string;
   onSelect: (id: string) => void;
 }) {
   const { t } = useI18n();
@@ -65,6 +65,7 @@ export function ModelSelector({
       helper={contextTitle}
       disabled={disabled}
       busy={pending}
+      compact
       leading={<BrandIcon brand={selected?.vendor} />}
       triggerClassName="composer-model-trigger w-auto"
       contentClassName="composer-model-menu"

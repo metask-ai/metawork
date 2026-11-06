@@ -27,6 +27,7 @@ export function SelectionMenu({
   actionLabel,
   disabled,
   busy = false,
+  compact = false,
   valueLayout = "compact",
   leading,
   triggerClassName = "",
@@ -44,6 +45,7 @@ export function SelectionMenu({
   actionLabel?: string;
   disabled: boolean;
   busy?: boolean;
+  compact?: boolean;
   valueLayout?: "compact" | "detailed";
   leading?: ReactNode;
   triggerClassName?: string;
@@ -129,6 +131,7 @@ export function SelectionMenu({
         >
           <Select.Popup
             className={`selection-menu-content ${contentClassName}`.trim()}
+            data-compact={compact || undefined}
           >
             <Select.List className="selection-menu-viewport">
               {helper && <div className="selection-menu-label">{helper}</div>}

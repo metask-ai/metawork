@@ -449,7 +449,7 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   await user.click(screen.getByRole("combobox", { name: "Permissions" }));
   await user.click(
     await screen.findByRole("option", {
-      name: "Direct execution",
+      name: "Full access",
       exact: true,
     }),
   );

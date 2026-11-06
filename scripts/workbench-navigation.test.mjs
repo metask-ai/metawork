@@ -33,7 +33,6 @@ import {
   pendingInputContinuation,
   orderedTasks,
   taskSignals,
-  workspaceDirectoryLabel,
 } from "../frontend/src/workbench/selectors.ts";
 
 function run(id, text, assistant, outcome, toolContent = "", cause = null) {
@@ -229,7 +228,7 @@ test("automatic review is processing until the current request needs a user", ()
   );
 });
 
-test("Task signals and Workspace path labels preserve their independent semantics", () => {
+test("Task signals distinguish waiting, running, completed, failed, and interrupted work", () => {
   const tasks = [
     task({ id: "1", currentRunId: "9", currentRunPhase: "running" }),
     task({
@@ -265,23 +264,6 @@ test("Task signals and Workspace path labels preserve their independent semantic
   assert.deepEqual(
     taskSignals(task({ archived: true, deletionStatus: "failed" })),
     { running: false, attention: false, failed: true },
-  );
-  assert.equal(
-    workspaceDirectoryLabel(
-      { kind: "manual", canonicalRoot: "/repo/metawork" },
-      "Default",
-    ),
-    "/repo/metawork",
-  );
-  assert.equal(
-    workspaceDirectoryLabel(
-      {
-        kind: "automatic",
-        canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
-      },
-      "Default",
-    ),
-    "Default",
   );
 });
 

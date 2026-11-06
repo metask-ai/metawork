@@ -78,6 +78,7 @@ import {
 } from "../features/approvals/mode-state.ts";
 import { ApprovalModeMenu } from "../features/approvals/ApprovalModeMenu.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
+import { automaticWorkspaceOptionId } from "../features/composer/WorkspaceContextSelector.tsx";
 import { createTaskInputHistoryReader } from "../features/composer/input-history.ts";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import {
@@ -205,10 +206,10 @@ import {
   searchWorkbench,
   boundedSearchQuery,
   selectActiveTask,
+  orderedProjects,
   pendingInputContinuation,
   taskDisplayState,
   taskSignals,
-  workspaceDirectoryLabel,
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { WorkspaceRemovalMenu } from "../features/workspaces/WorkspaceRemovalMenu.tsx";
@@ -268,7 +269,6 @@ type MutationReason =
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
 }
-const automaticWorkspaceOptionId = "automatic";
 type FileChangeDiffUiState =
   | {
       phase: "idle";
@@ -1327,9 +1327,8 @@ export default function App() {
     )
       clearFileChanges();
   }, [reviewTab?.taskId, reviewTab?.runId]);
-  const manualWorkspaces = useMemo(
-    () =>
-      snapshot.workspaces.filter((workspace) => workspace.kind === "manual"),
+  const projects = useMemo(
+    () => orderedProjects(snapshot.workspaces),
     [snapshot.workspaces],
   );
   const navigableTaskItems = useMemo(
@@ -1583,6 +1582,8 @@ export default function App() {
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
+  const composerWorkspaceLabel =
+    composerWorkspace?.canonicalRoot || t("workspace.select");
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
     ? composerWorkspace?.authorization === "available"
     : snapshot.capabilities.automaticWorkspaces;
@@ -2780,6 +2781,7 @@ export default function App() {
     if (
       !workspace ||
       workspace.kind !== "manual" ||
+      workspace.projectRemoved ||
       workspace.authorization !== "available"
     ) {
       const token = beginOperationFeedback(
@@ -4303,27 +4305,8 @@ export default function App() {
           composerWorkspace &&
           composerWorkspace.authorization !== "available",
         )}
-        workspaceMissing={Boolean(!newTaskDraftActive && !composerWorkspace)}
-        workspaceLabel={
-          newTaskDraftActive && !composerWorkspace
-            ? t("workspace.default_directory")
-            : composerWorkspace
-              ? workspaceDirectoryLabel(
-                  composerWorkspace,
-                  t("workspace.default_directory"),
-                )
-              : t("workspace.none")
-        }
-        workspaceTitle={
-          newTaskDraftActive && !composerWorkspace
-            ? t("workspace.default_directory")
-            : composerWorkspace
-              ? workspaceDirectoryLabel(
-                  composerWorkspace,
-                  t("workspace.default_directory"),
-                )
-              : t("workspace.none")
-        }
+        workspaceLabel={composerWorkspaceLabel}
+        workspaceTitle={composerWorkspaceLabel}
         workspaceDiagnostic={
           [
             workspaceSelectionFeedback?.diagnostic,
@@ -4335,14 +4318,14 @@ export default function App() {
         workspaceOptions={[
           {
             id: automaticWorkspaceOptionId,
-            label: t("workspace.default_directory"),
+            label: t("workspace.automatic_directory"),
+            triggerLabel: t("workspace.select"),
             authorization: "available" as const,
             disabled: !snapshot.capabilities.automaticWorkspaces,
           },
-          ...manualWorkspaces.map((workspace) => ({
+          ...projects.map((workspace) => ({
             id: workspace.id,
-            label: workspace.canonicalRoot,
-            description: workspace.displayName || undefined,
+            label: workspace.displayName || workspace.canonicalRoot,
             authorization: workspace.authorization,
           })),
         ]}
@@ -4351,7 +4334,8 @@ export default function App() {
             ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
             : ""
         }
-        workspaceEditable={newTaskDraftActive && !taskIdentityPending}
+        workspaceEditable={newTaskDraftActive}
+        workspaceSelectionPending={taskIdentityPending}
         modelLabel={
           newTaskDraftActive
             ? setupNotice?.action === "start" &&
@@ -4399,7 +4383,7 @@ export default function App() {
               : activeTask?.modelIntent?.state === "outcome_unknown"
                 ? t("mutation.reason.persistence_outcome_unknown")
                 : newTaskDraftActive
-                  ? t("settings.new_task_model_help")
+                  ? undefined
                   : t(
                       taskModelPolicy.selectable &&
                         taskModelOptions.length === 0
@@ -4568,6 +4552,18 @@ export default function App() {
                 key={activeTask.id}
                 task={activeTask}
                 models={snapshot.models}
+                workspace={composerWorkspace}
+                workspaceOpenDisabled={workbenchMutationDisabled}
+                onOpenWorkspace={
+                  composerWorkspace
+                    ? () =>
+                        client.openWorkspace(
+                          composerWorkspace.id,
+                          composerWorkspace.epoch,
+                        )
+                    : undefined
+                }
+                workspaceDiagnostic={composerCatalogFeedback?.diagnostic}
                 permissionProfilesEnabled={
                   snapshot.capabilities.permissionProfiles
                 }
@@ -5371,7 +5367,6 @@ export default function App() {
         >
           <TaskWorkspace
             newTask={newTaskDraftActive}
-            hasWorkspace={Boolean(composerWorkspace)}
             composer={
               activeTask?.archived ? (
                 <div className="archived-task-banner">

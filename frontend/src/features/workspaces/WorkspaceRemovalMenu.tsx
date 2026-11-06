@@ -15,6 +15,7 @@ import {
   type ContextMenuAnchor,
 } from "../../components/ui/context-menu-anchor.ts";
 import { useI18n } from "../../i18n/context.ts";
+import { useWorkspaceDirectoryOpen } from "./useWorkspaceDirectoryOpen.ts";
 
 export function WorkspaceRemovalMenu({
   workspace,
@@ -37,51 +38,39 @@ export function WorkspaceRemovalMenu({
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeFailed, setRemoveFailed] = useState(false);
-  const [openState, setOpenState] = useState<"idle" | "opening" | "failed">(
-    "idle",
+  const { cannotOpen, openDirectory, openFailed } = useWorkspaceDirectoryOpen(
+    workspace,
+    onOpen,
+    openDisabled,
   );
   const cancel = useRef<HTMLButtonElement>(null);
-  const trigger = useRef<HTMLElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const popup = useRef<HTMLDivElement>(null);
   const removeItem = useRef<HTMLElement>(null);
   const openItem = useRef<HTMLElement>(null);
   const keyboardOpen = useRef(false);
-  const cannotOpen =
-    openDisabled ||
-    openState === "opening" ||
-    workspace.redacted ||
-    workspace.authorization !== "available";
   function openMenu(
     event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
     anchorToElement = false,
   ) {
+    const button =
+      event.target instanceof Element ? event.target.closest("button") : null;
+    if (!button) return;
     event.preventDefault();
     event.stopPropagation();
-    trigger.current = event.currentTarget;
+    trigger.current = button;
     keyboardOpen.current =
       !("clientX" in event) || (anchorToElement && event.detail === 0);
     setMenuAnchor(
       "clientX" in event && !anchorToElement
-        ? createContextMenuAnchor(
-            event.currentTarget,
-            event.clientX,
-            event.clientY,
-          )
-        : event.currentTarget,
+        ? createContextMenuAnchor(button, event.clientX, event.clientY)
+        : button,
     );
     setMenuOpen(true);
   }
   function handleMenuKey(event: KeyboardEvent<HTMLElement>) {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))
       openMenu(event);
-  }
-  async function openDirectory() {
-    if (cannotOpen) return;
-    setOpenState("opening");
-    try {
-      setOpenState((await onOpen()).opened ? "idle" : "failed");
-    } catch {
-      setOpenState("failed");
-    }
   }
   async function removeProject() {
     if (removing || openDisabled) return;
@@ -99,12 +88,8 @@ export function WorkspaceRemovalMenu({
   return (
     <>
       <div
-        className="task-project-context focus-ring"
-        role="group"
-        tabIndex={0}
-        aria-label={t("workspace.actions", { title: workspace.displayName })}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
+        className="task-project-context"
+        data-menu-open={menuOpen}
         onContextMenu={openMenu}
         onKeyDown={handleMenuKey}
       >
@@ -129,13 +114,11 @@ export function WorkspaceRemovalMenu({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={(event) => openMenu(event, true)}
-          onContextMenu={openMenu}
-          onKeyDown={handleMenuKey}
         >
           <Icon name="more" />
         </button>
       </div>
-      {openState === "failed" && (
+      {openFailed && (
         <p className="task-list-empty" role="alert">
           {t("workspace.open_failed")}
         </p>
@@ -147,7 +130,7 @@ export function WorkspaceRemovalMenu({
           if (open && keyboardOpen.current)
             // Let the menu register its items before focusing one for keyboard navigation.
             window.requestAnimationFrame(() => {
-              if (trigger.current?.getAttribute("aria-expanded") === "true")
+              if (popup.current?.hasAttribute("data-open"))
                 (cannotOpen ? removeItem : openItem).current?.focus();
             });
         }}
@@ -165,6 +148,7 @@ export function WorkspaceRemovalMenu({
             collisionPadding={8}
           >
             <Menu.Popup
+              ref={popup}
               className="task-menu-popover"
               finalFocus={() =>
                 confirming ? false : (trigger.current ?? false)

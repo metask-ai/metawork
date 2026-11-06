@@ -124,13 +124,13 @@ export function ComposerFooter({
   canSubmit,
   runInFlight,
   accessRequired,
-  workspaceMissing,
   workspaceLabel,
   workspaceTitle,
   workspaceDiagnostic,
   workspaceOptions,
   selectedWorkspaceOptionId,
   workspaceEditable,
+  workspaceSelectionPending = false,
   modelLabel,
   modelTriggerRef,
   modelOptions,
@@ -182,19 +182,19 @@ export function ComposerFooter({
   canSubmit: boolean;
   runInFlight: boolean;
   accessRequired: boolean;
-  workspaceMissing: boolean;
   workspaceLabel: string;
   workspaceTitle: string;
   workspaceDiagnostic?: string;
   workspaceOptions: {
     id: string;
     label: string;
-    description?: string;
+    triggerLabel?: string;
     authorization: "available" | "removing" | "reauthorization_required";
     disabled?: boolean;
   }[];
   selectedWorkspaceOptionId: string;
   workspaceEditable: boolean;
+  workspaceSelectionPending?: boolean;
   modelLabel: string | null;
   modelTriggerRef?: RefObject<HTMLButtonElement | null>;
   modelOptions: ModelSelectorOption[];
@@ -202,7 +202,7 @@ export function ComposerFooter({
   modelEditable: boolean;
   modelSelectionDisabled: boolean;
   modelSelectionPending: boolean;
-  modelContextTitle: string;
+  modelContextTitle?: string;
   modelNotice?: ReactNode;
   actionDisabled: boolean;
   stopAction: "run" | "compact" | null;
@@ -642,6 +642,20 @@ export function ComposerFooter({
     });
   }
 
+  const workspaceContext = (
+    <WorkspaceContextSelector
+      accessRequired={accessRequired}
+      label={workspaceLabel}
+      title={workspaceTitle}
+      diagnostic={workspaceDiagnostic}
+      options={workspaceOptions}
+      selectedId={selectedWorkspaceOptionId}
+      disabled={actionDisabled || workspaceSelectionPending}
+      onConfirmAccess={onConfirmAccess}
+      onSelect={onSelectWorkspace}
+    />
+  );
+
   return (
     <footer
       ref={footerRef}
@@ -991,6 +1005,7 @@ export function ComposerFooter({
                 </Button>
               )}
               {approvalModeControl}
+              {workspaceEditable && workspaceContext}
             </div>
             <div className="composer-model-actions">
               {modelLabel && (
@@ -1067,19 +1082,6 @@ export function ComposerFooter({
             })}
           </p>
         )}
-        <WorkspaceContextSelector
-          accessRequired={accessRequired}
-          missing={workspaceMissing}
-          label={workspaceLabel}
-          title={workspaceTitle}
-          diagnostic={workspaceDiagnostic}
-          options={workspaceOptions}
-          selectedId={selectedWorkspaceOptionId}
-          editable={workspaceEditable}
-          disabled={actionDisabled}
-          onConfirmAccess={onConfirmAccess}
-          onSelect={onSelectWorkspace}
-        />
       </div>
       {modelNotice}
       {sendDisabledReason && (

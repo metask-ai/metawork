@@ -15,6 +15,7 @@ import {
   FolderOpen,
   FolderMinus,
   FolderUp,
+  FolderX,
   FileText,
   Pencil,
   FileDiff,
@@ -37,6 +38,7 @@ import {
   ExternalLink,
   Ellipsis,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Info,
   Square,
@@ -68,10 +70,12 @@ type IconName =
   | "workspace"
   | "folder-minus"
   | "folder-open"
+  | "folder-x"
   | "search"
   | "plus"
   | "settings"
   | "shield"
+  | "shield-alert"
   | "info"
   | "arrow-left"
   | "arrow-down"
@@ -106,6 +110,7 @@ type IconName =
 
 const icons: Record<IconName, LucideIcon> = {
   "folder-open": FolderOpen,
+  "folder-x": FolderX,
   more: Ellipsis,
   sidebar: PanelLeft,
   minimize: Minus,
@@ -127,6 +132,7 @@ const icons: Record<IconName, LucideIcon> = {
   plus: Plus,
   settings: Settings,
   shield: ShieldCheck,
+  "shield-alert": ShieldAlert,
   info: Info,
   "arrow-left": ArrowLeft,
   "arrow-down": ArrowDown,
