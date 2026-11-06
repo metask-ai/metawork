@@ -855,6 +855,7 @@ test("automatic approvals are grouped inside the Run process while denials stay 
       kind: "permission",
       state,
       answeredBy: "reviewer",
+      review: null,
       reviewReason:
         state === "denied"
           ? "Outside the requested scope."
@@ -8219,7 +8220,6 @@ test("automatic handoffs explain the actual cause before the user decides", () =
     "context_incomplete",
     "invalid_response",
     "capacity",
-    "unsupported_tool",
     "input_changed",
     "state_changed",
   ]) {

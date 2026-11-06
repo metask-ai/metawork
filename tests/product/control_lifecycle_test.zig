@@ -705,7 +705,7 @@ test "Control permission reviewer commits once-only decisions and projects audit
     }
 }
 
-test "Control permission reviewer scrubs decoded arguments and leaves MCP and Host requests manual" {
+test "Control permission reviewer scrubs decoded arguments for builtin MCP and Host through the same reviewer" {
     for (0..3) |case| {
         fake_core.reset();
         fake_core.permission_arguments_json = "{\"api_key\":\"fixture\\u002dsecret\",\"nested\":[\"fixture-secret\"]}";
@@ -736,17 +736,11 @@ test "Control permission reviewer scrubs decoded arguments and leaves MCP and Ho
         input.approval_mode = .auto_review;
         const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, task_id, .{ .text = "Inspect the local operation" });
-        if (case == 0) {
-            try transport.awaitEntered(&control);
-            try std.testing.expect(!transport.invalid.load(.acquire));
-            transport.released.store(true, .release);
-            try waitControlSnapshot(&control, "\"answeredBy\":\"reviewer\"");
-        } else {
-            try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
-            try std.testing.expectEqual(.unsupported_tool, control.task_runtime.find(task_id).?.runtime.permission_review.cause);
-            try std.testing.expectEqual(@as(usize, 0), transport.calls.load(.acquire));
-            try std.testing.expectEqual(@as(usize, 0), control.task_runtime.find(task_id).?.durable.ui_history_count);
-        }
+        try transport.awaitEntered(&control);
+        try std.testing.expect(!transport.invalid.load(.acquire));
+        transport.released.store(true, .release);
+        try waitControlSnapshot(&control, "\"answeredBy\":\"reviewer\"");
+        try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
     }
 }
 
@@ -1040,8 +1034,18 @@ test "Task permission review failures and needs-user retain the original manual 
         try std.testing.expectEqual(case.cause, review.cause);
         try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
         try std.testing.expectEqual(preparation.identity.request_id, task.runtime.pending_ui_request_id);
+        var tentative = try scenario.control.task_runtime.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .deny_once });
+        tentative.rollback();
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        try std.testing.expectEqual(case.cause, task.runtime.permission_review.cause);
+        try std.testing.expectEqual(preparation.identity.request_id, task.runtime.pending_ui_request_id);
         try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .allow_once });
-        try std.testing.expectEqual(.user, task.durable.ui_history[0].?.answered_by.?);
+        const record = &task.durable.ui_history[0].?;
+        try std.testing.expectEqual(.user, record.answered_by.?);
+        try std.testing.expect(record.reviewReason() == null);
+        try std.testing.expectEqual(case.cause, record.review.?.cause.?);
+        try std.testing.expectEqualStrings(if (outcome == .failure) "failed" else "needs_user", @tagName(record.review.?.outcome));
+        if (outcome != .failure) try std.testing.expectEqualStrings("Evidence *** is missing.", record.review.?.reasonText().?);
     }
 }
 
@@ -11723,4 +11727,22 @@ test "waiting ordinary attachment messages exhaust stock before payload and Stop
     for (task.input_submissions.items) |record| try std.testing.expectEqual(.cancelled, record.state);
     const ready = try scenario.control.stageAttachments(&.{.{ .display_name = "draft.txt", .bytes = "z" }}, &output);
     try std.testing.expect(try scenario.control.releaseAttachmentChecked(ready[0].id));
+}
+
+test "Task permission handoff reason is copied before cancellation invalidates the review" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    var preparation = try scenario.prepare();
+    defer preparation.deinit();
+    var commit = ReviewCommit{};
+    try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.needs_user, "Confirm this publication."), commit.effects(scenario)));
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+    try scenario.control.cancel(scenario.task_id, preparation.identity.run_id);
+    const record = &task.durable.ui_history[0].?;
+    try std.testing.expectEqual(.cancelled, record.state);
+    try std.testing.expect(record.answered_by == null);
+    try std.testing.expect(record.reviewReason() == null);
+    try std.testing.expectEqual(.needs_user, record.review.?.outcome);
+    try std.testing.expectEqualStrings("Confirm this publication.", record.review.?.reasonText().?);
 }

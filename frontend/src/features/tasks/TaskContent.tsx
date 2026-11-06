@@ -291,12 +291,21 @@ function PermissionReviewRecord({ record }: { record: UiRecord }) {
   return (
     <details className="projection-note">
       <summary>
-        {t("approval.answered_by_reviewer")}
-        {record.permission?.toolName && (
-          <> · {record.permission.toolName}</>
-        )} · {t(`ui.state.${record.state}`)}
+        {t(
+          record.answeredBy === "reviewer"
+            ? "approval.answered_by_reviewer"
+            : "approval.review_history",
+        )}
+        {record.permission?.toolName && <> · {record.permission.toolName}</>} ·{" "}
+        {t(`ui.state.${record.state}`)}
       </summary>
-      <p>{record.reviewReason}</p>
+      <p>
+        {record.review?.reason ??
+          record.reviewReason ??
+          (record.review?.cause
+            ? t(`approval.handoff.${record.review.cause}`)
+            : null)}
+      </p>
     </details>
   );
 }
@@ -798,10 +807,13 @@ export function TaskContent({
           }
           const reviewRecords = task.uiHistory.filter(
             (record) =>
-              record.runId === run.id && record.answeredBy === "reviewer",
+              record.runId === run.id &&
+              (record.answeredBy === "reviewer" || record.review != null),
           );
           const approvedReviews = reviewRecords.filter(
-            (record) => record.state === "allowed_once",
+            (record) =>
+              record.state === "allowed_once" &&
+              record.answeredBy === "reviewer",
           );
           const approvalHistory =
             approvedReviews.length > 0 ? (
@@ -875,7 +887,11 @@ export function TaskContent({
                   </div>
                 )}
               {reviewRecords
-                .filter((record) => record.state !== "allowed_once")
+                .filter(
+                  (record) =>
+                    record.state !== "allowed_once" ||
+                    record.answeredBy !== "reviewer",
+                )
                 .map((record) => (
                   <PermissionReviewRecord
                     key={record.requestId}

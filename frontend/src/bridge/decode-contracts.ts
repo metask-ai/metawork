@@ -3255,6 +3255,42 @@ function decodePermissionHistory(
     ),
   };
 }
+function decodePermissionReview(
+  value: unknown,
+  path: string,
+): UiRecord["review"] {
+  if (value === null) return null;
+  const item = object(value, path, ["outcome", "cause", "reason"]);
+  const outcome = enumValue(item.outcome, `${path}.outcome`, [
+    "allow_once",
+    "deny",
+    "needs_user",
+    "failed",
+    "not_started",
+  ] as const);
+  const cause = nullableEnum(item.cause, `${path}.cause`, [
+    "unavailable",
+    "reviewer_concern",
+    "context_incomplete",
+    "timeout",
+    "call_failed",
+    "invalid_response",
+    "capacity",
+    "input_changed",
+    "state_changed",
+  ] as const);
+  const reason =
+    item.reason === null ? null : nonEmptyString(item.reason, `${path}.reason`);
+  if (
+    (reason !== null &&
+      (new TextEncoder().encode(reason).length > 512 ||
+        reason.trim().length === 0 ||
+        /[\u0000-\u001f\u007f]/u.test(reason))) ||
+    (outcome === "failed" || outcome === "not_started") !== (reason === null)
+  )
+    fail(path, "invalid permission review summary");
+  return { outcome, cause, reason };
+}
 function decodeUiRecord(value: unknown, path: string): UiRecord {
   const item = object(value, path, [
     "requestId",
@@ -3270,6 +3306,7 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     "redacted",
     "answeredBy",
     "reviewReason",
+    "review",
   ]);
   const kind = enumValue(item.kind, `${path}.kind`, uiRecordKinds);
   const agentRequestId = stringValue(
@@ -3303,7 +3340,16 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
         /[\u0000-\u001f\u007f]/u.test(reviewReason)))
   )
     fail(path, "invalid permission review audit");
+  const review = decodePermissionReview(item.review, `${path}.review`);
+  if (
+    answeredBy === "reviewer" &&
+    review !== null &&
+    (review.outcome !== (state === "denied" ? "deny" : "allow_once") ||
+      review.reason !== reviewReason)
+  )
+    fail(path, "review summary must match reviewer decision");
   return {
+    review,
     requestId: positiveWireId(item.requestId, `${path}.requestId`),
     runId: positiveWireId(item.runId, `${path}.runId`),
     order: positiveWireId(item.order, `${path}.order`),
@@ -3760,7 +3806,6 @@ function decodeTask(
       "call_failed",
       "invalid_response",
       "capacity",
-      "unsupported_tool",
       "input_changed",
       "state_changed",
     ] as const);

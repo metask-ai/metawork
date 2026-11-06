@@ -1062,6 +1062,12 @@ pub const CompactWire = struct {
     diagnostic_redacted: bool,
 };
 
+pub const ReviewWire = struct {
+    outcome: []const u8,
+    cause: ?[]const u8,
+    reason: ?[]const u8,
+};
+
 pub const UiRecordWire = struct {
     request_id: u64,
     run_id: u64,
@@ -1076,6 +1082,7 @@ pub const UiRecordWire = struct {
     permission: ?PermissionSummaryWire = null,
     answered_by: ?[]const u8 = null,
     review_reason: ?[]const u8 = null,
+    review: ?ReviewWire = null,
 };
 
 pub const PermissionSummaryWire = struct {
@@ -1248,6 +1255,11 @@ pub fn projectTask(
             .state = @tagName(record.state),
             .answered_by = if (record.answered_by) |source| @tagName(source) else null,
             .review_reason = record.reviewReason(),
+            .review = if (record.review) |*review| .{
+                .outcome = @tagName(review.outcome),
+                .cause = if (review.cause) |cause| @tagName(cause) else null,
+                .reason = review.reasonText(),
+            } else null,
             .detail = record.detailSlice(),
             .item_count = record.item_count,
             .detail_truncated = record.detail_truncated,
@@ -2530,6 +2542,17 @@ fn restoreUiRecord(wire: UiRecordWire) task_state.UiRecord {
     } else if (result.state != .cancelled) {
         // Previously supported history could only contain user answers.
         result.answered_by = .user;
+    }
+    if (wire.review) |review| {
+        var audit = task_state.UiRecord.Review{
+            .outcome = parseEnum(task_state.UiRecord.ReviewOutcome, review.outcome).?,
+            .cause = if (review.cause) |cause| parseEnum(task_state.UiRecord.ReviewCause, cause).? else null,
+        };
+        if (review.reason) |reason| {
+            @memcpy(audit.reason[0..reason.len], reason);
+            audit.reason_len = reason.len;
+        }
+        result.review = audit;
     }
     if (wire.review_reason) |reason| {
         @memcpy(result.review_reason[0..reason.len], reason);
@@ -3918,6 +3941,20 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
 }
 
 fn validateReviewAudit(record: UiRecordWire, task: TaskWire) error{Invalid}!void {
+    if (record.review) |review| {
+        const outcome = parseEnum(task_state.UiRecord.ReviewOutcome, review.outcome) orelse return error.Invalid;
+        if (review.cause) |cause| _ = parseEnum(task_state.UiRecord.ReviewCause, cause) orelse return error.Invalid;
+        if (review.reason) |reason| {
+            if (!validText(reason, 512, false) or std.mem.trim(u8, reason, " \t\r\n").len == 0) return error.Invalid;
+            for (reason) |byte| if (byte < 0x20 or byte == 0x7f) return error.Invalid;
+        }
+        if ((outcome == .failed or outcome == .not_started) and review.reason != null) return error.Invalid;
+        if ((outcome == .allow_once or outcome == .deny or outcome == .needs_user) and review.reason == null) return error.Invalid;
+        if (record.answered_by != null and std.mem.eql(u8, record.answered_by.?, "reviewer")) {
+            if (!std.mem.eql(u8, review.outcome, if (std.mem.eql(u8, record.state, "denied")) "deny" else "allow_once")) return error.Invalid;
+            if (record.review_reason == null or review.reason == null or !std.mem.eql(u8, record.review_reason.?, review.reason.?)) return error.Invalid;
+        }
+    }
     const source = record.answered_by orelse {
         if (record.review_reason != null) return error.Invalid;
         return;
@@ -5902,4 +5939,37 @@ test "restored history allocates actual contents without Run execution and prese
     try std.testing.checkAllAllocationFailures(std.testing.allocator, restoreHistoryAllocationCase, .{true});
     // This is a history record memory bound, independent of the input capacity.
     try std.testing.expect(@sizeOf(task_state.RunRecord) < 4096);
+}
+
+test "permission handoff summary survives user and cancellation history without reviewer attribution" {
+    var runs = [_]RunWire{reviewTestRun()};
+    var task = reviewTestTask();
+    task.runs = &runs;
+    var record = UiRecordWire{
+        .request_id = 1,
+        .run_id = 1,
+        .order = 1,
+        .kind = "permission",
+        .state = "allowed_once",
+        .detail = "Bash",
+        .item_count = 0,
+        .detail_truncated = false,
+        .redacted = false,
+        .answered_by = "user",
+        .review = .{ .outcome = "needs_user", .cause = "reviewer_concern", .reason = "Confirm this publication." },
+    };
+    try validateReviewAudit(record, task);
+    const restored = restoreUiRecord(record);
+    try std.testing.expect(restored.reviewReason() == null);
+    try std.testing.expectEqualStrings("Confirm this publication.", restored.review.?.reasonText().?);
+    record.state = "cancelled";
+    record.answered_by = null;
+    try validateReviewAudit(record, task);
+    record.review_reason = "Must not attribute a user answer to the reviewer.";
+    try std.testing.expectError(error.Invalid, validateReviewAudit(record, task));
+    record.review_reason = null;
+    record.review.?.reason = "bad\nreason";
+    try std.testing.expectError(error.Invalid, validateReviewAudit(record, task));
+    record.review = .{ .outcome = "failed", .cause = "timeout", .reason = null };
+    try validateReviewAudit(record, task);
 }
