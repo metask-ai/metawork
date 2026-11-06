@@ -24,6 +24,7 @@ import type {
   RunOutcome,
   RunView,
   TaskView,
+  UiRecord,
   WaitingInputView,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
@@ -37,6 +38,7 @@ import {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { formatInteger } from "../../i18n/formatters.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import { RunOutputs, type OutputEditHandler } from "./RunOutputs.tsx";
@@ -279,6 +281,21 @@ function TaskInput({ input }: { input: RunInputView }) {
     </>
   );
 }
+function PermissionReviewRecord({ record }: { record: UiRecord }) {
+  const { t } = useI18n();
+  return (
+    <details className="projection-note">
+      <summary>
+        {t("approval.answered_by_reviewer")}
+        {record.permission?.toolName && (
+          <> · {record.permission.toolName}</>
+        )} · {t(`ui.state.${record.state}`)}
+      </summary>
+      <p>{record.reviewReason}</p>
+    </details>
+  );
+}
+
 export function TaskContent({
   task,
   snapshotReceivedAt,
@@ -764,11 +781,35 @@ export function TaskContent({
             toolDisclosure.set(disclosureKey, next);
             setDisclosureRevision((value) => value + 1);
           }
+          const reviewRecords = task.uiHistory.filter(
+            (record) =>
+              record.runId === run.id && record.answeredBy === "reviewer",
+          );
+          const approvedReviews = reviewRecords.filter(
+            (record) => record.state === "allowed_once",
+          );
+          const approvalHistory =
+            approvedReviews.length > 0 ? (
+              <details className="projection-note">
+                <summary>
+                  {t("approval.review_approved_count", {
+                    count: formatInteger(locale, approvedReviews.length),
+                  })}
+                </summary>
+                {approvedReviews.map((record) => (
+                  <PermissionReviewRecord
+                    key={record.requestId}
+                    record={record}
+                  />
+                ))}
+              </details>
+            ) : null;
           const supplement = (
             <>
               {presentation.active && (
                 <RunProcess
                   presentation={presentation}
+                  approvalHistory={approvalHistory}
                   reviewingPermission={
                     isCurrent && task.permissionReviewState === "reviewing"
                   }
@@ -799,25 +840,13 @@ export function TaskContent({
                     })}
                   </div>
                 )}
-              {task.uiHistory
-                .filter(
-                  (record) =>
-                    record.runId === run.id && record.answeredBy === "reviewer",
-                )
+              {reviewRecords
+                .filter((record) => record.state !== "allowed_once")
                 .map((record) => (
-                  <details
-                    className="projection-note"
-                    key={`review-${record.requestId}`}
-                  >
-                    <summary>
-                      {t("approval.answered_by_reviewer")}
-                      {record.permission?.toolName && (
-                        <> · {record.permission.toolName}</>
-                      )}{" "}
-                      · {t(`ui.state.${record.state}`)}
-                    </summary>
-                    <p>{record.reviewReason}</p>
-                  </details>
+                  <PermissionReviewRecord
+                    key={record.requestId}
+                    record={record}
+                  />
                 ))}
               {outputsEnabled && (
                 <RunOutputs
@@ -837,9 +866,10 @@ export function TaskContent({
                   }
                 />
               )}
-              {!presentation.active && presentation.processVisible && (
+              {!presentation.active && (
                 <RunProcess
                   presentation={presentation}
+                  approvalHistory={approvalHistory}
                   reviewingPermission={false}
                   fileChanges={fileChangesEnabled ? run.fileChanges : null}
                   elapsedMs={run.elapsedMs}

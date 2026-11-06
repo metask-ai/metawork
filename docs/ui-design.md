@@ -63,7 +63,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需在所属 Tool 行下方展开，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。成果只在所属 Run 存在可信交付记录时展示紧凑文件列表，不显示空模块；文件名、相对路径和大小描述交付时的记录，不能当作当前文件仍存在或未变更的证明。脱敏时隐藏整条路径，不显示猜测的文件名。文件动作由 Host 重新验证后开放，普通工具文字和文件变化不产生该列表。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
-上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，存在 Tool 时在 terminal 后继续提供折叠的历史检查入口；过程与正式回复保持主次层级，用户可以检查 Tool 证据而无需离开阅读上下文。仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
+上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，存在 Tool 或已自动允许的记录时在 terminal 后继续提供折叠的历史检查入口；过程与正式回复保持主次层级，用户可以检查 Tool 证据而无需离开阅读上下文。仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
 
 ### 2.2 Capability 标记
 
@@ -623,7 +623,7 @@ AgentCore typed CoreEvent
 | ----------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | User instruction  | Run 存在                                                                  | 历史稳定；正文下方始终有复制动作，可用时带弱化提交时间                 |
 | Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | 按插话锚点分为连续阅读块；closed part 稳定，尾部原位增长、定性或回滚   |
-| Process surface   | Run active，或 terminal Run 存在 Tool                                     | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开     |
+| Process surface   | Run active，或 terminal Run 存在 Tool 或已自动允许的记录                 | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开     |
 | Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                          |
 | Terminal notice   | partial、非 completed outcome 或完成但无 response                         | 与 partial 合并为唯一准确提示，不重复成功结果                          |
 | Response metadata | Run 已 terminal 且存在非空 final/partial response                         | 紧随所属 final/partial 回复正文；纯图标复制入口 + 可用时的弱化完成时间 |
@@ -634,7 +634,7 @@ AgentCore typed CoreEvent
 active Run:
   User instruction + optional submitted time + input copy action
   Assistant output interleaved with optional user interjections
-  RunProcess = live status header + optional collapsed Tool body
+  RunProcess = live status header + optional collapsed execution details
   intervention
 
 terminal Run:
@@ -642,7 +642,7 @@ terminal Run:
   Assistant output interleaved with optional user interjections
     response copy action + optional finished time inside the final/partial message
   optional File Changes
-  optional collapsed RunProcess when Tools exist
+  optional collapsed RunProcess when Tools or automatic approvals exist
   terminal notice
   trailing user messages after the last Assistant text/image entry
 ```
@@ -655,7 +655,7 @@ terminal Run:
 
 隐藏输入前必须确认当前加载范围有实际展示位置。根输入的锚点 Run 不在范围内时显示该 Run 已有根输入；接续原始消息可见时逐条展示并省略重复根输入，来源未加载时展示目标已有输入，不重建未知消息。补载后重新关联、去重。阅读恢复优先使用消息、输出 part 或图片的稳定 identity 与视口偏移，条目失效时选择最近存活条目，再使用 Run 位置；图片运行态与终态保持同一父级与 key，安全失效仍撤销资源和迟到结果。
 
-active→terminal 时，live activity 与持续外推必须消失；没有 Tool 的 process surface 同步卸载，存在 Tool 时则在最终结果之后保留标题为“执行详情”的默认折叠稳定摘要。Host 最终 `elapsedMs` 非空时在标题右侧弱化显示“本轮用时 {duration}”，不可得时不占位，也不改变入口名称。展开该摘要后，用户可以独立展开具有内联详情的 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。已有专用 Product 审计面的 Edit 与 Write 不重复挂载原始 input/result。折叠 process surface 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据紧随所属回复正文，位于同一 Assistant 阅读块内，不被后续插话、文件更改、历史 process surface 或 terminal notice 隔开；复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
+active→terminal 时，live activity 与持续外推必须消失；既没有 Tool 也没有已自动允许记录时卸载 process surface，有任一类记录时则在最终结果之后保留标题为“执行详情”的默认折叠稳定摘要。Host 最终 `elapsedMs` 非空时在标题右侧弱化显示“本轮用时 {duration}”，不可得时不占位，也不改变入口名称。展开该摘要后，用户可以独立展开具有内联详情的 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。已有专用 Product 审计面的 Edit 与 Write 不重复挂载原始 input/result。折叠 process surface 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据紧随所属回复正文，位于同一 Assistant 阅读块内，不被后续插话、文件更改、历史 process surface 或 terminal notice 隔开；复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
 
 #### Output projection 与可见迁移
 
@@ -693,7 +693,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 
 #### 本轮耗时
 
-活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从该 Run 投影的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后停止外推，存在 Tool 且 Host 最终 `elapsedMs` 非空时，在“执行详情”入口右侧固化显示“本轮用时 {duration}”，耗时不可得时不占位，没有 Tool 时不为耗时单独保留 surface。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
+活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从该 Run 投影的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后停止外推，保留“执行详情”且 Host 最终 `elapsedMs` 非空时，在“执行详情”入口右侧固化显示“本轮用时 {duration}”，耗时不可得时不占位，不为耗时单独保留 surface。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
 
 ### 7.3 用户指令
 
@@ -743,7 +743,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 ### 7.5 当前状态、请求与结果
 
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。工具数量、单工具分类与未知状态的文案遵守 [Activity 与 Tool presentation](#activity-与-tool-presentation)，不在主状态中暴露原始 Tool 名称、参数或命令；
-- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
+- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；既没有 Tool 也没有已自动允许记录时整个 surface 卸载，有任一类记录时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - Host 明确标记记录不完整时，在所属 Run 的唯一终态 notice 中说明“部分过程或回复未完整保留”；即使真实结果为 completed 且有 final response 也须可见。与已有失败原因或 partial 提示合并，不改称执行失败，不推断缺失的是最终回复，也不据此自动重试。
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
@@ -930,7 +930,7 @@ Host 确认创建后，若用户仍在原 New task，则以 canonical Snapshot �
 
 重复请求说明只能依据可关联到该请求的诊断事实归因。restore 的规则失效总数只能作为“部分会话规则曾失效”的补充信息，并明确与当前请求的关系未知，不得宣称当前规则未能恢复或覆盖具体请求的诊断。
 
-审批卡只在当前权限请求需要人工决定时显示，不仅按 Task 的审批模式判断。自动评审期间不显示审批卡、参数或批准与拒绝按钮，仅在执行状态中以 `aria-live` 说明“自动评审中”；用户仍可停止任务。评审中计入处理中，不计入人工关注数、不按人工待处理置顶，也不显示“需要你处理”的定位提醒；评审无法决定、失败或超时转人工后，立即显示审批卡并恢复人工关注与提醒，人工按钮与键盘决定保持可用。不改变底层 Run 等待审批的事实。不显示伪倒计时、自动重试或“已验证安全”。有效人工决定与自动结果仍由谁先被 Host 接纳谁生效，后来的回答按过期处理。审核器已允许或拒绝的请求不显示审批卡；其记录在所属 Run 中默认折叠，摘要只展示来源、可用的工具名称和本次结果，展开后展示 Host 脱敏理由，不重放参数。
+审批卡只在当前权限请求需要人工决定时显示，不仅按 Task 的审批模式判断。自动评审期间不显示审批卡、参数或批准与拒绝按钮，仅在执行状态中以 `aria-live` 说明“自动评审中”；用户仍可停止任务。评审中计入处理中，不计入人工关注数、不按人工待处理置顶，也不显示“需要你处理”的定位提醒；评审无法决定、失败或超时转人工后，立即显示审批卡并恢复人工关注与提醒，人工按钮与键盘决定保持可用。不改变底层 Run 等待审批的事实。不显示伪倒计时、自动重试或“已验证安全”。有效人工决定与自动结果仍由谁先被 Host 接纳谁生效，后来的回答按过期处理。审核器已允许或拒绝的请求不显示审批卡；已允许的记录按所属 Run 合并到执行详情内的一个默认折叠计数入口，主阅读流不逐条展示。拒绝记录在所属 Run 的主阅读流中默认折叠。单条记录的摘要只展示来源、可用的工具名称和本次结果，展开后展示 Host 脱敏理由，不重放参数。
 
 ### 10.2 审批模式
 

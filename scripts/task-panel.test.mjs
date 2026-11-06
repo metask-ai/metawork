@@ -845,66 +845,100 @@ test("Task only renders a permission card when the current request needs a user"
   }
 });
 
-test("automatic permission decisions keep collapsed audit records without replaying arguments", () => {
+test("automatic approvals are grouped inside the Run process while denials stay inline", () => {
   const waiting = run({ phase: "running", terminal: null });
-  const records = ["allowed_once", "denied"].map((state, index) => ({
-    requestId: `request-history-${index}`,
-    runId: waiting.id,
-    order: String(index + 1),
-    kind: "permission",
-    state,
-    answeredBy: "reviewer",
-    reviewReason:
-      index === 0
-        ? "Only reads the workspace."
-        : "Outside the requested scope.",
-    agentRequestId: `agent-request-${index}`,
-    permission: index === 0 ? { toolName: "Bash" } : null,
-    detail: '{"command":"permission-arguments-must-not-be-replayed"}',
-    itemCount: 1,
-    detailTruncated: false,
-    redacted: false,
-  }));
+  const records = ["allowed_once", "allowed_once", "denied"].map(
+    (state, index) => ({
+      requestId: `request-history-${index}`,
+      runId: waiting.id,
+      order: String(index + 1),
+      kind: "permission",
+      state,
+      answeredBy: "reviewer",
+      reviewReason:
+        state === "denied"
+          ? "Outside the requested scope."
+          : `Approved operation ${index}.`,
+      agentRequestId: `agent-request-${index}`,
+      permission: index === 0 ? { toolName: "Bash" } : null,
+      detail: '{"command":"permission-arguments-must-not-be-replayed"}',
+      itemCount: 1,
+      detailTruncated: false,
+      redacted: false,
+    }),
+  );
   for (const locale of ["en-US", "zh-CN"]) {
-    const container = document.createElement("div");
-    container.innerHTML = renderTaskContent(
-      task({
-        approvalMode: "auto_review",
-        currentRunId: waiting.id,
-        currentRunPhase: "running",
-        runs: [waiting],
-        uiHistory: [
-          ...records,
-          { ...records[0], requestId: "user-history", answeredBy: "user" },
-          { ...records[1], requestId: "other-run-history", runId: "other-run" },
-        ],
-      }),
-      locale,
-    );
-    const reviews = container.querySelectorAll("details.projection-note");
-    assert.equal(reviews.length, 2);
-    for (const [index, review] of reviews.entries()) {
-      assert.equal(review.hasAttribute("open"), false);
-      const summary = review.querySelector("summary").textContent;
-      assert.ok(
-        summary.includes(translate(locale, "approval.answered_by_reviewer")),
+    for (const value of [waiting, run()]) {
+      const { container } = render(
+        taskContentElement(
+          task({
+            approvalMode: "auto_review",
+            currentRunId: value.id,
+            currentRunPhase: value.phase,
+            runs: [value],
+            uiHistory: [
+              ...records,
+              { ...records[0], requestId: "user-history", answeredBy: "user" },
+              {
+                ...records[0],
+                requestId: "other-run-history",
+                runId: "other-run",
+              },
+            ],
+          }),
+          "1",
+          {},
+          locale,
+        ),
       );
-      assert.ok(
-        summary.includes(translate(locale, `ui.state.${records[index].state}`)),
-      );
-      assert.equal(summary.includes("Bash"), index === 0);
+      const process = container.querySelector(".run-process-header");
+      assert.equal(process.getAttribute("aria-expanded"), "false");
       assert.equal(
-        review.querySelector("p").textContent,
-        records[index].reviewReason,
+        container.querySelectorAll("details.projection-note").length,
+        1,
       );
-      assert.ok(!summary.includes(records[index].reviewReason));
+      const denial = container.querySelector("details.projection-note");
+      assert.equal(denial.hasAttribute("open"), false);
+      assert.ok(
+        denial
+          .querySelector("summary")
+          .textContent.includes(translate(locale, "ui.state.denied")),
+      );
+      assert.equal(
+        denial.querySelector("p").textContent,
+        records[2].reviewReason,
+      );
+      assert.equal(container.querySelector(".ai-intervention"), null);
+
+      fireEvent.click(process);
+      const group = container.querySelector(".run-process-body > details");
+      assert.equal(group.hasAttribute("open"), false);
+      assert.equal(
+        group.querySelector("summary").textContent,
+        translate(locale, "approval.review_approved_count", { count: "2" }),
+      );
+      const approvals = group.querySelectorAll("details.projection-note");
+      assert.equal(approvals.length, 2);
+      for (const [index, review] of approvals.entries()) {
+        assert.equal(review.hasAttribute("open"), false);
+        const summary = review.querySelector("summary").textContent;
+        assert.ok(
+          summary.includes(translate(locale, "approval.answered_by_reviewer")),
+        );
+        assert.ok(summary.includes(translate(locale, "ui.state.allowed_once")));
+        assert.equal(summary.includes("Bash"), index === 0);
+        assert.equal(
+          review.querySelector("p").textContent,
+          records[index].reviewReason,
+        );
+      }
+      assert.ok(
+        !container.textContent.includes(
+          "permission-arguments-must-not-be-replayed",
+        ),
+      );
+      cleanup();
     }
-    assert.equal(container.querySelector(".ai-intervention"), null);
-    assert.ok(
-      !container.textContent.includes(
-        "permission-arguments-must-not-be-replayed",
-      ),
-    );
   }
 });
 

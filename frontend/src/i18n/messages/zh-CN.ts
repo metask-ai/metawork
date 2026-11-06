@@ -1130,6 +1130,7 @@ export const zhCN: Record<MessageId, string> = {
   "task_panel.open": "打开右侧栏",
   "task_panel.close": "关闭右侧栏",
   "approval.answered_by_reviewer": "自动评审",
+  "approval.review_approved_count": "自动评审通过 {count} 次",
   "approval.action.command": "允许运行这条命令吗？",
   "approval.action.read": "允许读取《{target}》吗？",
   "approval.action.write": "允许写入《{target}》吗？",

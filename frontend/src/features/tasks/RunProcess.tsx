@@ -384,6 +384,7 @@ function ProcessTool({
 export function RunProcess({
   presentation,
   reviewingPermission,
+  approvalHistory = null,
   fileChanges = null,
   elapsedMs = null,
   snapshotReceivedAt = null,
@@ -397,6 +398,7 @@ export function RunProcess({
 }: {
   presentation: RunPresentation;
   reviewingPermission: boolean;
+  approvalHistory?: ReactNode;
   fileChanges?: RunFileChanges | null;
   elapsedMs?: string | null;
   snapshotReceivedAt?: number | null;
@@ -413,7 +415,7 @@ export function RunProcess({
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
-  if (!presentation.processVisible) return null;
+  if (!presentation.processVisible && !approvalHistory) return null;
 
   const activity = presentation.activity;
   const unsynchronized = presentation.active && !synchronized;
@@ -439,7 +441,9 @@ export function RunProcess({
       : activity
         ? activityDetail(activity, locale, t)
         : null;
-  const showBody = expanded && presentation.processCanCollapse;
+  const collapsible =
+    presentation.processCanCollapse || Boolean(approvalHistory);
+  const showBody = expanded && collapsible;
 
   return (
     <section
@@ -471,7 +475,7 @@ export function RunProcess({
             </small>
           ) : null
         }
-        collapsible={presentation.processCanCollapse}
+        collapsible={collapsible}
         expanded={showBody}
         controls={bodyId}
         onToggle={() => onExpandedChange(!showBody)}
@@ -494,6 +498,7 @@ export function RunProcess({
               ))}
             </ul>
           )}
+          {approvalHistory}
         </div>
       )}
     </section>

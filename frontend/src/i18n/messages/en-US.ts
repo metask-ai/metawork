@@ -1298,6 +1298,7 @@ export const enUS = {
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
   "approval.answered_by_reviewer": "Automatic review",
+  "approval.review_approved_count": "Automatic approvals ({count})",
   "approval.action.command": "Allow this command to run?",
   "approval.action.read": "Allow reading “{target}”?",
   "approval.action.write": "Allow writing “{target}”?",
