@@ -3978,6 +3978,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let titleCompletions = 0;
   let nextTitleGate = null;
   let reviewRequests = 0;
+  let mcpReviewRequests = 0;
   let inputReviewRequests = 0;
   let readabilityReviewRequests = 0;
   let technicalReviewRequests = 0;
@@ -4014,6 +4015,41 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           assert.equal(payload.stream, undefined);
           assert.equal(payload.tools, undefined);
           const review = JSON.parse(payload.messages[0].content);
+          if (review.evidence.request.tool_namespace === "mcp") {
+            assert.equal(process.env.METAWORK_MCP_ONLY, "1");
+            assert.ok(
+              ["mcp-automatic-first", "mcp-automatic-second"].includes(
+                review.evidence.user_intent,
+              ),
+            );
+            assert.equal(review.host.delegation, "current_request_only");
+            assert.equal(
+              review.evidence.request.arguments.text,
+              "desktop-echo",
+            );
+            mcpReviewRequests++;
+            response.writeHead(200, {
+              "content-type": "application/json",
+              connection: "close",
+            });
+            response.end(
+              JSON.stringify({
+                type: "message",
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      decision: "allow_once",
+                      reason: "当前任务内的本地合成 MCP 回显。",
+                    }),
+                  },
+                ],
+                stop_reason: "end_turn",
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+            );
+            return;
+          }
           const readability =
             review.evidence.user_intent ===
             "请检查审批请求，确认这条命令的用途。";
@@ -4250,6 +4286,9 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     get reviewRequests() {
       return reviewRequests;
+    },
+    get mcpReviewRequests() {
+      return mcpReviewRequests;
     },
 
     releaseReview() {
