@@ -661,6 +661,15 @@ test("MCP management uses only typed revision 1 commands", async () => {
         return { outcome: "started", operationId: "oauth-op" };
       if (command === "metawork.mcp.cancelAuthorization")
         return { outcome: "cancelled" };
+      if (
+        command === "metawork.mcp.createStdioServer" ||
+        command === "metawork.mcp.createHttpServer"
+      )
+        return {
+          outcome: "saved",
+          desiredGeneration: "8",
+          serverId: "server-1",
+        };
       return { outcome: "saved", desiredGeneration: "8" };
     }),
   });
@@ -1302,3 +1311,47 @@ for (const [method, command] of [
       await assert.rejects(client[method]("1", "7"), /Invalid Host contract/);
     }
   });
+
+test("MCP proposal commands carry exact identities and strict result shapes", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/bridge/testdata/mcp-installation-dismiss.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const calls = [];
+  let result = { outcome: "dismissed" };
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return result;
+    }),
+  });
+  assert.deepEqual(await client.dismissMcpInstallProposal("71"), result);
+  assert.deepEqual(calls[0], {
+    command: "metawork.mcp.dismissInstallProposal",
+    payload: fixture.proposal,
+  });
+  result = { outcome: "saved", desiredGeneration: "1", serverId: "server-1" };
+  const input = { displayName: "Suggested", command: "node", arguments: [] };
+  await client.createMcpStdioServer("0", input, "71");
+  assert.deepEqual(calls[1].payload, {
+    expectedDesiredGeneration: "0",
+    proposalId: "71",
+    ...input,
+  });
+  result = { outcome: "dismissed" };
+  await client.dismissMcpInstallProposal(null);
+  assert.deepEqual(calls[2], {
+    command: "metawork.mcp.dismissInstallProposal",
+    payload: fixture.notice,
+  });
+  result = { outcome: "dismissed", draft: {} };
+  await assert.rejects(
+    client.dismissMcpInstallProposal("71"),
+    /Invalid Host contract/,
+  );
+});

@@ -15,6 +15,8 @@ import type {
   McpConfigurationApplyResult,
   McpHttpConnectionInput,
   McpMutationResult,
+  McpCreateResult,
+  McpInstallationProposal,
   McpRefreshResult,
   McpSecretSlot,
   McpStdioConnectionInput,
@@ -30,6 +32,19 @@ import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import {
+  commandLineToken,
+  parseMcpCommandLine,
+  validMcpArgv,
+  validMcpHttpEndpoint,
+  parseMcpConfiguration,
+  type McpImportEntry,
+  type McpImportResult,
+} from "./configuration-input.ts";
+export {
+  parseMcpCommandLine,
+  validMcpHttpEndpoint,
+} from "./configuration-input.ts";
 
 type McpServer = McpManagementView["servers"][number];
 type PaneState =
@@ -63,158 +78,6 @@ export function filterMcpServers(
       ...server.tools.map((tool) => tool.name),
     ].some((value) => value.toLocaleLowerCase().includes(needle)),
   );
-}
-
-function validRawAuthorityPort(value: string): boolean {
-  if (!/^:[0-9]+$/.test(value)) return false;
-  const port = Number(value.slice(1));
-  return Number.isInteger(port) && port > 0 && port <= 65535;
-}
-
-function validRawHostName(value: string): boolean {
-  const host = value.endsWith(".") ? value.slice(0, -1) : value;
-  if (host.length === 0 || host.length > 255) return false;
-  return host
-    .split(".")
-    .every(
-      (label) =>
-        label.length > 0 &&
-        label.length <= 63 &&
-        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
-    );
-}
-
-function rawAuthorityHost(authority: string): string | null {
-  if (
-    authority.length === 0 ||
-    authority.includes("@") ||
-    authority.includes("%") ||
-    /[^\x00-\x7f]/.test(authority)
-  )
-    return null;
-
-  let host: string;
-  let port = "";
-  if (authority.startsWith("[")) {
-    const closingBracket = authority.indexOf("]");
-    if (closingBracket < 0) return null;
-    host = authority.slice(0, closingBracket + 1);
-    port = authority.slice(closingBracket + 1);
-  } else {
-    const separator = authority.indexOf(":");
-    if (separator < 0) {
-      host = authority;
-    } else {
-      if (authority.indexOf(":", separator + 1) >= 0) return null;
-      host = authority.slice(0, separator);
-      port = authority.slice(separator);
-    }
-  }
-
-  if (
-    !host ||
-    (port && !validRawAuthorityPort(port)) ||
-    (!host.startsWith("[") && !validRawHostName(host))
-  )
-    return null;
-  return host;
-}
-
-export function validMcpHttpEndpoint(value: string): boolean {
-  if (
-    !/^https?:\/\//i.test(value) ||
-    /[\u0000-\u0020\u007f\\?#]/.test(value) ||
-    new TextEncoder().encode(value).length > 4096
-  )
-    return false;
-  const authority = value.slice(value.indexOf("://") + 3).split("/", 1)[0];
-  const host = rawAuthorityHost(authority);
-  if (host === null) return false;
-  try {
-    const endpoint = new URL(value);
-    if (
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.search ||
-      endpoint.hash
-    )
-      return false;
-    if (endpoint.protocol === "https:") return true;
-    return (
-      endpoint.protocol === "http:" &&
-      ["localhost", "127.0.0.1", "[::1]"].includes(host.toLowerCase())
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function parseMcpCommandLine(value: string): string[] | null {
-  const tokens: string[] = [];
-  let token = "";
-  let quote: "single" | "double" | null = null;
-  let escaped = false;
-  let started = false;
-
-  for (const character of value.trim()) {
-    if (escaped) {
-      token += character;
-      escaped = false;
-      started = true;
-      continue;
-    }
-    if (quote === "single") {
-      if (character === "'") quote = null;
-      else token += character;
-      started = true;
-      continue;
-    }
-    if (quote === "double") {
-      if (character === '"') quote = null;
-      else if (character === "\\") escaped = true;
-      else if (character === "`" || character === "$") return null;
-      else token += character;
-      started = true;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (started) {
-        tokens.push(token);
-        token = "";
-        started = false;
-      }
-      continue;
-    }
-    if (character === "'") {
-      quote = "single";
-      started = true;
-      continue;
-    }
-    if (character === '"') {
-      quote = "double";
-      started = true;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      started = true;
-      continue;
-    }
-    if (/[|&;<>`$]/.test(character)) return null;
-    token += character;
-    started = true;
-  }
-  if (quote !== null || escaped) return null;
-  if (started) tokens.push(token);
-  return tokens.length > 0 && tokens.every((entry) => validMcpPublicText(entry))
-    ? tokens
-    : null;
-}
-
-function commandLineToken(value: string): string {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
-    ? value
-    : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
 function validMcpDisplayName(value: string): boolean {
@@ -602,8 +465,23 @@ export function McpPage({
   onTest,
   onApply,
   onRefresh,
+  installationProposal = null,
+  requestedProposalId = null,
+  proposalSourceInvalidated = false,
+  installationRejected = false,
+  onReviewProposal,
+  onProposalOpened,
+  onDismissProposal,
 }: {
   management: McpManagementView;
+  installationProposal?: McpInstallationProposal | null;
+  requestedProposalId?: string | null;
+  proposalSourceInvalidated?: boolean;
+  installationRejected?: boolean;
+  onReviewProposal?: (proposal: McpInstallationProposal) => void;
+  onProposalOpened?: () => void;
+  onDismissProposal?: (id: string | null) => Promise<unknown>;
+
   capabilities: {
     connectionApproval: boolean;
     secretCapture: boolean;
@@ -616,11 +494,13 @@ export function McpPage({
   onCreateStdio: (
     expectedGeneration: string,
     input: McpStdioConnectionInput,
-  ) => Promise<McpMutationResult>;
+    proposalId?: string,
+  ) => Promise<McpCreateResult>;
   onCreateHttp: (
     expectedGeneration: string,
     input: McpHttpConnectionInput,
-  ) => Promise<McpMutationResult>;
+    proposalId?: string,
+  ) => Promise<McpCreateResult>;
   onUpdateStdio: (
     expectedGeneration: string,
     serverId: string,
@@ -697,6 +577,39 @@ export function McpPage({
   >("automatic");
   const [timeoutMs, setTimeoutMs] = useState("30000");
   const [commandLine, setCommandLine] = useState("");
+  const [structuredArgv, setStructuredArgv] = useState<string[] | null>(null);
+  const [proposalLink, setProposalLink] = useState<string | null>(null);
+  const [proposalExpired, setProposalExpired] = useState(false);
+  const proposalAttempted = useRef(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBatch, setImportBatch] = useState<McpImportResult | null>(null);
+  const [importStatus, setImportStatus] = useState("");
+  const [importedDraft, setImportedDraft] = useState(false);
+  const [importedSecrets, setImportedSecrets] = useState<
+    Record<string, string>
+  >({});
+  const captureOperation = useRef<{ generations: Set<string> } | null>(null);
+  const currentManagement = useRef(management);
+  currentManagement.current = management;
+  useEffect(
+    () => () => {
+      captureOperation.current = null;
+    },
+    [],
+  );
+  const previousGeneration = useRef(management.desiredGeneration);
+  useEffect(() => {
+    if (
+      previousGeneration.current !== management.desiredGeneration ||
+      management.managementHealth !== "ready" ||
+      disabled
+    ) {
+      previousGeneration.current = management.desiredGeneration;
+      clearImportSecrets();
+    }
+    if (management.managementHealth !== "ready" || disabled)
+      captureOperation.current = null;
+  }, [management.desiredGeneration, management.managementHealth, disabled]);
   const [cwd, setCwd] = useState("");
   const [environmentNames, setEnvironmentNames] = useState<string[]>([]);
   const [stdioAuthMode, setStdioAuthMode] = useState<"none" | "static">("none");
@@ -778,10 +691,17 @@ export function McpPage({
       ? selected.connection.tokenEndpointAuthMethod
       : null;
   const addValid =
+    !proposalExpired &&
+    Object.values(importedSecrets).every(
+      (value) =>
+        new TextEncoder().encode(value).length <= capabilities.secretMaxBytes,
+    ) &&
     validMcpDisplayName(displayName) &&
     /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
     (transport === "stdio"
-      ? parseMcpCommandLine(commandLine) !== null &&
+      ? (structuredArgv !== null
+          ? validMcpArgv(structuredArgv)
+          : parseMcpCommandLine(commandLine) !== null) &&
         validMcpPublicText(cwd, false) &&
         validMcpNames(environmentNames) &&
         ((stdioAuthMode === "none" && environmentNames.length === 0) ||
@@ -817,6 +737,7 @@ export function McpPage({
   }, [selected?.id, selected?.displayName]);
 
   function openServer(server: McpServer, trigger: HTMLElement) {
+    clearImportSecrets();
     paneTrigger.current = trigger;
     setConfirmation(null);
     setNotice(null);
@@ -830,6 +751,12 @@ export function McpPage({
     setNegotiation("automatic");
     setTimeoutMs("30000");
     setCommandLine("");
+    setStructuredArgv(null);
+    setImportedSecrets({});
+    setImportedDraft(false);
+    setProposalLink(null);
+    setProposalExpired(false);
+    proposalAttempted.current = false;
     setCwd("");
     setEnvironmentNames([]);
     setStdioAuthMode("none");
@@ -843,19 +770,112 @@ export function McpPage({
     setPaneState({ kind: "add" });
   }
 
+  function clearImportSecrets() {
+    setImportedSecrets({});
+    setImportBatch(
+      (batch) =>
+        batch && {
+          ...batch,
+          entries: batch.entries.map((entry) => ({ ...entry, secrets: {} })),
+        },
+    );
+  }
+
+  function prefillImported(entry: McpImportEntry, trigger: HTMLElement) {
+    if (paneState !== null || mutationLocked) return;
+    openAdd(trigger);
+    const draft = entry.draft;
+    setDisplayName(draft.displayName);
+    setTransport(draft.transport);
+    setNegotiation(draft.negotiation);
+    setTimeoutMs(String(draft.timeoutMs));
+    setImportedSecrets(entry.secrets);
+    setImportedDraft(true);
+    // The selected form owns the only retained secret values.
+    setImportBatch(
+      (batch) =>
+        batch && {
+          ...batch,
+          entries: batch.entries.map((item) => ({ ...item, secrets: {} })),
+        },
+    );
+    if (draft.transport === "stdio") {
+      setStructuredArgv([draft.command, ...draft.arguments]);
+      setCwd(draft.cwd ?? "");
+      setEnvironmentNames(draft.environmentNames);
+      setStdioAuthMode(draft.environmentNames.length ? "static" : "none");
+    } else {
+      setEndpoint(draft.endpoint);
+      setAuthMode(draft.authMode);
+      setHeaderNames(draft.headerNames);
+    }
+    if (entry.ignoredPermissions || entry.publicValueOverlap)
+      setNotice({
+        tone: "attention",
+        text: [
+          entry.ignoredPermissions ? t("mcp.import.permissions_ignored") : "",
+          entry.publicValueOverlap ? t("mcp.import.review_values") : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      });
+  }
+
+  useEffect(() => {
+    if (
+      !requestedProposalId ||
+      requestedProposalId !== installationProposal?.id ||
+      paneState !== null ||
+      mutationLocked
+    )
+      return;
+    prefillImported(
+      {
+        draft: installationProposal.draft,
+        secrets: {},
+        ignoredPermissions: false,
+        publicValueOverlap: false,
+      },
+      title.current!,
+    );
+    setProposalLink(installationProposal.id);
+    onProposalOpened?.();
+  }, [requestedProposalId, installationProposal, paneState, mutationLocked]);
+  useEffect(() => {
+    if (
+      !proposalLink ||
+      installationProposal?.id === proposalLink ||
+      createPending
+    )
+      return;
+    clearImportSecrets();
+    if (proposalSourceInvalidated && !proposalAttempted.current) {
+      setProposalLink(null);
+      setNotice({ tone: "attention", text: t("mcp.proposal.detached") });
+    } else {
+      setProposalExpired(true);
+      setNotice({ tone: "attention", text: t("mcp.proposal.expired") });
+    }
+  }, [
+    proposalLink,
+    installationProposal?.id,
+    proposalSourceInvalidated,
+    createPending,
+  ]);
+
   function openReplacement(server: McpServer) {
+    clearImportSecrets();
     const connection = server.connection;
     if (connection === null) return;
     setDisplayName(server.displayName);
     setTransport(server.transport);
     setNegotiation(server.negotiation);
     setTimeoutMs(String(server.timeoutMs));
-    setCommandLine(
+    setCommandLine("");
+    setStructuredArgv(
       connection.kind === "stdio"
         ? [connection.command, ...connection.arguments]
-            .map(commandLineToken)
-            .join(" ")
-        : "",
+        : null,
     );
     setCwd(connection.kind === "stdio" ? (connection.cwd ?? "") : "");
     setEnvironmentNames(
@@ -898,25 +918,28 @@ export function McpPage({
     setPaneState({ kind: "replace", id: server.id });
   }
 
-  const savedServer = useRef<{ id: string } | { ids: Set<string> } | null>(
-    null,
-  );
+  const savedServer = useRef<{ id: string } | null>(null);
 
   useEffect(() => {
     // After the canonical projection includes a saved server, move from the
     // form to its detail. Testing remains an explicit next action.
     const pending = savedServer.current;
     if (!pending || !management.desiredGeneration) return;
-    const server =
-      "id" in pending
-        ? management.servers.find((entry) => entry.id === pending.id)
-        : management.servers.find((entry) => !pending.ids.has(entry.id));
+    const server = management.servers.find((entry) => entry.id === pending.id);
     if (!server) return;
     savedServer.current = null;
     setPaneState({ kind: "server", id: server.id });
   });
 
-  function closePane() {
+  function closePane(dismissProposal = true) {
+    if (dismissProposal && proposalLink)
+      void onDismissProposal?.(proposalLink).catch(() => {
+        setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
+      });
+    setProposalLink(null);
+    setProposalExpired(false);
+    clearImportSecrets();
+    captureOperation.current = null;
     const trigger = paneTrigger.current;
     setPaneState(null);
     setConfirmation(null);
@@ -985,6 +1008,14 @@ export function McpPage({
   async function createServer() {
     const generation = management.desiredGeneration;
     if (!generation || mutationLocked || !addValid || createPending) return;
+    const operation = { generations: new Set([generation]) };
+    captureOperation.current = operation;
+    if (proposalLink) proposalAttempted.current = true;
+    const secretValues = Object.entries(importedSecrets).filter(
+      ([, value]) => value.length > 0,
+    );
+    let saved = false;
+    clearImportSecrets();
     setCreatePending(true);
     setNotice(null);
     try {
@@ -996,7 +1027,8 @@ export function McpPage({
       const input =
         transport === "stdio"
           ? (() => {
-              const parsedCommand = parseMcpCommandLine(commandLine);
+              const parsedCommand =
+                structuredArgv ?? parseMcpCommandLine(commandLine);
               if (parsedCommand === null) throw new Error("invalid command");
               return {
                 ...shared,
@@ -1039,18 +1071,77 @@ export function McpPage({
                 input as McpHttpConnectionInput,
               )
           : transport === "stdio"
-            ? await onCreateStdio(generation, input as McpStdioConnectionInput)
-            : await onCreateHttp(generation, input as McpHttpConnectionInput);
+            ? proposalLink
+              ? await onCreateStdio(
+                  generation,
+                  input as McpStdioConnectionInput,
+                  proposalLink,
+                )
+              : await onCreateStdio(
+                  generation,
+                  input as McpStdioConnectionInput,
+                )
+            : proposalLink
+              ? await onCreateHttp(
+                  generation,
+                  input as McpHttpConnectionInput,
+                  proposalLink,
+                )
+              : await onCreateHttp(generation, input as McpHttpConnectionInput);
       mutationNotice(result);
+      if (captureOperation.current !== operation) return;
       if (result.outcome === "saved") {
-        savedServer.current =
+        saved = true;
+        setProposalLink(null);
+        const serverId =
           paneState?.kind === "replace" && selected
-            ? { id: selected.id }
-            : { ids: new Set(management.servers.map((server) => server.id)) };
-      } else if (result.outcome === "saved_recovery_required") closePane();
+            ? selected.id
+            : (result as McpCreateResult).serverId;
+        if (!serverId || !result.desiredGeneration)
+          throw Error("missing create receipt");
+        savedServer.current = { id: serverId };
+        let expected = result.desiredGeneration;
+        operation.generations.add(expected);
+        while (secretValues.length && captureOperation.current === operation) {
+          const current = currentManagement.current;
+          if (
+            !current.desiredGeneration ||
+            !operation.generations.has(current.desiredGeneration) ||
+            current.managementHealth !== "ready"
+          )
+            throw Error("stale capture");
+          const [name, secret] = secretValues.shift()!;
+          const names =
+            transport === "stdio"
+              ? (input as McpStdioConnectionInput).environmentNames
+              : (input as McpHttpConnectionInput).headerNames;
+          if (!names.includes(name)) continue;
+          if (!capabilities.secretCapture) throw Error("capture unavailable");
+          const capture = await onCaptureSecret(
+            expected,
+            serverId,
+            {
+              kind: transport === "stdio" ? "stdio_environment" : "http_header",
+              name,
+            },
+            secret,
+          );
+          if (captureOperation.current !== operation) break;
+          if (capture.outcome !== "saved" || !capture.desiredGeneration)
+            throw Error("capture failed");
+          expected = capture.desiredGeneration;
+          operation.generations.add(expected);
+        }
+      } else if (result.outcome === "saved_recovery_required") closePane(false);
     } catch {
-      setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
+      setNotice({
+        tone: "attention",
+        text: t(saved ? "mcp.import.capture_failed" : "mcp.mutation.failed"),
+      });
     } finally {
+      secretValues.length = 0;
+      if (captureOperation.current === operation)
+        captureOperation.current = null;
       setCreatePending(false);
     }
   }
@@ -1566,6 +1657,16 @@ export function McpPage({
               <p>{t("mcp.subtitle")}</p>
             </div>
             <div className="mcp-header-actions">
+              <Button
+                variant="secondary"
+                disabled={mutationLocked || paneState !== null}
+                onClick={() => {
+                  clearImportSecrets();
+                  setImportOpen((value) => !value);
+                }}
+              >
+                {t("mcp.import.title")}
+              </Button>
               {!empty && (
                 <>
                   <Button
@@ -1593,6 +1694,57 @@ export function McpPage({
             </div>
           </header>
 
+          {installationRejected && (
+            <p role="status" className="mcp-operation-notice">
+              {t("mcp.proposal.rejected")}
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  void onDismissProposal?.(null).catch(() =>
+                    setNotice({
+                      tone: "attention",
+                      text: t("mcp.mutation.failed"),
+                    }),
+                  )
+                }
+              >
+                {t("common.close")}
+              </Button>
+            </p>
+          )}
+          {installationProposal && (
+            <section
+              className="mcp-import"
+              aria-label={t("mcp.proposal.title")}
+            >
+              <strong>{installationProposal.draft.displayName}</strong>
+              <p>{t("mcp.proposal.body")}</p>
+              <div>
+                <Button
+                  variant="secondary"
+                  disabled={mutationLocked || paneState !== null}
+                  onClick={() => onReviewProposal?.(installationProposal)}
+                >
+                  {t("mcp.proposal.review")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={paneState !== null}
+                  onClick={() =>
+                    void onDismissProposal?.(installationProposal.id).catch(
+                      () =>
+                        setNotice({
+                          tone: "attention",
+                          text: t("mcp.mutation.failed"),
+                        }),
+                    )
+                  }
+                >
+                  {t("common.cancel")}
+                </Button>
+              </div>
+            </section>
+          )}
           {renderBanner()}
           {management.retainedMemberCount > 0 && (
             <p className="mcp-operation-notice" aria-live="polite">
@@ -1612,6 +1764,59 @@ export function McpPage({
             </p>
           )}
 
+          {importOpen && (
+            <section className="mcp-import" aria-label={t("mcp.import.title")}>
+              <label>
+                <span>{t("mcp.import.paste")}</span>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value=""
+                  disabled={mutationLocked || paneState !== null}
+                  onChange={() => {}}
+                  onPaste={(event) => {
+                    event.preventDefault();
+                    try {
+                      const parsed = parseMcpConfiguration(
+                        event.clipboardData.getData("text"),
+                        capabilities.secretMaxBytes,
+                      );
+                      setImportBatch(parsed);
+                      setImportStatus("");
+                    } catch {
+                      setImportBatch(null);
+                      setImportStatus(t("mcp.import.invalid"));
+                    } finally {
+                      event.currentTarget.value = "";
+                    }
+                  }}
+                />
+              </label>
+              <small>{t("mcp.import.help")}</small>
+              {importStatus && <p role="status">{importStatus}</p>}
+              {importBatch?.entries.map((entry, index) => (
+                <div key={index}>
+                  <span>
+                    {entry.draft.displayName} · {entry.draft.transport}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    disabled={mutationLocked || paneState !== null}
+                    onClick={(event) =>
+                      prefillImported(entry, event.currentTarget)
+                    }
+                  >
+                    {t("mcp.import.review")}
+                  </Button>
+                </div>
+              ))}
+              {importBatch?.issues.map((issue, index) => (
+                <p key={index}>
+                  {issue.name}: {t(`mcp.import.${issue.code}`)}
+                </p>
+              ))}
+            </section>
+          )}
           {!unavailable && !frozenWithoutDesired && !empty && (
             <div className="mcp-toolbar">
               <SearchField
@@ -1667,7 +1872,10 @@ export function McpPage({
         </div>
 
         {paneState !== null && (
-          <McpDetailDrawer closeLocked={paneCloseLocked} onClose={closePane}>
+          <McpDetailDrawer
+            closeLocked={paneCloseLocked}
+            onClose={() => closePane()}
+          >
             <header>
               <div>
                 <small>
@@ -1701,7 +1909,7 @@ export function McpPage({
                   className="icon-button focus-ring"
                   aria-label={t("common.close")}
                   disabled={paneCloseLocked}
-                  onClick={closePane}
+                  onClick={() => closePane()}
                 >
                   <Icon name="close" />
                 </button>
@@ -1751,6 +1959,28 @@ export function McpPage({
                       </span>
                     </button>
                   </fieldset>
+                  {importedDraft &&
+                    (transport === "stdio"
+                      ? environmentNames
+                      : headerNames
+                    ).map((name) => (
+                      <label key={name}>
+                        <span>
+                          {t("mcp.import.credential")} {name}
+                        </span>
+                        <Input
+                          type="password"
+                          autoComplete="off"
+                          value={importedSecrets[name] ?? ""}
+                          onChange={(event) =>
+                            setImportedSecrets((current) => ({
+                              ...current,
+                              [name]: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                    ))}
                   <label>
                     <span>{t("mcp.add.name")}</span>
                     <Input
@@ -1763,18 +1993,96 @@ export function McpPage({
                   </label>
                   {transport === "stdio" ? (
                     <>
-                      <label>
-                        <span>{t("mcp.add.command")}</span>
-                        <Input
-                          autoComplete="off"
-                          value={commandLine}
-                          placeholder="npx -y @modelcontextprotocol/server-filesystem /workspace"
-                          onChange={(event) =>
-                            setCommandLine(event.target.value)
-                          }
-                        />
-                        <small>{t("mcp.add.command_help")}</small>
-                      </label>
+                      {structuredArgv === null ? (
+                        <label>
+                          <span>{t("mcp.add.command")}</span>
+                          <Input
+                            autoComplete="off"
+                            value={commandLine}
+                            placeholder="npx -y @modelcontextprotocol/server-filesystem /workspace"
+                            onChange={(event) =>
+                              setCommandLine(event.target.value)
+                            }
+                          />
+                          <small>{t("mcp.add.command_help")}</small>
+                        </label>
+                      ) : (
+                        <fieldset className="mcp-structured-command">
+                          <legend>{t("mcp.add.structured_command")}</legend>
+                          <label>
+                            <span>{t("mcp.add.executable")}</span>
+                            <Input
+                              autoComplete="off"
+                              value={structuredArgv[0]}
+                              onChange={(event) =>
+                                setStructuredArgv([
+                                  event.target.value,
+                                  ...structuredArgv.slice(1),
+                                ])
+                              }
+                            />
+                          </label>
+                          {structuredArgv.slice(1).map((argument, index) => (
+                            <div className="mcp-argument-row" key={index}>
+                              <label>
+                                <span>
+                                  {t("mcp.add.argument")} {index + 1}
+                                </span>
+                                <Input
+                                  autoComplete="off"
+                                  value={argument}
+                                  onChange={(event) =>
+                                    setStructuredArgv(
+                                      structuredArgv.map((value, position) =>
+                                        position === index + 1
+                                          ? event.target.value
+                                          : value,
+                                      ),
+                                    )
+                                  }
+                                />
+                              </label>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                onClick={() =>
+                                  setStructuredArgv(
+                                    structuredArgv.filter(
+                                      (_, position) => position !== index + 1,
+                                    ),
+                                  )
+                                }
+                              >
+                                {t("mcp.add.remove_argument")}
+                              </Button>
+                            </div>
+                          ))}
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={structuredArgv.length > 128}
+                            onClick={() =>
+                              setStructuredArgv([...structuredArgv, ""])
+                            }
+                          >
+                            {t("mcp.add.add_argument")}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            onClick={() => {
+                              setCommandLine(
+                                structuredArgv
+                                  .map((value) => commandLineToken(value))
+                                  .join(" "),
+                              );
+                              setStructuredArgv(null);
+                            }}
+                          >
+                            {t("mcp.add.edit_command_line")}
+                          </Button>
+                        </fieldset>
+                      )}
                       <label>
                         <span>{t("mcp.add.cwd")}</span>
                         <Input
@@ -2038,7 +2346,7 @@ export function McpPage({
                     type="button"
                     variant="secondary"
                     size="sm"
-                    onClick={closePane}
+                    onClick={() => closePane()}
                   >
                     {t("common.cancel")}
                   </Button>

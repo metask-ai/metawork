@@ -61,6 +61,182 @@ test.after(async () => {
   dom.window.close();
 });
 
+const proposalManagement = {
+  availability: "ready",
+  managementHealth: "ready",
+  operation: "idle",
+  desiredGeneration: "0",
+  runtimeAlignment: "current",
+  redacted: false,
+  servers: [],
+};
+const proposal = {
+  id: "71",
+  taskId: "3",
+  runId: "7",
+  draft: {
+    displayName: "Suggested",
+    transport: "stdio",
+    command: "node",
+    arguments: ["--filter=$HOME", ""],
+    cwd: null,
+    environmentNames: [],
+    negotiation: "automatic",
+    timeoutMs: 30000,
+  },
+};
+
+test("MCP rejected proposal notice is dismissed through Host without consuming a proposal", async () => {
+  const dismissed = [];
+  const props = {
+    installationRejected: true,
+    onDismissProposal: async (id) => {
+      dismissed.push(id);
+      return { outcome: "dismissed" };
+    },
+  };
+  const view = render(pageElement(proposalManagement, "", props));
+  const notice = screen
+    .getByText(/suggestion could not be accepted/)
+    .closest('[role="status"]');
+  fireEvent.click(within(notice).getByRole("button", { name: "Close" }));
+  await waitFor(() => assert.deepEqual(dismissed, [null]));
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      installationRejected: false,
+    }),
+  );
+  assert.equal(screen.queryByText(/suggestion could not be accepted/), null);
+});
+
+test("MCP suggestions require review and one explicit Add with the precise proposal identity", async () => {
+  const calls = [],
+    reviewed = [];
+  const props = {
+    installationProposal: proposal,
+    onReviewProposal: (value) => reviewed.push(value),
+    onCreateStdio: async (...args) => {
+      calls.push(args);
+      return { outcome: "saved", serverId: "created" };
+    },
+  };
+  const view = render(pageElement(proposalManagement, "", props));
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.equal(calls.length, 0);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Review MCP configuration" }),
+  );
+  assert.deepEqual(reviewed, [proposal]);
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      requestedProposalId: proposal.id,
+    }),
+  );
+  const form = await screen.findByRole("dialog", { name: "Add an MCP server" });
+  view.rerender(pageElement(proposalManagement, "", props));
+  assert.equal(calls.length, 0);
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0][2], proposal.id);
+  assert.deepEqual(calls[0][1].arguments, ["--filter=$HOME", ""]);
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      installationProposal: null,
+    }),
+  );
+  assert.equal(calls.length, 1);
+});
+
+for (const sourceInvalidated of [false, true]) {
+  test(`MCP missing proposal detaches only on explicit source cancellation (${sourceInvalidated})`, async () => {
+    const suggested = {
+      ...proposal,
+      draft: { ...proposal.draft, environmentNames: ["TOKEN"] },
+    };
+    const calls = [];
+    const props = {
+      installationProposal: suggested,
+      onCreateStdio: async (...args) => {
+        calls.push(args);
+        return { outcome: "saved", serverId: "created" };
+      },
+    };
+    const view = render(
+      pageElement(proposalManagement, "", {
+        ...props,
+        requestedProposalId: proposal.id,
+      }),
+    );
+    const form = await screen.findByRole("dialog", {
+      name: "Add an MCP server",
+    });
+    const password = form.querySelector('input[type="password"]');
+    assert.ok(password);
+    fireEvent.change(password, { target: { value: "synthetic-secret" } });
+    view.rerender(
+      pageElement(proposalManagement, "", {
+        ...props,
+        installationProposal: null,
+        proposalSourceInvalidated: sourceInvalidated,
+      }),
+    );
+    await waitFor(() => assert.equal(password.value, ""));
+    const add = within(form).getByRole("button", { name: "Add server" });
+    assert.equal(calls.length, 0);
+    fireEvent.change(password, { target: { value: "new-explicit-secret" } });
+    assert.equal(add.disabled, !sourceInvalidated);
+    if (sourceInvalidated) {
+      fireEvent.click(add);
+      await waitFor(() => assert.equal(calls.length, 1));
+      assert.equal(calls[0].length, 2);
+    }
+  });
+}
+
+test("MCP proposal removal during an uncertain create cannot detach or replay Add", async () => {
+  let resolveCreate;
+  const calls = [];
+  const props = {
+    installationProposal: proposal,
+    onCreateStdio: (...args) => {
+      calls.push(args);
+      return new Promise((resolve) => {
+        resolveCreate = resolve;
+      });
+    },
+  };
+  const view = render(
+    pageElement(proposalManagement, "", {
+      ...props,
+      requestedProposalId: proposal.id,
+    }),
+  );
+  const form = await screen.findByRole("dialog", { name: "Add an MCP server" });
+  view.rerender(pageElement(proposalManagement, "", props));
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      installationProposal: null,
+      proposalSourceInvalidated: true,
+    }),
+  );
+  resolveCreate({
+    outcome: "indeterminate",
+    serverId: null,
+    desiredGeneration: null,
+  });
+  await waitFor(() => assert.ok(screen.getByText(/suggestion has expired/)));
+  const add = within(form).getByRole("button", { name: "Add server" });
+  assert.equal(add.disabled, true);
+  fireEvent.click(add);
+  assert.equal(calls.length, 1);
+});
+
 const servers = [
   {
     id: "github-binding",
@@ -717,8 +893,8 @@ test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", (
     name: "Edit connection settings",
   });
   assert.equal(
-    within(dialog).getByRole("textbox", { name: /Launch command/ }).value,
-    "/usr/local/bin/filesystem-server --root /workspace",
+    within(dialog).getByRole("textbox", { name: "Executable" }).value,
+    "/usr/local/bin/filesystem-server",
   );
   assert.equal(
     within(dialog).getByRole("textbox", {
@@ -726,6 +902,205 @@ test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", (
     }).value,
     "/workspace",
   );
+});
+
+test("MCP unmodified structured Edit submits literal argv and supports independent argument editing", async () => {
+  const calls = [];
+  const original = [
+    "",
+    "--filter=$HOME",
+    "`literal`",
+    "C:\\Data Files\\",
+    'a"b',
+  ];
+  const server = {
+    ...servers[2],
+    connection: {
+      ...servers[2].connection,
+      command: "C:\\Program Files\\mcp.exe",
+      arguments: original,
+    },
+  };
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "7",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [server],
+      },
+      "",
+      {
+        onUpdateStdio: async (...args) => {
+          calls.push(args);
+          return { outcome: "rejected" };
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
+  const form = screen.getByRole("dialog", { name: "Edit connection settings" });
+  const save = within(form).getByRole("button", { name: "Save connection" });
+  assert.equal(save.disabled, false);
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0][2].command, server.connection.command);
+  assert.deepEqual(calls[0][2].arguments, original);
+  fireEvent.change(within(form).getByRole("textbox", { name: "Argument 2" }), {
+    target: { value: "changed $literal" },
+  });
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(calls.length, 2));
+  assert.deepEqual(calls[1][2].arguments, [
+    "",
+    "changed $literal",
+    ...original.slice(2),
+  ]);
+  assert.equal(calls[1][2].cwd, server.connection.cwd);
+});
+
+test("MCP pasted configuration requires selection and Add, then captures only into the receipt identity", async () => {
+  const creates = [],
+    captures = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "7",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [],
+      },
+      "",
+      {
+        onCreateStdio: async (...args) => {
+          creates.push(args);
+          return {
+            outcome: "saved",
+            desiredGeneration: "8",
+            serverId: "receipt-only",
+          };
+        },
+        onCaptureSecret: async (...args) => {
+          captures.push(args);
+          return {
+            outcome: "saved",
+            desiredGeneration: String(8 + captures.length),
+          };
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Paste configuration" }));
+  const paste = screen.getByLabelText("Paste mcpServers JSON here");
+  assert.equal(paste.type, "password");
+  const source = JSON.stringify({
+    mcpServers: {
+      Local: {
+        command: "node",
+        args: ["", "$HOME"],
+        env: { FIRST: "synthetic-one", SECOND: "synthetic-two" },
+        autoApprove: ["all"],
+      },
+      Other: { url: "https://example.test/mcp" },
+    },
+  });
+  fireEvent.paste(paste, { clipboardData: { getData: () => source } });
+  assert.equal(paste.value, "");
+  assert.equal(creates.length, 0);
+  assert.equal(screen.queryByRole("dialog"), null);
+  fireEvent.click(screen.getAllByRole("button", { name: "Review and add" })[0]);
+  const form = screen.getByRole("dialog", { name: "Add an MCP server" });
+  assert.equal(
+    within(form).getByLabelText("Credential for FIRST").type,
+    "password",
+  );
+  assert.equal(form.textContent.includes("synthetic-one"), false);
+  assert.equal(creates.length, 0);
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(captures.length, 2));
+  assert.equal(JSON.stringify(creates).includes("synthetic-"), false);
+  assert.deepEqual(creates[0][1].arguments, ["", "$HOME"]);
+  assert.deepEqual(captures, [
+    [
+      "8",
+      "receipt-only",
+      { kind: "stdio_environment", name: "FIRST" },
+      "synthetic-one",
+    ],
+    [
+      "9",
+      "receipt-only",
+      { kind: "stdio_environment", name: "SECOND" },
+      "synthetic-two",
+    ],
+  ]);
+  assert.equal(within(form).getByLabelText("Credential for FIRST").value, "");
+});
+
+test("MCP import stops remaining credential submission after an external generation change", async () => {
+  let finishCreate;
+  const captures = [];
+  const overrides = {
+    onCreateHttp: () =>
+      new Promise((resolve) => {
+        finishCreate = resolve;
+      }),
+    onCaptureSecret: async (...args) => {
+      captures.push(args);
+      return { outcome: "saved", desiredGeneration: "10" };
+    },
+  };
+  const management = {
+    availability: "ready",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "7",
+    runtimeAlignment: "current",
+    redacted: false,
+    servers: [],
+  };
+  const view = render(pageElement(management, "", overrides));
+  fireEvent.click(screen.getByRole("button", { name: "Paste configuration" }));
+  fireEvent.paste(screen.getByLabelText("Paste mcpServers JSON here"), {
+    clipboardData: {
+      getData: () =>
+        JSON.stringify({
+          mcpServers: {
+            Remote: {
+              url: "https://example.test/mcp",
+              headers: { Authorization: "Bearer synthetic" },
+            },
+          },
+        }),
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Review and add" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Add server",
+    }),
+  );
+  await waitFor(() => assert.equal(typeof finishCreate, "function"));
+  view.rerender(
+    pageElement({ ...management, desiredGeneration: "9" }, "", overrides),
+  );
+  finishCreate({
+    outcome: "saved",
+    desiredGeneration: "8",
+    serverId: "committed",
+  });
+  await waitFor(() =>
+    assert.ok(screen.getByText(/remaining credentials could not be saved/)),
+  );
+  assert.equal(captures.length, 0);
+  assert.equal(screen.getByLabelText("Credential for Authorization").value, "");
 });
 
 test("MCP tests a saved connection without refreshing the current Runtime", async () => {
@@ -834,7 +1209,11 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
       {
         onCreateHttp: async (...args) => {
           calls.push(args);
-          return { outcome: "saved" };
+          return {
+            outcome: "saved",
+            desiredGeneration: "generation-10",
+            serverId: "local-search-binding",
+          };
         },
         onTest: async (...args) => {
           tests.push(args);
@@ -849,9 +1228,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
     name: "Add an MCP server",
   });
   assert.ok(
-    dialog.textContent.includes(
-      "Credentials are collected separately and never enter this form.",
-    ),
+    dialog.textContent.includes("Credentials use separate password fields."),
   );
   fireEvent.click(
     within(dialog).getByRole("button", { name: /Streamable HTTP/ }),

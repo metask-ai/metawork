@@ -33,6 +33,7 @@ export const commands = {
   retrySkill: "metawork.skills.retry",
   exportSkill: "metawork.skills.export",
   skillDetail: "metawork.skills.detail",
+  mcpDismissInstallProposal: "metawork.mcp.dismissInstallProposal",
   mcpCreateStdioServer: "metawork.mcp.createStdioServer",
   mcpCreateHttpServer: "metawork.mcp.createHttpServer",
   mcpUpdateStdioConnection: "metawork.mcp.updateStdioConnection",

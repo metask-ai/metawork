@@ -391,6 +391,7 @@ pub const McpProductState = struct {
     refresh_visible: bool = false,
     refresh_schedule_failed: bool = false,
     connection_test: ?McpConnectionTest = null,
+    process_observations: std.ArrayList(mcp_configuration.ProcessObservation) = .empty,
     configuration_apply_state: McpConfigurationApplyState = .idle,
     apply_target: ?mcp_configuration.RuntimeApplyTarget = null,
     runtime_uncertain: bool = false,
@@ -423,6 +424,8 @@ pub const McpProductState = struct {
     }
 
     pub fn deinit(self: *McpProductState) void {
+        for (self.process_observations.items) |value| self.preparation.allocator.free(value.server_id);
+        self.process_observations.deinit(self.preparation.allocator);
         for (self.task_references.items) |*reference| reference.deinit();
         self.task_references.deinit(self.preparation.allocator);
         if (self.authorization_operation) |*operation|

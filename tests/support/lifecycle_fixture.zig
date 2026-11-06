@@ -984,10 +984,10 @@ pub fn runtimeCreate(
     fake_core.lock();
     defer fake_core.unlock();
     fake_core.runtime_created += 1;
-    fake_core.image_tool = if (config.?.host_tool_count == 2) config.?.host_tools.?[0] else null;
-    fake_core.delivery_tool = if (config.?.host_tool_count == 2) config.?.host_tools.?[1] else null;
+    fake_core.image_tool = if (config.?.host_tool_count == 3) config.?.host_tools.?[0] else null;
+    fake_core.delivery_tool = if (config.?.host_tool_count == 3) config.?.host_tools.?[1] else null;
     fake_core.image_tool_seen = if (config.?.host_tools) |tools|
-        config.?.host_tool_count == 2 and
+        config.?.host_tool_count == 3 and
             config.?.builtin_tools != null and config.?.builtin_tool_count == 10 and
             std.mem.eql(u8, sdk.borrowedBytes(tools[0].name) catch "", "GenerateImage") and
             tools[0].execute != null and tools[0].release_result != null
@@ -1146,9 +1146,10 @@ pub fn sessionCreate(
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
             fake_core.product_allowlist_seen = host.allowed_tools != null and
-                host.allowed_tool_count == 12 and
+                host.allowed_tool_count == 13 and
                 std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage") and
-                std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[11]) catch "", "DeliverFile");
+                std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[11]) catch "", "DeliverFile") and
+                std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[12]) catch "", "ProposeMcpServer");
             recordAllowedTools(
                 host,
                 &fake_core.last_allowed_tool_count,

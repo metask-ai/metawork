@@ -601,7 +601,7 @@ test "GenerateImage fixture initializer uses the same fixed tool as product init
     }
     try std.testing.expect(fake_core.image_tool_seen);
     const session = try openSession(runtime);
-    try std.testing.expectEqual(@as(usize, 12), fake_core.last_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 13), fake_core.last_allowed_tool_count);
     try std.testing.expectEqualStrings("GenerateImage", std.mem.sliceTo(&fake_core.last_allowed_tool_names[10], 0));
     const run_id = try session.prepareRun(.{ .text = "ordinary text remains available" });
     var run = try session.beginRun(run_id);
@@ -770,7 +770,7 @@ test "GenerateImage per-Run credentials are zeroed on every exit including produ
                 .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
             },
             .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform },
-        }, null);
+        }, null, null);
         observing.watched = session.run_image.?.binding.credential;
         switch (action) {
             0 => try session.cancelPreparedRun(id),
@@ -818,11 +818,11 @@ test "GenerateImage failed per-Run preparation releases copies and leaves the Se
             .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform },
         };
         failing.fail_index = failing.alloc_index + offset;
-        try std.testing.expectError(error.OutOfMemory, session.prepareRunWithTools(.{ .text = "prepared text" }, input, null));
+        try std.testing.expectError(error.OutOfMemory, session.prepareRunWithTools(.{ .text = "prepared text" }, input, null, null));
         try std.testing.expect(session.run_image == null);
         try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
         failing.fail_index = std.math.maxInt(usize);
-        const next = try session.prepareRunWithTools(.{ .text = "still usable" }, null, null);
+        const next = try session.prepareRunWithTools(.{ .text = "still usable" }, null, null, null);
         try session.cancelPreparedRun(next);
         try std.testing.expectEqual(@as(usize, 0), network.calls);
     }
@@ -3246,7 +3246,7 @@ test "Agent Runtime applies the fixed MetaWork built-in and Host tool surface to
     defer closeSession(session, .session_close) catch {};
 
     const expected = [_][]const u8{
-        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch", "GenerateImage", "DeliverFile",
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch", "GenerateImage", "DeliverFile", "ProposeMcpServer",
     };
     try std.testing.expectEqual(expected.len, fake_core.last_allowed_tool_count);
     for (expected, 0..) |name, index| {

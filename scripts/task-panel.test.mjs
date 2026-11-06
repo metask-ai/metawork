@@ -950,6 +950,46 @@ function taskContentElement(
   );
 }
 
+test("Task MCP suggestion uses canonical source identity even without recorded tools", () => {
+  const current = run({ tools: [], recordingIncomplete: true });
+  const value = task({ runs: [current] });
+  const proposal = {
+    id: "17",
+    taskId: value.id,
+    runId: current.id,
+    draft: {
+      displayName: "Suggested server",
+      transport: "stdio",
+      command: "node",
+      arguments: [],
+      cwd: null,
+      environmentNames: [],
+      negotiation: "automatic",
+      timeoutMs: 30000,
+    },
+  };
+  const reviewed = [];
+  const view = render(
+    taskContentElement(value, "1", {
+      mcpInstallationProposal: proposal,
+      onReviewMcpProposal: (entry) => reviewed.push(entry),
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Review MCP configuration" }),
+  );
+  assert.deepEqual(reviewed, [proposal]);
+  view.rerender(
+    taskContentElement(value, "2", {
+      mcpInstallationProposal: { ...proposal, taskId: "999" },
+    }),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Review MCP configuration" }),
+    null,
+  );
+});
+
 function runProcessElement(
   value,
   { expanded = true, onExpandedChange = () => {}, onReviewFileChanges } = {},
@@ -6280,9 +6320,7 @@ test("file tree keyboard toggle preserves the active preview DOM and tab selecti
 function recentTaskButton(name) {
   const button = screen
     .getAllByRole("button", { name })
-    .find((candidate) =>
-      candidate.parentElement?.classList.contains("task-list"),
-    );
+    .find((candidate) => candidate.closest(".task-list"));
   assert.ok(button, "Task must have an entrance in Recent");
   return button;
 }

@@ -452,6 +452,38 @@ export const enUS = {
   "mcp.add.timeout": "Timeout (ms)",
   "mcp.add.timeoutHelp":
     "Per-request timeout. Connection and catalog management are limited to {limit} ms; tool calls keep the configured timeout.",
+  "mcp.add.structured_command": "Program and arguments",
+  "mcp.add.executable": "Executable",
+  "mcp.add.argument": "Argument",
+  "mcp.add.add_argument": "Add argument",
+  "mcp.add.remove_argument": "Remove argument",
+  "mcp.add.edit_command_line": "Edit as launch command",
+  "mcp.import.review_values":
+    "Some environment/header values also appear in the public connection. Review them before adding.",
+  "mcp.proposal.title": "MCP server suggestion",
+  "mcp.proposal.body":
+    "Review this public configuration, then add the server, authenticate and choose tools. New tasks can use the selected tools.",
+  "mcp.proposal.review": "Review MCP configuration",
+  "mcp.proposal.detached":
+    "The source task was stopped or deleted. Public settings are retained as a normal Add form; review and submit them explicitly.",
+  "mcp.proposal.expired":
+    "This suggestion has expired. No automatic retry was made. Close this form and check the saved connection before adding again.",
+  "mcp.proposal.rejected":
+    "An MCP suggestion could not be accepted. Review the public configuration and enter credentials only in password fields or OAuth.",
+  "mcp.import.title": "Paste configuration",
+  "mcp.import.paste": "Paste mcpServers JSON here",
+  "mcp.import.help":
+    "Paste strict JSON. Credentials stay in this form. Review and add one server at a time.",
+  "mcp.import.review": "Review and add",
+  "mcp.import.invalid": "Invalid configuration. Paste strict JSON again.",
+  "mcp.import.unsupported": "Unsupported configuration fields or transport.",
+  "mcp.import.variables":
+    "Provide concrete values instead of configuration expressions.",
+  "mcp.import.permissions_ignored":
+    "Imported permission settings were ignored. Choose allowed tools after connecting.",
+  "mcp.import.credential": "Credential for",
+  "mcp.import.capture_failed":
+    "The server was saved, but remaining credentials could not be saved. Enter them in its connection details.",
   "mcp.add.command": "Launch command",
   "mcp.add.command_help":
     "Paste the command you would normally run. Shell operators and substitutions are not executed.",
@@ -474,7 +506,7 @@ export const enUS = {
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
   "mcp.add.defaults":
-    "Credentials are collected separately and never enter this form. After saving, MetaWork shows the one next action this connection needs.",
+    "Credentials use separate password fields. After saving, MetaWork shows the next action this connection needs.",
   "mcp.add.submit": "Add server",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",

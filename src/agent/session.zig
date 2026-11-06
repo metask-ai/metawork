@@ -27,6 +27,7 @@ const session_runtime = @import("session/runtime.zig");
 const image_generation = @import("image_generation.zig");
 const generate_image = @import("generate_image.zig");
 const deliver_file = @import("agent_file_delivery");
+const mcp_install = @import("mcp_install.zig");
 const image_http = @import("agent_http_transport");
 
 pub const ImageGenerationTestOptions = struct {
@@ -62,6 +63,10 @@ const RunImage = struct {
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const FileDeliveryReceipt = deliver_file.Receipt;
+pub const McpInstallationInput = mcp_install.Input;
+pub const McpInstallationDraft = mcp_install.OwnedDraft;
+pub const McpInstallationResult = mcp_install.Result;
+pub const max_mcp_installation_bytes = mcp_install.max_bytes;
 pub const FileDeliveryInput = deliver_file.Input;
 pub const FileDeliveryInspection = deliver_file.Inspection;
 pub const max_file_deliveries_per_run = deliver_file.max_receipts_per_run;
@@ -83,6 +88,7 @@ pub fn hostToolPermissionContext(namespace: PermissionToolNamespace, name: []con
     if (namespace != .host) return null;
     if (std.mem.eql(u8, name, generate_image.name)) return generate_image.description;
     if (std.mem.eql(u8, name, deliver_file.name)) return deliver_file.description;
+    if (std.mem.eql(u8, name, mcp_install.name)) return mcp_install.description;
     return null;
 }
 pub const RunState = sdk.protocol.RunState;
@@ -658,6 +664,7 @@ pub const Session = struct {
     matched_image_receipts: [image_generation.production_limits.sends_per_run]?[tool_route_digest_bytes]u8 = @splat(null),
     image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
     run_delivery: ?FileDeliveryInput = null,
+    run_mcp_installation: ?McpInstallationInput = null,
     delivery_attempts: usize = 0,
     delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
     matched_delivery_receipts: [deliver_file.max_receipts_per_run]bool = @splat(false),
@@ -764,7 +771,7 @@ pub const Session = struct {
             };
         };
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedTools(input, &image, null);
+        return self.prepareRunOwnedTools(input, &image, null, null);
     }
 
     /// Freeze one Host-resolved image configuration with the Run. A null input
@@ -774,6 +781,7 @@ pub const Session = struct {
         input: RunInput,
         image_input: ?ImageGenerationRunInput,
         delivery_input: ?FileDeliveryInput,
+        mcp_input: ?McpInstallationInput,
     ) (Error || std.mem.Allocator.Error)!u64 {
         var image: ?RunImage = if (image_input) |value| .{
             .binding = image_generation.OwnedBinding.init(self.agent_runtime.allocator, value.binding) catch |err|
@@ -781,10 +789,10 @@ pub const Session = struct {
             .transport = value.transport,
         } else null;
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedTools(input, &image, delivery_input);
+        return self.prepareRunOwnedTools(input, &image, delivery_input, mcp_input);
     }
 
-    fn prepareRunOwnedTools(self: *Session, input: RunInput, image: *?RunImage, delivery: ?FileDeliveryInput) (Error || std.mem.Allocator.Error)!u64 {
+    fn prepareRunOwnedTools(self: *Session, input: RunInput, image: *?RunImage, delivery: ?FileDeliveryInput, mcp_input: ?McpInstallationInput) (Error || std.mem.Allocator.Error)!u64 {
         var owned_input = try OwnedRunInput.init(
             self.agent_runtime.allocator,
             input,
@@ -840,6 +848,7 @@ pub const Session = struct {
         @memset(&self.image_receipts, null);
         @memset(&self.matched_image_receipts, null);
         self.run_delivery = delivery;
+        self.run_mcp_installation = mcp_input;
         self.delivery_attempts = 0;
         @memset(&self.delivery_receipts, null);
         @memset(&self.matched_delivery_receipts, false);
@@ -2540,6 +2549,7 @@ pub const Session = struct {
         if (self.run_image) |*image| image.deinit(self.agent_runtime.allocator);
         self.run_image = null;
         self.run_delivery = null;
+        self.run_mcp_installation = null;
     }
 
     fn imageLimits(self: *const Session) image_generation.Limits {
@@ -2674,6 +2684,75 @@ pub const Session = struct {
             watchdog.join();
         }
         return image_generation.perform(runtime.allocator, transport, &image.binding, prompt, limits, &call);
+    }
+
+    const McpResultHeader = struct { allocation_len: usize };
+    const mcp_busy_result = "{\"status\":\"busy\"}";
+    pub fn executeMcpInstallation(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
+        const result_out = out orelse return wire.HOST_FATAL;
+        result_out.* = emptyOwnedBytes();
+        const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
+        defer self.releaseCoreCallback();
+        const previous = runtime.mcp_results_outstanding.fetchAdd(1, .acq_rel);
+        if (previous >= runtime.sessions.len * 8) {
+            _ = runtime.mcp_results_outstanding.fetchSub(1, .acq_rel);
+            result_out.* = .{ .ptr = @constCast(mcp_busy_result.ptr), .len = mcp_busy_result.len };
+            return wire.HOST_FAILED;
+        }
+        var transferred = false;
+        defer if (!transferred) {
+            _ = runtime.mcp_results_outstanding.fetchSub(1, .acq_rel);
+        };
+        const allocation = runtime.allocator.alloc(u8, @sizeOf(McpResultHeader) + mcp_install.result_bytes) catch {
+            result_out.* = .{ .ptr = @constCast(mcp_busy_result.ptr), .len = mcp_busy_result.len };
+            return wire.HOST_FAILED;
+        };
+        defer if (!transferred) runtime.allocator.free(allocation);
+        const outcome = self.performMcpInstallation(arguments);
+        const encoded = mcp_install.result(allocation[@sizeOf(McpResultHeader)..], outcome) catch return wire.HOST_FATAL;
+        std.mem.bytesAsValue(McpResultHeader, allocation[0..@sizeOf(McpResultHeader)]).* = .{ .allocation_len = allocation.len };
+        result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
+        transferred = true;
+        return if (outcome == .proposal_submitted) wire.HOST_OK else wire.HOST_FAILED;
+    }
+    pub fn releaseMcpInstallationResult(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return));
+        const result_out = out orelse return;
+        const ptr = result_out.ptr orelse return;
+        if (ptr != mcp_busy_result.ptr) {
+            const base = ptr - @sizeOf(McpResultHeader);
+            const header = std.mem.bytesAsValue(McpResultHeader, base[0..@sizeOf(McpResultHeader)]).*;
+            runtime.allocator.free(base[0..header.allocation_len]);
+            std.debug.assert(runtime.mcp_results_outstanding.fetchSub(1, .acq_rel) > 0);
+        }
+        result_out.* = emptyOwnedBytes();
+    }
+    fn performMcpInstallation(self: *Session, arguments: wire.BytesViewV1) mcp_install.Result {
+        const bytes = sdk.borrowedBytes(arguments) catch return .invalid_arguments;
+        self.lock();
+        const input = self.run_mcp_installation;
+        const run_id = self.active_run_id;
+        const generation = self.active_run_generation;
+        const cancelled = self.state == .closing or self.state == .closed or self.termination_signal != null;
+        self.unlock();
+        if (cancelled) return .cancelled;
+        const capability = input orelse return .unavailable;
+        var draft = mcp_install.proposal(capability.allocator, bytes) catch |err| return if (err == error.OutOfMemory) .unavailable else .invalid_arguments;
+        var moved = false;
+        defer if (!moved) draft.deinit();
+        self.lock();
+        if (self.active_run_id != run_id or self.active_run_generation != generation or self.termination_signal != null or self.state == .closing or self.state == .closed) {
+            self.unlock();
+            return .cancelled;
+        }
+        const result = capability.try_put_fn(capability.context, capability.task_id, run_id, generation, draft);
+        self.unlock();
+        if (result == .proposal_submitted) {
+            moved = true;
+            capability.wake_fn(capability.context);
+        }
+        return result;
     }
 
     const DeliveryResultHeader = struct { allocation_len: usize };

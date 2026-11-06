@@ -27,6 +27,7 @@ import {
   decodeSkillMutationResult,
   decodeSkillSourceSettingsResult,
   decodeMcpMutationResult,
+  decodeMcpCreateResult,
   decodeMcpRefreshResult,
   decodeFilePreview,
   decodeAttachmentChooseResult,
@@ -1869,6 +1870,38 @@ test("Host untrusted MCP projections pass the strict snapshot decoder", () => {
     snapshot.mcp = projection;
     assert.deepEqual(decodeWorkbenchSnapshot(snapshot).mcp, projection);
   }
+});
+
+test("MCP create receipts require committed identity and reject invented identity", () => {
+  const rejected = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/bridge/testdata/mcp-create-rejected.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeMcpCreateResult(rejected), {
+    outcome: "rejected",
+    desiredGeneration: null,
+    serverId: null,
+  });
+  assert.deepEqual(
+    decodeMcpCreateResult({
+      outcome: "saved",
+      desiredGeneration: "12",
+      serverId: "created-1",
+    }),
+    { outcome: "saved", desiredGeneration: "12", serverId: "created-1" },
+  );
+  for (const value of [
+    { outcome: "saved", desiredGeneration: "12", serverId: null },
+    { outcome: "rejected", desiredGeneration: "12", serverId: "invented" },
+    { outcome: "indeterminate", desiredGeneration: null, serverId: "invented" },
+    { outcome: "saved", desiredGeneration: "12" },
+  ])
+    assert.throws(() => decodeMcpCreateResult(value));
 });
 
 test("MCP command results preserve persistence certainty and refresh admission", () => {
