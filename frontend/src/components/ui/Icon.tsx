@@ -15,6 +15,7 @@ import {
   FolderOpen,
   FolderMinus,
   FolderUp,
+  FolderX,
   FileText,
   Pencil,
   FileDiff,
@@ -68,6 +69,7 @@ type IconName =
   | "workspace"
   | "folder-minus"
   | "folder-open"
+  | "folder-x"
   | "search"
   | "plus"
   | "settings"
@@ -106,6 +108,7 @@ type IconName =
 
 const icons: Record<IconName, LucideIcon> = {
   "folder-open": FolderOpen,
+  "folder-x": FolderX,
   more: Ellipsis,
   sidebar: PanelLeft,
   minimize: Minus,

@@ -701,7 +701,8 @@ for (const catalogFirst of [true, false]) {
     await waitFor(() => assert.equal(selector.textContent, original.id));
     assert.equal(selector.disabled, false);
     assert.equal(
-      screen.getByRole("combobox", { name: "Switch workspace" }).disabled,
+      screen.getByRole("combobox", { name: "Choose working directory" })
+        .disabled,
       false,
     );
     assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
@@ -1272,6 +1273,48 @@ test("App late send result preserves another Task's draft and focus", async (ctx
   assert.equal(document.activeElement, next);
 });
 
+test("App keeps Workspace selection in the toolbar until the bound path is published", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  const selector = await screen.findByRole("combobox", {
+    name: "Choose working directory",
+  });
+  assert.ok(selector.closest(".ai-composer-toolbar"));
+  assert.equal(selector.textContent, "Choose working directory");
+  await user.click(selector);
+  const noWorkingDirectory = await screen.findByRole("option", {
+    name: "No working directory",
+    selected: true,
+  });
+  assert.ok(screen.getAllByRole("option").at(-1) === noWorkingDirectory);
+  await user.keyboard("{Escape}");
+
+  await user.type(fixture.textarea, "Start conversation{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  assert.equal(selector.disabled, true);
+  assert.ok(selector.closest(".ai-composer-toolbar"));
+  assert.equal(document.querySelector(".composer-workspace-readonly"), null);
+
+  const path = "/data/workspaces/deadbeefdeadbeef";
+  Object.assign(fixture.snapshot.workspaces[0], {
+    kind: "automatic",
+    canonicalRoot: path,
+    recentOrder: "0",
+  });
+  await fixture.created();
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+
+  const boundPath = await screen.findByText(path);
+  assert.ok(boundPath.closest(".composer-workspace-readonly"));
+  assert.equal(boundPath.closest(".ai-composer"), null);
+  assert.equal(
+    screen.queryByRole("combobox", { name: "Choose working directory" }),
+    null,
+  );
+  await fixture.settle();
+});
+
 test("App leaving Task creation keeps the submitted target and preserves the other draft", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
@@ -1681,11 +1724,11 @@ test("pending Task identity keeps later input independent of a changed new-Task 
 
 async function selectManualSubmissionWorkspace(user) {
   fireEvent.keyDown(
-    screen.getByRole("combobox", { name: "Switch workspace" }),
+    screen.getByRole("combobox", { name: "Choose working directory" }),
     { key: "ArrowDown" },
   );
   await user.click(
-    await screen.findByRole("option", { name: /\/tmp\/metawork-test/ }),
+    await screen.findByRole("option", { name: /^metawork-test/ }),
   );
 }
 

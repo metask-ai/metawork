@@ -63,12 +63,13 @@ const base = {
   runInFlight: false,
   accessRequired: false,
   workspaceMissing: false,
-  workspaceLabel: "Default",
-  workspaceTitle: "Default",
+  workspaceLabel: "Choose working directory",
+  workspaceTitle: "Choose working directory",
   workspaceOptions: [
     {
       id: "automatic",
-      label: "Default",
+      label: "No working directory",
+      triggerLabel: "Choose working directory",
       authorization: "available",
     },
   ],
@@ -393,8 +394,8 @@ test("New task opens as an editable Composer with its execution context", () => 
   const markup = render();
   assert.match(markup, /<textarea/);
   assert.match(markup, />Claude Sonnet 4</);
-  assert.match(markup, />Default</);
-  assert.doesNotMatch(markup, />Select a workspace</);
+  assert.match(markup, />Choose working directory</);
+  assert.doesNotMatch(markup, />Default</);
   assert.match(markup, /composer-workspace-context/);
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
@@ -826,8 +827,7 @@ test("a new Task draft is editable before its first send", () => {
     workspaceOptions: [
       {
         id: "1",
-        label: "/repo/alpha",
-        description: "alpha",
+        label: "alpha",
         authorization: "available",
       },
     ],
@@ -899,7 +899,7 @@ test("an unavailable workspace preserves editable text and offers folder reselec
     workspaceTitle: "/repo/alpha",
   });
   assert.match(markup, />Keep this draft</);
-  assert.match(markup, />Select folder again</);
+  assert.match(markup, /data-state="reauthorization-required"/);
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,
@@ -907,17 +907,26 @@ test("an unavailable workspace preserves editable text and offers folder reselec
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("Composer keeps Workspace context after its input controls", () => {
-  const markup = render();
-  const composerStart = markup.indexOf('class="ai-composer"');
-  const workspaceContext = markup.indexOf('class="composer-workspace-context"');
-  assert.ok(composerStart >= 0 && workspaceContext > composerStart);
-  assert.ok(
-    markup.indexOf(
-      'class="selection-trigger focus-ring composer-model-trigger',
-      composerStart,
-    ) < workspaceContext,
+test("Composer puts Workspace selection before the model and the bound path below the input", () => {
+  const draft = render();
+  const toolbar = draft.indexOf('class="composer-context-actions"');
+  const selection = draft.indexOf('class="composer-workspace-context"');
+  const model = draft.indexOf('class="composer-model-actions"');
+  assert.ok(toolbar >= 0 && toolbar < selection && selection < model);
+
+  const conversation = render({
+    workspaceEditable: false,
+    workspaceLabel: "/repo/metawork",
+    workspaceTitle: "/repo/metawork",
+  });
+  const send = conversation.indexOf('class="composer-model-actions"');
+  const path = conversation.indexOf('class="composer-workspace-context"');
+  assert.ok(send >= 0 && send < path);
+  assert.match(
+    conversation,
+    /composer-workspace-readonly[^>]*title="\/repo\/metawork"/,
   );
+  assert.doesNotMatch(conversation, /composer-workspace-trigger/);
 });
 
 test("only non-composable Task states disable the Composer", () => {

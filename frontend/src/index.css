@@ -8905,6 +8905,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-label);
 }
 
+.composer-context-actions .composer-workspace-context {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  gap: 4px;
+}
+
 .composer-workspace-context[data-state="missing"],
 .composer-workspace-context[data-state="reauthorization-required"] {
   color: var(--ui-content-warning);
@@ -8914,12 +8922,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .composer-workspace-readonly {
   display: inline-flex;
   min-width: 0;
-  max-width: min(420px, 62vw);
+  max-width: 100%;
   align-items: center;
   gap: 6px;
 }
 
 .composer-workspace-trigger {
+  max-width: min(220px, 100%);
   height: 28px;
   padding: 0 6px;
   border-radius: 7px;
@@ -8948,33 +8957,49 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-workspace-menu {
-  width: min(420px, calc(100vw - 24px));
+  width: min(260px, calc(100vw - 24px));
 }
 
-.composer-workspace-action {
-  display: inline-flex;
-  min-width: 26px;
-  height: 26px;
-  padding: 0 6px;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  border: 0;
-  border-radius: 7px;
-  color: var(--ui-content-muted);
-  background: transparent;
-  font-size: var(--text-label);
+.composer-workspace-menu .selection-menu-viewport {
+  padding: 4px;
+}
+
+.composer-workspace-menu .selection-menu-item {
+  min-height: 34px;
+  padding: 4px 8px 4px 26px;
+  gap: 6px;
+}
+
+.composer-workspace-menu .selection-menu-item-label {
   font-weight: 400;
 }
 
-.composer-workspace-action:hover:not(:disabled) {
-  color: var(--ui-content-primary);
-  background: var(--ui-action-hover-surface);
+.composer-workspace-menu
+  .selection-menu-item:is([data-state="checked"], [data-selected])
+  .selection-menu-item-label {
+  font-weight: 600;
 }
 
-.composer-workspace-action[data-emphasis="true"] {
-  color: var(--ui-content-warning);
-  background: color-mix(in srgb, var(--ui-content-warning) 8%, transparent);
+@media (pointer: coarse) {
+  .composer-workspace-menu .selection-menu-item {
+    min-height: 44px;
+  }
+}
+
+.composer-workspace-menu
+  .selection-menu-item:has(.composer-workspace-picker-icon):not(:first-child) {
+  margin-top: 6px;
+}
+
+.composer-workspace-menu
+  .selection-menu-item:has(.composer-workspace-picker-icon):not(
+    :first-child
+  )::before {
+  position: absolute;
+  inset: -3px 0 auto;
+  border-top: 1px solid var(--ui-border);
+  pointer-events: none;
+  content: "";
 }
 
 .composer-send,

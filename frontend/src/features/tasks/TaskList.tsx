@@ -20,7 +20,11 @@ import {
   readLocalPreference,
   writeLocalPreference,
 } from "../../platform/local-preferences.ts";
-import { orderedTasks, taskSignals } from "../../workbench/selectors.ts";
+import {
+  orderedProjects,
+  orderedTasks,
+  taskSignals,
+} from "../../workbench/selectors.ts";
 
 export type TaskMenuAction = "rename" | "archive" | "delete";
 
@@ -81,15 +85,7 @@ export function TaskList({
   const openingDialog = useRef(false);
   const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
-  const projects = workspaces
-    .filter(
-      (workspace) => workspace.kind === "manual" && !workspace.projectRemoved,
-    )
-    .sort((left, right) => {
-      const leftOrder = BigInt(left.recentOrder);
-      const rightOrder = BigInt(right.recentOrder);
-      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
-    });
+  const projects = orderedProjects(workspaces);
 
   const menuTask =
     menuTaskId === null

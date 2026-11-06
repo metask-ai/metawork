@@ -6315,7 +6315,7 @@ function recentTaskButton(name) {
   const button = screen
     .getAllByRole("button", { name })
     .find((candidate) =>
-      candidate.parentElement?.classList.contains("task-list"),
+      candidate.matches(".task-list > .task-list-entry > .task-list-item"),
     );
   assert.ok(button, "Task must have an entrance in Recent");
   return button;
@@ -6465,10 +6465,15 @@ test("App Workspace selection failure stays by its draft with source diagnostics
   await act(async () =>
     fireEvent.click(screen.getByRole("button", { name: "New task" })),
   );
-  await waitFor(() =>
-    assert.equal(screen.getByRole("button", { name: "Add" }).disabled, false),
+  const user = userEvent.setup({ document: dom.window.document });
+  const workspace = await screen.findByRole("combobox", {
+    name: "Choose working directory",
+  });
+  await waitFor(() => assert.equal(workspace.disabled, false));
+  await user.click(workspace);
+  await user.click(
+    await screen.findByRole("option", { name: "Open local folder" }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Add" }));
   await waitFor(() =>
     assert.ok(document.querySelector(".workspace-selection-feedback")),
   );

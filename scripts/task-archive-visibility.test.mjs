@@ -1216,7 +1216,7 @@ for (const emptyProject of [false, true])
     await waitFor(() => assert.ok(document.activeElement === editor));
     assert.equal(
       document.querySelector(".composer-workspace-trigger").textContent,
-      snapshot.workspaces[0].canonicalRoot,
+      snapshot.workspaces[0].displayName,
     );
     assert.equal(editor.value, "");
     fireEvent.change(editor, { target: { value: "Saved project draft" } });
@@ -1246,7 +1246,7 @@ for (const emptyProject of [false, true])
     assert.equal(editor.value, "Saved project draft");
     assert.equal(
       document.querySelector(".composer-workspace-trigger").textContent,
-      snapshot.workspaces[0].canonicalRoot,
+      snapshot.workspaces[0].displayName,
     );
     assert.ok(
       [...taskRows("3")].every(
@@ -1506,6 +1506,15 @@ test("timed out project removal reconciles the Host state without resending", as
   assert.equal(taskRows("3").length, 1);
 });
 
+async function openLocalWorkspaceFolder(user) {
+  await user.click(
+    screen.getByRole("combobox", { name: "Choose working directory" }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: "Open local folder" }),
+  );
+}
+
 test("Host project removal survives remount and native folder selection restores its group", async (ctx) => {
   const { user } = await renderApp(ctx);
   await confirmProjectRemoval(user);
@@ -1516,11 +1525,26 @@ test("Host project removal survives remount and native folder selection restores
   await remounted.user.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
+  const picker = screen.getByRole("combobox", {
+    name: "Choose working directory",
+  });
+  await remounted.user.click(picker);
+  assert.equal((await screen.findAllByRole("option")).length, 2);
+  assert.ok(
+    screen.getByRole("option", {
+      name: "No working directory",
+      selected: true,
+    }),
+  );
   await remounted.user.click(
-    screen.getByRole("button", { name: "Add", exact: true }),
+    screen.getByRole("option", { name: "Open local folder" }),
   );
   await waitFor(projectHeading);
   assert.equal(taskRows("3").length, 2);
+
+  await remounted.user.click(picker);
+  await screen.findByRole("option", { name: "metawork-test", exact: true });
+  assert.equal(screen.queryByText("/tmp/metawork-test"), null);
 });
 
 for (const outcome of ["selected", "cancelled", "superseded"])
@@ -1539,7 +1563,7 @@ for (const outcome of ["selected", "cancelled", "superseded"])
           resolveChoice = resolve;
         }),
     );
-    await user.click(screen.getByRole("button", { name: "Add", exact: true }));
+    await openLocalWorkspaceFolder(user);
     assert.equal(typeof resolveChoice, "function");
     if (outcome === "superseded") await user.click(taskRows("3")[0]);
     if (outcome !== "cancelled") snapshot.workspaces[0].projectRemoved = false;

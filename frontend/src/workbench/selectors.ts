@@ -54,6 +54,18 @@ function permissionReviewInProgress(task: TaskNavigation): boolean {
   );
 }
 
+export function orderedProjects(workspaces: readonly WorkspaceView[]) {
+  return workspaces
+    .filter(
+      (workspace) => workspace.kind === "manual" && !workspace.projectRemoved,
+    )
+    .sort((left, right) => {
+      const leftOrder = BigInt(left.recentOrder);
+      const rightOrder = BigInt(right.recentOrder);
+      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
+    });
+}
+
 export function orderedTasks<T extends TaskNavigation>(tasks: T[]): T[] {
   const byRecent = (left: T, right: T) => {
     const leftOrder = BigInt(left.recentOrder);
@@ -172,15 +184,6 @@ export function taskSignals(task: TaskNavigation): TaskSignals {
         terminal.cause !== "session_close") ||
       lastCompact?.phase === "failed",
   };
-}
-
-export function workspaceDirectoryLabel(
-  workspace: Pick<WorkspaceView, "kind" | "canonicalRoot">,
-  defaultLabel: string,
-): string {
-  return workspace.kind === "automatic"
-    ? defaultLabel
-    : workspace.canonicalRoot;
 }
 
 export type SearchResult = {

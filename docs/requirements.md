@@ -99,7 +99,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - automatic root 设置只影响修改后新建的 Task；已存在的 Workspace、Task、Run、Session、checkpoint 和历史记录继续引用创建时的 canonical root，不迁移、不扫描、不删除也不猜测旧目录。Scheduled occurrence 在每次触发时使用当时已提交的 effective root；
 - 任一历史 Automatic Workspace 的精确 canonical root 都不能重新注册为 Manual Workspace；当前 effective automatic root 及其子目录也是保留命名空间。custom root 不得等于既有 Manual Workspace，不得等于或位于任一既有 Automatic Workspace 内；它可以是既有 Automatic Workspace 的祖先。用户通过原生 picker 明确选择 automatic root 的祖先仍只取得该 Manual Workspace authority，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
-- 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器中；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent 或重新授权入口，但其 owning Task 仍可导航；
+- New task 路径选择器的已添加目录来自左栏项目，即使项目没有 Task；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent 或重新授权入口，但其 owning Task 仍可导航；
 - New task 路径控件负责选择、添加和重新授权 Manual Workspace；设置页只提供 Automatic Workspace 上级目录的全局存储策略，不承担 Workspace 列表、打开、迁移、清理或重新授权。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
 - 项目是按 Manual Workspace 聚合 Task 的快捷入口。项目入口状态由 Host 保存并跨重启恢复；移除只移除入口，不删除 Workspace 或本地目录，不改变已有 Task 的目录关联、授权、Run 或 Session，空项目也遵循同一规则。已有任务继续在全局“最近”列表显示，排队、执行中与等待处理的任务保持原状态并可继续使用。用户通过 Host 原生目录选择器重新添加同一目录时恢复入口；已有有效授权保持原样，缺少授权时须先完成授权，取消选择或授权失败不添加入口。目录不可用不阻止移除入口。Automatic Workspace 仍随 owning Task 管理。
 - 用户可以从项目右键菜单在系统文件管理器中直接打开该项目目录，不是打开父目录后选中文件夹；不切换当前 Task，不改变目录授权、任务状态或历史。只允许打开当前可用且未脱敏的已授权 Manual Workspace；目录缺失、身份变化或系统打开失败须明确反馈，不自动重试。
