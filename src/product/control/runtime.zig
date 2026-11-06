@@ -6294,9 +6294,9 @@ pub const Runtime = struct {
         changed = self.sanitizeMcpInstallation() or changed;
         return runtime.syncInitialHealth() or changed;
     }
-    pub fn dismissMcpInstallProposal(self: *Runtime, id: u64) bool {
+    pub fn dismissMcpInstallProposal(self: *Runtime, id: ?u64) bool {
         const runtime = if (self.mcp) |*value| value else return false;
-        const changed = runtime.dismissInstallation(self.io, id, false);
+        const changed = if (id) |requested| runtime.dismissInstallation(self.io, requested, false) else runtime.dismissInstallationNotice();
         if (changed) self.publishMcpRuntimeChanges();
         return changed;
     }
@@ -6313,7 +6313,7 @@ pub const Runtime = struct {
         if ((result.outcome == .saved or result.outcome == .saved_recovery_required) and result.server_id != null)
             _ = runtime.dismissInstallation(self.io, requested, false)
         else if (result.outcome == .indeterminate)
-            _ = runtime.dismissInstallation(self.io, requested, true);
+            _ = runtime.dismissInstallation(self.io, requested, false);
     }
     fn publishMcpRuntimeChanges(self: *Runtime) void {
         const runtime = if (self.mcp) |*value| value else return;
@@ -20895,7 +20895,19 @@ test "empty MCP startup commits a proven manageable runtime" {
     const rejected_projection = try control.writeViewFixture(&output, .{});
     try std.testing.expect(control.mcp.?.pendingInstallation() == null);
     try std.testing.expect(std.mem.indexOf(u8, rejected_projection, "\"notice\":\"proposal_rejected\"") != null);
+    try std.testing.expect(!control.dismissMcpInstallProposal(proposal_id));
+    try std.testing.expect(control.mcp.?.installation_notice);
+    try std.testing.expect(control.dismissMcpInstallProposal(null));
+    try std.testing.expect(!control.dismissMcpInstallProposal(null));
+    try std.testing.expect(!control.mcp.?.installation_notice);
     control.clearAccountProjectionCredentials();
+    const uncertain_id = install.try_put_fn(install.context, 3, 7, 1, try make_draft(public_json)).proposal_submitted;
+    _ = control.syncMcpHealthNoFail();
+    try std.testing.expect(!control.dismissMcpInstallProposal(null));
+    try std.testing.expectEqual(uncertain_id, control.mcp.?.pendingInstallation().?.id);
+    control.finishInstallationCreate(uncertain_id, .{ .outcome = .indeterminate });
+    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
+    try std.testing.expect(!control.mcp.?.installation_notice);
     _ = install.try_put_fn(install.context, 3, 7, 1, try make_draft(public_json));
     _ = control.syncMcpHealthNoFail();
     control.publishMcpRuntimeChanges();

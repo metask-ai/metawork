@@ -4236,7 +4236,7 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.McpInstallProposalIdentity, invocation.request.payload);
         defer parsed.deinit();
-        const id = try handlers.parseWireId(parsed.value.proposalId);
+        const id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null;
         const workbench = try self.requireProductControl();
         const dismissed = workbench.dismissMcpInstallProposal(id);
         if (dismissed) self.notifyCommitted();

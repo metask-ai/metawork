@@ -86,6 +86,30 @@ const proposal = {
   },
 };
 
+test("MCP rejected proposal notice is dismissed through Host without consuming a proposal", async () => {
+  const dismissed = [];
+  const props = {
+    installationRejected: true,
+    onDismissProposal: async (id) => {
+      dismissed.push(id);
+      return { outcome: "dismissed" };
+    },
+  };
+  const view = render(pageElement(proposalManagement, "", props));
+  const notice = screen
+    .getByText(/suggestion could not be accepted/)
+    .closest('[role="status"]');
+  fireEvent.click(within(notice).getByRole("button", { name: "Close" }));
+  await waitFor(() => assert.deepEqual(dismissed, [null]));
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      installationRejected: false,
+    }),
+  );
+  assert.equal(screen.queryByText(/suggestion could not be accepted/), null);
+});
+
 test("MCP suggestions require review and one explicit Add with the precise proposal identity", async () => {
   const calls = [],
     reviewed = [];

@@ -655,7 +655,7 @@ pub fn writeProjection(
             "Authorization recovery is pending. The connection will retry automatically."
         else if (serverCapacityBlocked(mcp, server))
             "MCP connection capacity is full. Close unused tasks, then retry the connection."
-        else if (status != .ready and status != .disabled and status != .needs_authentication and processDiagnostic(mcp, server) != null)
+        else if ((status == .@"unreachable" or (status == .not_loaded and (serverApplyStatus(mcp, server) == .failed or serverApplyStatus(mcp, server) == .rejected))) and processDiagnostic(mcp, server) != null)
             processDiagnostic(mcp, server).?
         else if (mcp.refresh_schedule_failed)
             "Automatic refresh could not be scheduled. Select Refresh to retry."

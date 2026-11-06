@@ -480,7 +480,7 @@ export function McpPage({
   installationRejected?: boolean;
   onReviewProposal?: (proposal: McpInstallationProposal) => void;
   onProposalOpened?: () => void;
-  onDismissProposal?: (id: string) => Promise<unknown>;
+  onDismissProposal?: (id: string | null) => Promise<unknown>;
 
   capabilities: {
     connectionApproval: boolean;
@@ -1697,6 +1697,19 @@ export function McpPage({
           {installationRejected && (
             <p role="status" className="mcp-operation-notice">
               {t("mcp.proposal.rejected")}
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  void onDismissProposal?.(null).catch(() =>
+                    setNotice({
+                      tone: "attention",
+                      text: t("mcp.mutation.failed"),
+                    }),
+                  )
+                }
+              >
+                {t("common.close")}
+              </Button>
             </p>
           )}
           {installationProposal && (

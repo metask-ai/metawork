@@ -2690,6 +2690,10 @@ test "2025-06-18 MCP product chain admits a new Task after tool authorization" {
     try expectMcpProductAdmission("2025-06-18", .streamable_http);
 }
 
+test "healthy STDIO catalog expiry and paused refresh never revive startup diagnostics" {
+    try expectMcpProductAdmission("2026-07-28", .stdio);
+}
+
 test "compatible STDIO MCP product chain admits a new Task after tool authorization" {
     try expectMcpProductAdmission("2025-11-25", .stdio);
 }
@@ -2825,7 +2829,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
             .negotiation = "automatic",
             .timeout_ms = 2000,
             .command = options.node_path,
-            .arguments = if (static_auth) &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path, "--require-env" } else &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path },
+            .arguments = if (static_auth) &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path, "--require-env" } else &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path, "--ttl-ms", "2000" },
             .auth_mode = if (static_auth) .static else .none,
             .environment_names = if (static_auth) &.{"MCP_FIXTURE_TOKEN"} else &.{},
         })).outcome else (try initial_workbench.createMcpHttpServer(0, .{
@@ -2998,6 +3002,17 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
         try std.testing.expect(std.mem.indexOf(u8, trace, "tools/call") != null);
         try std.testing.expect(std.mem.indexOf(u8, trace, "mcp-static-fixture-secret") == null);
         return;
+    }
+    if (transport == .stdio and std.mem.eql(u8, protocol_version, "2026-07-28")) {
+        const server = mcp_types.testing.state(&restarted_workbench.mcp.?).management.?.desiredRegistry().?.servers[0];
+        var observation: mcp_configuration.ProcessObservation = .{ .server_id = server_id, .source = mcp_configuration.runtimeDescriptorFingerprint(server), .attempt = 1, .fact = .pending };
+        try std.testing.expect(try restarted_workbench.mcp.?.observeProcess(observation));
+        observation.fact = .spawned;
+        try std.testing.expect(try restarted_workbench.mcp.?.observeProcess(observation));
+        var output: [512 * 1024]u8 = undefined;
+        const ready = try restarted_workbench.writeAggregateFixture(&output);
+        try std.testing.expect(std.mem.indexOf(u8, ready, "\"runtimeStatus\":\"ready\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ready, "did not complete the MCP handshake") == null);
     }
     if (race == .retain_disabled or race == .retain_deleted or race == .revoked_then_deleted or race == .disabled_edit) {
         const mcp = &restarted_workbench.mcp.?;
@@ -3326,6 +3341,25 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
         .clock = .awake,
     } }, std.testing.io) catch return error.TestUnexpectedResult;
     refresh_timer.now_ms += 2_500;
+    if (transport == .stdio) {
+        const mcp = &restarted_workbench.mcp.?;
+        const state = mcp_types.testing.state(mcp);
+        const server = state.management.?.desiredRegistry().?.servers[0];
+        for ([_]mcp_configuration.ProcessFact{ .spawned, .stdio_closed }) |fact| {
+            _ = try mcp.observeProcess(.{ .server_id = server_id, .source = mcp_configuration.runtimeDescriptorFingerprint(server), .attempt = 1, .fact = fact });
+            for ([_]bool{ false, true }) |paused| {
+                state.refresh_paused = paused;
+                var output: [512 * 1024]u8 = undefined;
+                const expired = try restarted_workbench.writeAggregateFixture(&output);
+                const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, expired, .{});
+                defer decoded.deinit();
+                const projected = decoded.value.object.get("mcp").?.object.get("servers").?.array.items[0].object;
+                try std.testing.expectEqualStrings("not_loaded", projected.get("runtimeStatus").?.string);
+                try std.testing.expectEqualStrings(if (paused) "Tool catalog refresh paused after repeated failures. Select Refresh to retry." else "Tool catalog expired", projected.get("safeDiagnostic").?.string);
+            }
+        }
+        state.refresh_paused = false;
+    }
     const task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
     try std.testing.expectEqual(
         product_control.TaskMcpAuthorityAtCreation.unavailable,

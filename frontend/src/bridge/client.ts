@@ -619,7 +619,7 @@ export class BridgeClient {
       }),
     );
   }
-  async dismissMcpInstallProposal(proposalId: string) {
+  async dismissMcpInstallProposal(proposalId: string | null) {
     return decodeMcpInstallDismissResult(
       await this.invoke(commands.mcpDismissInstallProposal, { proposalId }),
     );

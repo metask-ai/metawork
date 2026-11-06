@@ -1313,6 +1313,15 @@ for (const [method, command] of [
   });
 
 test("MCP proposal commands carry exact identities and strict result shapes", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/bridge/testdata/mcp-installation-dismiss.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
   const calls = [];
   let result = { outcome: "dismissed" };
   const client = new BridgeClient({
@@ -1324,7 +1333,7 @@ test("MCP proposal commands carry exact identities and strict result shapes", as
   assert.deepEqual(await client.dismissMcpInstallProposal("71"), result);
   assert.deepEqual(calls[0], {
     command: "metawork.mcp.dismissInstallProposal",
-    payload: { proposalId: "71" },
+    payload: fixture.proposal,
   });
   result = { outcome: "saved", desiredGeneration: "1", serverId: "server-1" };
   const input = { displayName: "Suggested", command: "node", arguments: [] };
@@ -1333,6 +1342,12 @@ test("MCP proposal commands carry exact identities and strict result shapes", as
     expectedDesiredGeneration: "0",
     proposalId: "71",
     ...input,
+  });
+  result = { outcome: "dismissed" };
+  await client.dismissMcpInstallProposal(null);
+  assert.deepEqual(calls[2], {
+    command: "metawork.mcp.dismissInstallProposal",
+    payload: fixture.notice,
   });
   result = { outcome: "dismissed", draft: {} };
   await assert.rejects(

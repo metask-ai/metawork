@@ -1056,6 +1056,12 @@ pub const Runtime = struct {
         self.installation_proposal = null;
         self.installation_notice = false;
     }
+    pub fn dismissInstallationNotice(self: *Runtime) bool {
+        if (!self.installation_notice) return false;
+        self.installation_notice = false;
+        self.markChanged();
+        return true;
+    }
     pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer) ViewError!void {
         writer.writeAll("{\"proposal\":") catch return error.SnapshotTooLarge;
         if (self.installation_proposal) |value| {
