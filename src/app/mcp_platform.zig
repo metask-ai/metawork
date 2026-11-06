@@ -1096,7 +1096,7 @@ fn serverSecrets(
     server: mcp_configuration.ServerWire,
     preparation: *const mcp_configuration.Preparation,
 ) BuildError![]const []const u8 {
-    const count = server.transport.environment.len + server.transport.headers.len;
+    const count = server.transport.environment.len + server.transport.headers.len + if (server.installation) |operation| operation.credentials.len else @as(usize, 0);
     const values = try allocator.alloc([]const u8, count);
     var write: usize = 0;
     for (server.transport.environment) |entry| {
@@ -1117,6 +1117,13 @@ fn serverSecrets(
             write += 1;
         }
     }
+    if (server.installation) |operation| for (operation.credentials) |slot| if (slot.credential_ref) |locator| {
+        const secret = resolvedCredential(preparation, locator) orelse return error.InvalidConfig;
+        if (!containsSecret(values[0..write], secret)) {
+            values[write] = secret;
+            write += 1;
+        }
+    };
     return values[0..write];
 }
 
@@ -1973,11 +1980,17 @@ fn createHttpOwner(
     };
     errdefer std.crypto.secureZero(u8, @constCast(context.url));
     context.custom_headers = try owned.alloc(std.http.Header, server.transport.headers.len);
+    const installation_secret_count = if (server.installation) |operation| operation.credentials.len else @as(usize, 0);
     const private_secret_count = if (server.transport.sensitive_endpoint) |endpoint| 1 + endpoint.secret_parts.len else 0;
-    context.secret_values = try owned.alloc([]u8, server.transport.headers.len + private_secret_count);
+    context.secret_values = try owned.alloc([]u8, server.transport.headers.len + private_secret_count + installation_secret_count);
     for (context.secret_values) |*secret| secret.* = &.{};
     errdefer for (context.secret_values) |secret|
         if (secret.len != 0) std.crypto.secureZero(u8, secret);
+    if (server.installation) |operation| for (operation.credentials, 0..) |slot, i| {
+        const locator = slot.credential_ref orelse return error.InvalidConfig;
+        const value = resolvedCredential(preparation, locator) orelse return error.InvalidConfig;
+        context.secret_values[server.transport.headers.len + private_secret_count + i] = try owned.dupe(u8, value);
+    };
     if (server.transport.sensitive_endpoint) |endpoint| {
         context.secret_values[server.transport.headers.len] = @constCast(context.url);
         for (endpoint.secret_parts, 0..) |part, i| {

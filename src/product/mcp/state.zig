@@ -247,6 +247,7 @@ pub const McpSecretCaptureTarget = union(enum) {
     stdio_environment: []const u8,
     http_header: []const u8,
     oauth_client_secret,
+    installation_credential: []const u8,
 };
 
 pub const McpAuthorizationOperation = struct {

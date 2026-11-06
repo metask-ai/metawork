@@ -1,6 +1,11 @@
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  writeFileSync,
+  readFileSync,
+} from "node:fs";
 import path from "node:path";
 import { protocolTextSse, protocolToolSse } from "./provider_protocol.mjs";
 
@@ -184,6 +189,29 @@ function startHttp() {
         }
         if (request.url === "/v1/messages") {
           const payload = JSON.parse(body);
+          if (payload.model === "install-model") {
+            const last = payload.messages.at(-1);
+            const completed = last?.content?.some(
+              (entry) => entry.type === "tool_result",
+            );
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.end(
+              completed
+                ? protocolTextSse(
+                    "anthropic",
+                    "Installation request submitted.",
+                  )
+                : protocolToolSse(
+                    "anthropic",
+                    payload.messages.length,
+                    "InstallMcpServer",
+                    JSON.parse(
+                      readFileSync(options.installRequestFile, "utf8"),
+                    ),
+                  ),
+            );
+            return;
+          }
           const taskSwitchModel = ["gpt-4o", "gpt-4o-mini"].includes(
             payload.model,
           );
@@ -338,7 +366,13 @@ function startHttp() {
           response.end(providerBody);
           return;
         }
-        if (request.url !== "/mcp") throw new Error("unexpected endpoint");
+        const target = new URL(request.url, "http://localhost");
+        if (target.pathname !== "/mcp") throw new Error("unexpected endpoint");
+        if (
+          options.expectedQuery &&
+          target.searchParams.get("api_key") !== options.expectedQuery
+        )
+          throw new Error("credential query did not match");
         const message = JSON.parse(body);
         const protocolHeader = request.headers["mcp-protocol-version"];
         const classicOffer =
@@ -586,7 +620,8 @@ async function handle(message, send) {
       catalogLists += 1;
       if (
         options.refreshGate &&
-        (catalogLists > 1 || existsSync(`${options.refreshGate}.armed`))
+        ((!options.installRequestFile && catalogLists > 1) ||
+          existsSync(`${options.refreshGate}.armed`))
       ) {
         writeFileSync(`${options.refreshGate}.waiting`, "waiting");
         while (!existsSync(`${options.refreshGate}.release`))
@@ -614,6 +649,10 @@ async function handle(message, send) {
             ],
           }),
         );
+        return;
+      }
+      if (options.emptyCatalogFile && existsSync(options.emptyCatalogFile)) {
+        respond(send, message.id, result({ ...cacheHints(), tools: [] }));
         return;
       }
       respond(
@@ -750,6 +789,9 @@ function parseOptions(args) {
   let resultKind = "text";
   let refreshGate = null;
   let expectedBearer = null;
+  let expectedQuery = null;
+  let installRequestFile = null;
+  let emptyCatalogFile = null;
   let requireEnv = false;
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
@@ -783,6 +825,15 @@ function parseOptions(args) {
       case "--require-env":
         requireEnv = true;
         break;
+      case "--expected-query":
+        expectedQuery = args[++index] || null;
+        break;
+      case "--install-request-file":
+        installRequestFile = args[++index] || null;
+        break;
+      case "--empty-catalog-file":
+        emptyCatalogFile = args[++index] || null;
+        break;
       case "--expected-bearer":
         expectedBearer = args[(index += 1)] ?? null;
         break;
@@ -814,6 +865,9 @@ function parseOptions(args) {
     resultKind,
     refreshGate,
     expectedBearer,
+    expectedQuery,
+    installRequestFile,
+    emptyCatalogFile,
     requireEnv,
   };
 }

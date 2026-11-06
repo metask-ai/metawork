@@ -1643,14 +1643,62 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn mcpInstallationSourceEvidence(self: *const Runtime, task_id: u64, source_url: []const u8) InstallationSourceEvidence {
+        const task = self.findConst(task_id) orelse return .{};
+        var evidence: InstallationSourceEvidence = .{};
+        var previous: u64 = 0;
+        var budget: usize = 64 * 1024;
+        for (0..task.durable.runs.len) |_| {
+            const next = for (task.durable.runs) |*entry| {
+                if (entry.*) |*run| {
+                    if (run.id <= previous) continue;
+                    const earlier = for (task.durable.runs) |other| {
+                        if (other) |value| if (value.id > previous and value.id < run.id) break true;
+                    } else false;
+                    if (!earlier) break run;
+                }
+            } else break;
+            previous = next.id;
+            const message = switch (next.input) {
+                .text => |value| value.value,
+                .multimodal => |value| value.text orelse "",
+                .skill => "",
+            };
+            if (message.len > budget) {
+                evidence.incomplete = true;
+                break;
+            }
+            budget -= message.len;
+            evidence.observe(next.id, message, source_url);
+            for (next.additional_inputs) |entry| if (entry) |input| {
+                if (input.text.len > budget or input.redacted) {
+                    evidence.incomplete = true;
+                    break;
+                }
+                budget -= input.text.len;
+                evidence.observe(next.id, input.text, source_url);
+            };
+        }
+        return evidence;
+    }
+
     pub fn mcpInstallationSourceAvailable(self: *const Runtime, task_id: u64, run_id: u64) bool {
         const task = self.findConst(task_id) orelse return false;
+        for (task.durable.runs) |entry| if (entry) |record| if (record.id >= run_id) {
+            const text = switch (record.input) {
+                .text => |value| value.value,
+                .multimodal => |value| value.text orelse "",
+                .skill => "",
+            };
+            if (installationRevocation(text)) return false;
+            for (record.additional_inputs) |input| if (input) |value| if (installationRevocation(value.text)) return false;
+        };
         if (task.deletion != .idle) return false;
         if (task.runtime.active_run_id == run_id and task.runtime.cancel_requested) return false;
         for (task.durable.runs) |entry| if (entry) |run| {
             if (run.id != run_id) continue;
             const phase = task_state.runPhase(&run);
-            return phase != .stopped and phase != .cancelled and phase != .stopping and phase != .interrupted;
+            return phase != .stopped and phase != .cancelled and phase != .stopping;
         };
         return false;
     }
@@ -9068,6 +9116,96 @@ fn appendReviewHistory(runs: []const ?task_state.RunRecord, current_id: u64, tex
     try writer.writeAll(history_buffer[start..]);
     try writer.writeByte(']');
     input.user_history_json = writer.buffer[begin..writer.end];
+}
+
+/// Conservative installation authorization from actual user messages only.
+pub const InstallationSourceEvidence = struct {
+    message_id: ?u64 = null,
+    authorized: bool = false,
+    revoked: bool = false,
+    ambiguous: bool = false,
+    selected: bool = false,
+    incomplete: bool = false,
+    pub fn requiresConfirmation(self: @This()) bool {
+        return self.incomplete or self.message_id == null or !self.authorized or self.revoked or (self.ambiguous and !self.selected);
+    }
+    fn observe(self: *@This(), id: u64, text: []const u8, source: []const u8) void {
+        const message = std.mem.trim(u8, text, " \t\r\n");
+        const mentions = installationUrlIn(message, source);
+        var other_in_message = false;
+        var tokens = std.mem.tokenizeAny(u8, message, " \t\r\n<>\"'`()[]{}");
+        while (tokens.next()) |url| {
+            if (!std.mem.startsWith(u8, url, "https://") and !std.mem.startsWith(u8, url, "http://")) continue;
+            if (std.mem.eql(u8, url, source)) continue;
+            other_in_message = true;
+            self.ambiguous = true;
+            self.selected = false;
+        }
+        if (mentions) self.message_id = id;
+        if (installationRevocation(message)) {
+            self.revoked = true;
+            self.authorized = false;
+            self.selected = false;
+            return;
+        }
+        const sole = std.mem.eql(u8, message, source);
+        const explicit = installationDirective(message);
+        const confirmation = for ([_][]const u8{ "开始吧", "开始", "可以", "同意", "好", "是的", "yes", "go ahead", "proceed", "do it" }) |word| {
+            if (std.ascii.eqlIgnoreCase(message, word)) break true;
+        } else false;
+        if (self.message_id != null and (sole or (explicit and (mentions or !self.ambiguous)) or (confirmation and !self.ambiguous))) {
+            self.authorized = true;
+            self.revoked = false;
+            if (mentions) self.selected = !other_in_message;
+        }
+    }
+};
+
+fn installationUrlIn(text: []const u8, url: []const u8) bool {
+    if (url.len == 0) return false;
+    var offset: usize = 0;
+    while (std.mem.indexOfPos(u8, text, offset, url)) |index| {
+        const end = index + url.len;
+        const delimiters = " \t\r\n<>\"'`()[]{}";
+        if ((index == 0 or std.mem.indexOfScalar(u8, delimiters, text[index - 1]) != null) and
+            (end == text.len or std.mem.indexOfScalar(u8, delimiters, text[end]) != null or std.mem.startsWith(u8, text[end..], "，") or std.mem.startsWith(u8, text[end..], "。"))) return true;
+        offset = index + 1;
+    }
+    return false;
+}
+fn installationRevocation(text: []const u8) bool {
+    for ([_][]const u8{ "不要装", "不要安装", "别装", "取消安装", "停止安装", "do not install", "don't install", "cancel installation", "stop installing" }) |word| {
+        if (std.ascii.indexOfIgnoreCase(text, word) != null) return true;
+    }
+    return false;
+}
+fn installationDirective(text: []const u8) bool {
+    for ([_][]const u8{ "安装", "请安装", "帮我安装", "配置这个", "接入这个", "install ", "please install ", "set up " }) |word| {
+        if (std.ascii.startsWithIgnoreCase(text, word)) return true;
+    }
+    return false;
+}
+
+test "MCP installation evidence binds historical intent and handles revocation and ambiguity" {
+    const source = "https://source.example/install";
+    var evidence: InstallationSourceEvidence = .{};
+    evidence.observe(1, "看看这个链接 https://source.example/install", source);
+    try std.testing.expect(evidence.requiresConfirmation());
+    evidence.observe(3, "开始吧", source);
+    try std.testing.expect(!evidence.requiresConfirmation());
+    evidence.observe(4, "不要装了", source);
+    try std.testing.expect(evidence.requiresConfirmation());
+    evidence.observe(5, "请安装 https://source.example/install", source);
+    try std.testing.expect(!evidence.requiresConfirmation());
+    evidence.observe(6, "https://another.example/install", source);
+    evidence.observe(7, "开始吧", source);
+    try std.testing.expect(evidence.requiresConfirmation());
+    evidence.observe(8, "请安装 https://source.example/install", source);
+    try std.testing.expect(!evidence.requiresConfirmation());
+    try std.testing.expect(!installationUrlIn("https://source.example/install-other", source));
+    evidence.observe(9, "请安装 https://source.example/install https://another.example/install", source);
+    evidence.observe(10, "开始吧", source);
+    try std.testing.expect(evidence.requiresConfirmation());
 }
 
 /// Only explicit user-selected input metadata is included. Skill instructions,

@@ -131,6 +131,12 @@ pub const InstallationPhase = enum {
         };
     }
 };
+pub const InstallationCredentialWire = struct {
+    name: []const u8,
+    manual: bool,
+    credential_ref: ?[]const u8 = null,
+};
+pub const InstallationFailure = enum { invalid_request, credential_request_failed, credential_request_interrupted, configuration_changed, connection_failed, authorization_failed, storage_failed, timeout };
 pub const InstallationWire = struct {
     task_id: u64,
     run_id: u64,
@@ -138,7 +144,9 @@ pub const InstallationWire = struct {
     revision: u64,
     source_origin: []const u8,
     request_refs: []const []const u8,
+    credentials: []const InstallationCredentialWire = &.{},
     phase: InstallationPhase,
+    failure: ?InstallationFailure = null,
     initial_grant_pending: bool = true,
     initial_grant_completed: bool = false,
     cross_origin_authorized: bool = false,
@@ -153,6 +161,7 @@ pub const InstallationStart = struct {
     phase: InstallationPhase = .preparing,
     request: []const u8,
     existing_server_id: ?[]const u8 = null,
+    credentials: []const InstallationCredentialWire = &.{},
 };
 pub const InstallationConnection = union(enum) {
     http: CreateHttpServerInput,
@@ -163,6 +172,7 @@ pub const InstallationUpdate = struct {
     server_id: []const u8,
     expected_revision: u64,
     phase: InstallationPhase,
+    failure: ?InstallationFailure = null,
     active_elapsed_ms: u32,
     cross_origin_authorized: bool = false,
     /// Supplied only from a validated current catalog by Product Runtime.
@@ -692,7 +702,6 @@ pub const OauthClientPlan = union(enum) {
 };
 
 pub const CreateOauthHttpServerInput = struct {
-    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -810,7 +819,6 @@ const SecretCandidateSource = struct {
 };
 
 pub const CreateStdioServerInput = struct {
-    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -822,7 +830,6 @@ pub const CreateStdioServerInput = struct {
 };
 
 pub const CreateHttpServerInput = struct {
-    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -1771,7 +1778,9 @@ pub const ManagementPort = struct {
             if (old.task_id != input.task_id or old.phase.active()) return .rejected;
         } else if (input.existing_server_id != null) return .rejected;
         const old = server.installation;
-        const completed = if (old) |value| value.initial_grant_completed else false;
+        // An explicit retry of an empty initial discovery can grant its first
+        // tools. A still-nonempty allowlist keeps its existing ceiling.
+        const completed = if (old) |value| value.initial_grant_completed and !(value.phase == .no_tools and server.tools.len == 0) else false;
         const chunk_bytes = self.limits.max_credential_secret_bytes;
         if (chunk_bytes == 0) return .rejected;
         const chunk_count = std.math.divCeil(usize, input.request.len, chunk_bytes) catch return .rejected;
@@ -1788,6 +1797,7 @@ pub const ManagementPort = struct {
             .revision = if (old) |value| value.revision + 1 else 1,
             .source_origin = input.source_origin,
             .request_refs = &.{},
+            .credentials = input.credentials,
             .phase = input.phase,
             .initial_grant_pending = !completed,
             .initial_grant_completed = completed,
@@ -1846,6 +1856,7 @@ pub const ManagementPort = struct {
         const server = &servers[index];
         const operation = &server.installation.?;
         operation.phase = input.phase;
+        operation.failure = input.failure;
         operation.revision += 1;
         operation.active_elapsed_ms = input.active_elapsed_ms;
         operation.cross_origin_authorized = old.cross_origin_authorized or input.cross_origin_authorized;
@@ -1858,6 +1869,31 @@ pub const ManagementPort = struct {
         }
         if (input.phase == .cancelled or input.phase == .failed) server.enabled = false else if (input.phase == .connecting or input.phase == .needs_oauth) server.enabled = true;
         return self.prepareTarget(expected_generation, .{ .schema_version = schema_version, .generation = expected_generation + 1, .oauth_operation = base.oauth_operation, .servers = servers });
+    }
+
+    pub fn prepareCaptureInstallationCredential(self: *ManagementPort, expected_generation: u64, server_id: []const u8, name: []const u8, manual: bool, secret: []u8) std.mem.Allocator.Error!MutationPreparation {
+        defer std.crypto.secureZero(u8, secret);
+        if (!self.mutationReady(expected_generation) or secret.len == 0 or secret.len > self.limits.max_credential_secret_bytes) return .rejected;
+        const base = if (self.desired) |value| value.value else return .rejected;
+        const index = findServerIndex(base.servers, server_id) orelse return .rejected;
+        const operation = base.servers[index].installation orelse return .rejected;
+        if (!operation.phase.active() or operation.phase == .needs_authorization or operation.phase == .connecting) return .rejected;
+        const slot_index = for (operation.credentials, 0..) |slot, i| {
+            if (std.mem.eql(u8, slot.name, name) and slot.manual == manual) break i;
+        } else return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        const slots = try self.allocator.dupe(InstallationCredentialWire, operation.credentials);
+        defer self.allocator.free(slots);
+        var target = base;
+        target.generation += 1;
+        target.servers = servers;
+        var storage: [35]u8 = undefined;
+        const locator = self.freshCredentialLocator(target, &storage) orelse return .rejected;
+        slots[slot_index].credential_ref = locator;
+        servers[index].installation.?.credentials = slots;
+        servers[index].installation.?.revision += 1;
+        return self.prepareInstallationTarget(target, &.{.{ .locator = locator, .secret = secret }});
     }
 
     /// Persist Stop even while an uninterruptible Core apply is in flight.
@@ -1911,7 +1947,20 @@ pub const ManagementPort = struct {
         defer self.allocator.free(target.servers);
         const index = if (server_id) |id| findServerIndex(target.servers, id) orelse return .rejected else target.servers.len - 1;
         const default_parts = [_]EndpointPartInput{.{ .value = endpoint, .is_credential = true }};
-        const parts = if (supplied_parts.len == 0) &default_parts else supplied_parts;
+        const supplied = if (supplied_parts.len == 0) &default_parts else supplied_parts;
+        var normalized: std.array_list.Managed(EndpointPartInput) = .init(self.allocator);
+        defer normalized.deinit();
+        if (self.limits.max_credential_secret_bytes == 0) return .rejected;
+        for (supplied) |part| {
+            var offset: usize = 0;
+            if (part.value.len == 0) return .rejected;
+            while (offset < part.value.len) {
+                const end = @min(part.value.len, offset + self.limits.max_credential_secret_bytes);
+                try normalized.append(.{ .value = part.value[offset..end], .is_credential = part.is_credential });
+                offset = end;
+            }
+        }
+        const parts = normalized.items;
         if (parts.len > self.limits.max_credential_locators) return .rejected;
         var offset: usize = 0;
         for (parts) |part| {
@@ -3672,7 +3721,7 @@ fn authenticationFingerprint(server: ServerWire) DescriptorFingerprint {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "metawork.mcp.authentication-absence/v1");
     hashField(&hash, server.auth.kind);
-    hashInteger(&hash, credentialReferenceCount(server) - if (server.installation) |operation| operation.request_refs.len else @as(usize, 0));
+    hashInteger(&hash, credentialReferenceCount(server) - if (server.installation) |operation| installationCredentialRefCount(operation) else @as(usize, 0));
     if (server.transport.sensitive_endpoint) |endpoint|
         for (endpoint.credential_refs) |locator| hashField(&hash, locator);
     for (server.transport.arguments) |argument| {
@@ -3892,6 +3941,9 @@ fn serverReferencesCredential(server: ServerWire, locator: []const u8) bool {
     if (server.installation) |operation| for (operation.request_refs) |reference| {
         if (std.mem.eql(u8, reference, locator)) return true;
     };
+    if (server.installation) |operation| for (operation.credentials) |slot| {
+        if (slot.credential_ref) |reference| if (std.mem.eql(u8, reference, locator)) return true;
+    };
     if (server.transport.sensitive_endpoint) |endpoint|
         for (endpoint.credential_refs) |candidate|
             if (std.mem.eql(u8, candidate, locator)) return true;
@@ -3929,6 +3981,9 @@ fn resolveServerCredentials(
     credentials: *std.ArrayList(ResolvedCredential),
 ) ResolveError!bool {
     var ready = true;
+    if (server.installation) |operation| for (operation.credentials) |slot| if (slot.credential_ref) |locator| {
+        ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
+    };
     for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
         for (endpoint.credential_refs) |locator| {
             ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
@@ -4646,6 +4701,11 @@ fn collectCredentialReferences(
         if (server.installation) |operation| for (operation.request_refs) |locator| {
             if (validCredentialLocator(locator, limits.max_credential_locator_bytes)) try appendUniqueText(allocator, references, locator);
         };
+        if (server.installation) |operation| for (operation.credentials) |slot| {
+            if (slot.credential_ref) |locator| {
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes)) try appendUniqueText(allocator, references, locator);
+            }
+        };
         for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
             for (endpoint.credential_refs) |locator|
                 if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
@@ -4736,8 +4796,10 @@ fn installationEqual(left: ?InstallationWire, right: ?InstallationWire) bool {
     if (left == null or right == null) return left == null and right == null;
     const a = left.?;
     const b = right.?;
+    if (a.credentials.len != b.credentials.len) return false;
+    for (a.credentials, b.credentials) |x, y| if (!std.mem.eql(u8, x.name, y.name) or x.manual != y.manual or !optionalTextEqual(x.credential_ref, y.credential_ref)) return false;
     return a.task_id == b.task_id and a.run_id == b.run_id and a.source_message_id == b.source_message_id and
-        a.revision == b.revision and std.mem.eql(u8, a.source_origin, b.source_origin) and
+        a.revision == b.revision and a.failure == b.failure and std.mem.eql(u8, a.source_origin, b.source_origin) and
         stringSlicesEqual(a.request_refs, b.request_refs) and a.phase == b.phase and
         a.initial_grant_pending == b.initial_grant_pending and a.initial_grant_completed == b.initial_grant_completed and
         a.cross_origin_authorized == b.cross_origin_authorized and a.active_elapsed_ms == b.active_elapsed_ms and a.stop_pending == b.stop_pending;
@@ -4980,6 +5042,12 @@ pub fn serverProblem(server: ServerWire, limits: Limits) ?ServerProblem {
             (operation.stop_pending and operation.phase != .cancelled) or
             (!operation.phase.active() and operation.initial_grant_pending) or
             (operation.phase == .ready and !operation.initial_grant_completed)) return .invalid_transport;
+        if (operation.credentials.len > 16) return .invalid_transport;
+        for (operation.credentials, 0..) |slot, i| {
+            if (!validText(slot.name, 64, false)) return .invalid_transport;
+            for (operation.credentials[0..i]) |previous| if (std.mem.eql(u8, previous.name, slot.name)) return .invalid_transport;
+            if (slot.credential_ref) |locator| if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return .invalid_transport;
+        }
         const origin = endpointOrigin(operation.source_origin, limits.max_url_bytes) orelse return .invalid_transport;
         if (!std.mem.eql(u8, origin, operation.source_origin)) return .invalid_transport;
         for (operation.request_refs, 0..) |locator, i| {
@@ -5259,9 +5327,19 @@ fn validateOauthOperation(
     }
 }
 
+fn installationCredentialRefCount(operation: InstallationWire) usize {
+    var count = operation.request_refs.len;
+    for (operation.credentials) |slot| if (slot.credential_ref != null) {
+        count += 1;
+    };
+    return count;
+}
+
 fn credentialReferenceCount(server: ServerWire) usize {
     var count = transportCredentialReferenceCount(server.transport);
-    if (server.installation) |operation| count += operation.request_refs.len;
+    if (server.installation) |operation| {
+        count += installationCredentialRefCount(operation);
+    }
     for (oauthPrivateResources(server)) |resource| if (resource) |endpoint| {
         count += endpoint.credential_refs.len;
     };

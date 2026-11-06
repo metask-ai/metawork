@@ -139,7 +139,7 @@ pub fn build(b: *std.Build) void {
         .optimize = test_modules.agent.optimize,
     });
     const mcp_install_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-mcp-installation", .root_module = mcp_install_unit }));
-    b.step("test-mcp-installation", "Run strict public MCP proposal codec tests").dependOn(&mcp_install_tests.step);
+    b.step("test-mcp-installation", "Run structured MCP installation request tests").dependOn(&mcp_install_tests.step);
     artifacts.tests.step.dependOn(&mcp_install_tests.step);
     const image_codec_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/image_generation.zig"),
@@ -1242,6 +1242,8 @@ fn addMcpInteropTests(
     for (modules.app.import_table.keys(), modules.app.import_table.values()) |name, dependency| mcp_coordinator.addImport(name, dependency);
     mcp_coordinator.addImport("lifecycle_fixture", existingImport(cases, "lifecycle_fixture"));
     cases.addImport("mcp_management_coordinator", mcp_coordinator);
+    cases.addImport("native_sdk", existingImport(modules.app, "native_sdk"));
+    b.step("test-mcp-auto-install", "Run real Coordinator link installation and new Task calls").dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-mcp-auto-install", .root_module = cases, .filters = &.{"automatic installation"} })).step);
     cases.addOptions("mcp_interop_options", fixture_options);
     const tests = b.addTest(.{
         .name = "metawork-mcp-interop",

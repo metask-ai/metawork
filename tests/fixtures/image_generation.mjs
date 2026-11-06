@@ -214,9 +214,9 @@ const server = createServer(async (request, response) => {
       schema: declaration?.input_schema,
       results: images.length ? "[image result verified]" : results,
     });
-    if (mode === "mcp-proposal") {
+    if (mode === "mcp-installation") {
       const tool = payload.tools.find(
-        (entry) => entry.name === "ProposeMcpServer",
+        (entry) => entry.name === "InstallMcpServer",
       );
       if (!tool || tool.input_schema.additionalProperties !== false)
         throw Error("proposal schema");
@@ -227,13 +227,16 @@ const server = createServer(async (request, response) => {
           : protocolToolSse(
               "anthropic",
               payload.messages.length,
-              "ProposeMcpServer",
+              "InstallMcpServer",
               {
-                displayName: "Fixture MCP",
-                transport: "stdio",
-                command: "node",
-                arguments: ["--filter=$HOME", ""],
-                authMode: "none",
+                sourceUrl: "https://fixture.example/install",
+                connection: {
+                  displayName: "Fixture MCP",
+                  transport: "stdio",
+                  command: "node",
+                  arguments: ["--filter=$HOME", ""],
+                  authMode: "none",
+                },
               },
             ),
       );

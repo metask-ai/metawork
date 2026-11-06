@@ -290,7 +290,9 @@ Product Control 拥有 MCP Desired Registry、connection approval、OAuth consen
 
 敏感 HTTP endpoint 的有序地址片段只进入系统 credential storage；Desired 保存 origin、稳定 identity 和片段引用，公开投影只有 origin。OAuth 的授权 resource 与 endpoint 分开绑定：Host 在确认前暂存私有 resource 引用，授权事务将其转为 consent 的私有绑定，DCR 与恢复使用同一事务；公开 resource 行为保持不变。连接、授权、code exchange 和 refresh 只在 Host 中解析完整地址，临时 owned copy 在释放前清零；指纹只消费公开绑定与引用，不包含秘密或秘密 hash。
 
-自动安装的 durable operation 绑定精确 server、来源 Task/Run 与真实用户消息引用；原始请求只按系统凭据容量分块保存，metadata 保留 origin、引用、revision 和阶段。先提交 disabled 目标，再取得凭据、认证并连接。首次工具集合与一次性授权标记在同一凭据事务中保存，先准备 Admission 再提交，恢复只复用已经保存的精确集合。ready 的公开判断还必须证明当前正式成员、目录和新 Task Admission 有效；仅有 durable 阶段不能证明当前可用。Stop 的取消 marker 可在 Core apply 未结束时独立提交，不等待 worker；它立刻否决新加载和新准入，后续再对账停用配置。marker 不改变 descriptor 或 credential 引用、不推进 desired generation；正常 target 变更仍推进 generation，取消与完成都按 operation revision 拒绝迟到结果。
+自动安装的 durable operation 绑定精确 server、来源 Task/Run 与真实用户消息引用；原始请求只按系统凭据容量分块保存，metadata 保留 origin、引用、revision 和阶段。先提交 disabled 目标，再取得凭据、认证并连接。首次工具集合与一次性授权标记在同一凭据事务中保存，先准备 Admission 再提交，恢复只复用已经保存的精确集合。ready 的首次发布还必须证明当前正式成员、目录和新 Task Admission 有效；完成后保留安装历史，当前可用性独立取正常 Admission，不因停用或过期把完成历史改成连接中。Stop 的取消 marker 可在 Core apply 未结束时独立提交，不等待 worker；它立刻否决新加载和新准入，后续再对账停用配置。marker 不改变 descriptor 或 credential 引用、不推进 desired generation；正常 target 变更仍推进 generation，取消与完成都按 operation revision 拒绝迟到结果。
+
+安装来源只从同一 Task 的真实用户消息取证，支持跨 Run 的明确同意；后续撤销使旧请求失效，多个候选或不明确意图必须经 Host 确认。唯一失败目标按同 Task 与完整来源匹配，修复保留 server identity，不能按显示名或域名猜测。首次发现为空且允许列表仍为空的 `no_tools` 目标，在用户显式重试安装时可重新完成首次工具授权；重试时仍非空的允许列表保持原边界，目录刷新不得自动扩权。目录刷新占用 mutation 边界时保留已接纳的安装请求，由刷新完成事件继续推进；阶段提交后需继续结算的安装必须主动唤醒主线程，不能依赖来源 Run 或其他无关事件。OAuth 授权取消或未授权结束将本次安装结算为取消或失败，不自动重新打开浏览器；网络阶段消耗执行预算，人工确认和浏览器等待不消耗。
 
 Product Control 在 MCP 全部创建和替换连接入口复用 Host 已知凭据 predicate，在持久化与 effect 前拒绝敏感公开字段；不以名称、熵值或全部 env 值扩展凭据集合，也不改写既有记录。创建回执在 preparation 释放前持有确认 target 的稳定 identity，只有确定保存结果可以返回它；后续凭据捕获仍由当前 generation、server、auth mode 与 slot 校验，不通过 snapshot 猜测 identity。
 

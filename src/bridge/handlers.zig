@@ -277,7 +277,6 @@ pub const SkillInstall = struct {
 pub const SkillReimport = SkillInstall;
 pub const SkillIdentity = struct { installId: []const u8 };
 pub const McpCreateStdioServer = struct {
-    proposalId: ?[]const u8 = null,
     expectedDesiredGeneration: []const u8,
     displayName: []const u8,
     negotiation: []const u8,
@@ -293,7 +292,6 @@ pub const McpOauthRegistration = struct {
     tokenEndpointAuthMethod: ?[]const u8 = null,
 };
 pub const McpCreateHttpServer = struct {
-    proposalId: ?[]const u8 = null,
     expectedDesiredGeneration: []const u8,
     displayName: []const u8,
     negotiation: []const u8,
@@ -342,21 +340,7 @@ pub const McpAllowedTools = struct {
     serverId: []const u8,
     toolNames: []const []const u8,
 };
-pub const McpInstallProposalIdentity = struct { proposalId: ?[]const u8 };
-
-test "MCP proposal dismissal requires an explicit nullable identity" {
-    const fixture = try std.json.parseFromSlice(struct { proposal: McpInstallProposalIdentity, notice: McpInstallProposalIdentity }, std.testing.allocator, @embedFile("testdata/mcp-installation-dismiss.json"), .{});
-    defer fixture.deinit();
-    inline for (.{ "proposal", "notice" }) |key| {
-        const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, @field(fixture.value, key), .{});
-        defer std.testing.allocator.free(bytes);
-        var parsed = try parsePayload(McpInstallProposalIdentity, bytes);
-        defer parsed.deinit();
-        if (parsed.value.proposalId) |id| try std.testing.expectEqual(@as(u64, 71), try parseWireId(id)) else try std.testing.expectEqualStrings("notice", key);
-    }
-    for ([_][]const u8{ "{}", "{\"proposalId\":71}", "{\"proposalId\":null,\"extra\":true}" }) |invalid|
-        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(McpInstallProposalIdentity, invalid));
-}
+pub const McpInstallationIdentity = struct { serverId: []const u8, installationRevision: []const u8 };
 pub const McpServerIdentity = struct {
     expectedDesiredGeneration: []const u8,
     serverId: []const u8,

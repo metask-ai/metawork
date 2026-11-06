@@ -443,6 +443,36 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.remove_row": "删除此行",
   "mcp.add.sensitive_endpoint":
     "此地址包含凭据（安全保存；替换时填写完整地址）",
+  "mcp.install.phase.preparing": "正在准备配置…",
+  "mcp.install.phase.needs_authorization":
+    "请在系统确认窗口中确认本次安装和凭据去向。",
+  "mcp.install.phase.acquiring_credentials": "正在安全获取凭据…",
+  "mcp.install.phase.needs_credentials": "请在下方安全输入所需凭据。",
+  "mcp.install.phase.needs_oauth": "请在授权窗口中完成登录。",
+  "mcp.install.phase.connecting": "正在连接服务并发现工具…",
+  "mcp.install.phase.ready": "安装已完成，已授权安装时发现的工具。",
+  "mcp.install.phase.no_tools": "已连接，当前没有可用于新 Task 的工具。",
+  "mcp.install.phase.failed": "配置失败。",
+  "mcp.install.phase.cancelled": "安装已取消。",
+  "mcp.install.phase.cancelling": "正在停止安装，已阻止后续阶段。",
+  "mcp.install.failure.invalid_request": "无法应用这份安装说明。",
+  "mcp.install.failure.credential_request_failed":
+    "获取凭据失败，请检查安装来源后重试。",
+  "mcp.install.failure.credential_request_interrupted":
+    "获取凭据已中断，请明确重试本次安装。",
+  "mcp.install.failure.configuration_changed": "安装期间配置已变更。",
+  "mcp.install.failure.authorization_failed":
+    "授权未完成，请在准备好后明确重试。",
+  "mcp.install.failure.connection_failed":
+    "服务连接失败，请在 MCP 页查看连接状态。",
+  "mcp.install.failure.storage_failed": "无法安全保存配置。",
+  "mcp.install.failure.timeout": "安装超过了等待时限。",
+  "mcp.install.credential": "凭据：{slot}",
+  "mcp.install.title": "MCP 安装",
+  "mcp.install.submit": "安全提交",
+  "mcp.install.cancel": "取消安装",
+  "mcp.install.action_failed": "无法确认操作结果，请检查当前状态后重试。",
+  "mcp.install.rejected": "无法创建 MCP 配置，请查看 MCP 页面。",
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息和 fragment。",

@@ -17,6 +17,10 @@ const mcp_platform = @import("metawork_mcp_platform");
 const mcp_startup = @import("mcp_startup.zig");
 const app_platform = @import("platform.zig");
 
+pub const InstallationTestTransportRequest = if (builtin.is_test) mcp_oauth.Request else void;
+pub const InstallationTestTransportResponse = if (builtin.is_test) mcp_oauth.Response else void;
+pub const InstallationTestFetchError = if (builtin.is_test) mcp_oauth.FetchError else error{};
+
 const connection_approval_details_bytes: usize = mcp_configuration.max_store_bytes * 6 + 4096;
 const oauth_consent_details_bytes: usize = mcp_oauth.Limits.metadata_body_bytes * 6 + 4096;
 
@@ -601,6 +605,47 @@ const ConfigurationApplyJob = struct {
     }
 };
 
+const InstallationJob = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: Host,
+    server: [mcp_configuration.created_identity_bytes]u8,
+    revision: u64,
+    request: agent.McpParsedInstallRequest,
+    transport_override: ?mcp_oauth.Transport,
+    cancellation: mcp_oauth.Cancellation,
+    values: [16]?[]u8 = @splat(null),
+    failed: bool = false,
+    finished: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+    fn run(self: *@This()) void {
+        defer {
+            self.finished.store(true, .release);
+            self.host.notify();
+        }
+        var http: mcp_oauth.StdHttpTransport = .{ .allocator = self.allocator, .io = self.io, .cancellation = &self.cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(30) }) };
+        const transport = self.transport_override orelse http.transport();
+        for (self.request.parsed.value.credentials, 0..) |plan, i| {
+            if (self.cancellation.isCancelled()) {
+                self.failed = true;
+                return;
+            }
+            if (plan.kind != .http_json) continue;
+            self.values[i] = mcp_oauth.fetchInstallationCredential(self.allocator, transport, plan.url.?, plan.jsonPointer.?, mcp_platform.max_credential_secret_bytes) catch {
+                self.failed = true;
+                return;
+            };
+        }
+    }
+    fn deinit(self: *@This()) void {
+        if (self.thread) |thread| thread.join();
+        for (self.values) |value| if (value) |bytes| secureFree(self.allocator, bytes);
+        self.request.deinit();
+        const allocator = self.allocator;
+        allocator.destroy(self);
+    }
+};
+
 const ConfirmationState = struct {
     id: u64,
     page_token: u64 = 0,
@@ -613,6 +658,7 @@ const ConfirmationState = struct {
     kind: union(enum) {
         approval: struct { operation: u64, generation: u64, server: []u8, completion: *const Approval.Completion },
         oauth: []u8,
+        installation: struct { server: [mcp_configuration.created_identity_bytes]u8, revision: u64 },
     },
 };
 
@@ -627,6 +673,11 @@ pub const Coordinator = struct {
     host_environment: mcp_platform.HostEnvironment,
     transport_override: ?mcp_oauth.Transport = null,
     flow: ?*Flow = null,
+    installation_job: ?*InstallationJob = null,
+    installation_server: ?[mcp_configuration.created_identity_bytes]u8 = null,
+    installation_request_id: u64 = 0,
+    installation_active_since: ?std.Io.Timestamp = null,
+    installation_elapsed: u32 = 0,
     connection_test_job: ?*ConnectionTestJob = null,
     active_processes: ?mcp_platform.StdioObservations = null,
     process_attempt: u64 = 0,
@@ -953,8 +1004,348 @@ pub const Coordinator = struct {
         return .started;
     }
 
+    fn installationValue(self: *Coordinator, id: []const u8, name: []const u8) ![]u8 {
+        const observed = self.control.installation(id) orelse return error.InvalidState;
+        const slot = for (observed.server.installation.?.credentials) |slot| {
+            if (std.mem.eql(u8, slot.name, name)) break slot;
+        } else return error.InvalidState;
+        const locator = slot.credential_ref orelse return error.CredentialUnavailable;
+        const resolver = self.credential_store.resolver();
+        return switch (resolver.resolve_fn(resolver.context, self.allocator, locator)) {
+            .value => |value| value,
+            else => error.CredentialUnavailable,
+        };
+    }
+
+    fn prepareInstallationConnection(self: *Coordinator, observation: control_ports.McpInstallObservation, request: agent.McpInstallRequest) !void {
+        const id = observation.server.id[0..mcp_configuration.created_identity_bytes].*;
+        const d = request.connection;
+        // Framed headers/environment are separate from the raw protected source.
+        for (request.credentials) |plan| {
+            if (plan.target == .endpoint) continue;
+            const raw = try self.installationValue(&id, plan.slot);
+            defer secureFree(self.allocator, raw);
+            const value = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ plan.prefix, raw, plan.suffix });
+            defer secureFree(self.allocator, value);
+            const current = self.control.installation(&id) orelse return error.InvalidState;
+            const outcome = switch (plan.target) {
+                .header, .environment => try self.control.captureMcpStaticSecret(current.generation, .{ .server_id = &id, .slot_name = plan.name.?, .secret = value }),
+                .client_secret => try self.control.captureMcpOauthClientSecret(current.generation, .{ .server_id = &id, .secret = value }),
+                .endpoint => unreachable,
+            };
+            if (outcome != .saved and outcome != .saved_recovery_required) return error.CredentialUnavailable;
+        }
+        var endpoint_bytes: [4096]u8 = undefined;
+        defer std.crypto.secureZero(u8, &endpoint_bytes);
+        var writer = std.Io.Writer.fixed(&endpoint_bytes);
+        var parts: std.array_list.Managed(mcp_configuration.EndpointPartInput) = .init(self.allocator);
+        defer parts.deinit();
+        if (d.endpoint) |template| {
+            var rest = template;
+            while (std.mem.indexOf(u8, rest, "{credential:")) |start| {
+                if (start != 0) {
+                    const before = writer.buffered().len;
+                    try writer.writeAll(rest[0..start]);
+                    try parts.append(.{ .value = writer.buffered()[before..], .is_credential = false });
+                }
+                const tail = rest[start + "{credential:".len ..];
+                const end = std.mem.indexOfScalar(u8, tail, '}') orelse return error.InvalidState;
+                const name = tail[0..end];
+                const plan = for (request.credentials) |plan| {
+                    if (plan.target == .endpoint and std.mem.eql(u8, plan.slot, name)) break plan;
+                } else return error.InvalidState;
+                const raw = try self.installationValue(&id, name);
+                defer secureFree(self.allocator, raw);
+                const value = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ plan.prefix, raw, plan.suffix });
+                defer secureFree(self.allocator, value);
+                const before = writer.buffered().len;
+                try std.Uri.Component.percentEncode(&writer, value, struct {
+                    fn unreserved(byte: u8) bool {
+                        return std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-._~", byte) != null;
+                    }
+                }.unreserved);
+                try parts.append(.{ .value = writer.buffered()[before..], .is_credential = true });
+                rest = tail[end + 1 ..];
+            }
+            if (rest.len != 0) {
+                const before = writer.buffered().len;
+                try writer.writeAll(rest);
+                try parts.append(.{ .value = writer.buffered()[before..], .is_credential = false });
+            }
+        }
+        const current = self.control.installation(&id) orelse return error.InvalidState;
+        const connection: mcp_configuration.InstallationConnection = if (std.mem.eql(u8, d.transport, "stdio")) .{ .stdio = .{
+            .display_name = d.displayName,
+            .command = d.command.?,
+            .arguments = d.arguments,
+            .cwd = d.cwd,
+            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
+            .environment_names = d.environmentNames,
+        } } else if (std.mem.eql(u8, d.authMode, "oauth")) .{ .oauth = .{ .display_name = d.displayName, .url = writer.buffered(), .sensitive_endpoint = true, .endpoint_parts = parts.items, .client = .dynamic_registration } } else .{ .http = .{
+            .display_name = d.displayName,
+            .url = writer.buffered(),
+            .sensitive_endpoint = true,
+            .endpoint_parts = parts.items,
+            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
+            .header_names = d.headerNames,
+        } };
+        const outcome = try self.control.replaceInstallation(current.generation, &id, current.server.installation.?.revision, connection);
+        if (outcome != .saved and outcome != .saved_recovery_required and outcome != .unchanged) return error.InvalidState;
+    }
+
+    fn confirmInstallation(self: *Coordinator, observation: control_ports.McpInstallObservation) !void {
+        if (!self.host.confirmation_available) return;
+        const operation = observation.server.installation.?;
+        var request = try self.installationRequest(operation);
+        defer request.deinit();
+        var storage: [32 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try writer.writeAll("Allow this MCP installation and its credential destinations?\nThe saved connection will reconnect or start automatically on future launches.\n");
+        try writeQuotedDetailField(&writer, "Installation source", operation.source_origin);
+        if (observation.server.transport.sensitive_endpoint) |endpoint| try writeQuotedDetailField(&writer, "Use credentials on", endpoint.origin);
+        for (request.parsed.value.credentials) |plan| if (plan.url) |url| {
+            const origin = mcp_configuration.endpointOrigin(url, 4096) orelse return error.InvalidState;
+            try writeQuotedDetailField(&writer, "Get credentials from", origin);
+        };
+        if (request.parsed.value.connection.command) |command| {
+            try writeQuotedDetailField(&writer, "Command", command);
+            for (request.parsed.value.connection.arguments) |argument| try writeQuotedDetailField(&writer, "Argument", argument);
+            if (request.parsed.value.connection.cwd) |cwd| try writeQuotedDetailField(&writer, "Working directory", cwd);
+        }
+        const details = try self.allocator.dupe(u8, writer.buffered());
+        errdefer self.allocator.free(details);
+        self.confirmation = .{ .id = try self.nextConfirmationId(), .details = details, .title = "Authorize MCP installation", .approval_label = "Allow installation", .kind = .{ .installation = .{
+            .server = observation.server.id[0..mcp_configuration.created_identity_bytes].*,
+            .revision = operation.revision,
+        } } };
+        self.requestConfirmationPage() catch |err| {
+            self.confirmation = null;
+            return err;
+        };
+    }
+
+    fn installationElapsed(self: *Coordinator) u32 {
+        const since = self.installation_active_since orelse return self.installation_elapsed;
+        const elapsed = @max(@as(i96, 0), std.Io.Timestamp.now(self.io, .awake).nanoseconds - since.nanoseconds);
+        return @intCast(@min(@as(i96, mcp_configuration.installation_active_budget_ms), self.installation_elapsed + @divFloor(elapsed, std.time.ns_per_ms)));
+    }
+
+    fn installationPhase(self: *Coordinator, phase: mcp_configuration.InstallationPhase, failure: ?mcp_configuration.InstallationFailure) !bool {
+        const id = self.installation_server orelse return false;
+        const observation = self.control.installation(&id) orelse return false;
+        const operation = observation.server.installation.?;
+        const elapsed = self.installationElapsed();
+        const result = try self.control.updateInstallation(observation.generation, .{ .server_id = &id, .expected_revision = operation.revision, .phase = phase, .failure = failure, .active_elapsed_ms = elapsed });
+        if (result != .saved and result != .saved_recovery_required) return false;
+        self.installation_elapsed = elapsed;
+        self.installation_active_since = if (phase == .preparing or phase == .acquiring_credentials or phase == .connecting) .now(self.io, .awake) else null;
+        self.host.notify();
+        return true;
+    }
+
+    fn failInstallation(self: *Coordinator, failure: mcp_configuration.InstallationFailure) !void {
+        if (self.installation_server) |id| if (self.control.installation(&id)) |observed| {
+            if (observed.server.installation.?.phase.active()) _ = try self.installationPhase(.failed, failure);
+        };
+    }
+
+    fn installationRequest(self: *Coordinator, operation: mcp_configuration.InstallationWire) !agent.McpParsedInstallRequest {
+        var bytes: [agent.max_mcp_installation_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &bytes);
+        var writer = std.Io.Writer.fixed(&bytes);
+        const resolver = self.credential_store.resolver();
+        for (operation.request_refs) |locator| {
+            const value = switch (resolver.resolve_fn(resolver.context, self.allocator, locator)) {
+                .value => |value| value,
+                else => return error.CredentialUnavailable,
+            };
+            defer secureFree(self.allocator, value);
+            try writer.writeAll(value);
+        }
+        return agent.parseMcpInstallRequest(self.allocator, writer.buffered());
+    }
+
+    fn installationRetry(self: *Coordinator, pending: control_ports.McpInstallIngress, request: agent.McpInstallRequest) !?[mcp_configuration.created_identity_bytes]u8 {
+        if (request.serverId != null) return null;
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse return null;
+        const generation = inspection.desired_generation orelse return null;
+        const bytes = try self.allocator.alloc(u8, mcp_configuration.max_store_bytes);
+        defer self.allocator.free(bytes);
+        const data = try self.control.writeMcpDesiredConfiguration(generation, bytes);
+        var registry = try mcp_configuration.decode(self.allocator, data, mcp_startup.configuration_limits);
+        defer registry.deinit();
+        var candidate: ?[mcp_configuration.created_identity_bytes]u8 = null;
+        for (registry.value.servers) |server| {
+            const operation = server.installation orelse continue;
+            if (operation.task_id != pending.task_id or operation.phase.active() or operation.phase == .ready) continue;
+            var original = try self.installationRequest(operation);
+            defer original.deinit();
+            if (!std.mem.eql(u8, original.parsed.value.sourceUrl, request.sourceUrl)) continue;
+            if (candidate != null) return error.AmbiguousInstallationTarget;
+            candidate = server.id[0..mcp_configuration.created_identity_bytes].*;
+        }
+        return candidate;
+    }
+
+    fn drainInstallation(self: *Coordinator) !bool {
+        if (self.stopping) return false;
+        if (self.installation_server == null) {
+            if (self.control.installation(null)) |observed| {
+                self.installation_server = observed.server.id[0..mcp_configuration.created_identity_bytes].*;
+                self.installation_elapsed = observed.server.installation.?.active_elapsed_ms;
+            } else if (self.control.pendingInstallation()) |pending| {
+                var request = agent.parseMcpInstallRequest(self.allocator, pending.json) catch {
+                    self.control.releaseInstallation(pending.id);
+                    return true;
+                };
+                defer request.deinit();
+                if (self.configuration_apply_job != null) return false;
+                const retry = self.installationRetry(pending, request.parsed.value) catch {
+                    self.control.releaseInstallation(pending.id);
+                    return true;
+                };
+                const created = self.control.startInstallation(pending.id, if (retry) |*id| id else null) catch |err| switch (err) {
+                    error.McpManagementBusy => return false, // Refresh completion will wake us; retain the request.
+                    else => return err,
+                };
+                if (created.outcome != .saved and created.outcome != .saved_recovery_required) {
+                    self.control.releaseInstallation(pending.id);
+                    return true;
+                }
+                self.installation_server = created.server_id;
+                self.installation_request_id = pending.id;
+                self.host.notify();
+                return true;
+            } else return false;
+        }
+        const id = self.installation_server.?;
+        const observed = self.control.installation(&id) orelse {
+            if (self.installation_request_id != 0) self.control.releaseInstallation(self.installation_request_id);
+            self.installation_server = null;
+            self.installation_request_id = 0;
+            self.installation_active_since = null;
+            return true;
+        };
+        const operation = observed.server.installation.?;
+        if (!observed.source_available and operation.phase.active()) {
+            _ = try self.control.cancelInstallation(&id, operation.revision);
+            return true;
+        }
+        if (self.installation_job) |job| {
+            if (!operation.phase.active() or !observed.source_available) job.cancellation.cancel();
+            if (!job.finished.load(.acquire)) return false;
+            self.installation_job = null;
+            defer job.deinit();
+            if (!operation.phase.active() or operation.revision != job.revision or !observed.source_available) return true;
+            if (job.failed) {
+                try self.failInstallation(.credential_request_failed);
+                return true;
+            }
+            for (job.request.parsed.value.credentials, 0..) |plan, i| if (job.values[i]) |value| {
+                const current = self.control.installation(&id) orelse return error.InvalidState;
+                const outcome = try self.control.captureInstallation(current.generation, &id, plan.slot, false, value);
+                if (outcome != .saved and outcome != .saved_recovery_required) return error.CredentialUnavailable;
+            };
+            _ = try self.installationPhase(.preparing, null);
+            return true;
+        }
+        if (!operation.phase.active() and operation.phase != .ready) {
+            if (self.confirmation) |pending| if (pending.kind == .installation and std.mem.eql(u8, &pending.kind.installation.server, &id)) self.cancelConfirmation();
+            if (self.flow) |flow| if (std.mem.eql(u8, flow.start.server_id, &id)) {
+                _ = self.cancelAuthorization(flow.start.operation_id);
+            };
+        }
+        if (operation.phase == .cancelled) {
+            if (operation.stop_pending) {
+                _ = try self.control.cancelInstallation(&id, operation.revision);
+                return false;
+            }
+        }
+        if (!operation.phase.active()) {
+            if (self.installation_request_id != 0) self.control.releaseInstallation(self.installation_request_id);
+            self.installation_server = null;
+            self.installation_request_id = 0;
+            self.installation_active_since = null;
+            return true;
+        }
+        if (self.configuration_apply_job != null) return false;
+        if (operation.phase == .needs_oauth) {
+            // Network work consumes the installation budget; consent and the
+            // browser callback wait do not. Persist elapsed time on transitions.
+            const working = if (self.flow) |flow| if (flow.job) |job| job.input != .callback else false else false;
+            if (working and self.installation_active_since == null) self.installation_active_since = .now(self.io, .awake);
+            if (!working and self.installation_active_since != null) {
+                self.installation_elapsed = self.installationElapsed();
+                self.installation_active_since = null;
+            }
+        }
+        if (self.installationElapsed() >= mcp_configuration.installation_active_budget_ms) {
+            try self.failInstallation(.timeout);
+            return true;
+        }
+        switch (operation.phase) {
+            .needs_authorization => {
+                if (self.confirmation == null) try self.confirmInstallation(observed);
+                return false;
+            },
+            .acquiring_credentials => {
+                try self.failInstallation(.credential_request_interrupted);
+                return true;
+            },
+            .preparing, .needs_credentials => {
+                var parsed = try self.installationRequest(operation);
+                var owned = true;
+                defer if (owned) parsed.deinit();
+                var fetch = false;
+                var missing = false;
+                for (operation.credentials) |slot| if (slot.credential_ref == null) {
+                    if (slot.manual) missing = true else fetch = true;
+                };
+                if (fetch) {
+                    if (!try self.installationPhase(.acquiring_credentials, null)) return false;
+                    const next = self.control.installation(&id) orelse return error.InvalidState;
+                    const job = try self.allocator.create(InstallationJob);
+                    job.* = .{ .allocator = self.allocator, .io = self.io, .host = self.host, .server = id, .revision = next.server.installation.?.revision, .request = parsed, .transport_override = self.transport_override, .cancellation = .init(self.io) };
+                    owned = false;
+                    errdefer job.deinit();
+                    job.thread = try std.Thread.spawn(.{}, InstallationJob.run, .{job});
+                    self.installation_job = job;
+                    return true;
+                }
+                if (missing) {
+                    if (operation.phase != .needs_credentials) return self.installationPhase(.needs_credentials, null);
+                    return false;
+                }
+                if (operation.phase == .needs_credentials) return self.installationPhase(.preparing, null);
+                try self.prepareInstallationConnection(observed, parsed.parsed.value);
+                const next = self.control.installation(&id) orelse return error.InvalidState;
+                return self.installationPhase(if (std.mem.eql(u8, next.server.auth.kind, "oauth") and !mcp_configuration.serverRuntimeAuthorizationReady(next.server)) .needs_oauth else .connecting, null);
+            },
+            .needs_oauth => {
+                if (mcp_configuration.serverRuntimeAuthorizationReady(observed.server)) return self.installationPhase(.connecting, null);
+                if (self.flow == null) _ = try self.authorizeOauth(observed.generation, &id);
+                return false;
+            },
+            .connecting => {
+                if (self.installation_active_since == null) self.installation_active_since = .now(self.io, .awake);
+                if (observed.connection_failed) {
+                    try self.failInstallation(.connection_failed);
+                    return true;
+                }
+                const outcome = try self.control.finishInstallation(&id, operation.revision, self.installationElapsed());
+                const saved = outcome == .saved or outcome == .saved_recovery_required;
+                if (saved) self.host.notify();
+                return saved;
+            },
+            else => return false,
+        }
+    }
+
     pub fn drain(self: *Coordinator) bool {
-        var changed = false;
+        var changed = self.drainInstallation() catch blk: {
+            self.failInstallation(.invalid_request) catch {};
+            break :blk true;
+        };
         if (!self.stopping) if (self.active_processes) |processes| for (processes.slots) |slot| {
             changed = (self.control.observeMcpProcess(slot.snapshot()) catch |err| failed: {
                 std.log.warn("MCP process observation unavailable: {s}", .{@errorName(err)});
@@ -1057,6 +1448,11 @@ pub const Coordinator = struct {
     pub fn shutdown(self: *Coordinator) void {
         if (self.stopping) return;
         self.stopping = true;
+        if (self.installation_job) |job| {
+            job.cancellation.cancel();
+            job.deinit();
+            self.installation_job = null;
+        }
         if (self.active_processes) |*processes| processes.stopNotifications();
         if (self.configuration_apply_job) |job| job.processes.stopNotifications();
 
@@ -1134,6 +1530,7 @@ pub const Coordinator = struct {
         switch (pending.kind) {
             .approval => |approval| self.allocator.free(approval.server),
             .oauth => |operation| self.allocator.free(operation),
+            .installation => {},
         }
     }
 
@@ -1218,10 +1615,25 @@ pub const Coordinator = struct {
                 }
                 approval.completion.complete_fn(approval.completion.context, approval.operation, result);
             },
+            .installation => |installation| {
+                const observed = self.control.installation(&installation.server) orelse return;
+                const operation = observed.server.installation.?;
+                if (operation.revision != installation.revision or operation.phase != .needs_authorization) return;
+                if (requested == .confirmed and !self.stopping and observed.source_available) {
+                    _ = self.control.updateInstallation(observed.generation, .{ .server_id = &installation.server, .expected_revision = operation.revision, .phase = .preparing, .active_elapsed_ms = operation.active_elapsed_ms, .cross_origin_authorized = true }) catch {};
+                    self.installation_active_since = .now(self.io, .awake);
+                } else {
+                    _ = self.control.cancelInstallation(&installation.server, operation.revision) catch {};
+                }
+                self.host.notify();
+            },
             .oauth => |operation| {
                 const flow = self.flow orelse return;
                 if (!std.mem.eql(u8, flow.start.operation_id, operation)) return;
-                if (requested == .confirmed and !self.stopping and !flow.cancelling) self.resumeConsent(flow) catch self.finishFlow(flow) else self.finishFlow(flow);
+                if (requested == .confirmed and !self.stopping and !flow.cancelling) self.resumeConsent(flow) catch self.finishFlow(flow) else {
+                    flow.cancelling = true;
+                    self.finishFlow(flow);
+                }
                 self.host.notify();
             },
         }
@@ -1252,7 +1664,7 @@ pub const Coordinator = struct {
         if (value.len == 0 or value.len > secret_storage.len) return .rejected;
         const secret = secret_storage[0..value.len];
         @memcpy(secret, value);
-        return switch (slot) {
+        const outcome = switch (slot) {
             .stdio_environment => |name| mapManagementOutcome(
                 try self.control.captureMcpStaticSecret(
                     expected_generation,
@@ -1265,6 +1677,7 @@ pub const Coordinator = struct {
                     .{ .server_id = server_id, .slot_name = name, .secret = secret },
                 ),
             ),
+            .installation_credential => |name| mapManagementOutcome(try self.control.captureInstallation(expected_generation, server_id, name, true, secret)),
             .oauth_client_secret => mapManagementOutcome(
                 try self.control.captureMcpOauthClientSecret(
                     expected_generation,
@@ -1272,6 +1685,8 @@ pub const Coordinator = struct {
                 ),
             ),
         };
+        if (slot == .installation_credential and (outcome == .saved or outcome == .saved_recovery_required)) self.host.notify();
+        return outcome;
     }
 
     fn startDiscovery(self: *Coordinator, flow: *Flow) !void {
@@ -1777,6 +2192,16 @@ pub const Coordinator = struct {
         }
         _ = self.control.finishMcpAuthorization(flow.start.operation_id);
         if (self.flow == flow) self.flow = null;
+        if (!self.stopping) if (self.installation_server) |id| if (std.mem.eql(u8, &id, flow.start.server_id)) {
+            if (self.control.installation(&id)) |observed| {
+                if (observed.server.installation.?.phase == .needs_oauth and !mcp_configuration.serverRuntimeAuthorizationReady(observed.server)) {
+                    if (flow.cancelling)
+                        _ = self.control.cancelInstallation(&id, observed.server.installation.?.revision) catch {}
+                    else
+                        _ = self.installationPhase(.failed, .authorization_failed) catch {};
+                }
+            }
+        };
         flow.deinit(self.allocator);
         self.allocator.destroy(flow);
     }

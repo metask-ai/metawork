@@ -148,6 +148,7 @@ pub const McpSecretSlot = union(enum) {
     stdio_environment: []const u8,
     http_header: []const u8,
     oauth_client_secret,
+    installation_credential: []const u8,
 };
 
 /// Application-owned Models effects that cannot run inside Product Control.
@@ -411,7 +412,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.uninstall_skill, .function = uninstallSkill },
             .{ .name = commands.retry_skill, .function = retrySkill },
             .{ .name = commands.skill_detail, .function = skillDetail },
-            .{ .name = commands.mcp_dismiss_install_proposal, .function = dismissMcpInstallProposal },
+            .{ .name = commands.mcp_cancel_installation, .function = cancelMcpInstallation },
             .{ .name = commands.mcp_create_stdio_server, .function = createMcpStdioServer },
             .{ .name = commands.mcp_create_http_server, .function = createMcpHttpServer },
             .{ .name = commands.mcp_update_stdio_connection, .function = updateMcpStdioConnection },
@@ -4229,18 +4230,16 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
-    fn dismissMcpInstallProposal(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn cancelMcpInstallation(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.McpInstallProposalIdentity, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.McpInstallationIdentity, invocation.request.payload);
         defer parsed.deinit();
-        const id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null;
-        const workbench = try self.requireProductControl();
-        const dismissed = workbench.dismissMcpInstallProposal(id);
-        if (dismissed) self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{if (dismissed) @as([]const u8, "dismissed") else "stale_proposal"});
+        const revision = try handlers.parseWireId(parsed.value.installationRevision);
+        const control = try self.requireProductControl();
+        return self.finishMcpMutation(control, output, try control.cancelMcpInstallation(parsed.value.serverId, revision));
     }
 
     fn createMcpStdioServer(
@@ -4267,7 +4266,6 @@ pub const Dispatcher = struct {
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireProductControl();
         const outcome = try workbench.createMcpStdioServer(expected, .{
-            .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
@@ -4309,7 +4307,6 @@ pub const Dispatcher = struct {
         const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
             if (parsed.value.headerNames.len != 0) return error.InvalidBridgePayload;
             break :oauth try workbench.createMcpOauthHttpServer(expected, .{
-                .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
                 .display_name = parsed.value.displayName,
                 .negotiation = parsed.value.negotiation,
                 .timeout_ms = parsed.value.timeoutMs,
@@ -4318,7 +4315,6 @@ pub const Dispatcher = struct {
                 .client = try mcpOauthClientPlan(parsed.value.registration),
             });
         } else try workbench.createMcpHttpServer(expected, .{
-            .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
@@ -4540,6 +4536,8 @@ pub const Dispatcher = struct {
             .{ .stdio_environment = parsed.value.slot.name orelse return error.InvalidBridgePayload }
         else if (std.mem.eql(u8, parsed.value.slot.kind, "http_header"))
             .{ .http_header = parsed.value.slot.name orelse return error.InvalidBridgePayload }
+        else if (std.mem.eql(u8, parsed.value.slot.kind, "installation_credential"))
+            .{ .installation_credential = parsed.value.slot.name orelse return error.InvalidBridgePayload }
         else if (std.mem.eql(u8, parsed.value.slot.kind, "oauth_client_secret") and
             parsed.value.slot.name == null)
             .oauth_client_secret

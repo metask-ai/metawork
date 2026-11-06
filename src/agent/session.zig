@@ -63,8 +63,11 @@ const RunImage = struct {
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const FileDeliveryReceipt = deliver_file.Receipt;
+pub const McpInstallRequest = mcp_install.InstallRequest;
+pub const McpParsedInstallRequest = mcp_install.ParsedInstallRequest;
+pub const parseMcpInstallRequest = mcp_install.parseInstallRequest;
 pub const McpInstallationInput = mcp_install.Input;
-pub const McpInstallationDraft = mcp_install.OwnedDraft;
+pub const McpInstallationRequest = mcp_install.OwnedRequest;
 pub const McpInstallationResult = mcp_install.Result;
 pub const max_mcp_installation_bytes = mcp_install.max_bytes;
 pub const FileDeliveryInput = deliver_file.Input;
@@ -2714,7 +2717,7 @@ pub const Session = struct {
         std.mem.bytesAsValue(McpResultHeader, allocation[0..@sizeOf(McpResultHeader)]).* = .{ .allocation_len = allocation.len };
         result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         transferred = true;
-        return if (outcome == .proposal_submitted) wire.HOST_OK else wire.HOST_FAILED;
+        return if (outcome == .submitted) wire.HOST_OK else wire.HOST_FAILED;
     }
     pub fn releaseMcpInstallationResult(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return));
@@ -2738,7 +2741,7 @@ pub const Session = struct {
         self.unlock();
         if (cancelled) return .cancelled;
         const capability = input orelse return .unavailable;
-        var draft = mcp_install.proposal(capability.allocator, bytes) catch |err| return if (err == error.OutOfMemory) .unavailable else .invalid_arguments;
+        var draft = mcp_install.decode(capability.allocator, bytes) catch |err| return if (err == error.OutOfMemory) .unavailable else .invalid_arguments;
         var moved = false;
         defer if (!moved) draft.deinit();
         self.lock();
@@ -2748,7 +2751,7 @@ pub const Session = struct {
         }
         const result = capability.try_put_fn(capability.context, capability.task_id, run_id, generation, draft);
         self.unlock();
-        if (result == .proposal_submitted) {
+        if (result == .submitted) {
             moved = true;
             capability.wake_fn(capability.context);
         }

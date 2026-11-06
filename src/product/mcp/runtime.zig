@@ -171,8 +171,10 @@ pub const Runtime = struct {
     /// through Runtime typed operations; direct access is test-seam only.
     state: state_module.McpProductState,
     installation_mailbox: installation.Mailbox,
-    installation_proposal: ?installation.Payload = null,
+    installation_request: ?installation.Payload = null,
     installation_notice: bool = false,
+    installation_notice_task: u64 = 0,
+    installation_notice_run: u64 = 0,
     refresh_job: ?*refresh_job.Job = null,
     runtime_auth_delivery_pending: bool = false,
     shutting_down: bool = false,
@@ -205,7 +207,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
-        if (self.installation_proposal) |*value| value.deinit();
+        if (self.installation_request) |*value| value.deinit();
         self.installation_mailbox.deinit();
         std.debug.assert(self.refresh_job == null);
         self.ports.timer.cancel();
@@ -520,6 +522,12 @@ pub const Runtime = struct {
                     if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
                     return;
                 }
+                return error.McpManagementUnavailable;
+            },
+            .installation_credential => |name| {
+                const operation = server.installation orelse return error.McpManagementUnavailable;
+                if (operation.phase != .needs_credentials) return error.McpManagementUnavailable;
+                for (operation.credentials) |slot| if (slot.manual and std.mem.eql(u8, slot.name, name)) return;
                 return error.McpManagementUnavailable;
             },
             .oauth_client_secret => {
@@ -1030,21 +1038,25 @@ pub const Runtime = struct {
     }
     pub fn takeInstallation(self: *Runtime, io: std.Io) bool {
         const incoming = self.installation_mailbox.take(io) orelse return false;
-        std.debug.assert(self.installation_proposal == null);
-        self.installation_proposal = incoming;
+        std.debug.assert(self.installation_request == null);
+        self.installation_request = incoming;
         self.installation_notice = false;
         self.markChanged();
         return true;
     }
     pub fn pendingInstallation(self: *const Runtime) ?struct { id: u64, task_id: u64, run_id: u64, json: []const u8 } {
-        const value = self.installation_proposal orelse return null;
+        const value = self.installation_request orelse return null;
         return .{ .id = value.id, .task_id = value.task_id, .run_id = value.run_id, .json = value.draft.json };
     }
     pub fn dismissInstallation(self: *Runtime, io: std.Io, id: u64, rejected: bool) bool {
-        const value = if (self.installation_proposal) |*value| value else return false;
+        const value = if (self.installation_request) |*value| value else return false;
         if (id == 0 or value.id != id) return false;
+        if (rejected) {
+            self.installation_notice_task = value.task_id;
+            self.installation_notice_run = value.run_id;
+        }
         value.deinit();
-        self.installation_proposal = null;
+        self.installation_request = null;
         _ = self.installation_mailbox.release(io, id);
         self.installation_notice = rejected;
         self.markChanged();
@@ -1052,8 +1064,8 @@ pub const Runtime = struct {
     }
     pub fn closeInstallation(self: *Runtime, io: std.Io) void {
         self.installation_mailbox.close(io);
-        if (self.installation_proposal) |*value| value.deinit();
-        self.installation_proposal = null;
+        if (self.installation_request) |*value| value.deinit();
+        self.installation_request = null;
         self.installation_notice = false;
     }
     pub fn dismissInstallationNotice(self: *Runtime) bool {
@@ -1062,14 +1074,34 @@ pub const Runtime = struct {
         self.markChanged();
         return true;
     }
-    pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer) ViewError!void {
-        writer.writeAll("{\"proposal\":") catch return error.SnapshotTooLarge;
-        if (self.installation_proposal) |value| {
-            writer.print("{{\"id\":\"{d}\",\"taskId\":\"{d}\",\"runId\":\"{d}\",\"draft\":", .{ value.id, value.task_id, value.run_id }) catch return error.SnapshotTooLarge;
-            writer.writeAll(value.draft.json) catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(if (self.installation_notice) ",\"notice\":\"proposal_rejected\"}" else ",\"notice\":null}") catch return error.SnapshotTooLarge;
+    pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer, text: TextProjection) ViewError!void {
+        writer.writeAll("{\"operations\":[") catch return error.SnapshotTooLarge;
+        var count: usize = 0;
+        if (self.state.management) |*management| if (management.desiredRegistry()) |registry| for (registry.servers) |server| {
+            const operation = server.installation orelse continue;
+            if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            count += 1;
+            const phase: []const u8 = if (operation.stop_pending) "cancelling" else @tagName(operation.phase);
+            writer.print("{{\"serverId\":\"{s}\",\"taskId\":\"{d}\",\"runId\":\"{d}\",\"revision\":\"{d}\",\"desiredGeneration\":\"{d}\",\"displayName\":", .{ server.id, operation.task_id, operation.run_id, operation.revision, registry.generation }) catch return error.SnapshotTooLarge;
+            try text.write_json_fn(text.context, writer, server.display_name);
+            writer.print(",\"phase\":\"{s}\",\"failure\":", .{phase}) catch return error.SnapshotTooLarge;
+            if (operation.failure) |failure| writer.print("\"{s}\"", .{@tagName(failure)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"sourceOrigin\":") catch return error.SnapshotTooLarge;
+            try text.write_json_fn(text.context, writer, operation.source_origin);
+            writer.writeAll(",\"targetOrigin\":") catch return error.SnapshotTooLarge;
+            if (server.transport.sensitive_endpoint) |endpoint| try text.write_json_fn(text.context, writer, endpoint.origin) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"canCancel\":{},\"missingCredentials\":[", .{operation.phase.active()}) catch return error.SnapshotTooLarge;
+            var missing: usize = 0;
+            for (operation.credentials) |slot| if (slot.manual and slot.credential_ref == null) {
+                if (missing != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                missing += 1;
+                try text.write_json_fn(text.context, writer, slot.name);
+            };
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        };
+        writer.writeAll("],\"notice\":") catch return error.SnapshotTooLarge;
+        if (self.installation_notice) writer.print("{{\"taskId\":\"{d}\",\"runId\":\"{d}\"}}", .{ self.installation_notice_task, self.installation_notice_run }) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
     pub fn observeProcess(self: *Runtime, observation: configuration.ProcessObservation) Error!bool {
@@ -1125,6 +1157,23 @@ pub const Runtime = struct {
         return .{ .outcome = outcome, .server_id = if (outcome == .saved or outcome == .saved_recovery_required) id else null };
     }
 
+    pub fn captureInstallationCredential(self: *Runtime, generation: u64, server_id: []const u8, name: []const u8, manual: bool, secret: []u8) Error!configuration.ManagementOutcome {
+        defer std.crypto.secureZero(u8, secret);
+        const management = self.mutableManagement(generation, server_id) orelse return self.generationOutcome(generation);
+        var preparation = try management.prepareCaptureInstallationCredential(generation, server_id, name, manual, secret);
+        return self.commitPreparedMutation(&preparation);
+    }
+
+    pub fn installationConnectionFailed(self: *const Runtime, server_id: []const u8) bool {
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        const manifest = management.runtime_manifest orelse return false;
+        if (manifest.targetFor(server_id, registry, management.limits)) |target| for (management.convergence.results.items) |result| {
+            if (std.mem.eql(u8, result.target.id(), server_id) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint) and result.outcome != .pending and result.outcome != .waiting_auth) return true;
+        };
+        return false;
+    }
+
     pub fn updateInstallation(self: *Runtime, expected_generation: u64, input: configuration.InstallationUpdate) Error!configuration.ManagementOutcome {
         const management = self.mutableManagement(expected_generation, null) orelse return self.generationOutcome(expected_generation);
         var preparation = try management.prepareInstallationUpdate(expected_generation, input);
@@ -1138,6 +1187,13 @@ pub const Runtime = struct {
 
     pub fn cancelInstallation(self: *Runtime, server_id: []const u8, revision: u64) Error!configuration.ManagementOutcome {
         const management = if (self.state.management) |*value| value else return .rejected;
+        if (management.desiredRegistry()) |registry| if (state_module.findMcpServer(registry.servers, server_id)) |server| if (server.installation) |operation| {
+            if (operation.phase == .cancelled) {
+                if (operation.stop_pending and !self.catalogBoundaryBusy() and self.state.authorization_operation == null)
+                    return self.setServerEnabled(registry.generation, .{ .server_id = server_id, .enabled = false });
+                return .unchanged;
+            }
+        };
         var prepared = switch (try management.prepareInstallationCancellation(server_id, revision)) {
             .rejected => return .rejected,
             .prepared => |value| value,

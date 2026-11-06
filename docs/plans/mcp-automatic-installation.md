@@ -1,6 +1,6 @@
 # MCP 通用自动配置方案
 
-日期：2026-11-06。状态：方向评审通过，已整理复盘与后续评审补充项；未实施。具体机制仍须由代码和验证兑现，最终真实服务与模型行为由用户验收。
+日期：2026-11-06。状态：实施与评审修复中，具体机制和验证以工作区代码与结果为准；最终真实服务与模型行为由用户验收。
 
 ## 1 目标与问题归属
 
@@ -62,7 +62,7 @@ Agent 理解不同网站的自然语言与配置说明；MCP 模块消费统一�
 
 | Owner                         | 本次职责                                                                                                                         |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Agent                         | 注册工具、严格解码、验证 RunContext、接收无秘密结果、维护可取消的 callback wait；不持有 Product 状态或执行系统 credential effect |
+| Agent                         | 注册工具、严格解码、验证 RunContext、接收无秘密结果、立即返回接纳事实；不持有 Product 状态或执行系统 credential effect |
 | Product MCP / Product Control | 安装 operation、授权和目标身份、事务与恢复、敏感字段语义、工具集合和新 Task authority                                            |
 | Application                   | 有界凭据 HTTP 获取、系统 credential storage、进程与连接 effect、OAuth 和 coordinator；只执行 Product 已批准的目标                |
 | Renderer / Bridge             | 状态投影、必要的安全输入与人工权限操作；不解释网页、不建立另一条安装协议                                                         |
@@ -73,17 +73,17 @@ Agent 理解不同网站的自然语言与配置说明；MCP 模块消费统一�
 
 安装请求包含显示名、安装来源、完整 typed transport、认证计划和本次目标。认证计划仅包含公开的取值规则、模板或待填槽，不接收 secret value、credential locator、工具 allowlist 或模型声称的“用户已批准”。来源与 Task/Run 身份由 Host 验证，不信任模型提供身份。初始输入及 owned 编码沿用 32 KiB 工具预算，字段预算复用现有连接和 credential limits。
 
-新建接纳后返回 Host 生成的稳定 `installationId`；修正或重试必须携带该 id 与 `expectedRevision`，更新已关联的 `serverId`，不重新创建。对既有独立服务的更新必须指定精确 `serverId`，证明用户意图并校验 generation，不按显示名或域名猜测替换对象。
+接纳后工具立即返回 `in_progress` 与进程内 requestId；它不代表已保存、连接或完成，也不是 server identity。竞争时返回 busy，未接纳不执行 effect。最终事实由 Task/MCP 页直接投影 serverId、revision、阶段和分类原因，不经模型轮询。
 
-结果是结构化、无秘密的 `installationId`、可选 `serverId`、revision、phase、稳定 reason、恢复动作及新 Task 可用事实。具体阶段为 `preparing | needs_input | needs_authorization | connecting | discovering | authorizing_tools | ready | no_tools | failed | interrupted | cancelled`。`needs_*` 是等待条件，不伪装成失败；`in_progress` 只作为工具等待到期的响应，不作为持久终态。
+需要修正失败请求时，Agent 在同一 Task 提交相同完整 sourceUrl；Host 在凭据 owner 内解码原始请求，匹配唯一失败/取消目标并保留 server identity。多个匹配拒绝，不能按名称或域名猜测。已知 serverId 时可显式指定；跨 Task 修改独立服务必须提供精确目标和新的有效用户意图。
 
-工具结果只返回当前 operation 的安全事实，不返回原始响应、秘密、完整敏感 URL 或内部 credential 引用。等待超时后普通进度由 Product 投影直接更新，不通过再次调用安装工具查询，也不新增 Product 对某个 Host tool 自动放行的机制。用户明确修正或重试时，原安装 id 只是精确目标引用，不构成新的执行 authority。
+持久阶段和严格 wire 枚举由 Product 类型与 Bridge schema 唯一拥有；`in_progress` 只是交接响应，不作为安装终态。响应与投影均不回显秘密、原始响应或内部 credential 引用。
 
 ### 4.2 接纳与重复请求
 
 沿用现有单槽交接及 MCP mutation/apply 串行 owner，不另建调度框架。callback 非阻塞提交 owned 请求；竞争或未接纳时返回 `busy`，不产生 effect。已接纳 operation 的内存和持久状态不由 callback 生命周期拥有；来源 Run 正常结束时可继续，主动 Stop 则按第 7.3 节取消。主线程只做状态与事务推进，网络和存储 effect 在既有 worker 边界执行。
 
-同一 Run 中重入的相同初始请求复用 Host 保存的接纳记录和安装 id，不重复创建或再次取凭据；不同内容不能借此取得原批准。这个去重只限定同一可信 Task/Run 和完整请求，不把名称或地址相似视为同一个请求。跨 Run 修复使用精确安装 id；跨重启使用已持久记录，不声称 SDK 的 RunContext 提供了实际不存在的 tool-call id。
+单槽在接管后的安装结算前保持占用，重复提交返回 busy，不再次获取凭据或创建目标。结算后明确的失败修正按同一 Task 的唯一来源目标原地更新。跨重启从已持久记录恢复，不声称 SDK RunContext 提供实际不存在的 tool-call id。
 
 ## 5 凭据与敏感 endpoint
 
@@ -115,7 +115,7 @@ Application 仅为当前已批准安装执行 HTTPS 获取；不携带 Account/�
 
 ### 5.3 用户提供与安全引用
 
-缺少自动获取方式时，先建立有身份且无运行资格的安装目标，再发布绑定 `installationId + serverId + revision + slot` 的安全输入请求。password 表单经专用 typed command 交给 Host，复用 credential journal；输入只在本地有界生命周期存在，不通过 tool result 或普通 Task 消息转发。
+缺少自动获取方式时，先建立有身份且无运行资格的安装目标，再发布绑定 `serverId + revision + desiredGeneration + slot` 的安全输入请求。password 表单经专用 typed command 交给 Host，复用 credential journal；输入只在本地有界生命周期存在，不通过 tool result 或普通 Task 消息转发。
 
 已有秘密只可沿 Host 验证过的同一目标和槽保留；不允许 Agent 任意枚举 credential store、传入系统 locator 或借另一服务的凭据。安全输入请求取消、目标变化、外部编辑、断连或结果未知时清空未提交内容，不从 snapshot 自动重放。
 
@@ -157,7 +157,7 @@ Product MCP 持有有界安装记录，使用同一 registry 事务表达 server
 
 ### 6.3 失败、修正和并发
 
-安装失败保留同一 server 和具体原因，作为等待显式修正的状态，不让失败目标在每次无关 mutation 中重新连接。修正沿 `installationId + expectedRevision` 更新并重新批准实际改变的目标；结果未知先读取恢复，不重复 create，不按名称去重，不回滚覆盖用户后来的修改。
+安装失败保留同一 server 和具体原因，作为等待显式修正的状态，不让失败目标在每次无关 mutation 中重新连接。显式修复按第 4.1 节绑定原目标，Host 在当前 generation 和 operation revision 下提交更新并重新批准实际改变的目标；结果未知先读取恢复，不重复 create，不按名称去重，不回滚覆盖用户后来的修改。
 
 同目标的迟到凭据、apply、discovery 或授权 completion 必须核对目标 revision/source identity。外部编辑或 Delete 使旧 completion 失效；与其他成员的无关变更不应丢失已确认安装结果，也不借最新全局 generation 盲目重试。继续由现有 MCP owner 串行化 mutation/apply/OAuth，普通 Text Task 不因此被全局阻塞。
 
@@ -165,31 +165,25 @@ Product MCP 持有有界安装记录，使用同一 registry 事务表达 server
 
 ## 7 等待、停止与 shutdown
 
-### 7.1 两种 deadline
+### 7.1 非阻塞交接与安装 deadline
 
-一次 `InstallMcpServer` 调用默认最多等待 10 秒，绝对 deadline 不因进度或唤醒重置。若已达到终态或需要用户输入/授权，直接返回相应事实；否则超时返回 `in_progress` 和当前已接纳 id，不把正在进行的安装判为失败，也不重新提交安装。
+`InstallMcpServer` callback 只做有界非阻塞交接，立即返回 `in_progress` 和 requestId，不引入 10 秒观察等待。Agent 只能报告已提交，不能据此报告安装成功；后续结果由 Task/MCP 状态卡直接更新，不启动新 Agent Run，也不为普通进度触发审批模型或要求点击。模型正文旧消息不自动改写。
 
-返回 `in_progress` 后，Agent 如实报告正在配置并结束当前安装步骤，不调用查询工具或重复调用安装工具来等结果。Run 正常结束时 MCP owner 继续推进，Task 卡片与 MCP 页面自动呈现终态，不自动启动一个 Agent Run，也不为普通进度发起新的工具审批或审批模型请求。模型正文的旧“进行中”消息不自动改写，卡片显示最新真实状态。
-
-安装自身使用独立的阶段预算：首次 STDIO 启动到首次握手允许最多 180 秒，以涵盖 npx/uvx 冷缓存；HTTP 和后续目录请求沿现有连接管理有效上限，所有执行阶段共享最多 300 秒总执行预算。等待用户输入/OAuth 不占用 callback 或执行 worker，也不消耗该执行预算；恢复时重验资格，以剩余额度建立阶段绝对 deadline，不把总额度重置为 300 秒。进入新阶段或重复唤醒都不能无限续期。工具等待 deadline 与安装执行 deadline 独立。
+安装自身使用独立的阶段预算：首次 STDIO 启动到首次握手允许最多 180 秒，以涵盖 npx/uvx 冷缓存；HTTP 和后续目录请求沿现有连接管理有效上限，所有执行阶段共享最多 300 秒总执行预算。等待用户输入、OAuth consent 和浏览器 callback 不占用执行 worker，也不消耗该执行预算；OAuth discovery、registration 和 exchange 网络工作仍计入预算；恢复时重验资格，以剩余额度建立阶段绝对 deadline，不把总额度重置为 300 秒。进入新阶段或重复唤醒都不能无限续期。callback 无安装等待，安装执行 deadline 由 Host 独立拥有。
 
 180 秒不能只写在外层 timer：当前 `max_management_timeout_ms` 为 120 秒，默认 descriptor/request timeout 为 30 秒。实施须贯通 Product 的安装阶段预算、AgentCore descriptor 和实际请求/取消 deadline、`mcp_catalog_budget.zig` 的 `open/request`、底层进程/transport 与 candidate 总预算，使首次启动不会先被内部 30/120 秒截断。正式 Runtime 一次新成员安装与隔离 Test 的预算不能混用；安装完成后解除首次启动预算。
 
 现有普通管理上限和普通工具调用的 timeout 不整体放宽。以明确的安装阶段 scope 提供所需预算，`toolRequest` 继续原样使用该请求配置，不继承候选安装剩余时间。若 Core 自身先于 Host 到期，必须通过 canonical public 配置支持正确预算，不能仅延长 wrapper 等待冒充修复。预算由 Product MCP contract 唯一定义并投影，测试直接观察实际传入值和冷启动行为。
 
-### 7.2 独立等待对象
+### 7.2 取消关联与关闭
 
-callback 只持有引用计数的安全 operation observation 和本 Run 的 cancellation token，不持有主线程对象、Session mutex、管理锁、credential 副本或等待期间的 catalog lease。每个等待对象有自己的 mutex/condition，关闭标志与 revision 都在同一锁内检查，等待前后重验，避免丢唤醒。
+Product 保留来源 Task/Run 到未完成安装的取消关联，寿命不依赖 callback。callback 已返回但来源 Run 仍在运行时，主动 Stop 仍取消关联安装；Run 正常结束不取消。入口关闭立即拒绝后续提交，未取请求按 owned 生命周期释放；worker 只持 owned 请求与窄 capability，不持 Session 裸指针。
 
-Product MCP 保留来源 Task/Run 到未完成 operation 的取消关联和独立 token，寿命延续到安装结算，不随 10 秒 callback 返回而释放。Host 停止入口按可信来源身份直接设置该 token，Agent termination 路径也可通过冻结 capability 传递已验证的终止原因；两者作用于同一取消事实，不保留裸 Session 指针。这样 callback 已返回但来源 Run 仍在运行时，用户 Stop 仍能取消安装；Run 正常结束则仅释放其运行期引用，不取消 operation。
-
-三个事件可直接结束等待：结果到达、本 Run termination、安装入口 shutdown。阶段变化可以更新 observation，但不延长等待。三个结束事件都必须能从当前执行线程设置 sticky flag 并 broadcast，不依赖主线程 drain 或 UI 回答。实现时在 Agent 的统一 Run termination 路径和 Host ingress close 中接入该唤醒；有限 deadline 是最后界限，不能替代主动唤醒。是否取消安装依据可信的 termination reason 判断，不能把所有 callback 释放或 Run 结束都当成用户 Stop。
-
-锁序固定：不在 Session 锁内取得 operation wait 锁或调用 Product；取消先记录状态、释放 Session 锁，再通知 waiter。主线程写入安全 observation 后释放锁再唤醒。关闭入口先同步标记关闭并解除所有 waiter，再 join apply/executor，最后释放 operation owner。callback/result 由现有 paired release 恰好一次释放。
+不存在 callback 等主线程或安装 worker 的等待环。关闭时先关闭入口并标记取消，再 settle/join effect，最后释放 MCP/Agent owner；callback/result 沿现有 paired release 恰好释放一次。
 
 ### 7.3 Stop 的含义
 
-Run 正常完成与主动 Stop 明确区分：正常结束不撤销已经接纳的安装；用户主动 Stop 立即对该来源 Run 关联的未完成安装设置 cancellation fence，解除 callback 等待、阻止尚未开始的获取/启动/连接/工具授权，并请求取消在途工作。不能把“已接纳”当作忽略用户 Stop 的理由，也不要求用户再点一次取消卡片。
+Run 正常完成与主动 Stop 明确区分：正常结束不撤销已经接纳的安装；用户主动 Stop 立即对该来源 Run 关联的未完成安装设置 cancellation fence，阻止尚未开始的获取/启动/连接/工具授权，并请求取消在途工作。不能把“已接纳”当作忽略用户 Stop 的理由，也不要求用户再点一次取消卡片。
 
 每个阶段在 effect 前与 cancellation fence 同步检查，并明确阶段接管的线性化点。Stop 先于接管时不得执行该阶段；接管先于 Stop 时取消在途工作并按真实结果结算，不声称远端请求、已完成的磁盘提交或已执行命令被回滚。取消信号应在 worker/transport 中直接生效，不等待主线程才阻断后续工作；持久状态由 Product 主线程按同一取消事实结算。
 
@@ -197,11 +191,11 @@ Run 正常完成与主动 Stop 明确区分：正常结束不撤销已经接纳�
 
 来源 Run 已正常结束后，状态卡仍提供精确安装 id 的“取消安装”，采用相同 cancellation fence 与持久语义。Task 删除、服务 Delete 同样阻止后续安装阶段；等待安全输入或授权的请求立即失效，迟到提交不得继续安装。停止结果只有在持久状态确认后才报告 `cancelled`；写失败或结果未知显示待恢复，不宣称取消已保存，也不重试已经停止的 effect。
 
-Application shutdown 与用户主动取消不同：先关闭入口并唤醒 callback，再取消/join 当前进程工作，重启按第 6 节及持久停止事实恢复。测试须分别覆盖正常结束、主动 Stop、卡片取消、Task 删除和 shutdown，并证明主线程故意不 drain 时 callback 仍能退出、未接管的阶段不会启动，而不仅是测 10 秒后自然超时。
+Application shutdown 与用户主动取消不同：先关闭入口，再取消/join 当前进程工作，重启按第 6 节及持久停止事实恢复。测试须分别覆盖正常结束、主动 Stop、卡片取消、Task 删除和 shutdown，并证明主线程故意不 drain 时 callback 仍能退出、未接管的阶段不会启动，而不是依靠安装超时退出。
 
 ## 8 Agent 行为与通用安装范围
 
-工具说明同步改成正式安装语义：先理解网页，形成结构化请求，把秘密获取交给 Host；根据 operation 的事实报告，不把“已接纳”说成“已安装”。10 秒后未完成时由卡片承接状态，不增加 Agent 查询循环。需要用户明确修复时携带原 id，不查找 Codex、Claude 或 MetaWork 私有文件，也不声称当前 Task 已取得新工具。外部安装页要求“先征求同意”只是参考说明，不能自行增加产品确认步骤或生成授权；实际意图依据同一 Task 的有效用户指令判断。
+工具说明同步改成正式安装语义：先理解网页，形成结构化请求，把秘密获取交给 Host；根据 operation 的事实报告，不把“已接纳”说成“已安装”。提交后由卡片承接最终状态，不增加 Agent 查询循环。需要用户明确修复时提交同一来源，Host 绑定唯一失败目标，不查找 Codex、Claude 或 MetaWork 私有文件，也不声称当前 Task 已取得新工具。外部安装页要求“先征求同意”只是参考说明，不能自行增加产品确认步骤或生成授权；实际意图依据同一 Task 的有效用户指令判断。
 
 这是直接服务安装链路的工具合同和可信权限上下文，不另建意图识别模型或按域名拦 Bash 的规则。任意通用工具中未知秘密的检测和通用规划能力不因本次新增工具就被宣称解决。
 
@@ -245,7 +239,7 @@ registry 在现有 schema 2 基础上增加 endpoint 安全表达与安装恢复
 
 | 场景                                                                  | 必须观察的结果                                                                    |
 | --------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| 安装超过 10 秒，分别使用人工和自动审批                                | 安装工具只调用一次；状态卡继续变化；没有进度查询审批或额外审批模型调用            |
+| 安装持续进行，分别使用人工和自动审批                                | 安装工具只调用一次；状态卡继续变化；没有进度查询审批或额外审批模型调用            |
 | 链接在 Run 1、确认在 Run 3；旧允许后有取消；多个安装链接              | 正确关联同一次安装，后续取消生效，歧义不自动选目标；不把网页或 Assistant 当作授权 |
 | full_access 下跨站且无精确人工授权；授权后目标变更                    | 进入 needs_authorization，授权前不取/传凭据，旧决定不能批准新目标                 |
 | Stop 分别先于取凭据、spawn、apply、工具授权接管，及各自接管之后       | 前者没有 effect；后者取消并如实结算，不再启动下一阶段                             |

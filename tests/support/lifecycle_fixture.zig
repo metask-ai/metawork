@@ -1149,7 +1149,7 @@ pub fn sessionCreate(
                 host.allowed_tool_count == 13 and
                 std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage") and
                 std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[11]) catch "", "DeliverFile") and
-                std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[12]) catch "", "ProposeMcpServer");
+                std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[12]) catch "", "InstallMcpServer");
             recordAllowedTools(
                 host,
                 &fake_core.last_allowed_tool_count,

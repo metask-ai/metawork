@@ -91,6 +91,10 @@ const HttpFixture = struct {
     }
 
     fn startWithBearer(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32, bearer: []const u8) !HttpFixture {
+        return startForInstallation(protocol_version, framing, trace_path, ttl_ms, result_kind, gate_path, delay_ms, bearer, "", "", "");
+    }
+
+    fn startForInstallation(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32, bearer: []const u8, query: []const u8, request_file: []const u8, empty_catalog_file: []const u8) !HttpFixture {
         var delay_storage: [32]u8 = undefined;
         const delay = try std.fmt.bufPrint(&delay_storage, "{d}", .{delay_ms});
         var ttl_storage: [32]u8 = undefined;
@@ -116,6 +120,12 @@ const HttpFixture = struct {
             delay,
             "--expected-bearer",
             bearer,
+            "--expected-query",
+            query,
+            "--install-request-file",
+            request_file,
+            "--empty-catalog-file",
+            empty_catalog_file,
         };
         var child = try std.process.spawn(std.testing.io, .{
             .argv = &arguments,
@@ -3543,7 +3553,7 @@ const TaskSwitchVault = struct {
 };
 
 fn configureTaskSwitchProvider(control: *product_control.Runtime, endpoint: []const u8, name: []const u8, protocol: models_contract.Protocol) !product_control.NewTaskModelSelectionInput {
-    const model = if (std.mem.eql(u8, name, "source-model")) "gpt-4o" else "gpt-4o-mini";
+    const model = if (std.mem.eql(u8, name, "install-model")) "install-model" else if (std.mem.eql(u8, name, "source-model")) "gpt-4o" else "gpt-4o-mini";
     const root = endpoint[0 .. endpoint.len - "/v1/messages".len];
     const address = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}", .{ root, switch (protocol) {
         .anthropic_messages => "/v1/messages",
@@ -4337,4 +4347,343 @@ test "real Core connects a restored expired grant only with committed new bearer
     try std.testing.expect(std.mem.indexOf(u8, trace, "\"method\":\"tools/list\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "new-access-token") == null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "expired-access-token") == null);
+}
+
+const InstallationVault = struct {
+    const native = @import("native_sdk");
+    values: std.StringHashMap([]u8),
+    fn deinit(self: *@This()) void {
+        var iterator = self.values.iterator();
+        while (iterator.next()) |entry| {
+            self.values.allocator.free(entry.key_ptr.*);
+            std.crypto.secureZero(u8, entry.value_ptr.*);
+            self.values.allocator.free(entry.value_ptr.*);
+        }
+        self.values.deinit();
+    }
+    fn set(raw: ?*anyopaque, credential: native.platform.Credential) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        const entry = try self.values.getOrPut(credential.account);
+        if (entry.found_existing) {
+            std.crypto.secureZero(u8, entry.value_ptr.*);
+            self.values.allocator.free(entry.value_ptr.*);
+        } else entry.key_ptr.* = try self.values.allocator.dupe(u8, credential.account);
+        entry.value_ptr.* = try self.values.allocator.dupe(u8, credential.secret);
+    }
+    fn get(raw: ?*anyopaque, key: native.platform.CredentialKey, buffer: []u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        const value = self.values.get(key.account) orelse return error.CredentialNotFound;
+        if (value.len > buffer.len) return error.NoSpaceLeft;
+        @memcpy(buffer[0..value.len], value);
+        return buffer[0..value.len];
+    }
+    fn delete(raw: ?*anyopaque, key: native.platform.CredentialKey) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        const removed = self.values.fetchRemove(key.account) orelse return error.CredentialNotFound;
+        self.values.allocator.free(removed.key);
+        std.crypto.secureZero(u8, removed.value);
+        self.values.allocator.free(removed.value);
+    }
+};
+const InstallationTestHost = struct {
+    woken: std.atomic.Value(bool) = .init(true),
+    refuse: bool = false,
+    completion: ?*const product_control.NativeDialog.Completion = null,
+    token: u64 = 0,
+    confirmations: usize = 0,
+    fetches: std.atomic.Value(usize) = .init(0),
+    fn request(raw: *anyopaque, token: u64, _: product_control.NativeDialog.Message, completion: *const product_control.NativeDialog.Completion) !u64 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        try std.testing.expectEqual(@as(usize, 0), self.fetches.load(.acquire));
+        self.completion = completion;
+        self.token = token;
+        self.confirmations += 1;
+        return token;
+    }
+    fn open(_: *anyopaque, _: []const u8) bool {
+        return false;
+    }
+    fn now(_: *anyopaque) ?u64 {
+        return 1000;
+    }
+    fn notify(raw: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.woken.store(true, .release);
+    }
+    fn takeWake(self: *@This()) bool {
+        return self.woken.swap(false, .acq_rel);
+    }
+    fn productNotify(raw: ?*anyopaque) bool {
+        notify(raw.?);
+        return true;
+    }
+    fn fetch(raw: ?*anyopaque, request_value: @import("mcp_management_coordinator").InstallationTestTransportRequest, _: []u8, _: []u8) @import("mcp_management_coordinator").InstallationTestFetchError!@import("mcp_management_coordinator").InstallationTestTransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        if (std.mem.eql(u8, request_value.url, "https://mcp.example.test/mcp")) return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"https://mcp.example.test/oauth-resource\"" };
+        if (std.mem.eql(u8, request_value.url, "https://mcp.example.test/oauth-resource")) return .{ .status = 200, .content_type = "application/json", .body = "{\"resource\":\"https://mcp.example.test/mcp\",\"authorization_servers\":[\"https://auth.example.test\"]}" };
+        if (std.mem.eql(u8, request_value.url, "https://auth.example.test/.well-known/oauth-authorization-server")) return .{ .status = 200, .content_type = "application/json", .body = "{\"issuer\":\"https://auth.example.test\",\"authorization_endpoint\":\"https://auth.example.test/authorize\",\"token_endpoint\":\"https://auth.example.test/token\",\"registration_endpoint\":\"https://auth.example.test/register\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\",\"refresh_token\"],\"code_challenge_methods_supported\":[\"S256\"],\"token_endpoint_auth_methods_supported\":[\"none\"]}" };
+        if (!std.mem.eql(u8, request_value.url, "https://credentials.example/key")) return error.InvalidResponse;
+        _ = self.fetches.fetchAdd(1, .release);
+        return .{ .status = 200, .content_type = "application/json", .body = "{\"data\":{\"key\":\"mcp-static-fixture-secret\"}}" };
+    }
+    fn approve(self: *@This()) void {
+        if (self.completion) |completion| {
+            self.completion = null;
+            completion.result_fn(completion.context, self.token, .{ .button = if (self.refuse) .secondary else .primary });
+        }
+    }
+};
+
+const AutomaticInstallationCase = enum { public_http, failed_retry, no_tools_retry, catalog_refresh, manual_credential, oauth_cancel, credential_template, stdio_environment };
+fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    const trace = try std.fmt.allocPrint(a, "{s}/installation.jsonl", .{root});
+    defer a.free(trace);
+    const request_file = try std.fmt.allocPrint(a, "{s}/install-request.json", .{root});
+    defer a.free(request_file);
+    const empty_catalog_file = try std.fmt.allocPrint(a, "{s}/catalog.empty", .{root});
+    defer a.free(empty_catalog_file);
+    if (mode == .no_tools_retry) try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "catalog.empty", .data = "empty" });
+    const refresh_gate = try std.fmt.allocPrint(a, "{s}/refresh", .{root});
+    defer a.free(refresh_gate);
+    var fixture = try HttpFixture.startForInstallation("2026-07-28", "json", trace, 60_000, "text", if (mode == .catalog_refresh) refresh_gate else "", 0, "", if (mode == .credential_template or mode == .manual_credential) "mcp-static-fixture-secret" else "", request_file, empty_catalog_file);
+    defer fixture.deinit();
+    const source_url = try std.fmt.allocPrint(a, "{s}#agent-install", .{fixture.endpoint});
+    defer a.free(source_url);
+    const template = try std.fmt.allocPrint(a, "{s}?api_key={{credential:token}}", .{fixture.endpoint});
+    defer a.free(template);
+    const invalid_endpoint = try std.fmt.allocPrint(a, "{s}/missing", .{fixture.endpoint});
+    defer a.free(invalid_endpoint);
+    const json = switch (mode) {
+        .public_http, .failed_retry, .no_tools_retry, .catalog_refresh => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic HTTP", .transport = "streamable_http", .endpoint = if (mode == .failed_retry) invalid_endpoint else fixture.endpoint, .authMode = "none" } }, .{}),
+        .manual_credential => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Manual credential", .transport = "streamable_http", .endpoint = template, .authMode = "none" }, .credentials = .{.{ .slot = "token", .kind = "user_input", .target = "endpoint" }} }, .{}),
+        .oauth_cancel => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic OAuth", .transport = "streamable_http", .endpoint = "https://mcp.example.test/mcp", .authMode = "oauth" } }, .{}),
+        .credential_template => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic template", .transport = "streamable_http", .endpoint = template, .authMode = "none" }, .credentials = .{.{ .slot = "token", .kind = "http_json", .url = "https://credentials.example/key", .jsonPointer = "/data/key", .target = "endpoint" }} }, .{}),
+        .stdio_environment => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic STDIO", .transport = "stdio", .command = options.node_path, .arguments = .{ options.fixture_path, "--protocol", "2026-07-28", "--trace", trace, "--require-env" }, .authMode = "static", .environmentNames = .{"MCP_FIXTURE_TOKEN"} }, .credentials = .{.{ .slot = "token", .kind = "http_json", .url = "https://credentials.example/key", .jsonPointer = "/data/key", .target = "environment", .name = "MCP_FIXTURE_TOKEN" }} }, .{}),
+    };
+    defer a.free(json);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install-request.json", .data = json });
+    const native = @import("native_sdk");
+    const native_runtime = try a.create(native.Runtime);
+    defer a.destroy(native_runtime);
+    var credential_vault: InstallationVault = .{ .values = std.StringHashMap([]u8).init(a) };
+    defer credential_vault.deinit();
+    native_runtime.options.platform.services = .{ .context = &credential_vault, .set_credential_fn = InstallationVault.set, .get_credential_fn = InstallationVault.get, .delete_credential_fn = InstallationVault.delete };
+    var credentials: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = native_runtime, .main_thread_id = std.Thread.getCurrentId() };
+    var preparation = try mcp_configuration.prepare(a, null, true, false, credentials.resolver(), product_mcp_limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(a, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const bytes = try a.alloc(u8, mcp_configuration.max_store_bytes);
+    defer a.free(bytes);
+    var durable: DurableRegistry = .{ .storage = bytes };
+    const runtime = try agent.Runtime.init(std.testing.io, a, .{ .max_sessions = 4 });
+    var runtime_owned = true;
+    defer if (runtime_owned) {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    };
+    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
+    defer budget.release();
+    var configuration = managementConfiguration(&durable, &manifest);
+    configuration.credentials = credentials.effects();
+    configuration.locator_generator = credentials.locatorGenerator();
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, root);
+    defer checkpoints.deinit();
+    var history = try product_task.history.FileStore.init(std.testing.io, root);
+    defer history.deinit();
+    var typed_history: TaskSwitchHistory = .{ .file_store = &history };
+    defer typed_history.deinit();
+    var enablement = try product_skill.enablement.FileStore.init(std.testing.io, root);
+    defer enablement.deinit();
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .directories = .{ .canonical_user_home = root }, .task_persistence = typed_history.capability(), .checkpoint_store = .{ .file_store = &checkpoints }, .skill_enablement = .{ .file_store = &enablement }, .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .mcp = .{ .preparation = &preparation, .management = configuration } });
+    runtime_owned = false;
+    preparation_owned = false;
+    manifest_owned = false;
+    defer shutdownProduct(&control, runtime);
+    var model_vault: TaskSwitchVault = .{};
+    defer for (&model_vault.keys) |*key| std.crypto.secureZero(u8, key);
+    try control.startCustomProviders(root, model_vault.port());
+    defer control.stopCustomProviders();
+    const install_model = try configureTaskSwitchProvider(&control, fixture.provider_endpoint, "install-model", .anthropic_messages);
+    const workspace = try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted });
+    const initial_catalog = blk: {
+        for (0..2000) |_| {
+            try control.drainAgentEvents();
+            const catalog = try control.workspaceCatalog(workspace);
+            if (catalog.availability == .ready or catalog.availability == .degraded) break :blk catalog;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CatalogDidNotComplete;
+    };
+    const source_task = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), install_model, initial_catalog.revision, initial_catalog.selection_revision, .{ .interactive = .full_access });
+    try std.testing.expectEqual(.ready_without_selection, try control.taskMcpAuthority(source_task));
+    _ = try executeTaskSwitchRun(&control, source_task, .{ .text = source_url }, .allow_once);
+    var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = a };
+    defer authorizations.deinit();
+    var host: InstallationTestHost = .{ .refuse = mode == .oauth_cancel };
+    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, .{ .context = &host, .confirmation_available = true, .capture_available = true, .oauth_available = true, .request_dialog_fn = InstallationTestHost.request, .open_url_fn = InstallationTestHost.open, .now_unix_ms_fn = InstallationTestHost.now, .notify_fn = InstallationTestHost.notify }, .{ .catalog_budget = budget, .executable_search_path = std.fs.path.dirname(options.node_path), .windows_system_root = options.windows_system_root });
+    defer coordinator.deinit();
+    coordinator.transport_override = .{ .context = &host, .fetch_fn = InstallationTestHost.fetch };
+    var retried = false;
+    var manual_submitted = false;
+    var retry_id: ?[mcp_configuration.created_identity_bytes]u8 = null;
+    for (0..1000) |_| {
+        if (!host.takeWake()) {
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
+            continue;
+        }
+        control.syncLifecycle();
+        _ = coordinator.drain();
+        host.approve();
+        if (control.mcp.?.state.management.?.desiredRegistry()) |registry| if (registry.servers.len == 1) {
+            const server = registry.servers[0];
+            if (mode == .oauth_cancel and server.installation.?.phase == .cancelled and !server.installation.?.stop_pending) {
+                for (0..20) |_| {
+                    if (!host.takeWake()) break;
+                    _ = coordinator.drain();
+                }
+                try std.testing.expectEqual(@as(usize, 1), host.confirmations);
+                try std.testing.expect(coordinator.flow == null);
+                try std.testing.expect(!control.mcp.?.state.management.?.desiredRegistry().?.servers[0].enabled);
+                return;
+            }
+            if (mode == .manual_credential and server.installation.?.phase == .needs_credentials and !manual_submitted) {
+                try std.testing.expectEqual(.saved, try coordinator.captureSecret(registry.generation, server.id, .{ .installation_credential = "token" }, "mcp-static-fixture-secret"));
+                manual_submitted = true;
+                continue;
+            }
+            if (control.mcp.?.installationReady(server.id)) break;
+            if (server.installation.?.phase == .failed or server.installation.?.phase == .no_tools) {
+                if (((mode == .failed_retry and server.installation.?.phase == .failed) or (mode == .no_tools_retry and server.installation.?.phase == .no_tools)) and !retried) {
+                    retry_id = server.id[0..mcp_configuration.created_identity_bytes].*;
+                    if (host.takeWake()) _ = coordinator.drain(); // Settle the notified terminal request.
+                    if (mode == .no_tools_retry) try tmp.dir.deleteFile(std.testing.io, "catalog.empty");
+                    const corrected = try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Corrected HTTP", .transport = "streamable_http", .endpoint = fixture.endpoint, .authMode = "none" } }, .{});
+                    defer a.free(corrected);
+                    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install-request.json", .data = corrected });
+                    _ = try executeTaskSwitchRun(&control, source_task, .{ .text = source_url }, .allow_once);
+                    InstallationTestHost.notify(&host); // A new user Run is an external main-loop event.
+                    retried = true;
+                    continue;
+                }
+                std.debug.print("automatic installation failed: {any}\n", .{server.installation.?.failure});
+                return error.InstallationFailed;
+            }
+        };
+    } else {
+        const registry = control.mcp.?.state.management.?.desiredRegistry().?;
+        std.debug.print("installation timed out: phase={any}, enabled={}, consent={}, flow={}, authorization={any}\n", .{ registry.servers[0].installation.?.phase, registry.servers[0].enabled, host.confirmations, coordinator.flow != null, control.mcpAuthorizationOperation() });
+        return error.InstallationDidNotComplete;
+    }
+    if (mode == .failed_retry or mode == .no_tools_retry) {
+        try std.testing.expect(retried);
+        const registry = control.mcp.?.state.management.?.desiredRegistry().?;
+        try std.testing.expectEqual(@as(usize, 1), registry.servers.len);
+        try std.testing.expectEqualStrings(&retry_id.?, registry.servers[0].id);
+    }
+    if (mode == .manual_credential) try std.testing.expect(manual_submitted);
+    const uses_credentials = mode == .credential_template or mode == .stdio_environment;
+    try std.testing.expectEqual(@as(usize, if (uses_credentials) 1 else 0), host.fetches.load(.acquire));
+    try std.testing.expectEqual(@as(usize, if (uses_credentials) 1 else 0), host.confirmations);
+    try std.testing.expect(std.mem.indexOf(u8, durable.storage[0..durable.len], "mcp-static-fixture-secret") == null);
+    try std.testing.expectEqual(.ready_without_selection, try control.taskMcpAuthority(source_task));
+    const call_model = try configureTaskSwitchProvider(&control, fixture.provider_endpoint, "call-model", .anthropic_messages);
+    const next_task = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), call_model, null, null, .{ .interactive = .manual });
+    try std.testing.expectEqual(.ready_with_selection, try control.taskMcpAuthority(next_task));
+    _ = try executeTaskSwitchRun(&control, next_task, .{ .text = "Call the selected echo tool." }, .allow_once);
+    if (mode == .catalog_refresh) {
+        if (host.takeWake()) _ = coordinator.drain();
+        const installed = control.mcp.?.state.management.?.desiredRegistry().?.servers[0];
+        const installed_id = installed.id[0..mcp_configuration.created_identity_bytes].*;
+        const original_run = installed.installation.?.run_id;
+        // Only refresh workers use this Product notifier. The other cases
+        // deliberately rely on Host notifications so Product commits cannot
+        // hide a missing continuation wake in the installation coordinator.
+        control.mcp.?.ports.notifier = .{ .context = &host, .notify_fn = InstallationTestHost.productNotify };
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "refresh.armed", .data = "armed" });
+        defer tmp.dir.writeFile(std.testing.io, .{ .sub_path = "refresh.release", .data = "release" }) catch {};
+        try control.refreshMcpCatalog();
+        for (0..1000) |_| {
+            if (tmp.dir.statFile(std.testing.io, "refresh.waiting", .{})) |_| break else |_| {}
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
+        } else return error.RefreshDidNotStart;
+        const correction = try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .serverId = &installed_id, .connection = .{ .displayName = "Retried during refresh", .transport = "streamable_http", .endpoint = fixture.endpoint, .authMode = "none" } }, .{});
+        defer a.free(correction);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install-request.json", .data = correction });
+        _ = try executeTaskSwitchRun(&control, source_task, .{ .text = source_url }, .allow_once);
+        InstallationTestHost.notify(&host);
+        try std.testing.expect(host.takeWake());
+        control.syncLifecycle();
+        _ = coordinator.drain();
+        const pending_id = control.pendingMcpInstallation().?.id;
+        try std.testing.expect(control.mcp.?.hasRefreshJob());
+        try std.testing.expectEqual(pending_id, control.pendingMcpInstallation().?.id);
+        try std.testing.expectEqual(original_run, control.mcp.?.state.management.?.desiredRegistry().?.servers[0].installation.?.run_id);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "refresh.release", .data = "release" });
+        for (0..1000) |_| {
+            if (host.takeWake()) {
+                control.syncLifecycle();
+                _ = coordinator.drain();
+                const current = control.mcp.?.state.management.?.desiredRegistry().?.servers[0];
+                if (current.installation.?.run_id != original_run and control.mcp.?.installationReady(&installed_id)) break;
+            }
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
+        } else return error.PendingInstallationDidNotResume;
+    }
+    const calls = try tmp.dir.readFileAlloc(std.testing.io, "installation.jsonl", a, .limited(4 * 1024 * 1024));
+    defer a.free(calls);
+    try std.testing.expect(std.mem.indexOf(u8, calls, "tools/call") != null);
+    try std.testing.expect(std.mem.indexOf(u8, calls, "mcp-static-fixture-secret") == null);
+    // A later disable changes live admission, not the completed installation
+    // history, and must not keep its ingress slot occupied indefinitely.
+    const completed = control.mcp.?.state.management.?.desiredRegistry().?;
+    const completed_id = completed.servers[0].id[0..mcp_configuration.created_identity_bytes].*;
+    try std.testing.expectEqual(.saved, try control.setMcpServerEnabled(completed.generation, .{ .server_id = &completed_id, .enabled = false }));
+    _ = coordinator.drain();
+    try std.testing.expect(coordinator.installation_server == null);
+    try std.testing.expect(control.pendingMcpInstallation() == null);
+    const snapshot_memory = try a.alloc(u8, 512 * 1024);
+    defer a.free(snapshot_memory);
+    const snapshot = try control.writeAggregateFixture(snapshot_memory);
+    var projected = try std.json.parseFromSlice(std.json.Value, a, snapshot, .{});
+    defer projected.deinit();
+    const projected_operation = projected.value.object.get("mcpInstallation").?.object.get("operations").?.array.items[0].object;
+    try std.testing.expectEqualStrings("ready", projected_operation.get("phase").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "mcp-static-fixture-secret") == null);
+}
+
+test "automatic installation public HTTP gives a new Task a real callable tool" {
+    try expectAutomaticInstallation(.public_http);
+}
+test "automatic installation credential template keeps keys private and calls from a new Task" {
+    try expectAutomaticInstallation(.credential_template);
+}
+test "automatic installation STDIO environment keeps keys private and calls from a new Task" {
+    try expectAutomaticInstallation(.stdio_environment);
+}
+
+test "automatic installation corrected retry reuses the same failed server" {
+    try expectAutomaticInstallation(.failed_retry);
+}
+
+test "automatic installation OAuth refusal settles without reopening consent" {
+    try expectAutomaticInstallation(.oauth_cancel);
+}
+
+test "automatic installation manual credential resumes on notification and gives a new Task tools" {
+    try expectAutomaticInstallation(.manual_credential);
+}
+
+test "automatic installation empty discovery can retry and grant its first tools" {
+    try expectAutomaticInstallation(.no_tools_retry);
+}
+
+test "automatic installation retains a request during real catalog refresh and resumes on completion wake" {
+    try expectAutomaticInstallation(.catalog_refresh);
 }

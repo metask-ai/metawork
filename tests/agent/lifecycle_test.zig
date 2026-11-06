@@ -3246,7 +3246,7 @@ test "Agent Runtime applies the fixed MetaWork built-in and Host tool surface to
     defer closeSession(session, .session_close) catch {};
 
     const expected = [_][]const u8{
-        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch", "GenerateImage", "DeliverFile", "ProposeMcpServer",
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch", "GenerateImage", "DeliverFile", "InstallMcpServer",
     };
     try std.testing.expectEqual(expected.len, fake_core.last_allowed_tool_count);
     for (expected, 0..) |name, index| {

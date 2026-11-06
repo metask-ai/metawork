@@ -1312,46 +1312,23 @@ for (const [method, command] of [
     }
   });
 
-test("MCP proposal commands carry exact identities and strict result shapes", async () => {
-  const fixture = JSON.parse(
-    readFileSync(
-      new URL(
-        "../src/bridge/testdata/mcp-installation-dismiss.json",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
+test("MCP installation cancellation carries exact identity and strict results", async () => {
   const calls = [];
-  let result = { outcome: "dismissed" };
+  let result = { outcome: "saved", desiredGeneration: "9" };
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
       return result;
     }),
   });
-  assert.deepEqual(await client.dismissMcpInstallProposal("71"), result);
+  assert.deepEqual(await client.cancelMcpInstallation("server-1", "7"), result);
   assert.deepEqual(calls[0], {
-    command: "metawork.mcp.dismissInstallProposal",
-    payload: fixture.proposal,
+    command: "metawork.mcp.cancelInstallation",
+    payload: { serverId: "server-1", installationRevision: "7" },
   });
-  result = { outcome: "saved", desiredGeneration: "1", serverId: "server-1" };
-  const input = { displayName: "Suggested", command: "node", arguments: [] };
-  await client.createMcpStdioServer("0", input, "71");
-  assert.deepEqual(calls[1].payload, {
-    expectedDesiredGeneration: "0",
-    proposalId: "71",
-    ...input,
-  });
-  result = { outcome: "dismissed" };
-  await client.dismissMcpInstallProposal(null);
-  assert.deepEqual(calls[2], {
-    command: "metawork.mcp.dismissInstallProposal",
-    payload: fixture.notice,
-  });
-  result = { outcome: "dismissed", draft: {} };
+  result = { outcome: "saved", desiredGeneration: "9", secret: "unexpected" };
   await assert.rejects(
-    client.dismissMcpInstallProposal("71"),
+    client.cancelMcpInstallation("server-1", "7"),
     /Invalid Host contract/,
   );
 });

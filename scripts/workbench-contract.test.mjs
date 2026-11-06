@@ -27,6 +27,7 @@ import {
   decodeSkillMutationResult,
   decodeSkillSourceSettingsResult,
   decodeMcpMutationResult,
+  decodeMcpInstallation,
   decodeMcpCreateResult,
   decodeMcpRefreshResult,
   decodeFilePreview,
@@ -44,6 +45,45 @@ const fixture = JSON.parse(
     "utf8",
   ),
 );
+
+test("MCP installation operations are strict safe facts with terminal history", () => {
+  const operation = {
+    serverId: "mcp-01234567890123456789",
+    taskId: "3",
+    runId: "7",
+    revision: "2",
+    desiredGeneration: "9",
+    displayName: "Installed MCP",
+    phase: "ready",
+    failure: null,
+    sourceOrigin: "https://source.example",
+    targetOrigin: "https://target.example",
+    canCancel: false,
+    missingCredentials: [],
+  };
+  assert.deepEqual(
+    decodeMcpInstallation({ operations: [operation], notice: null })
+      .operations[0],
+    operation,
+  );
+  for (const patch of [
+    { request: "private" },
+    { credentialRef: "private" },
+    { endpoint: "private" },
+    { revision: "0" },
+    { phase: "proposal_submitted" },
+    { failure: "timeout" },
+  ]) {
+    assert.throws(
+      () =>
+        decodeMcpInstallation({
+          operations: [{ ...operation, ...patch }],
+          notice: null,
+        }),
+      /Invalid Host contract/,
+    );
+  }
+});
 
 const modelsUnavailableFixture = JSON.parse(
   readFileSync(
