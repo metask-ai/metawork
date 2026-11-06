@@ -151,7 +151,7 @@ fn reconcilePendingReauthorizations(
 }
 
 fn serverAdmittedByDesiredState(server: mcp_configuration.ServerWire) bool {
-    if (!server.enabled or server.connection_approval == null) return false;
+    if (!mcp_configuration.serverEnabled(server) or server.connection_approval == null) return false;
     if (std.mem.eql(u8, server.auth.kind, "oauth")) {
         const oauth = server.auth.oauth orelse return false;
         return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;
@@ -187,8 +187,10 @@ pub fn buildOauthRefreshBinding(
         .arena = undefined,
         .operation_id = try owned.dupe(u8, operation.id),
         .server_id = try owned.dupe(u8, operation.server_id),
-        .endpoint = try owned.dupe(u8, server.transport.url.?),
+        .endpoint = try owned.dupe(u8, mcp_configuration.endpointDisplay(server.transport)),
+        .private_endpoint = try mcp_configuration.ownSensitiveEndpoint(&arena, server.transport.sensitive_endpoint),
         .resource = try owned.dupe(u8, consent.resource),
+        .private_resource = try mcp_configuration.ownSensitiveEndpoint(&arena, consent.private_resource),
         .issuer = try owned.dupe(u8, consent.issuer),
         .scopes = scopes,
         .client_id = try owned.dupe(u8, registration.client_id.?),
@@ -757,7 +759,7 @@ test "OAuth operation remains excluded from every rebuilt Admission target" {
     };
     var servers = [_]mcp_configuration.ServerWire{ oauth_server, other };
     var registry: mcp_configuration.RegistryWire = .{
-        .schema_version = 2,
+        .schema_version = mcp_configuration.schema_version,
         .generation = 7,
         .oauth_operation = .{
             .id = "refresh-1",

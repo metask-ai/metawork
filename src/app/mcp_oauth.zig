@@ -93,6 +93,88 @@ pub const Transport = struct {
     }
 };
 
+/// Installation credential acquisition shares the bounded Host HTTP transport.
+/// No response, extracted value or HTTP diagnostic crosses into Agent results.
+pub fn fetchInstallationCredential(allocator: std.mem.Allocator, transport: Transport, url: []const u8, pointer: []const u8, max_bytes: usize) ![]u8 {
+    const uri = std.Uri.parse(url) catch return error.InvalidCredentialSource;
+    if (!std.mem.eql(u8, uri.scheme, "https") or uri.host == null or uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidCredentialSource;
+    var body: [64 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &body);
+    var headers: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &headers);
+    const response = try transport.fetch(.{ .method = .get, .url = url, .headers = &.{.{ .name = "Accept", .value = "application/json" }} }, &body, &headers);
+    if (response.status != 200 or response.body.len == 0 or response.body.len > body.len or !jsonContentType(response.content_type)) return error.InvalidCredentialResponse;
+    return parseInstallationCredential(allocator, response.body, pointer, max_bytes);
+}
+
+pub fn parseInstallationCredential(allocator: std.mem.Allocator, body: []const u8, pointer: []const u8, max_bytes: usize) ![]u8 {
+    if (body.len > 64 * 1024 or pointer.len > 1024 or (pointer.len != 0 and pointer[0] != '/')) return error.InvalidCredentialResponse;
+    // Bound parsed nesting before the recursive secret scrub runs.
+    var scanner = std.json.Scanner.initCompleteInput(allocator, body);
+    defer scanner.deinit();
+    while (true) {
+        const token = scanner.next() catch |err| return if (err == error.OutOfMemory) err else error.InvalidCredentialResponse;
+        if (scanner.stackHeight() > 64) return error.InvalidCredentialResponse;
+        if (token == .end_of_document) break;
+    }
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" }) catch |err| return if (err == error.OutOfMemory) err else error.InvalidCredentialResponse;
+    defer parsed.deinit();
+    defer clearCredentialJson(parsed.value);
+    var value = parsed.value;
+    var components = std.mem.splitScalar(u8, if (pointer.len == 0) "" else pointer[1..], '/');
+    var key_buffer: [1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &key_buffer);
+    if (pointer.len != 0) while (components.next()) |component| {
+        var length: usize = 0;
+        var i: usize = 0;
+        while (i < component.len) : (i += 1) {
+            var byte = component[i];
+            if (byte == '~') {
+                i += 1;
+                if (i == component.len) return error.InvalidCredentialResponse;
+                byte = switch (component[i]) {
+                    '0' => '~',
+                    '1' => '/',
+                    else => return error.InvalidCredentialResponse,
+                };
+            }
+            key_buffer[length] = byte;
+            length += 1;
+        }
+        const key = key_buffer[0..length];
+        value = switch (value) {
+            .object => |object| object.get(key) orelse return error.InvalidCredentialResponse,
+            .array => |array| blk: {
+                if (key.len == 0 or (key.len > 1 and key[0] == '0')) return error.InvalidCredentialResponse;
+                for (key) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidCredentialResponse;
+                const index = std.fmt.parseInt(usize, key, 10) catch return error.InvalidCredentialResponse;
+                if (index >= array.items.len) return error.InvalidCredentialResponse;
+                break :blk array.items[index];
+            },
+            else => return error.InvalidCredentialResponse,
+        };
+    };
+    if (value != .string or value.string.len == 0 or value.string.len > max_bytes or !std.unicode.utf8ValidateSlice(value.string)) return error.InvalidCredentialResponse;
+    return allocator.dupe(u8, value.string);
+}
+
+fn clearCredentialJson(value: std.json.Value) void {
+    switch (value) {
+        .string, .number_string => |bytes| std.crypto.secureZero(u8, @constCast(bytes)),
+        .array => |array| for (array.items) |item| {
+            clearCredentialJson(item);
+        },
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                std.crypto.secureZero(u8, @constCast(entry.key_ptr.*));
+                clearCredentialJson(entry.value_ptr.*);
+            }
+        },
+        else => {},
+    }
+}
+
 pub const Cancellation = struct {
     io: std.Io,
     state: std.atomic.Value(u32) = .init(0),
@@ -3232,4 +3314,48 @@ test "MCP callback accepts extensions while retaining exact issuer validation" {
     });
     try std.testing.expect(result.complete);
     try std.testing.expectEqualStrings("a", policy.callback.?.code.view());
+}
+
+test "MCP installation acquisition rejects redirects duplicate keys and wrong JSON shapes" {
+    const Fake = struct {
+        status: u16 = 200,
+        fn fetch(raw: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            std.testing.expect(request.method == .get and request.body.len == 0) catch return error.InvalidResponse;
+            return .{ .status = self.status, .content_type = "application/json", .body = "{\"data\":{\"api_key\":\"synthetic-key\"}}" };
+        }
+    };
+    var fake: Fake = .{};
+    const transport: Transport = .{ .context = &fake, .fetch_fn = Fake.fetch };
+    const key = try fetchInstallationCredential(std.testing.allocator, transport, "https://example.test/key", "/data/api_key", 2560);
+    defer {
+        std.crypto.secureZero(u8, key);
+        std.testing.allocator.free(key);
+    }
+    try std.testing.expectEqualStrings("synthetic-key", key);
+    fake.status = 302;
+    try std.testing.expectError(error.InvalidCredentialResponse, fetchInstallationCredential(std.testing.allocator, transport, "https://example.test/key", "/data/api_key", 2560));
+    try std.testing.expectError(error.InvalidCredentialResponse, parseInstallationCredential(std.testing.allocator, "{\"key\":\"one\",\"key\":\"two\"}", "/key", 2560));
+    try std.testing.expectError(error.InvalidCredentialResponse, parseInstallationCredential(std.testing.allocator, "{\"key\":5}", "/key", 2560));
+    try std.testing.expectError(error.InvalidCredentialResponse, parseInstallationCredential(std.testing.allocator, "{\"key\":\"long\"}", "/key", 2));
+}
+
+test "MCP installation JSON Pointer supports root escaped keys and bounded nesting" {
+    const root = try parseInstallationCredential(std.testing.allocator, "\"synthetic-root\"", "", 2560);
+    defer {
+        std.crypto.secureZero(u8, root);
+        std.testing.allocator.free(root);
+    }
+    try std.testing.expectEqualStrings("synthetic-root", root);
+    const nested = try parseInstallationCredential(std.testing.allocator, "{\"a/b\":[{\"~key\":\"synthetic-nested\"}]}", "/a~1b/0/~0key", 2560);
+    defer {
+        std.crypto.secureZero(u8, nested);
+        std.testing.allocator.free(nested);
+    }
+    try std.testing.expectEqualStrings("synthetic-nested", nested);
+    var deep: [133]u8 = undefined;
+    @memset(deep[0..65], '[');
+    @memcpy(deep[65..68], "\"x\"");
+    @memset(deep[68..], ']');
+    try std.testing.expectError(error.InvalidCredentialResponse, parseInstallationCredential(std.testing.allocator, &deep, "/0", 2560));
 }

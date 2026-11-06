@@ -1657,25 +1657,25 @@ test "DeliverFile previous GenerateImage-only checkpoints restore without recrea
     try checkpointTools(1, true, false);
 }
 
-test "ProposeMcpServer restores genuine two-Host-tool checkpoints without restoring proposal authority" {
+test "InstallMcpServer restores genuine two-Host-tool checkpoints without restoring proposal authority" {
     try checkpointTools(2, false, false);
     try checkpointTools(2, true, false);
 }
 
-test "ProposeMcpServer canonical Core submits without a main-thread drain and releases owned results" {
+test "InstallMcpServer canonical Core submits without a main-thread drain and releases owned results" {
     const Ingress = struct {
-        draft: ?agent.McpInstallationDraft = null,
+        draft: ?agent.McpInstallationRequest = null,
         run_id: u64 = 0,
         generation: u64 = 0,
         wakes: usize = 0,
-        fn put(raw: *anyopaque, task_id: u64, run_id: u64, generation: u64, draft: agent.McpInstallationDraft) agent.McpInstallationResult {
+        fn put(raw: *anyopaque, task_id: u64, run_id: u64, generation: u64, draft: agent.McpInstallationRequest) agent.McpInstallationResult {
             const self: *@This() = @ptrCast(@alignCast(raw));
             std.debug.assert(task_id == 42);
             if (self.draft != null) return .busy;
             self.run_id = run_id;
             self.generation = generation;
             self.draft = draft;
-            return .{ .proposal_submitted = 7 };
+            return .{ .submitted = 7 };
         }
         fn wake(raw: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
@@ -1683,14 +1683,14 @@ test "ProposeMcpServer canonical Core submits without a main-thread drain and re
         }
     };
     var h: Harness = undefined;
-    try h.init("mcp-proposal", .{});
+    try h.init("mcp-installation", .{});
     defer h.deinit();
     const session = try h.session(.full_access, false);
     var ingress: Ingress = .{};
     defer if (ingress.draft) |*draft| draft.deinit();
     for (0..3) |index| {
         const input: ?agent.McpInstallationInput = if (index == 0) null else .{ .context = &ingress, .allocator = std.testing.allocator, .task_id = 42, .try_put_fn = Ingress.put, .wake_fn = Ingress.wake };
-        const id = try session.prepareRunWithTools(.{ .text = "Propose the fixture MCP server." }, null, null, input);
+        const id = try session.prepareRunWithTools(.{ .text = "Install the fixture MCP server." }, null, null, input);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         thread.join();
@@ -1700,12 +1700,12 @@ test "ProposeMcpServer canonical Core submits without a main-thread drain and re
         while (h.runtime.takeEvent()) |value| {
             var event = value;
             defer event.deinit();
-            if (event.event.value == .known and event.event.value.known == .tool_result and std.mem.eql(u8, event.event.value.known.tool_result.name, "ProposeMcpServer")) {
+            if (event.event.value == .known and event.event.value.known == .tool_result and std.mem.eql(u8, event.event.value.known.tool_result.name, "InstallMcpServer")) {
                 results += 1;
                 const content = event.event.value.known.tool_result.content;
                 try std.testing.expect(std.mem.indexOf(u8, content, switch (index) {
                     0 => "unavailable",
-                    1 => "proposal_submitted",
+                    1 => "in_progress",
                     else => "busy",
                 }) != null);
                 try std.testing.expect(std.mem.indexOf(u8, content, "--filter") == null);
@@ -1718,7 +1718,7 @@ test "ProposeMcpServer canonical Core submits without a main-thread drain and re
     }
     try std.testing.expect(ingress.generation != 0);
     try std.testing.expectEqual(@as(usize, 1), ingress.wakes);
-    try session.close(.session_close); // The unconsumed proposal cannot hold Session.close.
+    try session.close(.session_close); // The unconsumed request cannot hold Session.close.
 }
 
 const DeliveryReader = struct {

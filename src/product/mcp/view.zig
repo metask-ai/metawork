@@ -464,7 +464,8 @@ fn writeMcpConnection(
     }
     writer.writeAll("{\"kind\":\"streamable_http\",\"endpoint\":") catch
         return error.SnapshotTooLarge;
-    try text.writeJson(writer, server.transport.url orelse "");
+    try text.writeJson(writer, mcp_configuration.endpointDisplay(server.transport));
+    if (server.transport.sensitive_endpoint != null) writer.writeAll(",\"sensitiveEndpoint\":true") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"headers\":") catch return error.SnapshotTooLarge;
     try writeMcpSecretSlots(writer, text, management, server.transport.headers);
     const oauth = if (std.mem.eql(u8, projected_auth_mode, "oauth"))

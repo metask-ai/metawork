@@ -41,7 +41,7 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
-    mcpInstallation: { proposal: null, notice: null },
+    mcpInstallation: { operations: [], notice: null },
     updates: {
       checkState: "unavailable",
       checkError: "none",

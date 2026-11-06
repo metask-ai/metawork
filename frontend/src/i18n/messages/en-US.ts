@@ -501,9 +501,50 @@ export const enUS = {
   "mcp.client_auth.client_secret_basic": "Client secret (HTTP Basic)",
   "mcp.client_auth.client_secret_post": "Client secret (request body)",
   "mcp.add.remove_row": "Remove row",
+  "mcp.add.sensitive_endpoint":
+    "This address contains credentials (stored securely; enter the full address to replace it)",
+  "mcp.install.phase.preparing": "Preparing configuration…",
+  "mcp.install.phase.needs_authorization":
+    "Confirm this installation in the system confirmation window.",
+  "mcp.install.phase.acquiring_credentials": "Obtaining credentials securely…",
+  "mcp.install.phase.needs_credentials": "Enter the required credential below.",
+  "mcp.install.phase.needs_oauth":
+    "Complete sign-in in the authorization window.",
+  "mcp.install.phase.connecting": "Connecting and discovering tools…",
+  "mcp.install.phase.ready":
+    "Installation completed. The tools discovered during installation were authorized.",
+  "mcp.install.phase.no_tools":
+    "Connected. There are currently no tools available to new tasks.",
+  "mcp.install.phase.failed": "Configuration failed.",
+  "mcp.install.phase.cancelled": "Installation cancelled.",
+  "mcp.install.phase.cancelling":
+    "Stopping installation. Further stages are blocked.",
+  "mcp.install.failure.invalid_request":
+    "The installation instructions could not be applied.",
+  "mcp.install.failure.credential_request_failed":
+    "Credential retrieval failed. Check the installation source before retrying.",
+  "mcp.install.failure.credential_request_interrupted":
+    "Credential retrieval was interrupted. Retry this installation explicitly.",
+  "mcp.install.failure.configuration_changed":
+    "The configuration changed during installation.",
+  "mcp.install.failure.authorization_failed":
+    "Authorization did not complete. Retry explicitly when you are ready.",
+  "mcp.install.failure.connection_failed":
+    "The service could not be connected. Check its connection details on the MCP page.",
+  "mcp.install.failure.storage_failed":
+    "Configuration could not be saved securely.",
+  "mcp.install.failure.timeout": "Installation exceeded its time budget.",
+  "mcp.install.credential": "Credential: {slot}",
+  "mcp.install.title": "MCP installation",
+  "mcp.install.submit": "Save credential",
+  "mcp.install.cancel": "Cancel installation",
+  "mcp.install.action_failed":
+    "The action could not be confirmed. Check the current status and retry.",
+  "mcp.install.rejected":
+    "MCP configuration could not be created. Check the MCP page.",
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
-    "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
+    "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
   "mcp.add.defaults":
     "Credentials use separate password fields. After saving, MetaWork shows the next action this connection needs.",
   "mcp.add.submit": "Add server",

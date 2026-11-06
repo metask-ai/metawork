@@ -35,7 +35,7 @@ pub const uninstall_skill = "metawork.skills.uninstall";
 pub const retry_skill = "metawork.skills.retry";
 pub const export_skill = "metawork.skills.export";
 pub const skill_detail = "metawork.skills.detail";
-pub const mcp_dismiss_install_proposal = "metawork.mcp.dismissInstallProposal";
+pub const mcp_cancel_installation = "metawork.mcp.cancelInstallation";
 pub const mcp_create_stdio_server = "metawork.mcp.createStdioServer";
 pub const mcp_create_http_server = "metawork.mcp.createHttpServer";
 pub const mcp_update_stdio_connection = "metawork.mcp.updateStdioConnection";
@@ -149,7 +149,7 @@ pub const product = [_][]const u8{
     skill_detail,
     mcp_create_stdio_server,
     mcp_create_http_server,
-    mcp_dismiss_install_proposal,
+    mcp_cancel_installation,
     mcp_update_stdio_connection,
     mcp_update_http_connection,
     mcp_rename_server,

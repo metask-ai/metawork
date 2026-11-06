@@ -8,7 +8,7 @@ pub const Payload = struct {
     task_id: u64,
     run_id: u64,
     run_generation: u64,
-    draft: agent.McpInstallationDraft,
+    draft: agent.McpInstallationRequest,
     pub fn deinit(self: *Payload) void {
         self.draft.deinit();
         self.* = undefined;
@@ -25,7 +25,7 @@ test "installation mailbox never waits for main and keeps its reservation after 
     defer mailbox.deinit();
     const input = mailbox.input(std.testing.io);
     const make = struct {
-        fn draft() !agent.McpInstallationDraft {
+        fn draft() !agent.McpInstallationRequest {
             return .{ .allocator = std.testing.allocator, .json = try std.testing.allocator.dupe(u8, "{}") };
         }
     }.draft;
@@ -36,7 +36,7 @@ test "installation mailbox never waits for main and keeps its reservation after 
     mailbox.mutex.unlock(std.testing.io);
     try std.testing.expectEqual(.busy, std.meta.activeTag(contended));
     const accepted = input.try_put_fn(input.context, 1, 2, 3, try make());
-    const id = accepted.proposal_submitted;
+    const id = accepted.submitted;
     try std.testing.expectEqual(.busy, std.meta.activeTag(input.try_put_fn(input.context, 4, 5, 6, refused)));
     var taken = mailbox.take(std.testing.io).?;
     defer taken.deinit();
@@ -44,7 +44,7 @@ test "installation mailbox never waits for main and keeps its reservation after 
     try std.testing.expectEqual(.busy, std.meta.activeTag(input.try_put_fn(input.context, 4, 5, 6, refused)));
     try std.testing.expect(!mailbox.release(std.testing.io, id + 1));
     try std.testing.expect(mailbox.release(std.testing.io, id));
-    const next = input.try_put_fn(input.context, 4, 5, 6, try make()).proposal_submitted;
+    const next = input.try_put_fn(input.context, 4, 5, 6, try make()).submitted;
     try std.testing.expect(next > id);
     try std.testing.expect(!mailbox.release(std.testing.io, id));
     mailbox.close(std.testing.io);
@@ -57,9 +57,9 @@ test "concurrent installation callbacks transfer exactly one owner" {
         input: agent.McpInstallationInput,
         accepted: *std.atomic.Value(usize),
         fn run(self: @This()) void {
-            var draft: agent.McpInstallationDraft = .{ .allocator = std.testing.allocator, .json = std.testing.allocator.dupe(u8, "{}") catch unreachable };
+            var draft: agent.McpInstallationRequest = .{ .allocator = std.testing.allocator, .json = std.testing.allocator.dupe(u8, "{}") catch unreachable };
             const result = self.input.try_put_fn(self.input.context, 1, 2, 3, draft);
-            if (result == .proposal_submitted) {
+            if (result == .submitted) {
                 _ = self.accepted.fetchAdd(1, .acq_rel);
             } else draft.deinit();
         }
@@ -92,7 +92,7 @@ pub const Mailbox = struct {
         if (self.io == null) self.io = io;
         return .{ .context = self, .allocator = self.allocator, .try_put_fn = tryPut, .wake_fn = wake };
     }
-    fn tryPut(raw: *anyopaque, task_id: u64, run_id: u64, generation: u64, draft: agent.McpInstallationDraft) agent.McpInstallationResult {
+    fn tryPut(raw: *anyopaque, task_id: u64, run_id: u64, generation: u64, draft: agent.McpInstallationRequest) agent.McpInstallationResult {
         const self: *Mailbox = @ptrCast(@alignCast(raw));
         if (!self.mutex.tryLock()) return .busy;
         defer self.mutex.unlock(self.io.?);
@@ -103,7 +103,7 @@ pub const Mailbox = struct {
         self.next_id += 1;
         self.reserved_id = self.next_id;
         self.queued = .{ .id = self.next_id, .task_id = task_id, .run_id = run_id, .run_generation = generation, .draft = draft };
-        return .{ .proposal_submitted = self.next_id };
+        return .{ .submitted = self.next_id };
     }
     fn wake(raw: *anyopaque) void {
         const self: *Mailbox = @ptrCast(@alignCast(raw));

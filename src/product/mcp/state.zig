@@ -67,7 +67,9 @@ pub const McpOauthRefreshBinding = struct {
     operation_id: []const u8,
     server_id: []const u8,
     endpoint: []const u8,
+    private_endpoint: ?mcp_configuration.SensitiveEndpointWire = null,
     resource: []const u8,
+    private_resource: ?mcp_configuration.SensitiveEndpointWire = null,
     issuer: []const u8,
     scopes: []const []const u8,
     client_id: []const u8,
@@ -81,6 +83,8 @@ pub const McpOauthRefreshBinding = struct {
     runtime_binding: RuntimeBinding,
 
     pub fn deinit(self: *McpOauthRefreshBinding) void {
+        if (self.private_endpoint != null) std.crypto.secureZero(u8, @constCast(self.endpoint));
+        if (self.private_resource != null) std.crypto.secureZero(u8, @constCast(self.resource));
         self.arena.deinit();
         self.* = undefined;
     }
@@ -97,6 +101,7 @@ pub const McpOauthAuthorizationPlan = struct {
     server_id: []const u8,
     issuer: []const u8,
     resource: []const u8,
+    private_resource_identity: ?[]const u8 = null,
     scopes: []const []const u8,
     redirect_uri: []const u8,
 };
@@ -106,6 +111,7 @@ pub const McpOauthAuthorizationBinding = struct {
     server_id: []const u8,
     issuer: []const u8,
     resource: []const u8,
+    private_resource: ?mcp_configuration.SensitiveEndpointWire = null,
     scopes: []const []const u8,
     redirect_uri: []const u8,
     client_id: []const u8,
@@ -129,6 +135,7 @@ pub const McpOauthCodeExchangeBinding = struct {
     token_endpoint_auth_method: []const u8,
     client_secret_ref: ?[]const u8,
     resource: []const u8,
+    private_resource: ?mcp_configuration.SensitiveEndpointWire = null,
     redirect_uri: []const u8,
 };
 
@@ -223,12 +230,14 @@ pub const McpAuthorizationStart = struct {
     operation_id: []const u8,
     server_id: []const u8,
     endpoint: []const u8,
+    private_endpoint: ?mcp_configuration.SensitiveEndpointWire = null,
     registration_kind: []const u8,
     client_id: ?[]const u8,
     token_endpoint_auth_method: ?[]const u8,
     additional_scopes: []const []const u8,
 
     pub fn deinit(self: *McpAuthorizationStart) void {
+        if (self.private_endpoint != null) std.crypto.secureZero(u8, @constCast(self.endpoint));
         self.arena.deinit();
         self.* = undefined;
     }
@@ -238,6 +247,7 @@ pub const McpSecretCaptureTarget = union(enum) {
     stdio_environment: []const u8,
     http_header: []const u8,
     oauth_client_secret,
+    installation_credential: []const u8,
 };
 
 pub const McpAuthorizationOperation = struct {

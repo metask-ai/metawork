@@ -77,6 +77,7 @@ fn captureSecret(
         .stdio_environment => |name| .{ .stdio_environment = name },
         .http_header => |name| .{ .http_header = name },
         .oauth_client_secret => .oauth_client_secret,
+        .installation_credential => |name| .{ .installation_credential = name },
     };
     return outcome(try coordinator.captureSecret(expected_generation, server_id, target, secret));
 }

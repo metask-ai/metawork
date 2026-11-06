@@ -171,8 +171,10 @@ pub const Runtime = struct {
     /// through Runtime typed operations; direct access is test-seam only.
     state: state_module.McpProductState,
     installation_mailbox: installation.Mailbox,
-    installation_proposal: ?installation.Payload = null,
+    installation_request: ?installation.Payload = null,
     installation_notice: bool = false,
+    installation_notice_task: u64 = 0,
+    installation_notice_run: u64 = 0,
     refresh_job: ?*refresh_job.Job = null,
     runtime_auth_delivery_pending: bool = false,
     shutting_down: bool = false,
@@ -205,7 +207,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
-        if (self.installation_proposal) |*value| value.deinit();
+        if (self.installation_request) |*value| value.deinit();
         self.installation_mailbox.deinit();
         std.debug.assert(self.refresh_job == null);
         self.ports.timer.cancel();
@@ -469,7 +471,7 @@ pub const Runtime = struct {
                 try writeQuotedListItem(&writer, slot.name);
         } else {
             try writer.writeAll("Transport: Streamable HTTP\n");
-            try writeQuotedField(&writer, "Endpoint", server.transport.url.?);
+            try writeQuotedField(&writer, "Endpoint", configuration.endpointDisplay(server.transport));
             try writer.writeAll("Header names:\n");
             for (server.transport.headers) |slot|
                 try writeQuotedListItem(&writer, slot.name);
@@ -520,6 +522,12 @@ pub const Runtime = struct {
                     if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
                     return;
                 }
+                return error.McpManagementUnavailable;
+            },
+            .installation_credential => |name| {
+                const operation = server.installation orelse return error.McpManagementUnavailable;
+                if (operation.phase != .needs_credentials) return error.McpManagementUnavailable;
+                for (operation.credentials) |slot| if (slot.manual and std.mem.eql(u8, slot.name, name)) return;
                 return error.McpManagementUnavailable;
             },
             .oauth_client_secret => {
@@ -1030,21 +1038,25 @@ pub const Runtime = struct {
     }
     pub fn takeInstallation(self: *Runtime, io: std.Io) bool {
         const incoming = self.installation_mailbox.take(io) orelse return false;
-        std.debug.assert(self.installation_proposal == null);
-        self.installation_proposal = incoming;
+        std.debug.assert(self.installation_request == null);
+        self.installation_request = incoming;
         self.installation_notice = false;
         self.markChanged();
         return true;
     }
     pub fn pendingInstallation(self: *const Runtime) ?struct { id: u64, task_id: u64, run_id: u64, json: []const u8 } {
-        const value = self.installation_proposal orelse return null;
+        const value = self.installation_request orelse return null;
         return .{ .id = value.id, .task_id = value.task_id, .run_id = value.run_id, .json = value.draft.json };
     }
     pub fn dismissInstallation(self: *Runtime, io: std.Io, id: u64, rejected: bool) bool {
-        const value = if (self.installation_proposal) |*value| value else return false;
+        const value = if (self.installation_request) |*value| value else return false;
         if (id == 0 or value.id != id) return false;
+        if (rejected) {
+            self.installation_notice_task = value.task_id;
+            self.installation_notice_run = value.run_id;
+        }
         value.deinit();
-        self.installation_proposal = null;
+        self.installation_request = null;
         _ = self.installation_mailbox.release(io, id);
         self.installation_notice = rejected;
         self.markChanged();
@@ -1052,8 +1064,8 @@ pub const Runtime = struct {
     }
     pub fn closeInstallation(self: *Runtime, io: std.Io) void {
         self.installation_mailbox.close(io);
-        if (self.installation_proposal) |*value| value.deinit();
-        self.installation_proposal = null;
+        if (self.installation_request) |*value| value.deinit();
+        self.installation_request = null;
         self.installation_notice = false;
     }
     pub fn dismissInstallationNotice(self: *Runtime) bool {
@@ -1062,14 +1074,34 @@ pub const Runtime = struct {
         self.markChanged();
         return true;
     }
-    pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer) ViewError!void {
-        writer.writeAll("{\"proposal\":") catch return error.SnapshotTooLarge;
-        if (self.installation_proposal) |value| {
-            writer.print("{{\"id\":\"{d}\",\"taskId\":\"{d}\",\"runId\":\"{d}\",\"draft\":", .{ value.id, value.task_id, value.run_id }) catch return error.SnapshotTooLarge;
-            writer.writeAll(value.draft.json) catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(if (self.installation_notice) ",\"notice\":\"proposal_rejected\"}" else ",\"notice\":null}") catch return error.SnapshotTooLarge;
+    pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer, text: TextProjection) ViewError!void {
+        writer.writeAll("{\"operations\":[") catch return error.SnapshotTooLarge;
+        var count: usize = 0;
+        if (self.state.management) |*management| if (management.desiredRegistry()) |registry| for (registry.servers) |server| {
+            const operation = server.installation orelse continue;
+            if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            count += 1;
+            const phase: []const u8 = if (operation.stop_pending) "cancelling" else @tagName(operation.phase);
+            writer.print("{{\"serverId\":\"{s}\",\"taskId\":\"{d}\",\"runId\":\"{d}\",\"revision\":\"{d}\",\"desiredGeneration\":\"{d}\",\"displayName\":", .{ server.id, operation.task_id, operation.run_id, operation.revision, registry.generation }) catch return error.SnapshotTooLarge;
+            try text.write_json_fn(text.context, writer, server.display_name);
+            writer.print(",\"phase\":\"{s}\",\"failure\":", .{phase}) catch return error.SnapshotTooLarge;
+            if (operation.failure) |failure| writer.print("\"{s}\"", .{@tagName(failure)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"sourceOrigin\":") catch return error.SnapshotTooLarge;
+            try text.write_json_fn(text.context, writer, operation.source_origin);
+            writer.writeAll(",\"targetOrigin\":") catch return error.SnapshotTooLarge;
+            if (server.transport.sensitive_endpoint) |endpoint| try text.write_json_fn(text.context, writer, endpoint.origin) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"canCancel\":{},\"missingCredentials\":[", .{operation.phase.active()}) catch return error.SnapshotTooLarge;
+            var missing: usize = 0;
+            for (operation.credentials) |slot| if (slot.manual and slot.credential_ref == null) {
+                if (missing != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                missing += 1;
+                try text.write_json_fn(text.context, writer, slot.name);
+            };
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        };
+        writer.writeAll("],\"notice\":") catch return error.SnapshotTooLarge;
+        if (self.installation_notice) writer.print("{{\"taskId\":\"{d}\",\"runId\":\"{d}\"}}", .{ self.installation_notice_task, self.installation_notice_run }) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
     pub fn observeProcess(self: *Runtime, observation: configuration.ProcessObservation) Error!bool {
@@ -1104,6 +1136,159 @@ pub const Runtime = struct {
         try self.state.process_observations.append(self.allocator, owned);
         self.markChanged();
         return true;
+    }
+
+    pub fn startInstallation(self: *Runtime, expected_generation: u64, connection: configuration.InstallationConnection, input: configuration.InstallationStart) Error!configuration.CreateResult {
+        const management = self.mutableManagement(expected_generation, input.existing_server_id) orelse return .{ .outcome = self.generationOutcome(expected_generation) };
+        var preparation = try management.prepareInstallationStart(expected_generation, connection, input);
+        const id: ?[configuration.created_identity_bytes]u8 = switch (preparation) {
+            .prepared => |*mutation| blk: {
+                const servers = mutation.target().servers;
+                const identity = input.existing_server_id orelse servers[servers.len - 1].id;
+                if (identity.len != configuration.created_identity_bytes) {
+                    mutation.deinit();
+                    return .{ .outcome = .rejected };
+                }
+                break :blk identity[0..configuration.created_identity_bytes].*;
+            },
+            else => null,
+        };
+        const outcome = try self.commitPreparedMutation(&preparation);
+        return .{ .outcome = outcome, .server_id = if (outcome == .saved or outcome == .saved_recovery_required) id else null };
+    }
+
+    pub fn captureInstallationCredential(self: *Runtime, generation: u64, server_id: []const u8, name: []const u8, manual: bool, secret: []u8) Error!configuration.ManagementOutcome {
+        defer std.crypto.secureZero(u8, secret);
+        const management = self.mutableManagement(generation, server_id) orelse return self.generationOutcome(generation);
+        var preparation = try management.prepareCaptureInstallationCredential(generation, server_id, name, manual, secret);
+        return self.commitPreparedMutation(&preparation);
+    }
+
+    pub fn installationConnectionFailed(self: *const Runtime, server_id: []const u8) bool {
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        const manifest = management.runtime_manifest orelse return false;
+        if (manifest.targetFor(server_id, registry, management.limits)) |target| for (management.convergence.results.items) |result| {
+            if (std.mem.eql(u8, result.target.id(), server_id) and std.mem.eql(u8, &result.target.fingerprint, &target.fingerprint) and result.outcome != .pending and result.outcome != .waiting_auth) return true;
+        };
+        return false;
+    }
+
+    pub fn updateInstallation(self: *Runtime, expected_generation: u64, input: configuration.InstallationUpdate) Error!configuration.ManagementOutcome {
+        const management = self.mutableManagement(expected_generation, null) orelse return self.generationOutcome(expected_generation);
+        var preparation = try management.prepareInstallationUpdate(expected_generation, input);
+        const outcome = try self.commitPreparedMutation(&preparation);
+        if (outcome == .saved or outcome == .saved_recovery_required) {
+            self.updateAdmissionDeadline();
+            self.expireAdmission();
+        }
+        return outcome;
+    }
+
+    pub fn cancelInstallation(self: *Runtime, server_id: []const u8, revision: u64) Error!configuration.ManagementOutcome {
+        const management = if (self.state.management) |*value| value else return .rejected;
+        if (management.desiredRegistry()) |registry| if (state_module.findMcpServer(registry.servers, server_id)) |server| if (server.installation) |operation| {
+            if (operation.phase == .cancelled) {
+                if (operation.stop_pending and !self.catalogBoundaryBusy() and self.state.authorization_operation == null)
+                    return self.setServerEnabled(registry.generation, .{ .server_id = server_id, .enabled = false });
+                return .unchanged;
+            }
+        };
+        var prepared = switch (try management.prepareInstallationCancellation(server_id, revision)) {
+            .rejected => return .rejected,
+            .prepared => |value| value,
+        };
+        defer prepared.deinit();
+        // Selection creation uses only our immutable Activation and local copies.
+        // It never calls Runtime apply, refresh, or waits on a worker.
+        var candidate = try self.admissionForTarget(prepared.target());
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const outcome = try management.commitPreparedOperationState(&prepared);
+        switch (outcome) {
+            .saved => {
+                self.installCommittedDesired(candidate);
+                candidate_owned = false;
+                self.updateAdmissionDeadline();
+                self.expireAdmission();
+                self.markChanged();
+            },
+            .indeterminate => {
+                policy.blockAdmission(&self.state, .persistence_outcome_unknown);
+                self.markChanged();
+            },
+            else => {},
+        }
+        return outcome;
+    }
+
+    /// Observe the exact current formal catalog, then commit its initial grant
+    /// and a prepared Admission together. No subsequent discovery can expand it.
+    fn installationHasAdmission(self: *const Runtime, server_id: []const u8) bool {
+        if (self.state.admission != .ready or self.admissionExpired()) return false;
+        const selection = self.state.admission.ready.selection orelse return false;
+        for (selection.selectedTools()) |tool| if (std.mem.eql(u8, tool.server_id, server_id)) return true;
+        return false;
+    }
+
+    pub fn installationReady(self: *const Runtime, server_id: []const u8) bool {
+        const management = if (self.state.management) |*value| value else return false;
+        const registry = management.desiredRegistry() orelse return false;
+        const server = state_module.findMcpServer(registry.servers, server_id) orelse return false;
+        const operation = server.installation orelse return false;
+        return operation.phase == .ready and operation.initial_grant_completed and self.installationHasAdmission(server_id);
+    }
+
+    pub fn finishInstallation(self: *Runtime, server_id: []const u8, revision: u64, elapsed_ms: u32) Error!configuration.ManagementOutcome {
+        const management = if (self.state.management) |*value| value else return .rejected;
+        const registry = management.desiredRegistry() orelse return .rejected;
+        const server = state_module.findMcpServer(registry.servers, server_id) orelse return .rejected;
+        const operation = server.installation orelse return .rejected;
+        if (operation.revision != revision or operation.phase != .connecting or self.state.runtime_uncertain or self.state.activation_failed or self.catalogBoundaryBusy()) return .rejected;
+        const manifest = management.runtime_manifest orelse return .rejected;
+        const loaded = for (manifest.entries) |entry| {
+            if (entry.state == .loaded and std.mem.eql(u8, entry.id, server_id) and std.mem.eql(u8, &entry.state.loaded, &configuration.runtimeDescriptorFingerprint(server))) break true;
+        } else false;
+        if (!loaded) return .rejected;
+        const activation = self.state.activation orelse return .rejected;
+        const health = for (activation.serverHealth()) |value| {
+            if (std.mem.eql(u8, value.id, server_id)) break value;
+        } else return .rejected;
+        if (health.state != .ready or health.issue_count != 0) return .rejected;
+        const catalog = for (activation.catalogServers()) |value| {
+            if (std.mem.eql(u8, &value.binding_identity, &health.binding_identity)) break value;
+        } else return .rejected;
+        const age = self.admissionCatalogAgeMs() orelse return .rejected;
+        if (!catalog.fresh or catalog.ttl_remaining_ms <= age) return .rejected;
+        var tools: std.array_list.Managed([]const u8) = .init(self.allocator);
+        defer tools.deinit();
+        for (activation.catalogTools()) |tool| {
+            if (std.mem.eql(u8, &tool.binding_identity, &health.binding_identity)) try tools.append(tool.name);
+        }
+        if (tools.items.len > management.limits.max_tools_per_server) return .rejected;
+        const usable = if (operation.initial_grant_pending) tools.items.len != 0 else blk: {
+            for (tools.items) |tool| for (server.tools) |allowed| {
+                if (std.mem.eql(u8, tool, allowed)) break :blk true;
+            };
+            break :blk false;
+        };
+        // First commit the exact grant while retaining the connecting phase.
+        // After restart the same set is reused, never recaptured from new tools.
+        if (operation.initial_grant_pending and usable) return self.updateInstallation(registry.generation, .{
+            .server_id = server_id,
+            .expected_revision = revision,
+            .phase = .connecting,
+            .active_elapsed_ms = elapsed_ms,
+            .initial_tools = tools.items,
+        });
+        if (usable and !self.installationHasAdmission(server_id)) return .rejected;
+        return self.updateInstallation(registry.generation, .{
+            .server_id = server_id,
+            .expected_revision = revision,
+            .phase = if (usable) .ready else .no_tools,
+            .active_elapsed_ms = elapsed_ms,
+            .initial_tools = if (operation.initial_grant_pending) tools.items else null,
+        });
     }
 
     pub fn createHttpServer(
@@ -1203,6 +1388,25 @@ pub const Runtime = struct {
             input,
         );
         return self.commitPreparedMutation(&preparation);
+    }
+
+    pub fn captureOauthResource(self: *Runtime, expected_generation: u64, input: configuration.CaptureOauthResourceInput) Error!configuration.CaptureOauthResourceResult {
+        defer std.crypto.secureZero(u8, input.resource);
+        if (self.shutting_down or !policy.authorizationAt(&self.state, input.server_id, &.{.awaiting_consent})) return .{ .outcome = .rejected };
+        const management = if (self.state.management) |*value| value else return .{ .outcome = .rejected };
+        var prepared = try management.prepareCaptureOauthResource(expected_generation, input);
+        const outcome = try self.commitPreparedMutation(&prepared);
+        var result: configuration.CaptureOauthResourceResult = .{ .outcome = outcome };
+        if (outcome == .saved) {
+            const registry = management.desiredRegistry() orelse return result;
+            const server = state_module.findMcpServer(registry.servers, input.server_id) orelse return result;
+            const resource = server.auth.oauth.?.pending_resource orelse return result;
+            if (resource.identity.len != 35) return result;
+            var identity: [35]u8 = undefined;
+            @memcpy(&identity, resource.identity);
+            result.identity = identity;
+        }
+        return result;
     }
 
     pub fn renameServer(
@@ -1519,7 +1723,8 @@ pub const Runtime = struct {
             &.{};
         const owned_operation_id = try owned.dupe(u8, operation_id);
         const owned_server_id = try owned.dupe(u8, server.id);
-        const owned_endpoint = try owned.dupe(u8, server.transport.url orelse return null);
+        const owned_endpoint = try owned.dupe(u8, configuration.endpointDisplay(server.transport));
+        const private_endpoint = try configuration.ownSensitiveEndpoint(&arena, server.transport.sensitive_endpoint);
         const owned_registration_kind = try owned.dupe(u8, oauth.registration.kind);
         const owned_client_id = if (oauth.registration.client_id) |value|
             try owned.dupe(u8, value)
@@ -1540,6 +1745,7 @@ pub const Runtime = struct {
             .operation_id = owned_operation_id,
             .server_id = owned_server_id,
             .endpoint = owned_endpoint,
+            .private_endpoint = private_endpoint,
             .registration_kind = owned_registration_kind,
             .client_id = owned_client_id,
             .token_endpoint_auth_method = owned_auth_method,
@@ -1619,7 +1825,7 @@ pub const Runtime = struct {
         const consent_already_bound = if (before_oauth.consent) |consent|
             std.mem.eql(u8, before_oauth.status, "awaiting_tokens") and
                 std.mem.eql(u8, consent.issuer, plan.issuer) and
-                std.mem.eql(u8, consent.resource, plan.resource) and
+                configuration.consentResourceMatches(consent, plan.resource, plan.private_resource_identity) and
                 std.mem.eql(u8, consent.redirect_uri, plan.redirect_uri) and
                 textSetsEqual(consent.scopes, plan.scopes)
         else
@@ -1630,6 +1836,7 @@ pub const Runtime = struct {
                 .{
                     .server_id = plan.server_id,
                     .resource = plan.resource,
+                    .private_resource_identity = plan.private_resource_identity,
                     .issuer = plan.issuer,
                     .scopes = plan.scopes,
                     .redirect_uri = plan.redirect_uri,
@@ -1649,7 +1856,7 @@ pub const Runtime = struct {
         const client_id = oauth.registration.client_id orelse return .rejected;
         if (!std.mem.eql(u8, oauth.status, "awaiting_tokens") or
             !std.mem.eql(u8, consent.issuer, plan.issuer) or
-            !std.mem.eql(u8, consent.resource, plan.resource) or
+            !configuration.consentResourceMatches(consent, plan.resource, plan.private_resource_identity) or
             !std.mem.eql(u8, consent.redirect_uri, plan.redirect_uri) or
             !textSetsEqual(consent.scopes, plan.scopes))
             return .rejected;
@@ -1658,6 +1865,7 @@ pub const Runtime = struct {
             .server_id = server.id,
             .issuer = consent.issuer,
             .resource = consent.resource,
+            .private_resource = consent.private_resource,
             .scopes = consent.scopes,
             .redirect_uri = consent.redirect_uri,
             .client_id = client_id,
@@ -1738,6 +1946,7 @@ pub const Runtime = struct {
                 return .rejected,
             .client_secret_ref = oauth.registration.client_secret_ref,
             .resource = consent.resource,
+            .private_resource = consent.private_resource,
             .redirect_uri = consent.redirect_uri,
         } };
     }
@@ -1763,7 +1972,7 @@ pub const Runtime = struct {
 
     fn commitOauthOperationBegin(
         self: *Runtime,
-        preparation: *configuration.PreparedOauthOperationState,
+        preparation: *configuration.PreparedOperationState,
     ) Error!state_module.McpOauthOperationBeginOutcome {
         if (self.state.runtime_uncertain) return .rejected;
         var reduced = try self.admissionForTarget(preparation.target());
@@ -1773,7 +1982,7 @@ pub const Runtime = struct {
         // ready catalog here would deadlock token renewal after catalog/auth
         // failure; the marker must atomically preserve that reduced state.
         const management = &self.state.management.?;
-        switch (try management.commitPreparedOauthOperationState(preparation)) {
+        switch (try management.commitPreparedOperationState(preparation)) {
             .saved => {
                 self.ports.timer.cancel();
                 self.installCommittedDesired(reduced);
@@ -1907,7 +2116,7 @@ pub const Runtime = struct {
         var candidate = try self.admissionForTarget(preparation.target());
         var candidate_owned = true;
         defer if (candidate_owned) candidate.deinit();
-        const outcome = try management.commitPreparedOauthOperationState(&preparation);
+        const outcome = try management.commitPreparedOperationState(&preparation);
         switch (outcome) {
             .saved => {
                 self.installCommittedDesired(candidate);
@@ -2411,7 +2620,7 @@ const OauthTestEffects = struct {
         const approval = configuration.connectionFingerprint(server);
         server.connection_approval = .{ .fingerprint = &approval };
         var servers = [_]configuration.ServerWire{server};
-        const initial: configuration.RegistryWire = .{ .schema_version = 2, .generation = 1, .oauth_operation = null, .servers = &servers };
+        const initial: configuration.RegistryWire = .{ .schema_version = configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers };
         var buffer: [8192]u8 = undefined;
         var preparation = try configuration.prepare(allocator, try configuration.encode(&buffer, initial, test_limits), true, false, .{}, test_limits);
         errdefer preparation.deinit();
@@ -2449,6 +2658,111 @@ fn testRetainOauthTaskReference(runtime: *Runtime) !void {
     };
     runtime.state.task_references.appendAssumeCapacity(reference);
     runtime.updateMemberReferenceCounts();
+}
+
+test "installation Stop persists a veto during apply without waiting for the apply worker" {
+    var effects: OauthTestEffects = .{};
+    var harness: TestHarness = .{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    const created = try runtime.startInstallation(1, .{ .stdio = .{ .display_name = "Install", .command = "node" } }, .{
+        .task_id = 7,
+        .run_id = 9,
+        .source_message_id = 8,
+        .source_origin = "https://install.example",
+        .request = "{}",
+    });
+    try std.testing.expectEqual(.saved, created.outcome);
+    const id = created.server_id.?;
+    try std.testing.expectEqual(.saved, try runtime.updateInstallation(2, .{ .server_id = &id, .expected_revision = 1, .phase = .connecting, .active_elapsed_ms = 1 }));
+    runtime.state.configuration_apply_state = .applying;
+    defer runtime.state.configuration_apply_state = .idle;
+    try std.testing.expectEqual(.rejected, try runtime.finishInstallation(&id, 2, 2));
+    try std.testing.expectEqual(.saved, try runtime.cancelInstallation(&id, 2));
+    const registry = runtime.state.management.?.desiredRegistry().?;
+    try std.testing.expectEqual(@as(u64, 3), registry.generation);
+    const cancelled = state_module.findMcpServer(registry.servers, &id).?;
+    try std.testing.expectEqual(.cancelled, cancelled.installation.?.phase);
+    try std.testing.expect(!configuration.serverEnabled(cancelled));
+    try std.testing.expect(!cancelled.installation.?.initial_grant_pending);
+    try std.testing.expect(!runtime.installationReady(&id));
+    try std.testing.expectEqual(@as(usize, 0), harness.activations);
+    var buffer: [configuration.max_store_bytes]u8 = undefined;
+    var preparation = try configuration.prepare(std.testing.allocator, try configuration.encode(&buffer, registry, test_limits), true, false, .{}, test_limits);
+    defer preparation.deinit();
+    try std.testing.expectEqual(.disabled, std.meta.activeTag(preparation.server_states[1]));
+}
+
+test "private OAuth endpoints keep resource bytes out of durable consent including dynamic registration" {
+    for ([_]bool{ false, true }) |dynamic| {
+        var effects: OauthTestEffects = .{};
+        var harness: TestHarness = .{};
+        var runtime = try effects.coldRuntime(&harness, if (dynamic) "client_registration_required" else "consent_required");
+        defer runtime.deinit();
+        const private_url = "https://mcp.example.test/k/synthetic?route=private";
+        try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(1, .{
+            .server_id = "oauth",
+            .display_name = "Private OAuth",
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .url = private_url,
+            .sensitive_endpoint = true,
+            .client = if (dynamic) .dynamic_registration else .{ .pre_registered = .{ .client_id = "client" } },
+        }));
+        var start = (try runtime.beginAuthorization(2, "oauth", "private-attempt")).?;
+        defer start.deinit();
+        try std.testing.expectEqualStrings("https://mcp.example.test", start.endpoint);
+        try std.testing.expect(start.private_endpoint != null);
+        try std.testing.expect(runtime.advanceAuthorization("private-attempt", .awaiting_consent));
+        const resource_copy = try std.testing.allocator.dupe(u8, private_url);
+        defer std.testing.allocator.free(resource_copy);
+        const captured = try runtime.captureOauthResource(2, .{ .server_id = "oauth", .resource = resource_copy });
+        try std.testing.expectEqual(.saved, captured.outcome);
+        const resource_identity = captured.identity.?;
+        if (dynamic) {
+            const operation = (try runtime.beginOauthDynamicRegistration(.{
+                .server_id = "oauth",
+                .resource = private_url,
+                .private_resource_identity = &resource_identity,
+                .issuer = "https://issuer.example.test",
+                .scopes = &.{"read"},
+                .redirect_uri = "http://127.0.0.1/callback",
+            })).started;
+            try std.testing.expect(runtime.advanceAuthorization("private-attempt", .registering));
+            try std.testing.expectEqual(.saved, try runtime.completeOauthDynamicRegistration(.{
+                .operation_id = operation.id,
+                .server_id = "oauth",
+                .client_id = "issued-client",
+                .token_endpoint_auth_method = "none",
+            }));
+        }
+        const authorized = try runtime.authorizeOauth(.{
+            .attempt_id = 1,
+            .server_id = "oauth",
+            .resource = private_url,
+            .private_resource_identity = &resource_identity,
+            .issuer = "https://issuer.example.test",
+            .scopes = &.{"read"},
+            .redirect_uri = "http://127.0.0.1/callback",
+        });
+        try std.testing.expect(authorized == .ready);
+        try std.testing.expectEqualStrings("https://mcp.example.test", authorized.ready.resource);
+        const private_resource = authorized.ready.private_resource.?;
+        const resolved = try configuration.resolvePrivateEndpoint(std.testing.allocator, private_resource, .{ .context = &effects, .available = true, .resolve_fn = OauthTestEffects.resolve }, test_limits);
+        defer {
+            std.crypto.secureZero(u8, resolved);
+            std.testing.allocator.free(resolved);
+        }
+        try std.testing.expectEqualStrings(private_url, resolved);
+        var encoded: [configuration.max_store_bytes]u8 = undefined;
+        const bytes = try configuration.encode(&encoded, runtime.state.management.?.desiredRegistry().?, test_limits);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "synthetic") == null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "route=private") == null);
+        try std.testing.expect(runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.pending_resource == null);
+        try std.testing.expect(runtime.advanceAuthorization("private-attempt", .awaiting_browser));
+        const exchange = (try runtime.beginOauthCodeExchange("oauth")).started;
+        try std.testing.expectEqualStrings(&resource_identity, exchange.private_resource.?.identity);
+    }
 }
 
 fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, refreshable: bool, expiry: ?u64) !Runtime {

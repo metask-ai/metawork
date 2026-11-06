@@ -10,7 +10,7 @@
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
-7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage`、`DeliverFile`、`ProposeMcpServer` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
+7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage`、`DeliverFile`、`InstallMcpServer` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
@@ -164,9 +164,9 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 ### Host tools
 
-`ProposeMcpServer` 仅接收单服务公开 typed 字段；env/header 只接收名称，禁止 secret、raw JSON 配置、credential locator、allowlist 和模型提供的来源身份。输入与 canonical draft 各至多 32 KiB UTF-8，限额由 Agent 工具合同拥有；结果是一次短文本 `proposal_submitted | busy | invalid_arguments | unavailable | cancelled`，仅 submitted 附进程内 proposal id，不回传草稿。submitted 只说明信箱接管，后续状态由 MCP 页面承担。callback 验证当前 RunContext、Session generation 与终止状态，使用 Run 冻结 capability 非阻塞 try-put，锁外唤醒；无主线程等待、轮询或工具结果文本驱动交接。capability 在 callback quiescence 后释放，不恢复进新 Run 或 checkpoint。工具说明在获取凭据前要求停止不支持的认证路径，不让模型获取 Key、猜内部文件或手写 Host 状态；该指令不代表机器能识别任意 URL path 凭据。效果说明进入既有审批上下文，工具审批不代替 Add，full_access 也不自动保存、连接或扩权。
+`InstallMcpServer` 接收有界的结构化单服务请求：sourceUrl、typed connection、公开凭据获取/输入计划和可选 serverId；不接收秘密值、credential locator、allowlist 或模型声称的来源身份。Agent 工具合同拥有严格 schema 与编码上限。callback 验证当前 RunContext、Session generation 和终止状态，通过冻结 capability 非阻塞交接 owned 请求并立即返回 `in_progress` 与 requestId；竞争、关闭或拒绝分别返回有界分类，不等待主线程、安装 worker 或 UI，不提供查询轮询工具。请求 id 不是成功证明或 server identity，最终结果直接消费 Product 状态卡；同一 Task 的显式修复由 Host 绑定唯一失败目标。Run 正常结束不取消已接纳安装；主动 Stop 在可信终止路径取消未完成操作，shutdown 先关闭入口再释放 owner。工具说明要求使用 Host 凭据计划，不让模型用 shell/WebFetch 取 Key 或猜写客户端私有配置；工具调用仍使用现有权限，网页不授予安装权限。Product 和 Application 的安装、凭据、来源及恢复语义分别由对应领域合同拥有。
 
-普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`、`ProposeMcpServer`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
+普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`、`InstallMcpServer`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
 图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
 

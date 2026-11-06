@@ -1,4 +1,8 @@
 import {
+  McpInstallationCard,
+  type McpInstallationActions,
+} from "./McpInstallationCard.tsx";
+import {
   useEffect,
   useId,
   useMemo,
@@ -16,7 +20,7 @@ import type {
   McpHttpConnectionInput,
   McpMutationResult,
   McpCreateResult,
-  McpInstallationProposal,
+  McpInstallationOperation,
   McpRefreshResult,
   McpSecretSlot,
   McpStdioConnectionInput,
@@ -446,6 +450,9 @@ function McpSecretInput({
 
 export function McpPage({
   management,
+  installationOperations = [],
+  onCancelInstallation,
+  onCaptureInstallation,
   query,
   disabled,
   onQuery,
@@ -465,22 +472,11 @@ export function McpPage({
   onTest,
   onApply,
   onRefresh,
-  installationProposal = null,
-  requestedProposalId = null,
-  proposalSourceInvalidated = false,
-  installationRejected = false,
-  onReviewProposal,
-  onProposalOpened,
-  onDismissProposal,
 }: {
   management: McpManagementView;
-  installationProposal?: McpInstallationProposal | null;
-  requestedProposalId?: string | null;
-  proposalSourceInvalidated?: boolean;
-  installationRejected?: boolean;
-  onReviewProposal?: (proposal: McpInstallationProposal) => void;
-  onProposalOpened?: () => void;
-  onDismissProposal?: (id: string | null) => Promise<unknown>;
+  installationOperations?: McpInstallationOperation[];
+  onCancelInstallation?: McpInstallationActions["onCancelInstallation"];
+  onCaptureInstallation?: McpInstallationActions["onCaptureInstallation"];
 
   capabilities: {
     connectionApproval: boolean;
@@ -494,12 +490,10 @@ export function McpPage({
   onCreateStdio: (
     expectedGeneration: string,
     input: McpStdioConnectionInput,
-    proposalId?: string,
   ) => Promise<McpCreateResult>;
   onCreateHttp: (
     expectedGeneration: string,
     input: McpHttpConnectionInput,
-    proposalId?: string,
   ) => Promise<McpCreateResult>;
   onUpdateStdio: (
     expectedGeneration: string,
@@ -578,9 +572,6 @@ export function McpPage({
   const [timeoutMs, setTimeoutMs] = useState("30000");
   const [commandLine, setCommandLine] = useState("");
   const [structuredArgv, setStructuredArgv] = useState<string[] | null>(null);
-  const [proposalLink, setProposalLink] = useState<string | null>(null);
-  const [proposalExpired, setProposalExpired] = useState(false);
-  const proposalAttempted = useRef(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importBatch, setImportBatch] = useState<McpImportResult | null>(null);
   const [importStatus, setImportStatus] = useState("");
@@ -606,6 +597,7 @@ export function McpPage({
     ) {
       previousGeneration.current = management.desiredGeneration;
       clearImportSecrets();
+      if (sensitiveEndpoint) setEndpoint("");
     }
     if (management.managementHealth !== "ready" || disabled)
       captureOperation.current = null;
@@ -614,6 +606,7 @@ export function McpPage({
   const [environmentNames, setEnvironmentNames] = useState<string[]>([]);
   const [stdioAuthMode, setStdioAuthMode] = useState<"none" | "static">("none");
   const [endpoint, setEndpoint] = useState("");
+  const [sensitiveEndpoint, setSensitiveEndpoint] = useState(false);
   const [authMode, setAuthMode] = useState<"none" | "static" | "oauth">("none");
   const [headerNames, setHeaderNames] = useState<string[]>([]);
   const [registrationKind, setRegistrationKind] = useState<
@@ -691,7 +684,6 @@ export function McpPage({
       ? selected.connection.tokenEndpointAuthMethod
       : null;
   const addValid =
-    !proposalExpired &&
     Object.values(importedSecrets).every(
       (value) =>
         new TextEncoder().encode(value).length <= capabilities.secretMaxBytes,
@@ -754,13 +746,11 @@ export function McpPage({
     setStructuredArgv(null);
     setImportedSecrets({});
     setImportedDraft(false);
-    setProposalLink(null);
-    setProposalExpired(false);
-    proposalAttempted.current = false;
     setCwd("");
     setEnvironmentNames([]);
     setStdioAuthMode("none");
     setEndpoint("");
+    setSensitiveEndpoint(false);
     setAuthMode("none");
     setHeaderNames([]);
     setRegistrationKind("automatic");
@@ -821,48 +811,6 @@ export function McpPage({
       });
   }
 
-  useEffect(() => {
-    if (
-      !requestedProposalId ||
-      requestedProposalId !== installationProposal?.id ||
-      paneState !== null ||
-      mutationLocked
-    )
-      return;
-    prefillImported(
-      {
-        draft: installationProposal.draft,
-        secrets: {},
-        ignoredPermissions: false,
-        publicValueOverlap: false,
-      },
-      title.current!,
-    );
-    setProposalLink(installationProposal.id);
-    onProposalOpened?.();
-  }, [requestedProposalId, installationProposal, paneState, mutationLocked]);
-  useEffect(() => {
-    if (
-      !proposalLink ||
-      installationProposal?.id === proposalLink ||
-      createPending
-    )
-      return;
-    clearImportSecrets();
-    if (proposalSourceInvalidated && !proposalAttempted.current) {
-      setProposalLink(null);
-      setNotice({ tone: "attention", text: t("mcp.proposal.detached") });
-    } else {
-      setProposalExpired(true);
-      setNotice({ tone: "attention", text: t("mcp.proposal.expired") });
-    }
-  }, [
-    proposalLink,
-    installationProposal?.id,
-    proposalSourceInvalidated,
-    createPending,
-  ]);
-
   function openReplacement(server: McpServer) {
     clearImportSecrets();
     const connection = server.connection;
@@ -889,7 +837,12 @@ export function McpPage({
         : "none",
     );
     setEndpoint(
-      connection.kind === "streamable_http" ? connection.endpoint : "",
+      connection.kind === "streamable_http" && !connection.sensitiveEndpoint
+        ? connection.endpoint
+        : "",
+    );
+    setSensitiveEndpoint(
+      connection.kind === "streamable_http" && !!connection.sensitiveEndpoint,
     );
     setAuthMode(server.authMode);
     setHeaderNames(
@@ -931,13 +884,9 @@ export function McpPage({
     setPaneState({ kind: "server", id: server.id });
   });
 
-  function closePane(dismissProposal = true) {
-    if (dismissProposal && proposalLink)
-      void onDismissProposal?.(proposalLink).catch(() => {
-        setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
-      });
-    setProposalLink(null);
-    setProposalExpired(false);
+  function closePane() {
+    setEndpoint("");
+    setSensitiveEndpoint(false);
     clearImportSecrets();
     captureOperation.current = null;
     const trigger = paneTrigger.current;
@@ -1010,7 +959,6 @@ export function McpPage({
     if (!generation || mutationLocked || !addValid || createPending) return;
     const operation = { generations: new Set([generation]) };
     captureOperation.current = operation;
-    if (proposalLink) proposalAttempted.current = true;
     const secretValues = Object.entries(importedSecrets).filter(
       ([, value]) => value.length > 0,
     );
@@ -1044,6 +992,7 @@ export function McpPage({
           : ({
               ...shared,
               endpoint: endpoint.trim(),
+              ...(sensitiveEndpoint ? { sensitiveEndpoint: true } : {}),
               authMode,
               headerNames: headerNames.map((value) => value.trim()),
               registration:
@@ -1071,28 +1020,12 @@ export function McpPage({
                 input as McpHttpConnectionInput,
               )
           : transport === "stdio"
-            ? proposalLink
-              ? await onCreateStdio(
-                  generation,
-                  input as McpStdioConnectionInput,
-                  proposalLink,
-                )
-              : await onCreateStdio(
-                  generation,
-                  input as McpStdioConnectionInput,
-                )
-            : proposalLink
-              ? await onCreateHttp(
-                  generation,
-                  input as McpHttpConnectionInput,
-                  proposalLink,
-                )
-              : await onCreateHttp(generation, input as McpHttpConnectionInput);
+            ? await onCreateStdio(generation, input as McpStdioConnectionInput)
+            : await onCreateHttp(generation, input as McpHttpConnectionInput);
       mutationNotice(result);
       if (captureOperation.current !== operation) return;
       if (result.outcome === "saved") {
         saved = true;
-        setProposalLink(null);
         const serverId =
           paneState?.kind === "replace" && selected
             ? selected.id
@@ -1132,13 +1065,14 @@ export function McpPage({
           expected = capture.desiredGeneration;
           operation.generations.add(expected);
         }
-      } else if (result.outcome === "saved_recovery_required") closePane(false);
+      } else if (result.outcome === "saved_recovery_required") closePane();
     } catch {
       setNotice({
         tone: "attention",
         text: t(saved ? "mcp.import.capture_failed" : "mcp.mutation.failed"),
       });
     } finally {
+      if (sensitiveEndpoint) setEndpoint("");
       secretValues.length = 0;
       if (captureOperation.current === operation)
         captureOperation.current = null;
@@ -1694,57 +1628,21 @@ export function McpPage({
             </div>
           </header>
 
-          {installationRejected && (
-            <p role="status" className="mcp-operation-notice">
-              {t("mcp.proposal.rejected")}
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  void onDismissProposal?.(null).catch(() =>
-                    setNotice({
-                      tone: "attention",
-                      text: t("mcp.mutation.failed"),
-                    }),
-                  )
-                }
-              >
-                {t("common.close")}
-              </Button>
-            </p>
-          )}
-          {installationProposal && (
-            <section
-              className="mcp-import"
-              aria-label={t("mcp.proposal.title")}
-            >
-              <strong>{installationProposal.draft.displayName}</strong>
-              <p>{t("mcp.proposal.body")}</p>
-              <div>
-                <Button
-                  variant="secondary"
-                  disabled={mutationLocked || paneState !== null}
-                  onClick={() => onReviewProposal?.(installationProposal)}
-                >
-                  {t("mcp.proposal.review")}
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={paneState !== null}
-                  onClick={() =>
-                    void onDismissProposal?.(installationProposal.id).catch(
-                      () =>
-                        setNotice({
-                          tone: "attention",
-                          text: t("mcp.mutation.failed"),
-                        }),
-                    )
-                  }
-                >
-                  {t("common.cancel")}
-                </Button>
-              </div>
-            </section>
-          )}
+          {installationOperations
+            .filter(
+              (operation) =>
+                operation.phase !== "ready" && operation.phase !== "cancelled",
+            )
+            .map((operation) => (
+              <McpInstallationCard
+                key={operation.serverId}
+                operation={operation}
+                disabled={disabled}
+                secretMaxBytes={capabilities.secretMaxBytes}
+                onCancelInstallation={onCancelInstallation}
+                onCaptureInstallation={onCaptureInstallation}
+              />
+            ))}
           {renderBanner()}
           {management.retainedMemberCount > 0 && (
             <p className="mcp-operation-notice" aria-live="polite">
@@ -2145,6 +2043,7 @@ export function McpPage({
                         </span>
                         <Input
                           autoComplete="off"
+                          type={sensitiveEndpoint ? "password" : "text"}
                           inputMode="url"
                           placeholder="https://mcp.example.com"
                           value={endpoint}
@@ -2161,6 +2060,18 @@ export function McpPage({
                         <small id="mcp-add-endpoint-help">
                           {t("mcp.add.endpoint_help")}
                         </small>
+                      </label>
+                      <label>
+                        <Input
+                          type="checkbox"
+                          checked={sensitiveEndpoint}
+                          disabled={createPending}
+                          onChange={(event) => {
+                            setEndpoint("");
+                            setSensitiveEndpoint(event.target.checked);
+                          }}
+                        />
+                        {t("mcp.add.sensitive_endpoint")}
                       </label>
                       <fieldset className="mcp-auth-choice">
                         <legend>{t("mcp.add.authentication")}</legend>

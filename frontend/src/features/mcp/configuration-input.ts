@@ -424,22 +424,16 @@ function rawAuthorityHost(authority: string): string | null {
 export function validMcpHttpEndpoint(value: string): boolean {
   if (
     !/^https?:\/\//i.test(value) ||
-    /[\u0000-\u0020\u007f\\?#]/.test(value) ||
+    /[\u0000-\u0020\u007f\\#]/.test(value) ||
     new TextEncoder().encode(value).length > 4096
   )
     return false;
-  const authority = value.slice(value.indexOf("://") + 3).split("/", 1)[0];
+  const authority = value.slice(value.indexOf("://") + 3).split(/[/?]/, 1)[0];
   const host = rawAuthorityHost(authority);
   if (host === null) return false;
   try {
     const endpoint = new URL(value);
-    if (
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.search ||
-      endpoint.hash
-    )
-      return false;
+    if (endpoint.username || endpoint.password || endpoint.hash) return false;
     if (endpoint.protocol === "https:") return true;
     return (
       endpoint.protocol === "http:" &&

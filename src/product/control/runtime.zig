@@ -116,6 +116,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     CatalogLoading,
     CatalogUnavailable,
     McpManagementUnavailable,
+    McpManagementBusy,
     McpOauthScopeCapacity,
     CatalogRequestGenerationExhausted,
     StaleCatalog,
@@ -5334,6 +5335,13 @@ pub const Runtime = struct {
     pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        if (self.observeMcpInstallation(null)) |observation| {
+            const operation = observation.server.installation.?;
+            if (operation.task_id == task_id and operation.run_id == run_id) {
+                const id = observation.server.id[0..mcp_configuration.created_identity_bytes].*;
+                _ = self.cancelMcpInstallation(&id, operation.revision) catch {};
+            }
+        }
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
@@ -6294,30 +6302,118 @@ pub const Runtime = struct {
         changed = self.sanitizeMcpInstallation() or changed;
         return runtime.syncInitialHealth() or changed;
     }
-    pub fn dismissMcpInstallProposal(self: *Runtime, id: ?u64) bool {
-        const runtime = if (self.mcp) |*value| value else return false;
-        const changed = if (id) |requested| runtime.dismissInstallation(self.io, requested, false) else runtime.dismissInstallationNotice();
-        if (changed) self.publishMcpRuntimeChanges();
-        return changed;
-    }
-    fn installationIdValid(self: *Runtime, id: ?u64) bool {
-        if (self.sanitizeMcpInstallation()) self.publishMcpRuntimeChanges();
-        const requested = id orelse return true;
-        const runtime = if (self.mcp) |*value| value else return false;
-        const pending = runtime.pendingInstallation() orelse return false;
-        return pending.id == requested;
-    }
-    fn finishInstallationCreate(self: *Runtime, id: ?u64, result: mcp_configuration.CreateResult) void {
-        const requested = id orelse return;
-        const runtime = if (self.mcp) |*value| value else return;
-        if ((result.outcome == .saved or result.outcome == .saved_recovery_required) and result.server_id != null)
-            _ = runtime.dismissInstallation(self.io, requested, false)
-        else if (result.outcome == .indeterminate)
-            _ = runtime.dismissInstallation(self.io, requested, false);
-    }
     fn publishMcpRuntimeChanges(self: *Runtime) void {
         const runtime = if (self.mcp) |*value| value else return;
         if (runtime.takeChanged()) self.bumpRevision();
+    }
+
+    pub fn pendingMcpInstallation(self: *Runtime) ?control_ports.McpInstallIngress {
+        const runtime = if (self.mcp) |*value| value else return null;
+        const pending = runtime.pendingInstallation() orelse return null;
+        return .{ .id = pending.id, .task_id = pending.task_id, .run_id = pending.run_id, .json = pending.json };
+    }
+
+    pub fn startMcpInstallation(self: *Runtime, id: u64, existing: ?[]const u8) Error!mcp_configuration.CreateResult {
+        const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
+        if (runtime.hasRefreshJob()) return error.McpManagementBusy;
+        const pending = runtime.pendingInstallation() orelse return .{ .outcome = .rejected };
+        if (pending.id != id or !self.task_runtime.mcpInstallationSourceAvailable(pending.task_id, pending.run_id)) return .{ .outcome = .rejected };
+        var parsed = lifecycle.parseMcpInstallRequest(self.allocator, pending.json) catch return .{ .outcome = .rejected };
+        defer parsed.deinit();
+        const request = parsed.parsed.value;
+        const d = request.connection;
+        const source_url = std.mem.sliceTo(request.sourceUrl, '#');
+        const origin = mcp_configuration.endpointOrigin(source_url, 4096) orelse return .{ .outcome = .rejected };
+        const evidence = self.task_runtime.mcpInstallationSourceEvidence(pending.task_id, request.sourceUrl);
+        const source_message = evidence.message_id;
+        var needs_authorization = evidence.requiresConfirmation();
+        const destination = if (d.endpoint) |endpoint| mcp_configuration.endpointOrigin(endpoint, 4096) orelse return .{ .outcome = .rejected } else null;
+        var slots: [16]mcp_configuration.InstallationCredentialWire = undefined;
+        for (request.credentials, 0..) |plan, i| {
+            slots[i] = .{ .name = plan.slot, .manual = plan.kind == .user_input };
+            if (plan.url) |url| {
+                const credential_origin = mcp_configuration.endpointOrigin(url, 4096) orelse return .{ .outcome = .rejected };
+                if (!std.mem.eql(u8, credential_origin, origin) or (destination != null and !std.mem.eql(u8, credential_origin, destination.?))) needs_authorization = true;
+            }
+        }
+        const connection: mcp_configuration.InstallationConnection = if (std.mem.eql(u8, d.transport, "stdio")) .{ .stdio = .{
+            .display_name = d.displayName,
+            .command = d.command.?,
+            .arguments = d.arguments,
+            .cwd = d.cwd,
+            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
+            .environment_names = d.environmentNames,
+        } } else if (std.mem.eql(u8, d.authMode, "oauth")) .{ .oauth = .{ .display_name = d.displayName, .url = d.endpoint.?, .client = .dynamic_registration } } else .{ .http = .{
+            .display_name = d.displayName,
+            .url = d.endpoint.?,
+            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
+            .header_names = d.headerNames,
+        } };
+        const inspection = runtime.state.management.?.inspect();
+        defer self.publishMcpRuntimeChanges();
+        return runtime.startInstallation(inspection.desired_generation orelse 0, connection, .{
+            .task_id = pending.task_id,
+            .run_id = pending.run_id,
+            .source_message_id = source_message orelse pending.run_id,
+            .source_origin = origin,
+            .phase = if (needs_authorization) .needs_authorization else .preparing,
+            .request = pending.json,
+            .existing_server_id = request.serverId orelse existing,
+            .credentials = slots[0..request.credentials.len],
+        }) catch |err| return @errorCast(err);
+    }
+
+    pub fn observeMcpInstallation(self: *Runtime, id: ?[]const u8) ?control_ports.McpInstallObservation {
+        const runtime = if (self.mcp) |*value| value else return null;
+        const management = if (runtime.state.management) |*value| value else return null;
+        const registry = management.desiredRegistry() orelse return null;
+        for (registry.servers) |server| {
+            const operation = server.installation orelse continue;
+            if (id) |value| {
+                if (!std.mem.eql(u8, value, server.id)) continue;
+            } else if (!operation.phase.active() and !operation.stop_pending) continue;
+            return .{
+                .generation = registry.generation,
+                .server = server,
+                .source_available = self.task_runtime.mcpInstallationSourceAvailable(operation.task_id, operation.run_id),
+                .ready = runtime.installationReady(server.id),
+                .connection_failed = runtime.installationConnectionFailed(server.id),
+            };
+        }
+        return null;
+    }
+
+    pub fn updateMcpInstallation(self: *Runtime, generation: u64, input: mcp_configuration.InstallationUpdate) Error!mcp_configuration.ManagementOutcome {
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.updateInstallation(generation, input) catch |err| return @errorCast(err);
+    }
+    pub fn captureMcpInstallationCredential(self: *Runtime, generation: u64, server_id: []const u8, name: []const u8, manual: bool, secret: []u8) Error!mcp_configuration.ManagementOutcome {
+        defer std.crypto.secureZero(u8, secret);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.captureInstallationCredential(generation, server_id, name, manual, secret) catch |err| return @errorCast(err);
+    }
+    pub fn replaceMcpInstallation(self: *Runtime, generation: u64, id: []const u8, revision: u64, connection: mcp_configuration.InstallationConnection) Error!mcp_configuration.ManagementOutcome {
+        const observed = self.observeMcpInstallation(id) orelse return .rejected;
+        const operation = observed.server.installation.?;
+        if (!observed.source_available or operation.revision != revision or observed.generation != generation or !operation.phase.active() or operation.phase == .needs_authorization or operation.phase == .connecting) return .rejected;
+        return switch (connection) {
+            .http => |value| try self.updateMcpHttpConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .url = value.url, .sensitive_endpoint = true, .endpoint_parts = value.endpoint_parts, .auth_mode = value.auth_mode, .header_names = value.header_names }),
+            .oauth => |value| try self.updateMcpOauthHttpConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .url = value.url, .sensitive_endpoint = true, .endpoint_parts = value.endpoint_parts, .client = value.client }),
+            .stdio => |value| try self.updateMcpStdioConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .command = value.command, .arguments = value.arguments, .cwd = value.cwd, .auth_mode = value.auth_mode, .environment_names = value.environment_names }),
+        };
+    }
+
+    pub fn finishMcpInstallation(self: *Runtime, server_id: []const u8, revision: u64, elapsed: u32) Error!mcp_configuration.ManagementOutcome {
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.finishInstallation(server_id, revision, elapsed) catch |err| return @errorCast(err);
+    }
+    pub fn cancelMcpInstallation(self: *Runtime, server_id: []const u8, revision: u64) Error!mcp_configuration.ManagementOutcome {
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.cancelInstallation(server_id, revision) catch |err| return @errorCast(err);
     }
 
     pub fn inspectMcpDesiredConfiguration(
@@ -6630,12 +6726,10 @@ pub const Runtime = struct {
         expected_generation: u64,
         input: mcp_configuration.CreateHttpServerInput,
     ) Error!mcp_configuration.CreateResult {
-        if (!self.installationIdValid(input.proposal_id)) return .{ .outcome = .rejected };
         if (self.mcpPublicInputContainsSensitive(input)) return .{ .outcome = .rejected };
         const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         defer self.publishMcpRuntimeChanges();
         const result = runtime.createHttpServer(expected_generation, input) catch |err| return @errorCast(err);
-        self.finishInstallationCreate(input.proposal_id, result);
         return result;
     }
 
@@ -6644,12 +6738,10 @@ pub const Runtime = struct {
         expected_generation: u64,
         input: mcp_configuration.CreateOauthHttpServerInput,
     ) Error!mcp_configuration.CreateResult {
-        if (!self.installationIdValid(input.proposal_id)) return .{ .outcome = .rejected };
         if (self.mcpPublicInputContainsSensitive(input)) return .{ .outcome = .rejected };
         const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         defer self.publishMcpRuntimeChanges();
         const result = runtime.createOauthHttpServer(expected_generation, input) catch |err| return @errorCast(err);
-        self.finishInstallationCreate(input.proposal_id, result);
         return result;
     }
 
@@ -6658,12 +6750,10 @@ pub const Runtime = struct {
         expected_generation: u64,
         input: mcp_configuration.CreateStdioServerInput,
     ) Error!mcp_configuration.CreateResult {
-        if (!self.installationIdValid(input.proposal_id)) return .{ .outcome = .rejected };
         if (self.mcpPublicInputContainsSensitive(input)) return .{ .outcome = .rejected };
         const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         defer self.publishMcpRuntimeChanges();
         const result = runtime.createStdioServer(expected_generation, input) catch |err| return @errorCast(err);
-        self.finishInstallationCreate(input.proposal_id, result);
         return result;
     }
 
@@ -6708,7 +6798,8 @@ pub const Runtime = struct {
             for (input.arguments) |value| if (self.containsKnownCredential(value)) return true;
             for (input.environment_names) |value| if (self.containsKnownCredential(value)) return true;
         } else {
-            if (self.containsKnownCredential(input.url)) return true;
+            const private_endpoint = if (@hasField(@TypeOf(input), "sensitive_endpoint")) input.sensitive_endpoint else false;
+            if (!private_endpoint and self.containsKnownCredential(input.url)) return true;
             if (@hasField(@TypeOf(input), "header_names")) {
                 for (input.header_names) |value| if (self.containsKnownCredential(value)) return true;
             } else switch (input.client) {
@@ -6748,6 +6839,13 @@ pub const Runtime = struct {
         };
         defer self.publishMcpRuntimeChanges();
         return runtime.captureOauthClientSecret(expected_generation, input) catch |err| return @errorCast(err);
+    }
+
+    pub fn captureMcpOauthResource(self: *Runtime, expected_generation: u64, input: mcp_configuration.CaptureOauthResourceInput) Error!mcp_configuration.CaptureOauthResourceResult {
+        defer std.crypto.secureZero(u8, input.resource);
+        const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
+        defer self.publishMcpRuntimeChanges();
+        return runtime.captureOauthResource(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn renameMcpServer(
@@ -6958,7 +7056,7 @@ pub const Runtime = struct {
             return error.SnapshotTooLarge;
         try self.writeAutomaticWorkspaceRootConfiguration(writer);
         writer.writeAll(",\"mcpInstallation\":") catch return error.SnapshotTooLarge;
-        if (self.mcp) |*runtime| try runtime.writeInstallation(writer) else writer.writeAll("{\"proposal\":null,\"notice\":null}") catch return error.SnapshotTooLarge;
+        if (self.mcp) |*runtime| try runtime.writeInstallation(writer, .{ .context = self, .contains_sensitive_fn = mcpViewContainsSensitive, .write_json_fn = writeMcpViewJson }) else writer.writeAll("{\"operations\":[],\"notice\":null}") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
@@ -10471,6 +10569,15 @@ pub const Runtime = struct {
     pub fn mcpManagementPort(self: *Runtime) control_ports.McpManagementPort {
         return .{
             .context = self,
+            .installation_request_fn = controlMcpInstallationRequest,
+            .start_installation_fn = controlMcpStartInstallation,
+            .observe_installation_fn = controlMcpObserveInstallation,
+            .update_installation_fn = controlMcpUpdateInstallation,
+            .capture_installation_fn = controlMcpCaptureInstallation,
+            .replace_installation_fn = controlMcpReplaceInstallation,
+            .finish_installation_fn = controlMcpFinishInstallation,
+            .cancel_installation_fn = controlMcpCancelInstallation,
+            .release_installation_fn = controlMcpReleaseInstallation,
             .observe_process_fn = controlMcpObserveProcess,
             .inspect_fn = controlMcpInspect,
             .write_desired_fn = controlMcpWriteDesired,
@@ -10489,6 +10596,7 @@ pub const Runtime = struct {
             .validate_secret_capture_fn = controlMcpValidateSecretCapture,
             .capture_static_secret_fn = controlMcpCaptureStaticSecret,
             .capture_oauth_client_secret_fn = controlMcpCaptureOauthClientSecret,
+            .capture_oauth_resource_fn = controlMcpCaptureOauthResource,
             .begin_dynamic_registration_fn = controlMcpBeginDynamicRegistration,
             .complete_dynamic_registration_fn = controlMcpCompleteDynamicRegistration,
             .begin_code_exchange_fn = controlMcpBeginCodeExchange,
@@ -11010,6 +11118,46 @@ fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
     return controlOwner(context).drainAgentEvents();
 }
 
+fn controlMcpInstallationRequest(context: *anyopaque) ?control_ports.McpInstallIngress {
+    return controlOwner(context).pendingMcpInstallation();
+}
+fn controlMcpStartInstallation(context: *anyopaque, id: u64, existing: ?[]const u8) !mcp_configuration.CreateResult {
+    return controlOwner(context).startMcpInstallation(id, existing);
+}
+fn controlMcpObserveInstallation(context: *anyopaque, id: ?[]const u8) ?control_ports.McpInstallObservation {
+    return controlOwner(context).observeMcpInstallation(id);
+}
+fn controlMcpUpdateInstallation(context: *anyopaque, generation: u64, input: mcp_configuration.InstallationUpdate) !mcp_configuration.ManagementOutcome {
+    return controlOwner(context).updateMcpInstallation(generation, input);
+}
+fn controlMcpCaptureInstallation(context: *anyopaque, generation: u64, id: []const u8, name: []const u8, manual: bool, secret: []u8) !mcp_configuration.ManagementOutcome {
+    return controlOwner(context).captureMcpInstallationCredential(generation, id, name, manual, secret);
+}
+fn controlMcpReplaceInstallation(context: *anyopaque, generation: u64, id: []const u8, revision: u64, connection: mcp_configuration.InstallationConnection) !mcp_configuration.ManagementOutcome {
+    return controlOwner(context).replaceMcpInstallation(generation, id, revision, connection);
+}
+fn controlMcpFinishInstallation(context: *anyopaque, id: []const u8, revision: u64, elapsed: u32) !mcp_configuration.ManagementOutcome {
+    return controlOwner(context).finishMcpInstallation(id, revision, elapsed);
+}
+fn controlMcpCancelInstallation(context: *anyopaque, id: []const u8, revision: u64) !mcp_configuration.ManagementOutcome {
+    return controlOwner(context).cancelMcpInstallation(id, revision);
+}
+fn controlMcpReleaseInstallation(context: *anyopaque, id: u64) void {
+    const owner = controlOwner(context);
+    const runtime = if (owner.mcp) |*value| value else return;
+    const pending = runtime.pendingInstallation() orelse return;
+    if (pending.id != id) return;
+    var exists = false;
+    if (runtime.state.management) |*management| if (management.desiredRegistry()) |registry| for (registry.servers) |server| {
+        if (server.installation) |operation| if (operation.task_id == pending.task_id and operation.run_id == pending.run_id) {
+            exists = true;
+            break;
+        };
+    };
+    _ = runtime.dismissInstallation(owner.io, id, !exists);
+    owner.publishMcpRuntimeChanges();
+}
+
 fn controlMcpInspect(context: *anyopaque) ?mcp_configuration.ManagementInspection {
     return controlOwner(context).inspectMcpDesiredConfiguration();
 }
@@ -11063,6 +11211,9 @@ fn controlMcpCaptureStaticSecret(context: *anyopaque, generation: u64, input: mc
 }
 fn controlMcpCaptureOauthClientSecret(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureOauthClientSecretInput) anyerror!mcp_configuration.ManagementOutcome {
     return controlOwner(context).captureMcpOauthClientSecret(generation, input);
+}
+fn controlMcpCaptureOauthResource(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureOauthResourceInput) anyerror!mcp_configuration.CaptureOauthResourceResult {
+    return controlOwner(context).captureMcpOauthResource(generation, input);
 }
 fn controlMcpBeginDynamicRegistration(context: *anyopaque, input: mcp_configuration.OauthConsentInput) anyerror!McpOauthOperationBeginOutcome {
     return controlOwner(context).beginMcpOauthDynamicRegistration(input);
@@ -11808,7 +11959,11 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     // JSON control escapes already occupy bytes in that source; they cannot
     // independently incur another 6x expansion in the decoded representation.
     var total = std.math.mul(usize, limits.max_projection_bytes, json_string_expansion) catch return null;
-    total = std.math.add(usize, total, lifecycle.max_mcp_installation_bytes + 4096) catch return null;
+    // MCP management and installation cards project the same bounded registry.
+    // Count their shared strings in the registry expansion below, rather than
+    // reserving another full registry for the secret-free installation subset.
+    // The extra allowance is for the installation envelope and notice.
+    total = std.math.add(usize, total, 4096) catch return null;
     total = std.math.add(
         usize,
         total,
@@ -20534,7 +20689,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         oversized_server,
     };
     const registry: mcp_configuration.RegistryWire = .{
-        .schema_version = 2,
+        .schema_version = mcp_configuration.schema_version,
         .generation = 4,
         .oauth_operation = null,
         .servers = &servers,
@@ -20853,70 +21008,21 @@ test "empty MCP startup commits a proven manageable runtime" {
     const leaking_http = try control.createMcpHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL" });
     try std.testing.expectEqual(.rejected, leaking_http.outcome);
     try std.testing.expect(leaking_http.server_id == null);
+    try std.testing.expect(!control.mcpPublicInputContainsSensitive(mcp_configuration.CreateHttpServerInput{
+        .display_name = "Private endpoint",
+        .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL",
+        .sensitive_endpoint = true,
+    }));
+    try std.testing.expect(control.mcpPublicInputContainsSensitive(mcp_configuration.CreateHttpServerInput{
+        .display_name = "SYNTHETIC-MCP-CREDENTIAL",
+        .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL",
+        .sensitive_endpoint = true,
+    }));
     try std.testing.expectEqual(.rejected, (try control.createMcpStdioServer(0, .{ .display_name = "Bad", .command = "node", .arguments = &.{"SYNTHETIC-MCP-CREDENTIAL"} })).outcome);
     try std.testing.expectEqual(.rejected, (try control.createMcpOauthHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/mcp", .client = .{ .pre_registered = .{ .client_id = "SYNTHETIC-MCP-CREDENTIAL" } } })).outcome);
     try std.testing.expectEqual(@as(?u64, null), control.inspectMcpDesiredConfiguration().?.desired_generation);
     control.view_credentials = null;
-    const install = control.mcp.?.installationInput(std.testing.io).?;
-    const public_json = "{\"displayName\":\"Remote\",\"transport\":\"streamable_http\",\"endpoint\":\"https://mcp.example.test/rpc\",\"authMode\":\"none\"}";
-    const make_draft = struct {
-        fn make(bytes: []const u8) !lifecycle.McpInstallationDraft {
-            return .{ .allocator = std.testing.allocator, .json = try std.testing.allocator.dupe(u8, bytes) };
-        }
-    }.make;
-    const proposal_id = install.try_put_fn(install.context, 3, 7, 1, try make_draft(public_json)).proposal_submitted;
-    _ = control.syncMcpHealthNoFail();
-    control.publishMcpRuntimeChanges();
-    try std.testing.expectEqual(proposal_id, control.mcp.?.pendingInstallation().?.id);
-    try std.testing.expect(!control.dismissMcpInstallProposal(proposal_id + 1));
-    const before_confirmation = try control.writeViewFixture(&output, .{});
-    try std.testing.expect(std.mem.indexOf(u8, before_confirmation, "\"proposal\":{\"id\":") != null);
-    try std.testing.expectEqual(@as(?u64, null), control.inspectMcpDesiredConfiguration().?.desired_generation);
-    try std.testing.expectEqual(.rejected, (try control.createMcpHttpServer(0, .{ .proposal_id = proposal_id + 1, .display_name = "Remote", .url = "https://mcp.example.test/rpc" })).outcome);
-    const created = try control.createMcpHttpServer(0, .{ .proposal_id = proposal_id, .display_name = "Remote", .url = "https://mcp.example.test/rpc" });
-    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
-    try std.testing.expectEqual(.rejected, (try control.createMcpHttpServer(1, .{ .proposal_id = proposal_id, .display_name = "Duplicate", .url = "https://mcp.example.test/rpc" })).outcome);
-    try std.testing.expectEqual(@as(usize, 1), mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers.len);
-    // Late credential discovery must remove a public proposal before projection.
-    _ = install.try_put_fn(install.context, 3, 7, 1, try make_draft(public_json));
-    _ = control.syncMcpHealthNoFail();
-    control.publishMcpRuntimeChanges();
-    try std.testing.expect(control.mcp.?.pendingInstallation() != null);
-    const LateCredential = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
-        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
-            try callback(context, "mcp.example.test");
-        }
-    };
-    var credential_owner: u8 = 0;
-    control.setAccountProjectionCredentials(.{ .context = &credential_owner, .generation_fn = LateCredential.generation, .visit_fn = LateCredential.visit });
-    const rejected_projection = try control.writeViewFixture(&output, .{});
-    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
-    try std.testing.expect(std.mem.indexOf(u8, rejected_projection, "\"notice\":\"proposal_rejected\"") != null);
-    try std.testing.expect(!control.dismissMcpInstallProposal(proposal_id));
-    try std.testing.expect(control.mcp.?.installation_notice);
-    try std.testing.expect(control.dismissMcpInstallProposal(null));
-    try std.testing.expect(!control.dismissMcpInstallProposal(null));
-    try std.testing.expect(!control.mcp.?.installation_notice);
-    control.clearAccountProjectionCredentials();
-    const uncertain_id = install.try_put_fn(install.context, 3, 7, 1, try make_draft(public_json)).proposal_submitted;
-    _ = control.syncMcpHealthNoFail();
-    try std.testing.expect(!control.dismissMcpInstallProposal(null));
-    try std.testing.expectEqual(uncertain_id, control.mcp.?.pendingInstallation().?.id);
-    control.finishInstallationCreate(uncertain_id, .{ .outcome = .indeterminate });
-    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
-    try std.testing.expect(!control.mcp.?.installation_notice);
-    _ = install.try_put_fn(install.context, 3, 7, 1, try make_draft(public_json));
-    _ = control.syncMcpHealthNoFail();
-    control.publishMcpRuntimeChanges();
-    try std.testing.expect(control.mcp.?.pendingInstallation() != null);
-    control.task_runtime.tasks[0].?.runtime.cancel_requested = true;
-    _ = control.syncMcpHealthNoFail();
-    control.publishMcpRuntimeChanges();
-    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
-    control.task_runtime.tasks[0].?.runtime.cancel_requested = false;
+    const created = try control.createMcpHttpServer(0, .{ .display_name = "Remote", .url = "https://mcp.example.test/rpc" });
     try std.testing.expectEqual(.saved, created.outcome);
     const created_id = created.server_id.?;
     control.view_credentials = &.{"SYNTHETIC-MCP-CREDENTIAL"};

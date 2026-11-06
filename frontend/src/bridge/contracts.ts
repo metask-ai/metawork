@@ -1653,7 +1653,7 @@ export const mcpAuthorizationPhaseValues = [
 ] as const;
 export type McpSecretSlot =
   | {
-      kind: "stdio_environment" | "http_header";
+      kind: "stdio_environment" | "http_header" | "installation_credential";
       name: string;
     }
   | {
@@ -1673,6 +1673,7 @@ export type McpHttpConnectionInput = {
   negotiation: "automatic" | "modern_only" | "compat_only";
   timeoutMs: number;
   endpoint: string;
+  sensitiveEndpoint?: boolean;
   authMode: "none" | "static" | "oauth";
   headerNames: string[];
   registration:
@@ -1731,6 +1732,7 @@ export type McpManagementView = {
       | {
           kind: "streamable_http";
           endpoint: string;
+          sensitiveEndpoint?: boolean;
           headers: {
             name: string;
             status: "missing" | "set";
@@ -1780,18 +1782,46 @@ export type McpCreateResult = McpMutationResult & { serverId: string | null };
 export type McpInstallDraft =
   | ({ transport: "stdio" } & McpStdioConnectionInput)
   | ({ transport: "streamable_http" } & McpHttpConnectionInput);
-export type McpInstallationProposal = {
-  id: string;
+export const mcpInstallationPhases = [
+  "preparing",
+  "needs_authorization",
+  "acquiring_credentials",
+  "needs_credentials",
+  "needs_oauth",
+  "connecting",
+  "ready",
+  "no_tools",
+  "failed",
+  "cancelled",
+  "cancelling",
+] as const;
+export const mcpInstallationFailures = [
+  "invalid_request",
+  "credential_request_failed",
+  "credential_request_interrupted",
+  "configuration_changed",
+  "connection_failed",
+  "authorization_failed",
+  "storage_failed",
+  "timeout",
+] as const;
+export type McpInstallationOperation = {
+  serverId: string;
   taskId: string;
   runId: string;
-  draft: McpInstallDraft;
+  revision: string;
+  desiredGeneration: string;
+  displayName: string;
+  phase: (typeof mcpInstallationPhases)[number];
+  failure: (typeof mcpInstallationFailures)[number] | null;
+  sourceOrigin: string;
+  targetOrigin: string | null;
+  canCancel: boolean;
+  missingCredentials: string[];
 };
 export type McpInstallation = {
-  proposal: McpInstallationProposal | null;
-  notice: "proposal_rejected" | null;
-};
-export type McpInstallDismissResult = {
-  outcome: "dismissed" | "stale_proposal";
+  operations: McpInstallationOperation[];
+  notice: { taskId: string; runId: string } | null;
 };
 export type McpAuthorizationResult = {
   outcome:

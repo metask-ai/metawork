@@ -1009,7 +1009,7 @@ pub fn buildRuntime(
             allocator.destroy(owner);
             return err;
         };
-        owner.* = catalog_budget.wrapTransport(allocator, owner, server.timeout_ms, host_environment.catalog_budget) catch |err| {
+        owner.* = catalog_budget.wrapTransport(allocator, owner, server.timeout_ms, host_environment.catalog_budget, mcp_configuration.initialInstallation(server) and host_environment.catalog_budget != null) catch |err| {
             owner.deinit();
             allocator.destroy(owner);
             return err;
@@ -1038,7 +1038,7 @@ pub fn buildRuntime(
             .namespace = server.namespace,
             .client_name = client_name,
             .client_version = client_version,
-            .timeout_ms = server.timeout_ms,
+            .timeout_ms = if (mcp_configuration.initialInstallation(server) and host_environment.catalog_budget != null) @max(server.timeout_ms, mcp_configuration.initial_installation_timeout_ms) else server.timeout_ms,
             .configuration_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             .allowed_tools = server.tools,
         };
@@ -1096,7 +1096,7 @@ fn serverSecrets(
     server: mcp_configuration.ServerWire,
     preparation: *const mcp_configuration.Preparation,
 ) BuildError![]const []const u8 {
-    const count = server.transport.environment.len + server.transport.headers.len;
+    const count = server.transport.environment.len + server.transport.headers.len + if (server.installation) |operation| operation.credentials.len else @as(usize, 0);
     const values = try allocator.alloc([]const u8, count);
     var write: usize = 0;
     for (server.transport.environment) |entry| {
@@ -1117,6 +1117,13 @@ fn serverSecrets(
             write += 1;
         }
     }
+    if (server.installation) |operation| for (operation.credentials) |slot| if (slot.credential_ref) |locator| {
+        const secret = resolvedCredential(preparation, locator) orelse return error.InvalidConfig;
+        if (!containsSecret(values[0..write], secret)) {
+            values[write] = secret;
+            write += 1;
+        }
+    };
     return values[0..write];
 }
 
@@ -1967,14 +1974,32 @@ fn createHttpOwner(
     errdefer context.arena.deinit();
     errdefer if (context.authorization) |authorization| authorization.release();
     const owned = context.arena.allocator();
-    context.url = try owned.dupe(u8, server.transport.url orelse
-        return error.InvalidConfig);
+    context.url = mcp_configuration.resolveEndpoint(owned, server.transport, preparation.credentials, 4096) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidEndpoint => return error.InvalidConfig,
+    };
+    errdefer std.crypto.secureZero(u8, @constCast(context.url));
     context.custom_headers = try owned.alloc(std.http.Header, server.transport.headers.len);
-    context.secret_values = try owned.alloc([]u8, server.transport.headers.len);
+    const installation_secret_count = if (server.installation) |operation| operation.credentials.len else @as(usize, 0);
+    const private_secret_count = if (server.transport.sensitive_endpoint) |endpoint| 1 + endpoint.secret_parts.len else 0;
+    context.secret_values = try owned.alloc([]u8, server.transport.headers.len + private_secret_count + installation_secret_count);
     for (context.secret_values) |*secret| secret.* = &.{};
     errdefer for (context.secret_values) |secret|
         if (secret.len != 0) std.crypto.secureZero(u8, secret);
-    for (server.transport.headers, context.custom_headers, context.secret_values) |source, *header, *secret_value| {
+    if (server.installation) |operation| for (operation.credentials, 0..) |slot, i| {
+        const locator = slot.credential_ref orelse return error.InvalidConfig;
+        const value = resolvedCredential(preparation, locator) orelse return error.InvalidConfig;
+        context.secret_values[server.transport.headers.len + private_secret_count + i] = try owned.dupe(u8, value);
+    };
+    if (server.transport.sensitive_endpoint) |endpoint| {
+        context.secret_values[server.transport.headers.len] = @constCast(context.url);
+        for (endpoint.secret_parts, 0..) |part, i| {
+            if (part >= endpoint.credential_refs.len) return error.InvalidConfig;
+            const value = resolvedCredential(preparation, endpoint.credential_refs[part]) orelse return error.InvalidConfig;
+            context.secret_values[server.transport.headers.len + 1 + i] = try owned.dupe(u8, value);
+        }
+    }
+    for (server.transport.headers, context.custom_headers, context.secret_values[0..server.transport.headers.len]) |source, *header, *secret_value| {
         const locator = source.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
@@ -3449,6 +3474,37 @@ test "MCP platform distinguishes trusted Bearer challenges from bare HTTP auth r
     try std.testing.expect(authorization.acknowledgeRuntimeAuthFailure(&bare_failure));
 }
 
+test "MCP private endpoint is resolved only in its HTTP owner and rejects cross-origin assembly" {
+    const allocator = std.testing.allocator;
+    const secret = try allocator.dupe(u8, "https://mcp.example.test/k/synthetic?route=private");
+    defer secureFree(allocator, secret);
+    var credentials = [_]mcp_configuration.ResolvedCredential{.{ .locator = "endpoint/fixture", .secret = secret }};
+    const preparation: mcp_configuration.Preparation = .{ .allocator = allocator, .state = .available, .credentials = &credentials };
+    const server: mcp_configuration.ServerWire = .{
+        .id = "private",
+        .namespace = "private",
+        .display_name = "Private",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "streamable_http", .sensitive_endpoint = .{ .origin = "https://mcp.example.test", .identity = "endpoint-generation", .credential_refs = &.{"endpoint/fixture"} } },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    var authorization: ?*HttpAuthSlot = null;
+    var owner = try createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization);
+    defer owner.deinit();
+    const backend: *agent.McpHttpBackend = @ptrCast(@alignCast(owner.transport.context));
+    const context: *HttpContext = @fieldParentPtr("backend", backend);
+    try std.testing.expectEqualStrings(secret, context.url);
+    @memset(secret, 'x');
+    try std.testing.expectEqualStrings("https://mcp.example.test/k/synthetic?route=private", context.url);
+    var inspection: HttpContext.Inspection = .{ .context = context, .lease = null };
+    try std.testing.expect(!HttpContext.Inspection.check(&inspection, context.url));
+    try std.testing.expectError(error.InvalidConfig, createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization));
+}
+
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {
     var servers = [_]mcp_configuration.ServerWire{
         .{
@@ -3488,7 +3544,7 @@ test "MCP platform builds lazy stdio and HTTP transport owners without opening t
     const registry = try mcp_configuration.encode(
         &registry_buffer,
         .{
-            .schema_version = 2,
+            .schema_version = mcp_configuration.schema_version,
             .generation = 3,
             .oauth_operation = null,
             .servers = &servers,
@@ -3573,7 +3629,7 @@ test "MCP platform creates no owner and reads no credential before approval" {
     const registry = try mcp_configuration.encode(
         &registry_buffer,
         .{
-            .schema_version = 2,
+            .schema_version = mcp_configuration.schema_version,
             .generation = 1,
             .oauth_operation = null,
             .servers = &servers,

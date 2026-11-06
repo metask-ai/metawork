@@ -14,6 +14,7 @@ pub const Budget = struct {
     epoch: u64 = 0,
     active: bool = false,
     bounded: bool = false,
+    initial_installation: bool = false,
     started_ns: i96 = 0,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, runtime: *agent.Runtime) std.mem.Allocator.Error!*Budget {
@@ -34,20 +35,21 @@ pub const Budget = struct {
 
     /// Only wrappers constructed for this next apply carry this epoch. Existing
     /// members never participate. Empty Runtime needs no extra total deadline.
-    pub fn begin(self: *Budget, existing_members: usize) agent.Error!void {
+    pub fn begin(self: *Budget, existing_members: usize, initial_installation: bool) agent.Error!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.active) return error.McpRefreshInProgress;
         if (self.epoch == std.math.maxInt(u64)) return error.McpRuntimeIdentityExhausted;
         self.started_ns = self.now();
         self.epoch += 1;
-        self.bounded = existing_members != 0;
+        self.bounded = existing_members != 0 or initial_installation;
+        self.initial_installation = initial_installation;
         self.active = true;
     }
 
     /// APPLIED ends candidate ownership before Activation or Session use.
     pub fn applied(self: *Budget) void {
-        self.end();
+        if (!self.initial_installation) self.end();
     }
     pub fn end(self: *Budget) void {
         self.mutex.lockUncancelable(self.io);
@@ -77,7 +79,7 @@ pub const Budget = struct {
 
 /// Management limits also apply to isolated connection-test Runtimes. Only
 /// the optional candidate scope adds an absolute pre-adoption deadline.
-pub fn wrapTransport(allocator: std.mem.Allocator, owner: *agent.McpTransportOwner, timeout_ms: u32, budget: ?*Budget) std.mem.Allocator.Error!agent.McpTransportOwner {
+pub fn wrapTransport(allocator: std.mem.Allocator, owner: *agent.McpTransportOwner, timeout_ms: u32, budget: ?*Budget, initial_installation: bool) std.mem.Allocator.Error!agent.McpTransportOwner {
     const wrapper = try allocator.create(Transport);
     var epoch: u64 = 0;
     if (budget) |scope| {
@@ -86,7 +88,7 @@ pub fn wrapTransport(allocator: std.mem.Allocator, owner: *agent.McpTransportOwn
         scope.mutex.unlock(scope.io);
         scope.retain();
     }
-    wrapper.* = .{ .allocator = allocator, .budget = budget, .underlying = owner.take(), .epoch = epoch, .timeout_ms = product_mcp.contract.managementTimeoutMs(timeout_ms) };
+    wrapper.* = .{ .allocator = allocator, .budget = budget, .underlying = owner.take(), .epoch = epoch, .timeout_ms = timeout_ms, .initial_installation = initial_installation };
     return .init(.{ .context = wrapper, .open_fn = Transport.open, .request_fn = Transport.request, .tool_request_fn = Transport.toolRequest, .notify_fn = Transport.notify, .close_fn = Transport.close }, Transport.deinit);
 }
 
@@ -96,17 +98,18 @@ const Transport = struct {
     underlying: agent.McpTransportOwner,
     epoch: u64,
     timeout_ms: u32,
+    initial_installation: bool,
     const Connection = struct { transport: *Transport, underlying: *anyopaque };
 
     fn remaining(self: *Transport, requested: u32) ?u32 {
-        const timeout = product_mcp.contract.managementTimeoutMs(requested);
-        const budget = self.budget orelse return timeout;
+        const ordinary = product_mcp.contract.managementTimeoutMs(if (self.initial_installation) @min(requested, self.timeout_ms) else requested);
+        const budget = self.budget orelse return ordinary;
         budget.mutex.lockUncancelable(budget.io);
         defer budget.mutex.unlock(budget.io);
-        if (!budget.active or !budget.bounded or self.epoch != budget.epoch) return timeout;
-        // A request timeout is not an apply timeout. Allow negotiation/startup
-        // and catalog exchanges separate windows, under an explicit total cap.
-        const total_ms = @as(i96, self.timeout_ms) * product_mcp.contract.candidate_timeout_windows;
+        if (!budget.active or self.epoch != budget.epoch) return ordinary;
+        const timeout = if (self.initial_installation) @min(requested, product_mcp.contract.initial_installation_timeout_ms) else ordinary;
+        if (!budget.bounded) return timeout;
+        const total_ms = if (self.initial_installation) @as(i96, product_mcp.contract.initial_installation_timeout_ms) else @as(i96, ordinary) * product_mcp.contract.candidate_timeout_windows;
         const left_ms = @divFloor(budget.started_ns + total_ms * std.time.ns_per_ms - budget.now(), std.time.ns_per_ms);
         if (left_ms < 1) return null;
         return @intCast(@min(@as(i96, timeout), left_ms));
@@ -139,7 +142,7 @@ const Transport = struct {
     fn toolRequest(raw: *anyopaque, allocator: std.mem.Allocator, bytes: []const u8, timeout_ms: u32, cancellation: agent.McpCancellation) agent.McpExchangeOutcome {
         const connection: *Connection = @ptrCast(@alignCast(raw));
         const transport = connection.transport.underlying.transport;
-        return (transport.tool_request_fn orelse transport.request_fn)(connection.underlying, allocator, bytes, timeout_ms, cancellation);
+        return (transport.tool_request_fn orelse transport.request_fn)(connection.underlying, allocator, bytes, if (connection.transport.initial_installation) @min(timeout_ms, connection.transport.timeout_ms) else timeout_ms, cancellation);
     }
 
     fn notify(raw: *anyopaque, bytes: []const u8, timeout_ms: u32, cancellation: agent.McpCancellation) ?agent.McpTransportFailure {
@@ -168,18 +171,18 @@ const Transport = struct {
 
 test "candidate deadline ends at adoption and never follows old members into later applies" {
     var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
-    var candidate: Transport = .{ .allocator = std.testing.allocator, .budget = &budget, .underlying = undefined, .epoch = 1, .timeout_ms = 20 };
-    try budget.begin(1);
+    var candidate: Transport = .{ .allocator = std.testing.allocator, .budget = &budget, .underlying = undefined, .epoch = 1, .timeout_ms = 20, .initial_installation = false };
+    try budget.begin(1, false);
     budget.started_ns -= 1000 * std.time.ns_per_ms;
     try std.testing.expect(candidate.remaining(20) == null);
     budget.applied();
     try std.testing.expectEqual(@as(?u32, 20), candidate.remaining(20));
-    try budget.begin(2);
+    try budget.begin(2, false);
     budget.started_ns -= 1000 * std.time.ns_per_ms;
     try std.testing.expectEqual(@as(?u32, 20), candidate.remaining(20));
     budget.end();
     candidate.epoch = 3;
-    try budget.begin(0);
+    try budget.begin(0, false);
     budget.started_ns -= 1000 * std.time.ns_per_ms;
     try std.testing.expectEqual(@as(?u32, 20), candidate.remaining(20));
     budget.end();
@@ -216,8 +219,8 @@ test "management timeout limit preserves long tool calls with and without a cand
     for ([_]?*Budget{ null, &budget }) |scope| {
         var capture: Capture = .{};
         var source = agent.McpTransportOwner.init(.{ .context = &capture, .open_fn = Capture.open, .request_fn = Capture.request, .tool_request_fn = Capture.tool, .notify_fn = Capture.notify, .close_fn = Capture.close }, Capture.destroy);
-        var owner = try wrapTransport(std.testing.allocator, &source, 180_000, scope);
-        if (scope) |active| try active.begin(1);
+        var owner = try wrapTransport(std.testing.allocator, &source, 180_000, scope, false);
+        if (scope) |active| try active.begin(1, false);
         const transport = owner.transport;
         const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 180_000)) {
             .connection => |value| value,
@@ -229,7 +232,7 @@ test "management timeout limit preserves long tool calls with and without a cand
         try std.testing.expectEqual(@as(u32, 180_000), capture.tool_ms);
         if (scope) |active| {
             active.applied();
-            try active.begin(2);
+            try active.begin(2, false);
             active.started_ns -= 1000 * std.time.ns_per_s;
             _ = transport.tool_request_fn.?(connection, std.testing.allocator, "tool", 180_000, .{});
             try std.testing.expectEqual(@as(u32, 180_000), capture.tool_ms);
@@ -239,4 +242,40 @@ test "management timeout limit preserves long tool calls with and without a cand
         owner.deinit();
         try std.testing.expect(capture.destroyed);
     }
+}
+
+test "MCP initial installation covers discovery while tools retain their configured timeout" {
+    const Capture = struct {
+        timeout: u32 = 0,
+        fn open(raw: *anyopaque, _: agent.McpPurpose, _: agent.McpEra, _: u32) agent.McpOpenOutcome {
+            return .{ .connection = raw };
+        }
+        fn request(raw: *anyopaque, _: std.mem.Allocator, _: []const u8, timeout: u32, _: agent.McpCancellation) agent.McpExchangeOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.timeout = timeout;
+            return .{ .failure = .network };
+        }
+        fn notify(_: *anyopaque, _: []const u8, _: u32, _: agent.McpCancellation) ?agent.McpTransportFailure {
+            return null;
+        }
+        fn close(_: *anyopaque) void {}
+        fn destroy(_: *anyopaque) void {}
+    };
+    var capture: Capture = .{};
+    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
+    var source = agent.McpTransportOwner.init(.{ .context = &capture, .open_fn = Capture.open, .request_fn = Capture.request, .notify_fn = Capture.notify, .close_fn = Capture.close }, Capture.destroy);
+    var owner = try wrapTransport(std.testing.allocator, &source, 30_000, &budget, true);
+    defer owner.deinit();
+    try budget.begin(0, true);
+    const transport = owner.transport;
+    const connection = transport.open_fn(transport.context, .actual, .modern_2026_07_28, 180_000).connection;
+    defer transport.close_fn(connection);
+    budget.applied();
+    _ = transport.request_fn(connection, std.testing.allocator, "discovery", 180_000, .{});
+    try std.testing.expect(capture.timeout > 120_000 and capture.timeout <= 180_000);
+    _ = transport.tool_request_fn.?(connection, std.testing.allocator, "tool", 180_000, .{});
+    try std.testing.expectEqual(@as(u32, 30_000), capture.timeout);
+    budget.end();
+    _ = transport.request_fn(connection, std.testing.allocator, "ordinary refresh", 180_000, .{});
+    try std.testing.expectEqual(@as(u32, 30_000), capture.timeout);
 }

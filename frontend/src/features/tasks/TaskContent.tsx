@@ -1,4 +1,8 @@
 import {
+  McpInstallationCard,
+  type McpInstallationActions,
+} from "../mcp/McpInstallationCard.tsx";
+import {
   GeneratedImagePreview,
   type FilePreviewLoader,
 } from "./GeneratedImagePreview.tsx";
@@ -18,7 +22,7 @@ import {
 } from "react";
 import type {
   FileReferenceView,
-  McpInstallationProposal,
+  McpInstallationOperation,
   OutputActionHandler,
   PendingUi,
   RunInputView,
@@ -299,8 +303,11 @@ function PermissionReviewRecord({ record }: { record: UiRecord }) {
 
 export function TaskContent({
   task,
-  mcpInstallationProposal,
-  onReviewMcpProposal,
+  mcpInstallations = [],
+  mcpInstallationNotice = null,
+  onCancelInstallation,
+  onCaptureInstallation,
+  installationSecretMaxBytes = 2560,
   snapshotReceivedAt,
   synchronized,
   requestingStop,
@@ -325,8 +332,11 @@ export function TaskContent({
   memory,
 }: {
   task: TaskView | null;
-  mcpInstallationProposal?: McpInstallationProposal | null;
-  onReviewMcpProposal?: (proposal: McpInstallationProposal) => void;
+  mcpInstallations?: McpInstallationOperation[];
+  mcpInstallationNotice?: { taskId: string; runId: string } | null;
+  onCancelInstallation?: McpInstallationActions["onCancelInstallation"];
+  onCaptureInstallation?: McpInstallationActions["onCaptureInstallation"];
+  installationSecretMaxBytes?: number;
   memory?: TaskReadingMemory;
   history?: {
     available: boolean;
@@ -811,23 +821,24 @@ export function TaskContent({
             ) : null;
           const supplement = (
             <>
-              {mcpInstallationProposal?.taskId === task.id &&
-                mcpInstallationProposal.runId === run.id && (
-                  <section
-                    className="mcp-import"
-                    aria-label={t("mcp.proposal.title")}
-                  >
-                    <strong>{mcpInstallationProposal.draft.displayName}</strong>
-                    <p>{t("mcp.proposal.body")}</p>
-                    <Button
-                      variant="secondary"
-                      onClick={() =>
-                        onReviewMcpProposal?.(mcpInstallationProposal)
-                      }
-                    >
-                      {t("mcp.proposal.review")}
-                    </Button>
-                  </section>
+              {mcpInstallations
+                .filter(
+                  (operation) =>
+                    operation.taskId === task.id && operation.runId === run.id,
+                )
+                .map((operation) => (
+                  <McpInstallationCard
+                    key={operation.serverId}
+                    operation={operation}
+                    disabled={!synchronized || requestingStop}
+                    secretMaxBytes={installationSecretMaxBytes}
+                    onCancelInstallation={onCancelInstallation}
+                    onCaptureInstallation={onCaptureInstallation}
+                  />
+                ))}
+              {mcpInstallationNotice?.taskId === task.id &&
+                mcpInstallationNotice.runId === run.id && (
+                  <p role="status">{t("mcp.install.rejected")}</p>
                 )}
               {presentation.active && (
                 <RunProcess

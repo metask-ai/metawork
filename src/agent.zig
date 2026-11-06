@@ -14,8 +14,11 @@ pub const max_provider_id_bytes = model_binding.max_provider_id_bytes;
 
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
 pub const FileDeliveryReceipt = session_impl.FileDeliveryReceipt;
+pub const McpInstallRequest = session_impl.McpInstallRequest;
+pub const McpParsedInstallRequest = session_impl.McpParsedInstallRequest;
+pub const parseMcpInstallRequest = session_impl.parseMcpInstallRequest;
 pub const McpInstallationInput = session_impl.McpInstallationInput;
-pub const McpInstallationDraft = session_impl.McpInstallationDraft;
+pub const McpInstallationRequest = session_impl.McpInstallationRequest;
 pub const McpInstallationResult = session_impl.McpInstallationResult;
 pub const max_mcp_installation_bytes = session_impl.max_mcp_installation_bytes;
 pub const FileDeliveryInput = session_impl.FileDeliveryInput;

@@ -180,7 +180,6 @@ import type {
   TaskRestoreReason,
   RunInputView,
   McpMutationResult,
-  McpInstallationProposal,
   McpRefreshResult,
   McpConfigurationApplyResult,
   McpConnectionTestResult,
@@ -384,25 +383,22 @@ export default function App() {
   }, [searchQuery]);
 
   const [skillsQuery, setSkillsQuery] = useState("");
-  const [mcpReview, setMcpReview] = useState<{
-    id: string;
-    taskId: string;
-    runId: string;
-    invalidated: boolean;
-  } | null>(null);
-  const [requestedMcpProposal, setRequestedMcpProposal] = useState<
-    string | null
-  >(null);
-  function reviewMcpProposal(proposal: McpInstallationProposal) {
-    setMcpReview({
-      id: proposal.id,
-      taskId: proposal.taskId,
-      runId: proposal.runId,
-      invalidated: false,
-    });
-    setRequestedMcpProposal(proposal.id);
-    setRoute("mcp");
-  }
+  const cancelMcpInstallation = (id: string, revision: string) =>
+    commitMcpMutation(() => client.cancelMcpInstallation(id, revision));
+  const captureMcpInstallation = (
+    generation: string,
+    id: string,
+    slot: string,
+    secret: string,
+  ) =>
+    commitMcpMutation(() =>
+      client.captureMcpSecret(
+        generation,
+        id,
+        { kind: "installation_credential", name: slot },
+        secret,
+      ),
+    );
   const [mcpQuery, setMcpQuery] = useState("");
   const [renameEditor, setRenameEditor] = useState<{
     taskId: string;
@@ -3226,12 +3222,6 @@ export default function App() {
         if (session) ({ localOnly } = await session.stop(target));
         else if (taskId) {
           await client.stopTask(taskId);
-          setMcpReview((current) =>
-            current?.taskId === taskId &&
-            current.runId === activeTask?.currentRunId
-              ? { ...current, invalidated: true }
-              : current,
-          );
         }
       } catch (error) {
         if (!current()) return;
@@ -3756,11 +3746,6 @@ export default function App() {
     try {
       try {
         await client.deleteTask(task.id);
-        setMcpReview((current) =>
-          current?.taskId === task.id
-            ? { ...current, invalidated: true }
-            : current,
-        );
       } catch (error) {
         if (await refreshAfterTimeout(error)) {
           if (current()) setDeleteError("task.delete_unconfirmed");
@@ -5223,17 +5208,9 @@ export default function App() {
         snapshot.mcp ? (
           <McpPage
             management={snapshot.mcp}
-            installationProposal={snapshot.mcpInstallation.proposal}
-            installationRejected={snapshot.mcpInstallation.notice !== null}
-            requestedProposalId={requestedMcpProposal}
-            proposalSourceInvalidated={mcpReview?.invalidated ?? false}
-            onReviewProposal={reviewMcpProposal}
-            onProposalOpened={() => setRequestedMcpProposal(null)}
-            onDismissProposal={async (id) => {
-              const result = await client.dismissMcpInstallProposal(id);
-              await refreshCommittedView();
-              return result;
-            }}
+            installationOperations={snapshot.mcpInstallation.operations}
+            onCancelInstallation={cancelMcpInstallation}
+            onCaptureInstallation={captureMcpInstallation}
             capabilities={{
               connectionApproval: snapshot.capabilities.mcpConnectionApproval,
               secretCapture: snapshot.capabilities.mcpSecretCapture,
@@ -5243,14 +5220,14 @@ export default function App() {
             query={mcpQuery}
             disabled={bridgeUnavailable || !snapshot.capabilities.mcpManagement}
             onQuery={setMcpQuery}
-            onCreateStdio={(generation, input, proposalId) =>
+            onCreateStdio={(generation, input) =>
               commitMcpMutation(() =>
-                client.createMcpStdioServer(generation, input, proposalId),
+                client.createMcpStdioServer(generation, input),
               )
             }
-            onCreateHttp={(generation, input, proposalId) =>
+            onCreateHttp={(generation, input) =>
               commitMcpMutation(() =>
-                client.createMcpHttpServer(generation, input, proposalId),
+                client.createMcpHttpServer(generation, input),
               )
             }
             onUpdateStdio={(generation, serverId, input) =>
@@ -5403,8 +5380,13 @@ export default function App() {
               <TaskContent
                 key={`${bridgeGeneration}:${snapshot.securityEpoch}:${snapshot.historyEpoch}`}
                 task={activeTask}
-                mcpInstallationProposal={snapshot.mcpInstallation.proposal}
-                onReviewMcpProposal={reviewMcpProposal}
+                mcpInstallations={snapshot.mcpInstallation.operations}
+                mcpInstallationNotice={snapshot.mcpInstallation.notice}
+                onCancelInstallation={cancelMcpInstallation}
+                onCaptureInstallation={captureMcpInstallation}
+                installationSecretMaxBytes={
+                  snapshot.capabilities.mcpSecretMaxBytes
+                }
                 memory={taskReadingMemory}
                 history={{
                   available: Boolean(nextHistoryCursor),
