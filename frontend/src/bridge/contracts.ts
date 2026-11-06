@@ -1775,6 +1775,10 @@ export type McpMutationResult = {
     | "capability_unavailable";
   desiredGeneration: string | null;
 };
+export type McpCreateResult = McpMutationResult & { serverId: string | null };
+export type McpInstallDraft =
+  | ({ transport: "stdio" } & McpStdioConnectionInput)
+  | ({ transport: "streamable_http" } & McpHttpConnectionInput);
 export type McpAuthorizationResult = {
   outcome:
     | "started"

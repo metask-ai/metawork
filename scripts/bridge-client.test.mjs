@@ -661,6 +661,15 @@ test("MCP management uses only typed revision 1 commands", async () => {
         return { outcome: "started", operationId: "oauth-op" };
       if (command === "metawork.mcp.cancelAuthorization")
         return { outcome: "cancelled" };
+      if (
+        command === "metawork.mcp.createStdioServer" ||
+        command === "metawork.mcp.createHttpServer"
+      )
+        return {
+          outcome: "saved",
+          desiredGeneration: "8",
+          serverId: "server-1",
+        };
       return { outcome: "saved", desiredGeneration: "8" };
     }),
   });

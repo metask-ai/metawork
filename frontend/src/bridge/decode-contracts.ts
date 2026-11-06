@@ -99,6 +99,7 @@ import {
   type SkillSourceSettingsResult,
   type McpManagementView,
   type McpMutationResult,
+  type McpCreateResult,
   type McpAuthorizationResult,
   type McpAuthorizationCancelResult,
   type McpRefreshResult,
@@ -6508,6 +6509,29 @@ export function decodeMcpMutationResult(value: unknown): McpMutationResult {
   )
     fail("$.desiredGeneration", "known mutation outcome requires generation");
   return { outcome, desiredGeneration };
+}
+export function decodeMcpCreateResult(value: unknown): McpCreateResult {
+  const item = object(value, "$", ["outcome", "desiredGeneration", "serverId"]);
+  const result = decodeMcpMutationResult({
+    outcome: item.outcome,
+    desiredGeneration: item.desiredGeneration,
+  });
+  const serverId =
+    item.serverId === null ? null : stringValue(item.serverId, "$.serverId");
+  if (
+    serverId !== null &&
+    (serverId.length === 0 || new TextEncoder().encode(serverId).length > 128)
+  )
+    fail("$.serverId", "invalid server identity");
+  if (result.outcome === "saved" && serverId === null)
+    fail("$.serverId", "saved create requires identity");
+  if (
+    serverId !== null &&
+    result.outcome !== "saved" &&
+    result.outcome !== "saved_recovery_required"
+  )
+    fail("$.serverId", "unconfirmed create cannot claim identity");
+  return { ...result, serverId };
 }
 export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
   const item = object(value, "$", ["outcome"]);

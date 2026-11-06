@@ -3472,9 +3472,9 @@ export default function App() {
       throw error;
     }
   }
-  async function commitMcpMutation(
-    mutation: () => Promise<McpMutationResult>,
-  ): Promise<McpMutationResult> {
+  async function commitMcpMutation<T extends McpMutationResult>(
+    mutation: () => Promise<T>,
+  ): Promise<T> {
     try {
       const result = await mutation();
       if (result.outcome !== "unchanged") await refreshCommittedView();

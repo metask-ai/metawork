@@ -6573,8 +6573,9 @@ pub const Runtime = struct {
         self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CreateHttpServerInput,
-    ) Error!mcp_configuration.ManagementOutcome {
-        const runtime = if (self.mcp) |*value| value else return .rejected;
+    ) Error!mcp_configuration.CreateResult {
+        if (self.mcpPublicInputContainsSensitive(input)) return .{ .outcome = .rejected };
+        const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         defer self.publishMcpRuntimeChanges();
         return runtime.createHttpServer(expected_generation, input) catch |err| return @errorCast(err);
     }
@@ -6583,8 +6584,9 @@ pub const Runtime = struct {
         self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CreateOauthHttpServerInput,
-    ) Error!mcp_configuration.ManagementOutcome {
-        const runtime = if (self.mcp) |*value| value else return .rejected;
+    ) Error!mcp_configuration.CreateResult {
+        if (self.mcpPublicInputContainsSensitive(input)) return .{ .outcome = .rejected };
+        const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         defer self.publishMcpRuntimeChanges();
         return runtime.createOauthHttpServer(expected_generation, input) catch |err| return @errorCast(err);
     }
@@ -6593,8 +6595,9 @@ pub const Runtime = struct {
         self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CreateStdioServerInput,
-    ) Error!mcp_configuration.ManagementOutcome {
-        const runtime = if (self.mcp) |*value| value else return .rejected;
+    ) Error!mcp_configuration.CreateResult {
+        if (self.mcpPublicInputContainsSensitive(input)) return .{ .outcome = .rejected };
+        const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         defer self.publishMcpRuntimeChanges();
         return runtime.createStdioServer(expected_generation, input) catch |err| return @errorCast(err);
     }
@@ -6604,6 +6607,7 @@ pub const Runtime = struct {
         expected_generation: u64,
         input: mcp_configuration.UpdateHttpConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
+        if (self.mcpPublicInputContainsSensitive(input)) return .rejected;
         const runtime = if (self.mcp) |*value| value else return .rejected;
         defer self.publishMcpRuntimeChanges();
         return runtime.updateHttpConnection(expected_generation, input) catch |err| return @errorCast(err);
@@ -6614,6 +6618,7 @@ pub const Runtime = struct {
         expected_generation: u64,
         input: mcp_configuration.UpdateOauthHttpConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
+        if (self.mcpPublicInputContainsSensitive(input)) return .rejected;
         const runtime = if (self.mcp) |*value| value else return .rejected;
         defer self.publishMcpRuntimeChanges();
         return runtime.updateOauthHttpConnection(expected_generation, input) catch |err| return @errorCast(err);
@@ -6624,9 +6629,29 @@ pub const Runtime = struct {
         expected_generation: u64,
         input: mcp_configuration.UpdateStdioConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
+        if (self.mcpPublicInputContainsSensitive(input)) return .rejected;
         const runtime = if (self.mcp) |*value| value else return .rejected;
         defer self.publishMcpRuntimeChanges();
         return runtime.updateStdioConnection(expected_generation, input) catch |err| return @errorCast(err);
+    }
+
+    fn mcpPublicInputContainsSensitive(self: *const Runtime, input: anytype) bool {
+        if (self.containsKnownCredential(input.display_name) or self.containsKnownCredential(input.negotiation)) return true;
+        if (@hasField(@TypeOf(input), "command")) {
+            if (self.containsKnownCredential(input.command)) return true;
+            if (input.cwd) |cwd| if (self.containsKnownCredential(cwd)) return true;
+            for (input.arguments) |value| if (self.containsKnownCredential(value)) return true;
+            for (input.environment_names) |value| if (self.containsKnownCredential(value)) return true;
+        } else {
+            if (self.containsKnownCredential(input.url)) return true;
+            if (@hasField(@TypeOf(input), "header_names")) {
+                for (input.header_names) |value| if (self.containsKnownCredential(value)) return true;
+            } else switch (input.client) {
+                .pre_registered => |client| if (self.containsKnownCredential(client.client_id) or self.containsKnownCredential(client.token_endpoint_auth_method)) return true,
+                .dynamic_registration => {},
+            }
+        }
+        return false;
     }
 
     /// Accepts the Host-owned copy of a manually entered secret forwarded by
@@ -20750,13 +20775,24 @@ test "empty MCP startup commits a proven manageable runtime" {
         empty_snapshot,
         "\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"0\",\"runtimeAlignment\":\"current\",\"redacted\":false,\"servers\":[]",
     ) != null);
-    try std.testing.expectEqual(
-        mcp_configuration.ManagementOutcome.saved,
-        try control.createMcpHttpServer(0, .{
-            .display_name = "Remote",
-            .url = "https://mcp.example.test/rpc",
-        }),
-    );
+    // The same Host-known credential predicate protects every write path.
+    control.view_credentials = &.{"SYNTHETIC-MCP-CREDENTIAL"};
+    const leaking_http = try control.createMcpHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL" });
+    try std.testing.expectEqual(.rejected, leaking_http.outcome);
+    try std.testing.expect(leaking_http.server_id == null);
+    try std.testing.expectEqual(.rejected, (try control.createMcpStdioServer(0, .{ .display_name = "Bad", .command = "node", .arguments = &.{"SYNTHETIC-MCP-CREDENTIAL"} })).outcome);
+    try std.testing.expectEqual(.rejected, (try control.createMcpOauthHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/mcp", .client = .{ .pre_registered = .{ .client_id = "SYNTHETIC-MCP-CREDENTIAL" } } })).outcome);
+    try std.testing.expectEqual(@as(?u64, null), control.inspectMcpDesiredConfiguration().?.desired_generation);
+    control.view_credentials = null;
+    const created = try control.createMcpHttpServer(0, .{ .display_name = "Remote", .url = "https://mcp.example.test/rpc" });
+    try std.testing.expectEqual(.saved, created.outcome);
+    const created_id = created.server_id.?;
+    control.view_credentials = &.{"SYNTHETIC-MCP-CREDENTIAL"};
+    try std.testing.expectEqual(.rejected, try control.updateMcpHttpConnection(1, .{ .server_id = &created_id, .display_name = "Bad", .negotiation = "automatic", .timeout_ms = 30000, .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL", .auth_mode = .none }));
+    try std.testing.expectEqual(.rejected, try control.updateMcpStdioConnection(1, .{ .server_id = &created_id, .display_name = "Bad", .negotiation = "automatic", .timeout_ms = 30000, .command = "node", .arguments = &.{"SYNTHETIC-MCP-CREDENTIAL"}, .auth_mode = .none }));
+    try std.testing.expectEqual(.rejected, try control.updateMcpOauthHttpConnection(1, .{ .server_id = &created_id, .display_name = "Bad", .negotiation = "automatic", .timeout_ms = 30000, .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL", .client = .dynamic_registration }));
+    try std.testing.expectEqualStrings("https://mcp.example.test/rpc", mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].transport.url.?);
+    control.view_credentials = null;
     const inspection = control.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 1), inspection.desired_generation);
     try std.testing.expectEqual(
@@ -20903,11 +20939,11 @@ test "MCP authorization operation owns product phase and durable token boundary"
 
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try control.createMcpOauthHttpServer(0, .{
+        (try control.createMcpOauthHttpServer(0, .{
             .display_name = "Remote OAuth",
             .url = "https://mcp.example.test/mcp",
             .client = .{ .pre_registered = .{ .client_id = "client-1" } },
-        }),
+        })).outcome,
     );
     const server_id = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].id;
     var start = (try control.beginMcpAuthorization(1, server_id)).?;

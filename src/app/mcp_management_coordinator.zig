@@ -1909,10 +1909,10 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     defer workbench_owner.deinit();
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench_owner.createMcpHttpServer(0, .{
+        (try workbench_owner.createMcpHttpServer(0, .{
             .display_name = "Remote",
             .url = "https://mcp.example.test/mcp",
-        }),
+        })).outcome,
     );
 
     var failing = std.testing.FailingAllocator.init(
@@ -2155,11 +2155,11 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     defer workbench_owner.deinit();
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench_owner.createMcpOauthHttpServer(0, .{
+        (try workbench_owner.createMcpOauthHttpServer(0, .{
             .display_name = "Remote",
             .url = "https://mcp.example.test/mcp",
             .client = .dynamic_registration,
-        }),
+        })).outcome,
     );
     const canonical_server_id = "mcp-7c7c7c7c7c7c7c7c7c7c";
     var credential_store: mcp_platform.CredentialStore = undefined;
@@ -2191,20 +2191,20 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     defer coordinator.deinit();
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench_owner.createMcpOauthHttpServer(1, .{
+        (try workbench_owner.createMcpOauthHttpServer(1, .{
             .display_name = "Remote to cancel",
             .url = "https://mcp.example.test/mcp",
             .client = .dynamic_registration,
-        }),
+        })).outcome,
     );
     const cancelled_server_id = "mcp-7d7d7d7d7d7d7d7d7d7d";
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench_owner.createMcpOauthHttpServer(2, .{
+        (try workbench_owner.createMcpOauthHttpServer(2, .{
             .display_name = "Remote with uncertain cancel",
             .url = "https://mcp.example.test/mcp",
             .client = .dynamic_registration,
-        }),
+        })).outcome,
     );
     const uncertain_server_id = "mcp-7e7e7e7e7e7e7e7e7e7e";
     const started = try coordinator.authorizeOauth(3, canonical_server_id);

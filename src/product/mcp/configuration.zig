@@ -939,6 +939,14 @@ pub const ManagementOutcome = enum {
     indeterminate,
 };
 
+/// An owned create receipt. Identity is copied before preparation is released.
+/// Only confirmed canonical saves carry an identity; no allocation follows commit.
+pub const created_identity_bytes = 24;
+pub const CreateResult = struct {
+    outcome: ManagementOutcome,
+    server_id: ?[created_identity_bytes]u8 = null,
+};
+
 pub const PreparedMutation = struct {
     allocator: std.mem.Allocator,
     plan: MutationPlan,
@@ -1179,7 +1187,7 @@ pub const ManagementPort = struct {
         if (!self.mutationReady(expected_generation) or
             base_servers.len >= self.limits.max_servers)
             return .rejected;
-        var identity_storage: [24]u8 = undefined;
+        var identity_storage: [created_identity_bytes]u8 = undefined;
         var namespace_storage: [24]u8 = undefined;
         const generated = generated: {
             var attempts: usize = 0;

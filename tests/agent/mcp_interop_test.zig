@@ -1837,7 +1837,7 @@ fn expectProductIncrementalConvergence(bad_first: bool) !void {
     defer shutdownProduct(&control, runtime);
     for (0..2) |index| {
         const bad = (index == 0) == bad_first;
-        try std.testing.expectEqual(.saved, try control.createMcpHttpServer(index, .{ .display_name = if (bad) "Bad" else "Healthy", .url = if (bad) bad_endpoint else fixture.endpoint, .timeout_ms = 200, .negotiation = "modern_only" }));
+        try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(index, .{ .display_name = if (bad) "Bad" else "Healthy", .url = if (bad) bad_endpoint else fixture.endpoint, .timeout_ms = 200, .negotiation = "modern_only" })).outcome);
     }
     var desired = try mcp_configuration.decode(a, durable.storage[0..durable.len], product_mcp_limits);
     defer desired.deinit();
@@ -2002,7 +2002,7 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     activation_owned = false;
     manifest_owned = false;
     defer shutdownProduct(&control, runtime);
-    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(1, .{ .display_name = "Unreachable candidate", .url = bad_endpoint, .timeout_ms = 200, .negotiation = "modern_only" }));
+    try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(1, .{ .display_name = "Unreachable candidate", .url = bad_endpoint, .timeout_ms = 200, .negotiation = "modern_only" })).outcome);
     var candidate = try mcp_configuration.prepare(a, durable.storage[0..durable.len], true, false, .{}, product_mcp_limits);
     defer candidate.deinit();
     const bad_id = try a.dupe(u8, candidate.registry.?.value.servers[1].id);
@@ -2705,18 +2705,18 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        if (transport == .stdio) try initial_workbench.createMcpStdioServer(0, .{
+        if (transport == .stdio) (try initial_workbench.createMcpStdioServer(0, .{
             .display_name = "Deterministic STDIO",
             .negotiation = "automatic",
             .timeout_ms = 2000,
             .command = options.node_path,
             .arguments = &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path },
-        }) else try initial_workbench.createMcpHttpServer(0, .{
+        })).outcome else (try initial_workbench.createMcpHttpServer(0, .{
             .display_name = "Deterministic HTTP",
             .negotiation = if (std.mem.eql(u8, protocol_version, "2026-07-28")) "modern_only" else "automatic",
             .timeout_ms = 2000,
             .url = fixture.endpoint,
-        }),
+        })).outcome,
     );
     var created = try mcp_configuration.decode(
         std.testing.allocator,
@@ -2970,7 +2970,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "healthy-b.release", .data = "release" });
         var healthy_b = try HttpFixture.startWithGate("2026-07-28", "json", b_trace, 5_000, "text", b_gate);
         defer healthy_b.deinit();
-        try std.testing.expectEqual(.saved, try restarted_workbench.createMcpHttpServer(2, .{ .display_name = "Healthy B", .url = healthy_b.endpoint, .negotiation = "modern_only" }));
+        try std.testing.expectEqual(.saved, (try restarted_workbench.createMcpHttpServer(2, .{ .display_name = "Healthy B", .url = healthy_b.endpoint, .negotiation = "modern_only" })).outcome);
         var current = try mcp_configuration.decode(std.testing.allocator, durable_registry.storage[0..durable_registry.len], product_mcp_limits);
         defer current.deinit();
         const b_id = current.value.servers[1].id;
@@ -3881,7 +3881,7 @@ test "real Coordinator settles eligibility loss and edit without self waking" {
     var host: CoordinatorHost = .{};
     var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, host.host(), .{ .catalog_budget = budget });
     defer coordinator.deinit();
-    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(0, .{ .display_name = "Source", .url = source.endpoint, .timeout_ms = 2000, .negotiation = "modern_only" }));
+    try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(0, .{ .display_name = "Source", .url = source.endpoint, .timeout_ms = 2000, .negotiation = "modern_only" })).outcome);
     try settleCoordinator(&coordinator);
     const state = mcp_types.testing.state(&control.mcp.?);
     const id = try a.dupe(u8, state.management.?.desiredRegistry().?.servers[0].id);

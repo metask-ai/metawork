@@ -76,6 +76,7 @@ import {
   decodeSkillExportResult,
   decodeSkillDetailResult,
   decodeMcpMutationResult,
+  decodeMcpCreateResult,
   decodeMcpRefreshResult,
   decodeMcpConfigurationApplyResult,
   decodeMcpConnectionTestResult,
@@ -621,7 +622,7 @@ export class BridgeClient {
     expectedDesiredGeneration: string,
     input: McpStdioConnectionInput,
   ) {
-    return decodeMcpMutationResult(
+    return decodeMcpCreateResult(
       await this.invoke(commands.mcpCreateStdioServer, {
         expectedDesiredGeneration,
         ...input,
@@ -632,7 +633,7 @@ export class BridgeClient {
     expectedDesiredGeneration: string,
     input: McpHttpConnectionInput,
   ) {
-    return decodeMcpMutationResult(
+    return decodeMcpCreateResult(
       await this.invoke(commands.mcpCreateHttpServer, {
         expectedDesiredGeneration,
         ...input,

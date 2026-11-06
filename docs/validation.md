@@ -712,3 +712,5 @@ MiniMax-M3 的真实文本 Run 返回 `OK`，证明这份 artifact 的 Chat 端�
 - 长期证据 ID 是稳定引用；既有 ID 的证据对象、结论与有效范围不得改写为另一项验收，新证据使用新 ID 追加。
 - 新增普通测试、测试改名、测试文件移动、artifact rebuild、checksum 或 lock refresh 不要求更新本文；只有测试层或归属规则、标准入口、证据结论或未闭合缺口变化时才更新。
 - `rg`、格式检查、文件存在性和源码关键词检查只属于卫生或结构验证，不能替代合同、运行时和平台行为测试。
+
+MCP 通用配置输入的纯解析与平台分词往返由 `scripts/mcp-configuration-input.test.mjs` 验证，MCP 页 suite 覆盖 password 粘贴、逐项显式 Add、结构化 Edit、create 回执 identity 与外部 generation 变化终止后续秘密提交。Bridge result decoder 必须拒绝失败携带 identity 或成功缺少 identity。`test-product-control-mcp`、`test-product-mcp-runtime` 与 `test-mcp-app` 分别验证已知凭据写前拒绝、owned create 回执和正式协调调用；这些 fixture 不替代真实系统凭据存储、远端 OAuth 或新 Task 实际调用验收。

@@ -1019,36 +1019,36 @@ pub const Runtime = struct {
         self: *Runtime,
         expected_generation: u64,
         input: configuration.CreateHttpServerInput,
-    ) Error!configuration.ManagementOutcome {
+    ) Error!configuration.CreateResult {
         const management = self.mutableManagement(expected_generation, null) orelse
-            return self.generationOutcome(expected_generation);
+            return .{ .outcome = self.generationOutcome(expected_generation) };
         var preparation = try management.prepareCreateHttpServer(expected_generation, input);
-        return self.commitPreparedMutation(&preparation);
+        return self.commitPreparedCreate(&preparation);
     }
 
     pub fn createOauthHttpServer(
         self: *Runtime,
         expected_generation: u64,
         input: configuration.CreateOauthHttpServerInput,
-    ) Error!configuration.ManagementOutcome {
+    ) Error!configuration.CreateResult {
         const management = self.mutableManagement(expected_generation, null) orelse
-            return self.generationOutcome(expected_generation);
+            return .{ .outcome = self.generationOutcome(expected_generation) };
         var preparation = try management.prepareCreateOauthHttpServer(
             expected_generation,
             input,
         );
-        return self.commitPreparedMutation(&preparation);
+        return self.commitPreparedCreate(&preparation);
     }
 
     pub fn createStdioServer(
         self: *Runtime,
         expected_generation: u64,
         input: configuration.CreateStdioServerInput,
-    ) Error!configuration.ManagementOutcome {
+    ) Error!configuration.CreateResult {
         const management = self.mutableManagement(expected_generation, null) orelse
-            return self.generationOutcome(expected_generation);
+            return .{ .outcome = self.generationOutcome(expected_generation) };
         var preparation = try management.prepareCreateStdioServer(expected_generation, input);
-        return self.commitPreparedMutation(&preparation);
+        return self.commitPreparedCreate(&preparation);
     }
 
     pub fn updateHttpConnection(
@@ -1190,6 +1190,21 @@ pub const Runtime = struct {
         if (!policy.expectedGenerationMatches(management, expected_generation))
             return .stale_generation;
         return .rejected;
+    }
+
+    fn commitPreparedCreate(self: *Runtime, preparation: *configuration.MutationPreparation) Error!configuration.CreateResult {
+        const identity: ?[configuration.created_identity_bytes]u8 = switch (preparation.*) {
+            .prepared => |*mutation| identity: {
+                // Creation appends its generated server to the prepared target.
+                const servers = mutation.target().servers;
+                const id = servers[servers.len - 1].id;
+                std.debug.assert(id.len == configuration.created_identity_bytes);
+                break :identity id[0..configuration.created_identity_bytes].*;
+            },
+            else => null,
+        };
+        const outcome = try self.commitPreparedMutation(preparation);
+        return .{ .outcome = outcome, .server_id = if (outcome == .saved or outcome == .saved_recovery_required) identity else null };
     }
 
     fn commitPreparedMutation(
@@ -2742,7 +2757,7 @@ test "Product MCP manual recovery distinguishes HTTP auth refusal from network f
         harness.executeQueued();
         try std.testing.expect(runtime.syncRefreshJob());
         try std.testing.expect(runtime.nextOauthExpiry() == null);
-        try std.testing.expectEqual(.saved, try runtime.createHttpServer(4, .{ .display_name = "Unrelated", .url = "https://other.example.test/mcp" }));
+        try std.testing.expectEqual(.saved, (try runtime.createHttpServer(4, .{ .display_name = "Unrelated", .url = "https://other.example.test/mcp" })).outcome);
         try std.testing.expect(runtime.nextOauthExpiry() == null);
         try std.testing.expect(runtime.canBeginAuthorization(5, "oauth"));
         // Exercise an actual unrelated add/remove, including the membership
@@ -3222,10 +3237,10 @@ test "Product MCP Runtime releases a prepared mutation rejected during apply" {
     try std.testing.expect(try runtime.beginConfigurationApply(1));
     try std.testing.expectEqual(
         configuration.ManagementOutcome.rejected,
-        try runtime.createHttpServer(1, .{
+        (try runtime.createHttpServer(1, .{
             .display_name = "Prepared while applying",
             .url = "https://mcp.example.test/rpc",
-        }),
+        })).outcome,
     );
     try std.testing.expectEqual(@as(u64, 1), runtime.state.management.?.inspect().desired_generation);
 }
@@ -3409,7 +3424,7 @@ test "Product MCP obsolete add failures clear after disable or delete without an
         var harness = TestHarness{};
         var runtime = try effects.coldRuntime(&harness, "consent_required");
         defer runtime.deinit();
-        try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Unavailable", .url = "https://unavailable.example.test/mcp" }));
+        try std.testing.expectEqual(.saved, (try runtime.createHttpServer(1, .{ .display_name = "Unavailable", .url = "https://unavailable.example.test/mcp" })).outcome);
         var step = (try runtime.prepareConfigurationStep(2, .automatic)).?;
         defer step.deinit();
         const id = step.target.id();
@@ -3431,8 +3446,8 @@ test "Product MCP later apply success preserves another current target failure" 
     var harness = TestHarness{};
     var runtime = try effects.coldRuntime(&harness, "consent_required");
     defer runtime.deinit();
-    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" }));
-    try std.testing.expectEqual(.saved, try runtime.createHttpServer(2, .{ .display_name = "Second", .url = "https://second.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" })).outcome);
+    try std.testing.expectEqual(.saved, (try runtime.createHttpServer(2, .{ .display_name = "Second", .url = "https://second.example.test/mcp" })).outcome);
     var first = (try runtime.prepareConfigurationStep(3, .automatic)).?;
     defer first.deinit();
     try std.testing.expect(runtime.failConfigurationApply(3, .rejected));
@@ -3451,7 +3466,7 @@ test "Product MCP rejected replacement settles admission without waiting for cat
     var harness = TestHarness{};
     var runtime = try effects.coldRuntime(&harness, "consent_required");
     defer runtime.deinit();
-    try std.testing.expectEqual(.saved, try runtime.createHttpServer(1, .{ .display_name = "Original", .url = "https://original.example.test/mcp" }));
+    try std.testing.expectEqual(.saved, (try runtime.createHttpServer(1, .{ .display_name = "Original", .url = "https://original.example.test/mcp" })).outcome);
     var original = (try runtime.prepareConfigurationStep(2, .automatic)).?;
     defer original.deinit();
     var manifest = (try configuration.RuntimeManifest.candidate(std.testing.allocator, &original.preparation)).?;
@@ -3467,4 +3482,20 @@ test "Product MCP rejected replacement settles admission without waiting for cat
     try std.testing.expectEqual(.activation_unavailable, runtime.state.admission.blocked);
     try std.testing.expectEqual(.failed, runtime.state.configuration_apply_state);
     try std.testing.expect(harness.queued == null);
+}
+
+test "MCP create receipts only expose committed identity and own it across mutations" {
+    var effects = OauthTestEffects{};
+    var harness = TestHarness{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    const first = try runtime.createHttpServer(1, .{ .display_name = "First", .url = "https://first.example.test/mcp" });
+    try std.testing.expectEqual(.saved, first.outcome);
+    const identity = first.server_id.?;
+    try std.testing.expectEqualStrings(&identity, runtime.state.management.?.desiredRegistry().?.servers[1].id);
+    const stale = try runtime.createHttpServer(1, .{ .display_name = "Stale", .url = "https://stale.example.test/mcp" });
+    try std.testing.expectEqual(.stale_generation, stale.outcome);
+    try std.testing.expect(stale.server_id == null);
+    try std.testing.expectEqual(.saved, try runtime.renameServer(2, .{ .server_id = &identity, .display_name = "Renamed" }));
+    try std.testing.expectEqualStrings(&identity, runtime.state.management.?.desiredRegistry().?.servers[1].id);
 }

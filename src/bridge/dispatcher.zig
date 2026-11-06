@@ -4261,7 +4261,7 @@ pub const Dispatcher = struct {
             .auth_mode = if (parsed.value.environmentNames.len == 0) .none else .static,
             .environment_names = parsed.value.environmentNames,
         });
-        return self.finishMcpMutation(workbench, output, outcome);
+        return self.finishMcpCreate(workbench, output, outcome);
     }
 
     fn createMcpHttpServer(
@@ -4276,7 +4276,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayloadWithLimit(
             handlers.McpCreateHttpServer,
             invocation.request.payload,
-            8 * 1024,
+            256 * 1024,
         );
         defer parsed.deinit();
         try validateMcpConnectionFields(
@@ -4308,7 +4308,7 @@ pub const Dispatcher = struct {
             ),
             .header_names = parsed.value.headerNames,
         });
-        return self.finishMcpMutation(workbench, output, outcome);
+        return self.finishMcpCreate(workbench, output, outcome);
     }
 
     fn updateMcpStdioConnection(
@@ -4745,6 +4745,15 @@ pub const Dispatcher = struct {
         const outcome = try host.apply_fn(host.context, intent);
         if (outcome == .started) self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
+    }
+
+    fn finishMcpCreate(self: *Dispatcher, workbench: *product_control.Runtime, output: []u8, result: mcp_configuration.CreateResult) ![]const u8 {
+        const base = try self.finishMcpMutation(workbench, output, result.outcome);
+        const suffix = if (result.server_id) |id|
+            try std.fmt.bufPrint(output[base.len - 1 ..], ",\"serverId\":\"{s}\"}}", .{id})
+        else
+            try std.fmt.bufPrint(output[base.len - 1 ..], ",\"serverId\":null}}", .{});
+        return output[0 .. base.len - 1 + suffix.len];
     }
 
     fn finishMcpMutation(
@@ -6031,6 +6040,21 @@ fn decodeUiResponse(request: handlers.UiResponseRequest) !product_control.UiResp
         } };
     }
     return error.InvalidUiResponse;
+}
+
+test "MCP Bridge create rejection shares the strict Renderer receipt fixture" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+    };
+    // This boundary only needs the management inspection and notification port.
+    var control: product_control.Runtime = undefined;
+    control.mcp = null;
+    var boundary: Dispatcher = undefined;
+    boundary.platform.context = null;
+    boundary.platform.wake_fn = Host.wake;
+    var output: [256]u8 = undefined;
+    const result = try boundary.finishMcpCreate(&control, &output, .{ .outcome = .rejected });
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @embedFile("testdata/mcp-create-rejected.json"), "\r\n"), result);
 }
 
 test "MCP Bridge keeps OAuth client authentication explicit and bounded" {

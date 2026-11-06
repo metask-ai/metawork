@@ -787,6 +787,146 @@ test("MCP unmodified structured Edit submits literal argv and supports independe
   assert.equal(calls[1][2].cwd, server.connection.cwd);
 });
 
+test("MCP pasted configuration requires selection and Add, then captures only into the receipt identity", async () => {
+  const creates = [],
+    captures = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "7",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [],
+      },
+      "",
+      {
+        onCreateStdio: async (...args) => {
+          creates.push(args);
+          return {
+            outcome: "saved",
+            desiredGeneration: "8",
+            serverId: "receipt-only",
+          };
+        },
+        onCaptureSecret: async (...args) => {
+          captures.push(args);
+          return {
+            outcome: "saved",
+            desiredGeneration: String(8 + captures.length),
+          };
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Paste configuration" }));
+  const paste = screen.getByLabelText("Paste mcpServers JSON here");
+  assert.equal(paste.type, "password");
+  const source = JSON.stringify({
+    mcpServers: {
+      Local: {
+        command: "node",
+        args: ["", "$HOME"],
+        env: { FIRST: "synthetic-one", SECOND: "synthetic-two" },
+        autoApprove: ["all"],
+      },
+      Other: { url: "https://example.test/mcp" },
+    },
+  });
+  fireEvent.paste(paste, { clipboardData: { getData: () => source } });
+  assert.equal(paste.value, "");
+  assert.equal(creates.length, 0);
+  assert.equal(screen.queryByRole("dialog"), null);
+  fireEvent.click(screen.getAllByRole("button", { name: "Review and add" })[0]);
+  const form = screen.getByRole("dialog", { name: "Add an MCP server" });
+  assert.equal(
+    within(form).getByLabelText("Credential for FIRST").type,
+    "password",
+  );
+  assert.equal(form.textContent.includes("synthetic-one"), false);
+  assert.equal(creates.length, 0);
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(captures.length, 2));
+  assert.equal(JSON.stringify(creates).includes("synthetic-"), false);
+  assert.deepEqual(creates[0][1].arguments, ["", "$HOME"]);
+  assert.deepEqual(captures, [
+    [
+      "8",
+      "receipt-only",
+      { kind: "stdio_environment", name: "FIRST" },
+      "synthetic-one",
+    ],
+    [
+      "9",
+      "receipt-only",
+      { kind: "stdio_environment", name: "SECOND" },
+      "synthetic-two",
+    ],
+  ]);
+  assert.equal(within(form).getByLabelText("Credential for FIRST").value, "");
+});
+
+test("MCP import stops remaining credential submission after an external generation change", async () => {
+  let finishCreate;
+  const captures = [];
+  const overrides = {
+    onCreateHttp: () =>
+      new Promise((resolve) => {
+        finishCreate = resolve;
+      }),
+    onCaptureSecret: async (...args) => {
+      captures.push(args);
+      return { outcome: "saved", desiredGeneration: "10" };
+    },
+  };
+  const management = {
+    availability: "ready",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "7",
+    runtimeAlignment: "current",
+    redacted: false,
+    servers: [],
+  };
+  const view = render(pageElement(management, "", overrides));
+  fireEvent.click(screen.getByRole("button", { name: "Paste configuration" }));
+  fireEvent.paste(screen.getByLabelText("Paste mcpServers JSON here"), {
+    clipboardData: {
+      getData: () =>
+        JSON.stringify({
+          mcpServers: {
+            Remote: {
+              url: "https://example.test/mcp",
+              headers: { Authorization: "Bearer synthetic" },
+            },
+          },
+        }),
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Review and add" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Add server",
+    }),
+  );
+  await waitFor(() => assert.equal(typeof finishCreate, "function"));
+  view.rerender(
+    pageElement({ ...management, desiredGeneration: "9" }, "", overrides),
+  );
+  finishCreate({
+    outcome: "saved",
+    desiredGeneration: "8",
+    serverId: "committed",
+  });
+  await waitFor(() =>
+    assert.ok(screen.getByText(/remaining credentials could not be saved/)),
+  );
+  assert.equal(captures.length, 0);
+  assert.equal(screen.getByLabelText("Credential for Authorization").value, "");
+});
+
 test("MCP tests a saved connection without refreshing the current Runtime", async () => {
   const calls = [];
   render(
@@ -893,7 +1033,11 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
       {
         onCreateHttp: async (...args) => {
           calls.push(args);
-          return { outcome: "saved" };
+          return {
+            outcome: "saved",
+            desiredGeneration: "generation-10",
+            serverId: "local-search-binding",
+          };
         },
         onTest: async (...args) => {
           tests.push(args);
@@ -908,9 +1052,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
     name: "Add an MCP server",
   });
   assert.ok(
-    dialog.textContent.includes(
-      "Credentials are collected separately and never enter this form.",
-    ),
+    dialog.textContent.includes("Credentials use separate password fields."),
   );
   fireEvent.click(
     within(dialog).getByRole("button", { name: /Streamable HTTP/ }),

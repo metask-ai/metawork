@@ -398,6 +398,17 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.add_argument": "添加参数",
   "mcp.add.remove_argument": "删除参数",
   "mcp.add.edit_command_line": "编辑完整启动命令",
+  "mcp.import.review_values": "部分环境变量或标头值也出现在公开连接字段中，请在添加前核对。",
+  "mcp.import.title": "粘贴配置",
+  "mcp.import.paste": "在此粘贴 mcpServers JSON",
+  "mcp.import.help": "粘贴严格 JSON。凭据仅留在本次表单中，逐个查看并添加服务。",
+  "mcp.import.review": "查看并添加",
+  "mcp.import.invalid": "配置无效，请重新粘贴严格 JSON。",
+  "mcp.import.unsupported": "不支持的配置字段或传输方式。",
+  "mcp.import.variables": "请提供具体值，不支持配置插值表达式。",
+  "mcp.import.permissions_ignored": "未采用导入的权限设置。连接后请选择允许的工具。",
+  "mcp.import.credential": "凭据",
+  "mcp.import.capture_failed": "服务已保存，但剩余凭据未能保存。请在连接详情中重新填写。",
   "mcp.add.command": "启动命令",
   "mcp.add.command_help":
     "粘贴你通常会执行的命令。MetaWork 不会执行管道、重定向或变量替换。",
@@ -420,7 +431,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息、查询参数和 fragment。",
   "mcp.add.defaults":
-    "凭证由 MetaWork 单独安全采集，不会进入此表单。保存后，页面只显示当前需要完成的下一项操作。",
+    "凭据仅通过独立密码字段提交。保存后，页面显示此连接需要完成的下一项操作。",
   "mcp.add.submit": "添加服务",
   "mcp.add.adding": "正在添加…",
   "mcp.rename.action": "保存名称",

@@ -286,6 +286,8 @@ macOS 首次新建 Node 需要已准备的固定私有 Python，通过其标准�
 
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。
 
+Product Control 在 MCP 全部创建和替换连接入口复用 Host 已知凭据 predicate，在持久化与 effect 前拒绝敏感公开字段；不以名称、熵值或全部 env 值扩展凭据集合，也不改写既有记录。创建回执在 preparation 释放前持有确认 target 的稳定 identity，只有确定保存结果可以返回它；后续凭据捕获仍由当前 generation、server、auth mode 与 slot 校验，不通过 snapshot 猜测 identity。
+
 Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事实：
 
 - Desired Registry 表达已 durable 提交的用户意图；
