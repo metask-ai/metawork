@@ -87,7 +87,87 @@ pub const ServerWire = struct {
     auth: AuthWire,
     connection_approval: ?ConnectionApprovalWire,
     tools: []const []const u8,
+    installation: ?InstallationWire = null,
 };
+
+/// Durable, secret-free progress attached to the exact installed server.
+/// Only the Product installation path can create or advance this record.
+pub const installation_active_budget_ms = 300_000;
+
+pub const InstallationPhase = enum {
+    preparing,
+    acquiring_credentials,
+    needs_authorization,
+    needs_credentials,
+    needs_oauth,
+    connecting,
+    ready,
+    no_tools,
+    failed,
+    cancelled,
+    pub fn allows(self: @This(), next: @This()) bool {
+        if (!self.active()) return false;
+        if (next == .failed or next == .cancelled or next == self) return true;
+        return switch (self) {
+            .preparing => next == .needs_authorization or next == .acquiring_credentials or next == .needs_credentials or next == .needs_oauth or next == .connecting,
+            .needs_authorization => next == .preparing,
+            .acquiring_credentials => next == .preparing or next == .needs_credentials or next == .needs_oauth or next == .connecting,
+            .needs_credentials => next == .preparing or next == .needs_oauth or next == .connecting,
+            .needs_oauth => next == .connecting,
+            .connecting => next == .ready or next == .no_tools,
+            else => false,
+        };
+    }
+    pub fn active(self: @This()) bool {
+        return switch (self) {
+            .ready, .no_tools, .failed, .cancelled => false,
+            else => true,
+        };
+    }
+};
+pub const InstallationWire = struct {
+    task_id: u64,
+    run_id: u64,
+    source_message_id: u64,
+    revision: u64,
+    source_origin: []const u8,
+    request_refs: []const []const u8,
+    phase: InstallationPhase,
+    initial_grant_pending: bool = true,
+    initial_grant_completed: bool = false,
+    cross_origin_authorized: bool = false,
+    active_elapsed_ms: u32 = 0,
+    stop_pending: bool = false,
+};
+pub const InstallationStart = struct {
+    task_id: u64,
+    run_id: u64,
+    source_message_id: u64,
+    source_origin: []const u8,
+    phase: InstallationPhase = .preparing,
+    request: []const u8,
+    existing_server_id: ?[]const u8 = null,
+};
+pub const InstallationConnection = union(enum) {
+    http: CreateHttpServerInput,
+    oauth: CreateOauthHttpServerInput,
+    stdio: CreateStdioServerInput,
+};
+pub const InstallationUpdate = struct {
+    server_id: []const u8,
+    expected_revision: u64,
+    phase: InstallationPhase,
+    active_elapsed_ms: u32,
+    cross_origin_authorized: bool = false,
+    /// Supplied only from a validated current catalog by Product Runtime.
+    initial_tools: ?[]const []const u8 = null,
+};
+
+pub fn serverEnabled(server: ServerWire) bool {
+    if (!server.enabled) return false;
+    if (server.installation) |operation| return !operation.stop_pending;
+    return true;
+}
 
 pub const AuthWire = struct {
     kind: []const u8,
@@ -321,24 +401,24 @@ pub const MutationPlan = struct {
     }
 };
 
-/// Same-file state transition for the single durable OAuth operation marker.
+/// Same-file transition for durable operation markers, without network effects.
 /// It deliberately carries no credential journal and does not advance the
 /// desired generation because no server target changed.
-pub const OauthOperationStatePlan = struct {
+pub const OperationStatePlan = struct {
     base: std.json.Parsed(RegistryWire),
     target: ?std.json.Parsed(RegistryWire),
 
-    pub fn targetRegistry(self: *const OauthOperationStatePlan) Error!RegistryWire {
+    pub fn targetRegistry(self: *const OperationStatePlan) Error!RegistryWire {
         return if (self.target) |target| target.value else error.InvalidMutation;
     }
 
-    pub fn takeTarget(self: *OauthOperationStatePlan) std.json.Parsed(RegistryWire) {
+    pub fn takeTarget(self: *OperationStatePlan) std.json.Parsed(RegistryWire) {
         const target = self.target.?;
         self.target = null;
         return target;
     }
 
-    pub fn deinit(self: *OauthOperationStatePlan) void {
+    pub fn deinit(self: *OperationStatePlan) void {
         if (self.target) |*target| target.deinit();
         self.base.deinit();
         self.* = undefined;
@@ -700,22 +780,22 @@ pub const CompleteRefreshInput = struct {
     expires_at_unix_ms: ?u64 = null,
 };
 
-pub const PreparedOauthOperationState = struct {
-    plan: OauthOperationStatePlan,
+pub const PreparedOperationState = struct {
+    plan: OperationStatePlan,
 
-    pub fn target(self: *const PreparedOauthOperationState) RegistryWire {
+    pub fn target(self: *const PreparedOperationState) RegistryWire {
         return self.plan.targetRegistry() catch unreachable;
     }
 
-    pub fn deinit(self: *PreparedOauthOperationState) void {
+    pub fn deinit(self: *PreparedOperationState) void {
         self.plan.deinit();
         self.* = undefined;
     }
 };
 
-pub const OauthOperationPreparation = union(enum) {
+pub const OperationStatePreparation = union(enum) {
     rejected,
-    prepared: PreparedOauthOperationState,
+    prepared: PreparedOperationState,
 };
 
 const SecretCandidateSource = struct {
@@ -1608,6 +1688,202 @@ pub const ManagementPort = struct {
         });
     }
 
+    /// Prepare one disabled durable target before any credential fetch or spawn.
+    /// Request bytes are encrypted in bounded system-store chunks, never metadata.
+    pub fn prepareInstallationStart(self: *ManagementPort, expected_generation: u64, connection: InstallationConnection, input: InstallationStart) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation) or input.request.len == 0 or input.request.len > 32 * 1024 or
+            input.task_id == 0 or input.run_id == 0 or input.source_message_id == 0 or !input.phase.active()) return .rejected;
+        var preparation = switch (connection) {
+            .http => |value| if (input.existing_server_id) |id| try self.prepareUpdateHttpConnection(expected_generation, .{
+                .server_id = id,
+                .display_name = value.display_name,
+                .negotiation = value.negotiation,
+                .timeout_ms = value.timeout_ms,
+                .url = value.url,
+                .sensitive_endpoint = true,
+                .endpoint_parts = value.endpoint_parts,
+                .auth_mode = value.auth_mode,
+                .header_names = value.header_names,
+            }) else try self.prepareCreateHttpServer(expected_generation, .{
+                .display_name = value.display_name,
+                .negotiation = value.negotiation,
+                .timeout_ms = value.timeout_ms,
+                .url = value.url,
+                .sensitive_endpoint = true,
+                .endpoint_parts = value.endpoint_parts,
+                .auth_mode = value.auth_mode,
+                .header_names = value.header_names,
+            }),
+            .oauth => |value| if (input.existing_server_id) |id| try self.prepareUpdateOauthHttpConnection(expected_generation, .{
+                .server_id = id,
+                .display_name = value.display_name,
+                .negotiation = value.negotiation,
+                .timeout_ms = value.timeout_ms,
+                .url = value.url,
+                .sensitive_endpoint = true,
+                .endpoint_parts = value.endpoint_parts,
+                .client = value.client,
+            }) else try self.prepareCreateOauthHttpServer(expected_generation, .{
+                .display_name = value.display_name,
+                .negotiation = value.negotiation,
+                .timeout_ms = value.timeout_ms,
+                .url = value.url,
+                .sensitive_endpoint = true,
+                .endpoint_parts = value.endpoint_parts,
+                .client = value.client,
+            }),
+            .stdio => |value| if (input.existing_server_id) |id| try self.prepareUpdateStdioConnection(expected_generation, .{
+                .server_id = id,
+                .display_name = value.display_name,
+                .negotiation = value.negotiation,
+                .timeout_ms = value.timeout_ms,
+                .command = value.command,
+                .arguments = value.arguments,
+                .cwd = value.cwd,
+                .auth_mode = value.auth_mode,
+                .environment_names = value.environment_names,
+            }) else try self.prepareCreateStdioServer(expected_generation, value),
+        };
+        defer switch (preparation) {
+            .prepared => |*value| value.deinit(),
+            else => {},
+        };
+        var target = switch (preparation) {
+            .prepared => |*value| value.target(),
+            .unchanged => if (self.desired) |value| blk: {
+                var next = value.value;
+                next.generation += 1;
+                break :blk next;
+            } else return .rejected,
+            .rejected => return .rejected,
+        };
+        target.servers = try self.allocator.dupe(ServerWire, target.servers);
+        defer self.allocator.free(target.servers);
+        const index = if (input.existing_server_id) |id| findServerIndex(target.servers, id) orelse return .rejected else target.servers.len - 1;
+        const server = &target.servers[index];
+        if (server.installation) |old| {
+            if (old.task_id != input.task_id or old.phase.active()) return .rejected;
+        } else if (input.existing_server_id != null) return .rejected;
+        const old = server.installation;
+        const completed = if (old) |value| value.initial_grant_completed else false;
+        const chunk_bytes = self.limits.max_credential_secret_bytes;
+        if (chunk_bytes == 0) return .rejected;
+        const chunk_count = std.math.divCeil(usize, input.request.len, chunk_bytes) catch return .rejected;
+        if (chunk_count > self.limits.max_credential_locators) return .rejected;
+        const storage = try self.allocator.alloc([35]u8, chunk_count);
+        defer self.allocator.free(storage);
+        const refs = try self.allocator.alloc([]const u8, chunk_count);
+        defer self.allocator.free(refs);
+        server.enabled = false;
+        server.installation = .{
+            .task_id = input.task_id,
+            .run_id = input.run_id,
+            .source_message_id = input.source_message_id,
+            .revision = if (old) |value| value.revision + 1 else 1,
+            .source_origin = input.source_origin,
+            .request_refs = &.{},
+            .phase = input.phase,
+            .initial_grant_pending = !completed,
+            .initial_grant_completed = completed,
+        };
+        for (refs, 0..) |*reference, i| {
+            server.installation.?.request_refs = refs[0..i];
+            reference.* = self.freshCredentialLocator(target, &storage[i]) orelse return .rejected;
+        }
+        server.installation.?.request_refs = refs;
+        var sources: std.array_list.Managed(SecretCandidateSource) = .init(self.allocator);
+        defer sources.deinit();
+        if (preparation == .prepared) for (preparation.prepared.candidates) |candidate| {
+            try sources.append(.{ .locator = candidate.locator, .secret = candidate.secret });
+        };
+        for (refs, 0..) |locator, i| {
+            const start = i * chunk_bytes;
+            try sources.append(.{ .locator = locator, .secret = input.request[start..@min(input.request.len, start + chunk_bytes)] });
+        }
+        return self.prepareInstallationTarget(target, sources.items);
+    }
+
+    fn prepareInstallationTarget(self: *ManagementPort, target: RegistryWire, sources: []const SecretCandidateSource) std.mem.Allocator.Error!MutationPreparation {
+        const locators = try self.allocator.alloc([]const u8, sources.len);
+        defer self.allocator.free(locators);
+        for (sources, locators) |source, *locator| locator.* = source.locator;
+        var plan = (planMutation(self.allocator, if (self.desired) |value| value.value else null, target, if (self.desired) |value| value.value.generation else 0, locators, self.limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        }) orelse return .unchanged;
+        errdefer plan.deinit();
+        const candidates = try self.allocator.alloc(CandidateCredential, sources.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (candidates[0..initialized]) |candidate| secureFree(self.allocator, candidate.secret);
+            self.allocator.free(candidates);
+        }
+        for (sources, candidates) |source, *candidate| {
+            candidate.* = .{ .locator = findText(plan.transaction.candidate_locators, source.locator) orelse unreachable, .secret = try self.allocator.dupe(u8, source.secret) };
+            initialized += 1;
+        }
+        return .{ .prepared = .{ .allocator = self.allocator, .plan = plan, .candidates = candidates } };
+    }
+
+    pub fn prepareInstallationUpdate(self: *ManagementPort, expected_generation: u64, input: InstallationUpdate) std.mem.Allocator.Error!MutationPreparation {
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |value| value.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        const old = base.servers[index].installation orelse return .rejected;
+        if (old.revision != input.expected_revision or !old.phase.allows(input.phase) or input.active_elapsed_ms < old.active_elapsed_ms or input.active_elapsed_ms > installation_active_budget_ms) return .rejected;
+        if (input.cross_origin_authorized and (old.phase != .needs_authorization or input.phase != .preparing)) return .rejected;
+        if (input.phase == .ready and input.initial_tools == null and (!old.initial_grant_completed or base.servers[index].tools.len == 0)) return .rejected;
+        if (input.phase == .no_tools and old.initial_grant_pending and input.initial_tools == null) return .rejected;
+        if (input.initial_tools != null and input.phase != .connecting and input.phase != .no_tools) return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        const server = &servers[index];
+        const operation = &server.installation.?;
+        operation.phase = input.phase;
+        operation.revision += 1;
+        operation.active_elapsed_ms = input.active_elapsed_ms;
+        operation.cross_origin_authorized = old.cross_origin_authorized or input.cross_origin_authorized;
+        if (!input.phase.active()) operation.initial_grant_pending = false;
+        if (input.initial_tools) |tools| {
+            if (!old.initial_grant_pending or old.initial_grant_completed or (input.phase == .ready and tools.len == 0) or (input.phase == .no_tools and tools.len != 0)) return .rejected;
+            server.tools = tools;
+            operation.initial_grant_completed = true;
+            operation.initial_grant_pending = false;
+        }
+        if (input.phase == .cancelled or input.phase == .failed) server.enabled = false else if (input.phase == .connecting or input.phase == .needs_oauth) server.enabled = true;
+        return self.prepareTarget(expected_generation, .{ .schema_version = schema_version, .generation = expected_generation + 1, .oauth_operation = base.oauth_operation, .servers = servers });
+    }
+
+    /// Persist Stop even while an uninterruptible Core apply is in flight.
+    /// The marker vetoes loading/admission immediately; a later normal mutation
+    /// reconciles enabled=false. No descriptor or credential reference is changed.
+    pub fn prepareInstallationCancellation(self: *ManagementPort, server_id: []const u8, expected_revision: u64) std.mem.Allocator.Error!OperationStatePreparation {
+        if (self.coordinator.health != .ready) return .rejected;
+        const base = if (self.desired) |value| value.value else return .rejected;
+        const index = findServerIndex(base.servers, server_id) orelse return .rejected;
+        const old = base.servers[index].installation orelse return .rejected;
+        if (old.phase == .cancelled) return .rejected;
+        if (old.revision != expected_revision or !old.phase.active()) return .rejected;
+        const servers = try self.allocator.dupe(ServerWire, base.servers);
+        defer self.allocator.free(servers);
+        const operation = &servers[index].installation.?;
+        operation.phase = .cancelled;
+        operation.stop_pending = true;
+        operation.revision += 1;
+        operation.initial_grant_pending = false;
+        var target = base;
+        target.servers = servers;
+        var owned_base = cloneRegistry(self.allocator, base, self.limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        };
+        errdefer owned_base.deinit();
+        return .{ .prepared = .{ .plan = .{ .base = owned_base, .target = cloneRegistry(self.allocator, target, self.limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .rejected,
+        } } } };
+    }
+
     /// Replaces an effect-free public draft with one credential-journal target.
     /// No public-origin intermediate configuration is ever committed or connected.
     fn secureEndpointPreparation(self: *ManagementPort, preparation: *MutationPreparation, server_id: ?[]const u8, endpoint: []const u8, supplied_parts: []const EndpointPartInput) std.mem.Allocator.Error!MutationPreparation {
@@ -1932,7 +2208,7 @@ pub const ManagementPort = struct {
         self: *ManagementPort,
         expected_generation: u64,
         input: BeginDynamicRegistrationInput,
-    ) std.mem.Allocator.Error!OauthOperationPreparation {
+    ) std.mem.Allocator.Error!OperationStatePreparation {
         if (!self.mutationReady(expected_generation)) return .rejected;
         const base = if (self.desired) |registry| registry.value else return .rejected;
         const index = findServerIndex(base.servers, input.consent.server_id) orelse return .rejected;
@@ -1991,7 +2267,7 @@ pub const ManagementPort = struct {
         self: *ManagementPort,
         expected_generation: u64,
         input: BeginCodeExchangeInput,
-    ) std.mem.Allocator.Error!OauthOperationPreparation {
+    ) std.mem.Allocator.Error!OperationStatePreparation {
         if (!self.mutationReady(expected_generation)) return .rejected;
         const base = if (self.desired) |registry| registry.value else return .rejected;
         const server = findServer(base.servers, input.server_id) orelse return .rejected;
@@ -2030,7 +2306,7 @@ pub const ManagementPort = struct {
         self: *ManagementPort,
         expected_generation: u64,
         input: BeginRefreshInput,
-    ) std.mem.Allocator.Error!OauthOperationPreparation {
+    ) std.mem.Allocator.Error!OperationStatePreparation {
         if (!self.mutationReady(expected_generation)) return .rejected;
         const base = if (self.desired) |registry| registry.value else return .rejected;
         const server = findServer(base.servers, input.server_id) orelse return .rejected;
@@ -2290,7 +2566,7 @@ pub const ManagementPort = struct {
     pub fn prepareClearOauthOperation(
         self: *ManagementPort,
         expected_operation_id: []const u8,
-    ) std.mem.Allocator.Error!OauthOperationPreparation {
+    ) std.mem.Allocator.Error!OperationStatePreparation {
         if (self.coordinator.health != .ready) return .rejected;
         const base = if (self.desired) |registry| registry.value else return .rejected;
         var plan = planClearOauthOperation(
@@ -2387,9 +2663,9 @@ pub const ManagementPort = struct {
         return std.fmt.bufPrint(storage, "oauth-{s}", .{hex[0..20]}) catch unreachable;
     }
 
-    pub fn commitPreparedOauthOperationState(
+    pub fn commitPreparedOperationState(
         self: *ManagementPort,
-        prepared: *PreparedOauthOperationState,
+        prepared: *PreparedOperationState,
     ) std.mem.Allocator.Error!ManagementOutcome {
         const target = prepared.plan.targetRegistry() catch return .rejected;
         if (self.coordinator.health != .ready) return .rejected;
@@ -2502,10 +2778,18 @@ pub const ManagementPort = struct {
         if (!self.mutationReady(expected_generation)) return .rejected;
         const base = if (self.desired) |registry| registry.value else return .rejected;
         const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
-        if (base.servers[index].enabled == input.enabled) return .unchanged;
+        if (serverEnabled(base.servers[index]) == input.enabled and (base.servers[index].installation == null or !base.servers[index].installation.?.stop_pending)) return .unchanged;
         const servers = try self.allocator.dupe(ServerWire, base.servers);
         defer self.allocator.free(servers);
         servers[index].enabled = input.enabled;
+        if (servers[index].installation) |*operation| {
+            operation.stop_pending = false;
+            if (operation.phase.active()) {
+                operation.phase = .cancelled;
+                operation.initial_grant_pending = false;
+                operation.revision += 1;
+            }
+        }
         if (input.enabled and (serverProblem(servers[index], self.limits) != null or
             servers[index].connection_approval == null))
             return .rejected;
@@ -2525,10 +2809,18 @@ pub const ManagementPort = struct {
         if (!self.mutationReady(expected_generation)) return .rejected;
         const base = if (self.desired) |registry| registry.value else return .rejected;
         const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
-        if (stringSlicesEqual(base.servers[index].tools, input.tools)) return .unchanged;
+        if (stringSlicesEqual(base.servers[index].tools, input.tools) and (base.servers[index].installation == null or !base.servers[index].installation.?.initial_grant_pending)) return .unchanged;
         const servers = try self.allocator.dupe(ServerWire, base.servers);
         defer self.allocator.free(servers);
         servers[index].tools = input.tools;
+        if (servers[index].installation) |*operation| {
+            if (operation.initial_grant_pending) {
+                operation.initial_grant_pending = false;
+                operation.initial_grant_completed = true;
+                operation.phase = .cancelled;
+                operation.revision += 1;
+            }
+        }
         if (serverProblem(servers[index], self.limits) != null) return .rejected;
         return try self.prepareTarget(expected_generation, .{
             .schema_version = schema_version,
@@ -3184,27 +3476,27 @@ fn entryCompatible(
     return switch (entry.state) {
         .loaded => unreachable,
         .absent => |proof| switch (proof) {
-            .disabled => if (target) |server| !server.enabled else true,
+            .disabled => if (target) |server| !serverEnabled(server) else true,
             .unapproved => if (target) |server|
-                !server.enabled or server.connection_approval == null
+                !serverEnabled(server) or server.connection_approval == null
             else
                 true,
             .needs_authentication => |fingerprint| if (target) |server|
-                !server.enabled or
+                !serverEnabled(server) or
                     serverProblem(server, limits) != null or
                     oauthDoesNotRequireLoading(server) or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
             else
                 true,
             .reauth_required => |fingerprint| if (target) |server|
-                !server.enabled or
+                !serverEnabled(server) or
                     serverProblem(server, limits) != null or
                     oauthDoesNotRequireLoading(server) or
                     std.mem.eql(u8, &fingerprint, &authenticationFingerprint(server))
             else
                 true,
             .invalid_catalog => |invalid| if (target) |server| invalid_target: {
-                if (!server.enabled) break :invalid_target true;
+                if (!serverEnabled(server)) break :invalid_target true;
                 if (serverProblem(server, limits) != null)
                     break :invalid_target true;
                 break :invalid_target invalid.problem == .credential_capacity_exceeded and
@@ -3222,11 +3514,11 @@ pub fn serverRuntimeAuthorizationReady(server: ServerWire) bool {
 }
 
 pub fn runtimeLoadEligible(server: ServerWire, limits: Limits) bool {
-    return server.enabled and serverRuntimeAuthorizationReady(server) and serverProblem(server, limits) == null;
+    return serverEnabled(server) and serverRuntimeAuthorizationReady(server) and serverProblem(server, limits) == null;
 }
 
 pub fn admissionTools(registry: RegistryWire, server: ServerWire) []const []const u8 {
-    if (!server.enabled or !serverRuntimeAuthorizationReady(server)) return &.{};
+    if (!serverEnabled(server) or !serverRuntimeAuthorizationReady(server)) return &.{};
     if (registry.oauth_operation) |operation|
         if (std.mem.eql(u8, operation.server_id, server.id)) return &.{};
     return server.tools;
@@ -3374,7 +3666,7 @@ fn authenticationFingerprint(server: ServerWire) DescriptorFingerprint {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "metawork.mcp.authentication-absence/v1");
     hashField(&hash, server.auth.kind);
-    hashInteger(&hash, credentialReferenceCount(server));
+    hashInteger(&hash, credentialReferenceCount(server) - if (server.installation) |operation| operation.request_refs.len else @as(usize, 0));
     if (server.transport.sensitive_endpoint) |endpoint|
         for (endpoint.credential_refs) |locator| hashField(&hash, locator);
     for (server.transport.arguments) |argument| {
@@ -3494,7 +3786,7 @@ pub fn prepare(
             server_states[index] = .{ .invalid_catalog = problem };
             continue;
         }
-        if (!server.enabled) {
+        if (!serverEnabled(server)) {
             server_states[index] = .disabled;
             continue;
         }
@@ -3591,6 +3883,9 @@ fn pruneUnusedCredentials(
 }
 
 fn serverReferencesCredential(server: ServerWire, locator: []const u8) bool {
+    if (server.installation) |operation| for (operation.request_refs) |reference| {
+        if (std.mem.eql(u8, reference, locator)) return true;
+    };
     if (server.transport.sensitive_endpoint) |endpoint|
         for (endpoint.credential_refs) |candidate|
             if (std.mem.eql(u8, candidate, locator)) return true;
@@ -3853,7 +4148,7 @@ fn migrateSchemaTwo(allocator: std.mem.Allocator, input: []const u8, limits: Lim
     errdefer parsed.deinit();
     // Schema 2 never had the private endpoint representation.
     for (parsed.value.servers) |server| {
-        if (server.transport.sensitive_endpoint != null) return error.RegistryCorrupt;
+        if (server.transport.sensitive_endpoint != null or server.installation != null) return error.RegistryCorrupt;
         for (oauthPrivateResources(server)) |resource| if (resource != null) return error.RegistryCorrupt;
     }
     parsed.value.schema_version = schema_version;
@@ -4260,7 +4555,7 @@ pub fn planBeginOauthOperation(
     expected_generation: u64,
     operation: OauthOperationWire,
     limits: Limits,
-) (Error || std.mem.Allocator.Error)!OauthOperationStatePlan {
+) (Error || std.mem.Allocator.Error)!OperationStatePlan {
     if (base.generation != expected_generation) return error.GenerationMismatch;
     validateRegistryIdentity(&base, limits) catch return error.InvalidMutation;
     if (base.oauth_operation != null) return error.InvalidMutation;
@@ -4281,7 +4576,7 @@ pub fn planClearOauthOperation(
     expected_generation: u64,
     expected_operation_id: []const u8,
     limits: Limits,
-) (Error || std.mem.Allocator.Error)!OauthOperationStatePlan {
+) (Error || std.mem.Allocator.Error)!OperationStatePlan {
     if (base.generation != expected_generation) return error.GenerationMismatch;
     validateRegistryIdentity(&base, limits) catch return error.InvalidMutation;
     const operation = base.oauth_operation orelse return error.InvalidMutation;
@@ -4342,6 +4637,9 @@ fn collectCredentialReferences(
     limits: Limits,
 ) std.mem.Allocator.Error!void {
     for (registry.servers) |server| {
+        if (server.installation) |operation| for (operation.request_refs) |locator| {
+            if (validCredentialLocator(locator, limits.max_credential_locator_bytes)) try appendUniqueText(allocator, references, locator);
+        };
         for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
             for (endpoint.credential_refs) |locator|
                 if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
@@ -4416,6 +4714,7 @@ fn serverWireEqual(left: ServerWire, right: ServerWire) bool {
         left.timeout_ms != right.timeout_ms or
         !transportWireEqual(left.transport, right.transport) or
         !authWireEqual(left.auth, right.auth) or
+        !installationEqual(left.installation, right.installation) or
         !optionalConnectionApprovalEqual(
             left.connection_approval,
             right.connection_approval,
@@ -4425,6 +4724,17 @@ fn serverWireEqual(left: ServerWire, right: ServerWire) bool {
     for (left.tools, right.tools) |left_tool, right_tool|
         if (!std.mem.eql(u8, left_tool, right_tool)) return false;
     return true;
+}
+
+fn installationEqual(left: ?InstallationWire, right: ?InstallationWire) bool {
+    if (left == null or right == null) return left == null and right == null;
+    const a = left.?;
+    const b = right.?;
+    return a.task_id == b.task_id and a.run_id == b.run_id and a.source_message_id == b.source_message_id and
+        a.revision == b.revision and std.mem.eql(u8, a.source_origin, b.source_origin) and
+        stringSlicesEqual(a.request_refs, b.request_refs) and a.phase == b.phase and
+        a.initial_grant_pending == b.initial_grant_pending and a.initial_grant_completed == b.initial_grant_completed and
+        a.cross_origin_authorized == b.cross_origin_authorized and a.active_elapsed_ms == b.active_elapsed_ms and a.stop_pending == b.stop_pending;
 }
 
 fn optionalConnectionApprovalEqual(
@@ -4656,6 +4966,20 @@ pub fn serverProblem(server: ServerWire, limits: Limits) ?ServerProblem {
             return .invalid_allowlist;
         for (server.tools[0..index]) |previous|
             if (std.mem.eql(u8, previous, tool)) return .invalid_allowlist;
+    }
+    if (server.installation) |operation| {
+        if (operation.task_id == 0 or operation.run_id == 0 or operation.source_message_id == 0 or operation.revision == 0 or operation.revision == std.math.maxInt(u64) or
+            operation.active_elapsed_ms > installation_active_budget_ms or operation.request_refs.len == 0 or operation.request_refs.len > limits.max_credential_locators or
+            (operation.initial_grant_pending and operation.initial_grant_completed) or
+            (operation.stop_pending and operation.phase != .cancelled) or
+            (!operation.phase.active() and operation.initial_grant_pending) or
+            (operation.phase == .ready and !operation.initial_grant_completed)) return .invalid_transport;
+        const origin = endpointOrigin(operation.source_origin, limits.max_url_bytes) orelse return .invalid_transport;
+        if (!std.mem.eql(u8, origin, operation.source_origin)) return .invalid_transport;
+        for (operation.request_refs, 0..) |locator, i| {
+            if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return .invalid_transport;
+            if (containsText(operation.request_refs[0..i], locator)) return .invalid_transport;
+        }
     }
     if (validateTransport(server.transport, limits)) |problem| return problem;
     if (validateAuth(server, limits)) |problem| return problem;
@@ -4931,6 +5255,7 @@ fn validateOauthOperation(
 
 fn credentialReferenceCount(server: ServerWire) usize {
     var count = transportCredentialReferenceCount(server.transport);
+    if (server.installation) |operation| count += operation.request_refs.len;
     for (oauthPrivateResources(server)) |resource| if (resource) |endpoint| {
         count += endpoint.credential_refs.len;
     };
@@ -6120,6 +6445,95 @@ test "private endpoint parts remain ordered and protect only credential substitu
     try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-key") == null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "route=one") == null);
     try std.testing.expectEqual(std.meta.Tag(MutationPreparation).rejected, std.meta.activeTag(try management.prepareCreateHttpServer(0, .{ .display_name = "Mismatch", .url = "https://elsewhere.test/", .sensitive_endpoint = true, .endpoint_parts = &parts })));
+}
+
+test "installation target persists before effects and grants the initial catalog once" {
+    const Fake = struct {
+        entropy: u8 = 0,
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.entropy += 1;
+            @memset(output, self.entropy);
+            return true;
+        }
+        fn commit(_: ?*anyopaque, _: []const u8) PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var fake: Fake = .{};
+    var limits = test_limits;
+    limits.max_credential_secret_bytes = 32;
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = .{ .available = true, .commit_journal_fn = Fake.commit, .commit_registry_fn = Fake.commit, .clear_journal_fn = Fake.clear },
+        .credentials = .{ .available = true, .probe_fn = Fake.probe, .create_fn = Fake.create, .delete_fn = Fake.delete },
+        .identity_generator = .{ .context = &fake, .available = true, .fill_fn = Fake.fill },
+        .locator_generator = .{ .context = &fake, .available = true, .fill_fn = Fake.fill },
+        .limits = limits,
+    });
+    defer management.deinit();
+    const request = "{this is a synthetic private request, not a user secret or an executable payload}";
+    var start = switch (try management.prepareInstallationStart(0, .{ .stdio = .{ .display_name = "Fixture", .command = "node" } }, .{
+        .task_id = 1,
+        .run_id = 3,
+        .source_message_id = 2,
+        .source_origin = "https://source.example",
+        .request = request,
+    })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer start.deinit();
+    try std.testing.expect(management.desiredRegistry() == null);
+    const target = start.target();
+    const id = try std.testing.allocator.dupe(u8, target.servers[0].id);
+    defer std.testing.allocator.free(id);
+    try std.testing.expect(!target.servers[0].enabled);
+    try std.testing.expect(target.servers[0].installation.?.request_refs.len > 1);
+    try std.testing.expectEqual(.saved, try management.commitPreparedMutation(&start));
+    var buffer: [max_store_bytes]u8 = undefined;
+    const durable = try encode(&buffer, management.desiredRegistry().?, limits);
+    try std.testing.expect(std.mem.indexOf(u8, durable, "synthetic private") == null);
+    var restored = try decode(std.testing.allocator, durable, limits);
+    defer restored.deinit();
+    try std.testing.expect(!restored.value.servers[0].enabled);
+    try std.testing.expectEqual(.preparing, restored.value.servers[0].installation.?.phase);
+    try std.testing.expectEqual(.rejected, std.meta.activeTag(try management.prepareInstallationUpdate(1, .{ .server_id = id, .expected_revision = 1, .phase = .ready, .active_elapsed_ms = 0, .initial_tools = &.{"echo"} })));
+    var connect = switch (try management.prepareInstallationUpdate(1, .{ .server_id = id, .expected_revision = 1, .phase = .connecting, .active_elapsed_ms = 1 })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer connect.deinit();
+    try std.testing.expectEqual(.saved, try management.commitPreparedMutation(&connect));
+    var grant = switch (try management.prepareInstallationUpdate(2, .{ .server_id = id, .expected_revision = 2, .phase = .connecting, .active_elapsed_ms = 2, .initial_tools = &.{"echo"} })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer grant.deinit();
+    try std.testing.expectEqual(.saved, try management.commitPreparedMutation(&grant));
+    var ready = switch (try management.prepareInstallationUpdate(3, .{ .server_id = id, .expected_revision = 3, .phase = .ready, .active_elapsed_ms = 3 })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer ready.deinit();
+    try std.testing.expectEqual(.saved, try management.commitPreparedMutation(&ready));
+    const installed = management.desiredRegistry().?.servers[0];
+    try std.testing.expectEqual(@as(usize, 1), installed.tools.len);
+    try std.testing.expectEqualStrings("echo", installed.tools[0]);
+    try std.testing.expect(installed.installation.?.initial_grant_completed);
+    try std.testing.expect(!installed.installation.?.initial_grant_pending);
+    try std.testing.expectEqual(.rejected, std.meta.activeTag(try management.prepareInstallationUpdate(4, .{ .server_id = id, .expected_revision = 4, .phase = .ready, .active_elapsed_ms = 4, .initial_tools = &.{ "echo", "new_tool" } })));
 }
 
 test "schema two migration preserves approved public connections and tool grants" {
@@ -9224,7 +9638,7 @@ test "typed OAuth management commits consent marker and fresh token locators" {
     try std.testing.expectEqual(@as(u64, 2), begin.target().generation);
     try std.testing.expectEqual(
         ManagementOutcome.saved,
-        try management.commitPreparedOauthOperationState(&begin),
+        try management.commitPreparedOperationState(&begin),
     );
     const operation_id = management.desiredRegistry().?.oauth_operation.?.id;
     var access = [_]u8{ 'a', 'c', 'c', 'e', 's', 's' };
@@ -9551,7 +9965,7 @@ test "disabled referenced OAuth refresh rebases unrelated changes and rotates fr
     defer begin.deinit();
     try std.testing.expectEqual(
         ManagementOutcome.saved,
-        try management.commitPreparedOauthOperationState(&begin),
+        try management.commitPreparedOperationState(&begin),
     );
     const operation = management.desiredRegistry().?.oauth_operation.?;
     var operation_storage: [64]u8 = undefined;

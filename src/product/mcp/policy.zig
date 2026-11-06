@@ -151,7 +151,7 @@ fn reconcilePendingReauthorizations(
 }
 
 fn serverAdmittedByDesiredState(server: mcp_configuration.ServerWire) bool {
-    if (!server.enabled or server.connection_approval == null) return false;
+    if (!mcp_configuration.serverEnabled(server) or server.connection_approval == null) return false;
     if (std.mem.eql(u8, server.auth.kind, "oauth")) {
         const oauth = server.auth.oauth orelse return false;
         return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;
