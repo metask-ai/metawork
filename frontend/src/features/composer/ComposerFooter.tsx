@@ -204,7 +204,7 @@ export function ComposerFooter({
   modelEditable: boolean;
   modelSelectionDisabled: boolean;
   modelSelectionPending: boolean;
-  modelContextTitle: string;
+  modelContextTitle?: string;
   modelNotice?: ReactNode;
   actionDisabled: boolean;
   stopAction: "run" | "compact" | null;

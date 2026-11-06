@@ -4352,7 +4352,7 @@ export default function App() {
               : activeTask?.modelIntent?.state === "outcome_unknown"
                 ? t("mutation.reason.persistence_outcome_unknown")
                 : newTaskDraftActive
-                  ? t("settings.new_task_model_help")
+                  ? undefined
                   : t(
                       taskModelPolicy.selectable &&
                         taskModelOptions.length === 0
@@ -5313,7 +5313,6 @@ export default function App() {
         >
           <TaskWorkspace
             newTask={newTaskDraftActive}
-            hasWorkspace={Boolean(composerWorkspace)}
             composer={
               activeTask?.archived ? (
                 <div className="archived-task-banner">

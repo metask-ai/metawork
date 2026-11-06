@@ -332,7 +332,7 @@ test("Composer recalls only the current Task's saved text after remount and page
     const app = await renderApp(ctx, { historyRuns });
     await app.user.click(taskRows("3")[0]);
     const textarea = await screen.findByPlaceholderText(
-      "Describe the outcome you need…",
+      "Enter your instructions…",
     );
     assert.equal(textarea.value, "");
     fireEvent.keyDown(textarea, { key: "ArrowUp" });
@@ -1210,9 +1210,7 @@ for (const emptyProject of [false, true])
     );
     await act(async () => newConversation.focus());
     await user.keyboard("{Enter}");
-    let editor = await screen.findByPlaceholderText(
-      "Describe the outcome you need…",
-    );
+    let editor = await screen.findByPlaceholderText("Enter your instructions…");
     await waitFor(() => assert.ok(document.activeElement === editor));
     assert.equal(
       document.querySelector(".composer-workspace-trigger").textContent,
@@ -1225,24 +1223,18 @@ for (const emptyProject of [false, true])
       exact: true,
     });
     await user.click(newTask);
-    editor = await screen.findByPlaceholderText(
-      "Describe the outcome you need…",
-    );
+    editor = await screen.findByPlaceholderText("Enter your instructions…");
     assert.equal(editor.value, "");
     fireEvent.change(editor, { target: { value: "Saved automatic draft" } });
     if (!emptyProject) {
       await user.click(taskRows("3")[0]);
-      editor = await screen.findByPlaceholderText(
-        "Describe the outcome you need…",
-      );
+      editor = await screen.findByPlaceholderText("Enter your instructions…");
       fireEvent.change(editor, {
         target: { value: "Saved existing Task draft" },
       });
     }
     await user.click(newConversation);
-    editor = await screen.findByPlaceholderText(
-      "Describe the outcome you need…",
-    );
+    editor = await screen.findByPlaceholderText("Enter your instructions…");
     assert.equal(editor.value, "Saved project draft");
     assert.equal(
       document.querySelector(".composer-workspace-trigger").textContent,
@@ -1256,15 +1248,13 @@ for (const emptyProject of [false, true])
     assert.equal(screen.queryByRole("menu"), null);
     await user.click(newTask);
     assert.equal(
-      (await screen.findByPlaceholderText("Describe the outcome you need…"))
-        .value,
+      (await screen.findByPlaceholderText("Enter your instructions…")).value,
       "Saved automatic draft",
     );
     if (!emptyProject) {
       await user.click(taskRows("3")[0]);
       assert.equal(
-        (await screen.findByPlaceholderText("Describe the outcome you need…"))
-          .value,
+        (await screen.findByPlaceholderText("Enter your instructions…")).value,
         "Saved existing Task draft",
       );
     }

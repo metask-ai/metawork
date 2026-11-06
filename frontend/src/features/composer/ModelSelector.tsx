@@ -29,7 +29,7 @@ export function ModelSelector({
   editable: boolean;
   disabled: boolean;
   pending: boolean;
-  contextTitle: string;
+  contextTitle?: string;
   onSelect: (id: string) => void;
 }) {
   const { t } = useI18n();

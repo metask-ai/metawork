@@ -42,13 +42,11 @@ export function NewTaskApprovalModeMenu({
 
 export function TaskWorkspace({
   newTask,
-  hasWorkspace,
   taskContent,
   composer,
   pendingContent,
 }: {
   newTask: boolean;
-  hasWorkspace: boolean;
   taskContent?: ReactNode;
   composer: ReactNode;
   pendingContent?: ReactNode;
@@ -58,20 +56,7 @@ export function TaskWorkspace({
     <div className={newTask ? "new-task-scroll" : "task-workspace"}>
       <section className={newTask ? "new-task-view" : "task-workspace"}>
         <div className={newTask ? "new-task-content" : "task-workspace"}>
-          {newTask ? (
-            <>
-              <h2>{t("task.empty_title")}</h2>
-              <p>
-                {t(
-                  hasWorkspace
-                    ? "task.empty_body_with_workspace"
-                    : "task.empty_body_without_workspace",
-                )}
-              </p>
-            </>
-          ) : (
-            taskContent
-          )}
+          {newTask ? <h2>{t("task.empty_title")}</h2> : taskContent}
           {newTask && pendingContent}
           {composer}
         </div>

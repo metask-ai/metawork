@@ -8206,14 +8206,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.1;
 }
 
-.new-task-content > p {
-  max-width: 500px;
-  margin: 14px auto 0;
-  color: var(--ui-content-muted);
-  font-size: var(--text-body);
-  line-height: 1.7;
-}
-
 .new-task-content .composer-bar {
   width: 100%;
   margin-top: 28px;
@@ -8464,6 +8456,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-panel);
   box-shadow: 0 1px 3px
     color-mix(in srgb, var(--ui-content-primary) 4%, transparent);
+  transition: border-color 140ms ease-out;
 }
 
 .ai-conversation-jump {
@@ -8515,7 +8508,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .ai-composer:focus-within {
-  border-color: var(--ui-content-muted);
+  border-color: color-mix(
+    in srgb,
+    var(--ui-border),
+    var(--ui-content-muted) 25%
+  );
 }
 
 .ai-composer textarea {

@@ -108,7 +108,7 @@ test("detached Conversation recovery stays invisible until normal send", () => {
   });
   assert.doesNotMatch(required, /conversation-recovery/);
   assert.doesNotMatch(required, /Restore conversation/);
-  assert.match(required, /placeholder="Describe the outcome you need…"/);
+  assert.match(required, /placeholder="Enter your instructions…"/);
   assert.match(required, /aria-label="Send"/);
 
   const restoring = render({
@@ -118,7 +118,7 @@ test("detached Conversation recovery stays invisible until normal send", () => {
   });
   assert.doesNotMatch(restoring, /Restoring conversation/);
   assert.match(restoring.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(restoring, /placeholder="Describe the outcome you need…"/);
+  assert.match(restoring, /placeholder="Enter your instructions…"/);
 
   const failed = render({
     unavailable: true,
@@ -127,7 +127,7 @@ test("detached Conversation recovery stays invisible until normal send", () => {
     canSubmit: true,
   });
   assert.doesNotMatch(failed, /Try again|Restore conversation/);
-  assert.match(failed, /placeholder="Describe the outcome you need…"/);
+  assert.match(failed, /placeholder="Enter your instructions…"/);
   assert.match(failed, /aria-label="Send"/);
 });
 
@@ -741,7 +741,7 @@ test("new Task places the Composer after the outcome prompt", () => {
   const markup = renderNewTaskView(
     createElement("footer", { "data-test": "draft-composer" }, "Composer"),
   );
-  const prompt = markup.indexOf("Start with the outcome");
+  const prompt = markup.indexOf("What would you like to accomplish?");
   const composer = markup.indexOf('data-test="draft-composer"');
   assert.ok(prompt >= 0 && composer > prompt);
   assert.doesNotMatch(markup, /task-examples|task-example/);
@@ -976,7 +976,7 @@ test("a restart-detached Task keeps the Composer ready for send-time recovery", 
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,
   );
-  assert.match(markup, /Describe the outcome you need/);
+  assert.match(markup, /Enter your instructions/);
   assert.doesNotMatch(markup, />Restore conversation</);
   assert.doesNotMatch(markup, /start a new one to continue/);
 });

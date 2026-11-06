@@ -716,11 +716,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.sources.root.compat.claude.workspace": "Claude · 项目目录",
   "skills.sources.root.compat.codex.user": "Codex · 个人目录",
   "skills.sources.root.compat.codex.workspace": "Codex · 项目目录",
-  "task.empty_title": "先说说你想完成什么。",
-  "task.empty_body_with_workspace":
-    "描述一个明确结果。新任务会使用当前工作区，MetaWork 会把过程、决定和结果整理在一起。",
-  "task.empty_body_without_workspace":
-    "描述一个明确结果；首次发送时再选择工作区。取消选择不会丢失草稿。",
+  "task.empty_title": "你想完成什么？",
   "task.created_empty_body": "这个任务已经准备好，输入第一条指令即可开始。",
   "task.conversation_history_excluded":
     "部分历史记录未包含在恢复后的对话上下文中。后续消息仍可继续。",
@@ -812,7 +808,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.tokens": "{count} tokens",
   "run.preparing": "正在准备工作…",
   "run.submit": "发送",
-  "run.placeholder": "描述你需要的结果…",
+  "run.placeholder": "写下具体要求…",
   "run.context": "当前执行上下文",
   "run.placeholder_no_task": "请先开始一个任务",
   "run.placeholder_archived": "恢复此任务后才能继续",
@@ -1424,7 +1420,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_credential.invalid": "凭据被拒绝",
   "settings.catalog_count": "模型 {models}",
   "settings.language_help": "更改会立即应用到这台设备。",
-  "settings.new_task_model_help": "选择这个新任务使用的模型。",
   "settings.new_task_model_invalid":
     "之前选择的模型已不可用；请重新选择模型后再发送。",
   "settings.custom_model_add": "添加模型",

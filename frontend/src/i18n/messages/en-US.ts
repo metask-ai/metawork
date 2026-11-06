@@ -817,11 +817,7 @@ export const enUS = {
   "skills.sources.root.compat.claude.workspace": "Claude · Project directory",
   "skills.sources.root.compat.codex.user": "Codex · Personal directory",
   "skills.sources.root.compat.codex.workspace": "Codex · Project directory",
-  "task.empty_title": "Start with the outcome you want.",
-  "task.empty_body_with_workspace":
-    "Describe a clear outcome. The new task will use the current workspace, and MetaWork will keep the work, decisions, and result together.",
-  "task.empty_body_without_workspace":
-    "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
+  "task.empty_title": "What would you like to accomplish?",
   "task.created_empty_body":
     "This task is ready. Enter its first instruction to begin.",
   "task.conversation_history_excluded":
@@ -924,7 +920,7 @@ export const enUS = {
   "run.submit": "Send",
   "run.input_history_loading": "Loading input history…",
   "run.input_history_failed": "Couldn't load input history. Press ↑ to retry.",
-  "run.placeholder": "Describe the outcome you need…",
+  "run.placeholder": "Enter your instructions…",
   "run.context": "Current execution context",
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
@@ -1629,7 +1625,6 @@ export const enUS = {
   "settings.custom_provider_credential.invalid": "Credential rejected",
   "settings.catalog_count": "Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.new_task_model_help": "Choose the model for this new task.",
   "settings.new_task_model_invalid":
     "The previously selected model is no longer available. Choose another model before sending.",
   "settings.custom_model_add": "Add model",
