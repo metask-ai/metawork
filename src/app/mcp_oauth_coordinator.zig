@@ -870,7 +870,7 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
         .rejected => return error.TestUnexpectedResult,
     };
     defer marker.deinit();
-    try std.testing.expectEqual(.saved, try managed.commitPreparedOauthOperationState(&marker));
+    try std.testing.expectEqual(.saved, try managed.commitPreparedOperationState(&marker));
     const old_id = try allocator.dupe(u8, managed.desiredRegistry().?.oauth_operation.?.id);
     defer allocator.free(old_id);
     fixture.now_ms = 100_000;
