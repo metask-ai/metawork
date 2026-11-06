@@ -176,7 +176,7 @@ Product MCP 主线程拥有一个非持久待处理提议，绑定 id、来源 T
 2. `tryPut` 使用 try-lock；竞争、消息未取走或已有待处理提议时立即 busy，调用方释放失败 candidate；关闭/来源失效返回 unavailable/cancelled。
 3. 短锁内仅检查 token、生成非零进程内 id、转移 owner 并占名额，不分配、编码、调用其他 owner、唤醒、等待或 join。
 4. 解锁后以非阻塞 RequiredWake 通知主线程并立即返回 submitted，不等待主线程响应，不重放提议。
-5. 主线程 drain 重验来源、移动已构造数据并投影，不依赖新的大块分配；take 不释放名额，create 消费、关闭或失效才释放。
+5. 主线程 drain 重验来源并移动已构造数据，接管不再复制草稿；凭据复核只解析有界编码，资源不足时安全拒绝；take 不释放名额，create 消费、关闭或失效才释放。
 
 queued、由主线程持有与 closed 属于同一名额生命周期，不是第二套配置状态。两个并发 callback 最多一个成功；释放核对 proposal id，不误释放新提议。
 
@@ -186,7 +186,7 @@ queued、由主线程持有与 closed 属于同一名额生命周期，不是第
 
 ### 6.3 投影与容量
 
-MCP projection 增加 nullable `installationProposal`，非空仅有 id、taskId、runId 与公开 typed draft；管理不可用、无提议或已消费时为 null，不增加“已提交”状态。
+公共 `context.mcpInstallation` 精确包含 `proposal` 和 `notice`。proposal 为 null 或仅含 id、taskId、runId 与公开 typed draft；notice 为 null 或固定 `proposal_rejected`，不回显输入。Task scope 不交付 MCP management，所以提议只在公共 context 发布一份 canonical 状态，不复制到管理块；无提议或已消费时 proposal 为 null。
 
 主线程接管前及每次投影使用现有 Host 已知凭据 predicate 检查公开字段；命中则失效、释放名额并安全提示，不把脱敏失真的配置交给 Add。callback 不读取主线程可变凭据集合，submitted 不宣称后续检查已通过。
 

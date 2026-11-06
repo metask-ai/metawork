@@ -43,8 +43,8 @@ const CoreProbe = struct {
             return active.original.runtime().create()(&copy, plugins, output, diagnostic);
         }
         if (active.changed_schema) {
-            std.debug.assert(copy.host_tool_count == 2);
-            var tools = [_]sdk.types.HostToolV1{ copy.host_tools.?[0], copy.host_tools.?[1] };
+            std.debug.assert(copy.host_tool_count == 3);
+            var tools = [_]sdk.types.HostToolV1{ copy.host_tools.?[0], copy.host_tools.?[1], copy.host_tools.?[2] };
             const tool = &tools[0];
             tool.input_schema_json = sdk.bytesView("{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"maxLength\":1000}},\"required\":[\"prompt\"],\"additionalProperties\":false}");
             copy.host_tools = &tools;
@@ -56,9 +56,9 @@ const CoreProbe = struct {
         var copy = config.?.*;
         var host = copy.host.?.*;
         if (active.legacy_tools) {
-            std.debug.assert(host.allowed_tool_count == 12);
+            std.debug.assert(host.allowed_tool_count == 13);
             std.debug.assert(std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage"));
-            host.allowed_tool_count -= 2 - active.legacy_host_count;
+            host.allowed_tool_count -= 3 - active.legacy_host_count;
             copy.host = &host;
         }
         return active.original.session().create()(runtime, &copy, callbacks, output, diagnostic);
@@ -379,7 +379,7 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     try h.init("restore", .{});
     defer h.deinit();
     var legacy_probe: CoreProbe = undefined;
-    if (old_host_count < 2) {
+    if (old_host_count < 3) {
         try h.runtime.shutdown();
         h.runtime.deinit();
         try legacy_probe.init(false);
@@ -434,7 +434,7 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     defer described.deinit();
     // Changing only GenerateImage's schema does not invalidate an unrelated
     // built-in Write grant. Host tools cannot have persisted Session grants.
-    const changed = old_host_count < 2 and grant;
+    const changed = old_host_count < 3 and grant;
     try std.testing.expectEqual(if (changed) agent.CheckpointRestoreHealth.degraded else .complete, restored.report.health);
     try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), restored.report.invalidated_permission_rules);
     try std.testing.expectEqual(@as(u32, if (grant and !changed) 1 else 0), restored.report.restored_permission_rules);
@@ -462,8 +462,8 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
 
 test "GenerateImage canonical checkpoint invalidates changed tool authority and preserves unchanged grants" {
     try checkpointTools(0, true, false);
-    try checkpointTools(2, true, false);
-    try checkpointTools(2, true, true);
+    try checkpointTools(3, true, false);
+    try checkpointTools(3, true, true);
 }
 
 test "GenerateImage legacy checkpoint without grants restores complete and requires fresh approval" {
@@ -747,7 +747,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
         .binding = .{ .endpoint = &endpoint, .model = &model, .credential = &credential, .output = h.sink.output() },
         .transport = first.transport(),
     };
-    const id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, input, null);
+    const id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, input, null, null);
     @memset(&endpoint, 'x');
     @memset(&model, 'x');
     @memset(&credential, 0);
@@ -766,7 +766,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
 
     // Explicit unavailability also overrides the Session's synthetic fixture
     // source. Neither the previous production input nor the fixture is reused.
-    var missing: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, null, null) };
+    var missing: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, null, null, null) };
     const missing_thread = try std.Thread.spawn(.{}, Work.run, .{&missing});
     missing_thread.join();
     defer missing.result.?.deinit();
@@ -781,11 +781,11 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
         },
         .transport = second.transport(),
     };
-    const cancelled = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null);
+    const cancelled = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null, null);
     try session.cancelPreparedRun(cancelled);
     try std.testing.expect(session.run_image == null);
     try std.testing.expectEqual(@as(usize, 0), second.calls.load(.acquire));
-    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null) };
+    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null, null) };
     const renewed_thread = try std.Thread.spawn(.{}, Work.run, .{&renewed});
     renewed_thread.join();
     defer renewed.result.?.deinit();
@@ -1657,6 +1657,70 @@ test "DeliverFile previous GenerateImage-only checkpoints restore without recrea
     try checkpointTools(1, true, false);
 }
 
+test "ProposeMcpServer restores genuine two-Host-tool checkpoints without restoring proposal authority" {
+    try checkpointTools(2, false, false);
+    try checkpointTools(2, true, false);
+}
+
+test "ProposeMcpServer canonical Core submits without a main-thread drain and releases owned results" {
+    const Ingress = struct {
+        draft: ?agent.McpInstallationDraft = null,
+        run_id: u64 = 0,
+        generation: u64 = 0,
+        wakes: usize = 0,
+        fn put(raw: *anyopaque, task_id: u64, run_id: u64, generation: u64, draft: agent.McpInstallationDraft) agent.McpInstallationResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(task_id == 42);
+            if (self.draft != null) return .busy;
+            self.run_id = run_id;
+            self.generation = generation;
+            self.draft = draft;
+            return .{ .proposal_submitted = 7 };
+        }
+        fn wake(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.wakes += 1;
+        }
+    };
+    var h: Harness = undefined;
+    try h.init("mcp-proposal", .{});
+    defer h.deinit();
+    const session = try h.session(.full_access, false);
+    var ingress: Ingress = .{};
+    defer if (ingress.draft) |*draft| draft.deinit();
+    for (0..3) |index| {
+        const input: ?agent.McpInstallationInput = if (index == 0) null else .{ .context = &ingress, .allocator = std.testing.allocator, .task_id = 42, .try_put_fn = Ingress.put, .wake_fn = Ingress.wake };
+        const id = try session.prepareRunWithTools(.{ .text = "Propose the fixture MCP server." }, null, null, input);
+        var work: Work = .{ .session = session, .id = id };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        thread.join();
+        defer work.result.?.deinit();
+        try std.testing.expectEqual(@as(?agent.TerminalFailure, null), work.result.?.failure);
+        var results: usize = 0;
+        while (h.runtime.takeEvent()) |value| {
+            var event = value;
+            defer event.deinit();
+            if (event.event.value == .known and event.event.value.known == .tool_result and std.mem.eql(u8, event.event.value.known.tool_result.name, "ProposeMcpServer")) {
+                results += 1;
+                const content = event.event.value.known.tool_result.content;
+                try std.testing.expect(std.mem.indexOf(u8, content, switch (index) {
+                    0 => "unavailable",
+                    1 => "proposal_submitted",
+                    else => "busy",
+                }) != null);
+                try std.testing.expect(std.mem.indexOf(u8, content, "--filter") == null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), results);
+        if (index == 1) try std.testing.expectEqual(id, ingress.run_id);
+        try std.testing.expectEqual(@as(usize, 0), h.runtime.mcp_results_outstanding.load(.acquire));
+        try std.testing.expect(session.run_mcp_installation == null);
+    }
+    try std.testing.expect(ingress.generation != 0);
+    try std.testing.expectEqual(@as(usize, 1), ingress.wakes);
+    try session.close(.session_close); // The unconsumed proposal cannot hold Session.close.
+}
+
 const DeliveryReader = struct {
     root: []const u8,
     main_thread_id: std.Thread.Id,
@@ -1694,7 +1758,7 @@ test "DeliverFile canonical Core checks actual Workspace bytes and sends one tru
     var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() };
     for (0..3) |index| {
         if (index == 2) try h.tmp.dir.deleteFile(std.testing.io, "result.docx");
-        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, if (index == 1) null else reader.input());
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, if (index == 1) null else reader.input(), null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         thread.join();
@@ -1742,7 +1806,7 @@ test "DeliverFile canonical Core cancellation joins file callbacks on stop close
         defer h.deinit();
         const session = try h.session(.full_access, false);
         var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId(), .hold = true };
-        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input());
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input(), null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         defer {
@@ -1787,7 +1851,7 @@ test "DeliverFile canonical Core approval gates file reads and refuses Session g
         try file.writeStreamingAll(std.testing.io, "approved bytes");
         file.close(std.testing.io);
         var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() };
-        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input());
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input(), null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         defer {

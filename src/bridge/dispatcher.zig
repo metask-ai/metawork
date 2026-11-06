@@ -411,6 +411,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.uninstall_skill, .function = uninstallSkill },
             .{ .name = commands.retry_skill, .function = retrySkill },
             .{ .name = commands.skill_detail, .function = skillDetail },
+            .{ .name = commands.mcp_dismiss_install_proposal, .function = dismissMcpInstallProposal },
             .{ .name = commands.mcp_create_stdio_server, .function = createMcpStdioServer },
             .{ .name = commands.mcp_create_http_server, .function = createMcpHttpServer },
             .{ .name = commands.mcp_update_stdio_connection, .function = updateMcpStdioConnection },
@@ -4228,6 +4229,20 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
+    fn dismissMcpInstallProposal(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.McpInstallProposalIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const id = try handlers.parseWireId(parsed.value.proposalId);
+        const workbench = try self.requireProductControl();
+        const dismissed = workbench.dismissMcpInstallProposal(id);
+        if (dismissed) self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{if (dismissed) @as([]const u8, "dismissed") else "stale_proposal"});
+    }
+
     fn createMcpStdioServer(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -4252,6 +4267,7 @@ pub const Dispatcher = struct {
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
         const workbench = try self.requireProductControl();
         const outcome = try workbench.createMcpStdioServer(expected, .{
+            .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
@@ -4290,6 +4306,7 @@ pub const Dispatcher = struct {
         const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
             if (parsed.value.headerNames.len != 0) return error.InvalidBridgePayload;
             break :oauth try workbench.createMcpOauthHttpServer(expected, .{
+                .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
                 .display_name = parsed.value.displayName,
                 .negotiation = parsed.value.negotiation,
                 .timeout_ms = parsed.value.timeoutMs,
@@ -4297,6 +4314,7 @@ pub const Dispatcher = struct {
                 .client = try mcpOauthClientPlan(parsed.value.registration),
             });
         } else try workbench.createMcpHttpServer(expected, .{
+            .proposal_id = if (parsed.value.proposalId) |value| try handlers.parseWireId(value) else null,
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,

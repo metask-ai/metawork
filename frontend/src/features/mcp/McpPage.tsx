@@ -16,6 +16,7 @@ import type {
   McpHttpConnectionInput,
   McpMutationResult,
   McpCreateResult,
+  McpInstallationProposal,
   McpRefreshResult,
   McpSecretSlot,
   McpStdioConnectionInput,
@@ -464,8 +465,23 @@ export function McpPage({
   onTest,
   onApply,
   onRefresh,
+  installationProposal = null,
+  requestedProposalId = null,
+  proposalSourceInvalidated = false,
+  installationRejected = false,
+  onReviewProposal,
+  onProposalOpened,
+  onDismissProposal,
 }: {
   management: McpManagementView;
+  installationProposal?: McpInstallationProposal | null;
+  requestedProposalId?: string | null;
+  proposalSourceInvalidated?: boolean;
+  installationRejected?: boolean;
+  onReviewProposal?: (proposal: McpInstallationProposal) => void;
+  onProposalOpened?: () => void;
+  onDismissProposal?: (id: string) => Promise<unknown>;
+
   capabilities: {
     connectionApproval: boolean;
     secretCapture: boolean;
@@ -478,10 +494,12 @@ export function McpPage({
   onCreateStdio: (
     expectedGeneration: string,
     input: McpStdioConnectionInput,
+    proposalId?: string,
   ) => Promise<McpCreateResult>;
   onCreateHttp: (
     expectedGeneration: string,
     input: McpHttpConnectionInput,
+    proposalId?: string,
   ) => Promise<McpCreateResult>;
   onUpdateStdio: (
     expectedGeneration: string,
@@ -560,6 +578,9 @@ export function McpPage({
   const [timeoutMs, setTimeoutMs] = useState("30000");
   const [commandLine, setCommandLine] = useState("");
   const [structuredArgv, setStructuredArgv] = useState<string[] | null>(null);
+  const [proposalLink, setProposalLink] = useState<string | null>(null);
+  const [proposalExpired, setProposalExpired] = useState(false);
+  const proposalAttempted = useRef(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importBatch, setImportBatch] = useState<McpImportResult | null>(null);
   const [importStatus, setImportStatus] = useState("");
@@ -670,6 +691,7 @@ export function McpPage({
       ? selected.connection.tokenEndpointAuthMethod
       : null;
   const addValid =
+    !proposalExpired &&
     Object.values(importedSecrets).every(
       (value) =>
         new TextEncoder().encode(value).length <= capabilities.secretMaxBytes,
@@ -732,6 +754,9 @@ export function McpPage({
     setStructuredArgv(null);
     setImportedSecrets({});
     setImportedDraft(false);
+    setProposalLink(null);
+    setProposalExpired(false);
+    proposalAttempted.current = false;
     setCwd("");
     setEnvironmentNames([]);
     setStdioAuthMode("none");
@@ -795,6 +820,48 @@ export function McpPage({
           .join(" "),
       });
   }
+
+  useEffect(() => {
+    if (
+      !requestedProposalId ||
+      requestedProposalId !== installationProposal?.id ||
+      paneState !== null ||
+      mutationLocked
+    )
+      return;
+    prefillImported(
+      {
+        draft: installationProposal.draft,
+        secrets: {},
+        ignoredPermissions: false,
+        publicValueOverlap: false,
+      },
+      title.current!,
+    );
+    setProposalLink(installationProposal.id);
+    onProposalOpened?.();
+  }, [requestedProposalId, installationProposal, paneState, mutationLocked]);
+  useEffect(() => {
+    if (
+      !proposalLink ||
+      installationProposal?.id === proposalLink ||
+      createPending
+    )
+      return;
+    clearImportSecrets();
+    if (proposalSourceInvalidated && !proposalAttempted.current) {
+      setProposalLink(null);
+      setNotice({ tone: "attention", text: t("mcp.proposal.detached") });
+    } else {
+      setProposalExpired(true);
+      setNotice({ tone: "attention", text: t("mcp.proposal.expired") });
+    }
+  }, [
+    proposalLink,
+    installationProposal?.id,
+    proposalSourceInvalidated,
+    createPending,
+  ]);
 
   function openReplacement(server: McpServer) {
     clearImportSecrets();
@@ -864,7 +931,13 @@ export function McpPage({
     setPaneState({ kind: "server", id: server.id });
   });
 
-  function closePane() {
+  function closePane(dismissProposal = true) {
+    if (dismissProposal && proposalLink)
+      void onDismissProposal?.(proposalLink).catch(() => {
+        setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
+      });
+    setProposalLink(null);
+    setProposalExpired(false);
     clearImportSecrets();
     captureOperation.current = null;
     const trigger = paneTrigger.current;
@@ -937,6 +1010,7 @@ export function McpPage({
     if (!generation || mutationLocked || !addValid || createPending) return;
     const operation = { generations: new Set([generation]) };
     captureOperation.current = operation;
+    if (proposalLink) proposalAttempted.current = true;
     const secretValues = Object.entries(importedSecrets).filter(
       ([, value]) => value.length > 0,
     );
@@ -997,12 +1071,28 @@ export function McpPage({
                 input as McpHttpConnectionInput,
               )
           : transport === "stdio"
-            ? await onCreateStdio(generation, input as McpStdioConnectionInput)
-            : await onCreateHttp(generation, input as McpHttpConnectionInput);
+            ? proposalLink
+              ? await onCreateStdio(
+                  generation,
+                  input as McpStdioConnectionInput,
+                  proposalLink,
+                )
+              : await onCreateStdio(
+                  generation,
+                  input as McpStdioConnectionInput,
+                )
+            : proposalLink
+              ? await onCreateHttp(
+                  generation,
+                  input as McpHttpConnectionInput,
+                  proposalLink,
+                )
+              : await onCreateHttp(generation, input as McpHttpConnectionInput);
       mutationNotice(result);
       if (captureOperation.current !== operation) return;
       if (result.outcome === "saved") {
         saved = true;
+        setProposalLink(null);
         const serverId =
           paneState?.kind === "replace" && selected
             ? selected.id
@@ -1042,7 +1132,7 @@ export function McpPage({
           expected = capture.desiredGeneration;
           operation.generations.add(expected);
         }
-      } else if (result.outcome === "saved_recovery_required") closePane();
+      } else if (result.outcome === "saved_recovery_required") closePane(false);
     } catch {
       setNotice({
         tone: "attention",
@@ -1604,6 +1694,44 @@ export function McpPage({
             </div>
           </header>
 
+          {installationRejected && (
+            <p role="status" className="mcp-operation-notice">
+              {t("mcp.proposal.rejected")}
+            </p>
+          )}
+          {installationProposal && (
+            <section
+              className="mcp-import"
+              aria-label={t("mcp.proposal.title")}
+            >
+              <strong>{installationProposal.draft.displayName}</strong>
+              <p>{t("mcp.proposal.body")}</p>
+              <div>
+                <Button
+                  variant="secondary"
+                  disabled={mutationLocked || paneState !== null}
+                  onClick={() => onReviewProposal?.(installationProposal)}
+                >
+                  {t("mcp.proposal.review")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={paneState !== null}
+                  onClick={() =>
+                    void onDismissProposal?.(installationProposal.id).catch(
+                      () =>
+                        setNotice({
+                          tone: "attention",
+                          text: t("mcp.mutation.failed"),
+                        }),
+                    )
+                  }
+                >
+                  {t("common.cancel")}
+                </Button>
+              </div>
+            </section>
+          )}
           {renderBanner()}
           {management.retainedMemberCount > 0 && (
             <p className="mcp-operation-notice" aria-live="polite">
@@ -1731,7 +1859,10 @@ export function McpPage({
         </div>
 
         {paneState !== null && (
-          <McpDetailDrawer closeLocked={paneCloseLocked} onClose={closePane}>
+          <McpDetailDrawer
+            closeLocked={paneCloseLocked}
+            onClose={() => closePane()}
+          >
             <header>
               <div>
                 <small>
@@ -1765,7 +1896,7 @@ export function McpPage({
                   className="icon-button focus-ring"
                   aria-label={t("common.close")}
                   disabled={paneCloseLocked}
-                  onClick={closePane}
+                  onClick={() => closePane()}
                 >
                   <Icon name="close" />
                 </button>
@@ -2202,7 +2333,7 @@ export function McpPage({
                     type="button"
                     variant="secondary"
                     size="sm"
-                    onClick={closePane}
+                    onClick={() => closePane()}
                   >
                     {t("common.cancel")}
                   </Button>

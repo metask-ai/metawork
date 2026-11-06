@@ -1398,6 +1398,7 @@ export type WorkbenchSnapshot = {
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView | null;
   mcp: McpManagementView | null;
+  mcpInstallation: McpInstallation;
   workspaces: WorkspaceView[];
   scheduledTasks: ScheduledTaskView[] | null;
   tasks: TaskView[];
@@ -1779,6 +1780,19 @@ export type McpCreateResult = McpMutationResult & { serverId: string | null };
 export type McpInstallDraft =
   | ({ transport: "stdio" } & McpStdioConnectionInput)
   | ({ transport: "streamable_http" } & McpHttpConnectionInput);
+export type McpInstallationProposal = {
+  id: string;
+  taskId: string;
+  runId: string;
+  draft: McpInstallDraft;
+};
+export type McpInstallation = {
+  proposal: McpInstallationProposal | null;
+  notice: "proposal_rejected" | null;
+};
+export type McpInstallDismissResult = {
+  outcome: "dismissed" | "stale_proposal";
+};
 export type McpAuthorizationResult = {
   outcome:
     | "started"

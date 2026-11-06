@@ -277,6 +277,7 @@ pub const SkillInstall = struct {
 pub const SkillReimport = SkillInstall;
 pub const SkillIdentity = struct { installId: []const u8 };
 pub const McpCreateStdioServer = struct {
+    proposalId: ?[]const u8 = null,
     expectedDesiredGeneration: []const u8,
     displayName: []const u8,
     negotiation: []const u8,
@@ -292,6 +293,7 @@ pub const McpOauthRegistration = struct {
     tokenEndpointAuthMethod: ?[]const u8 = null,
 };
 pub const McpCreateHttpServer = struct {
+    proposalId: ?[]const u8 = null,
     expectedDesiredGeneration: []const u8,
     displayName: []const u8,
     negotiation: []const u8,
@@ -338,6 +340,7 @@ pub const McpAllowedTools = struct {
     serverId: []const u8,
     toolNames: []const []const u8,
 };
+pub const McpInstallProposalIdentity = struct { proposalId: []const u8 };
 pub const McpServerIdentity = struct {
     expectedDesiredGeneration: []const u8,
     serverId: []const u8,

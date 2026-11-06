@@ -525,6 +525,7 @@ pub const OauthClientPlan = union(enum) {
 };
 
 pub const CreateOauthHttpServerInput = struct {
+    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -627,6 +628,7 @@ const SecretCandidateSource = struct {
 };
 
 pub const CreateStdioServerInput = struct {
+    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
@@ -638,6 +640,7 @@ pub const CreateStdioServerInput = struct {
 };
 
 pub const CreateHttpServerInput = struct {
+    proposal_id: ?u64 = null,
     display_name: []const u8,
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,

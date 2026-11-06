@@ -133,6 +133,14 @@ pub fn build(b: *std.Build) void {
     const image_unit_run = b.addRunArtifact(image_tests);
     b.step("test-generate-image-unit", "Run GenerateImage codec and argument tests").dependOn(&image_unit_run.step);
     artifacts.tests.step.dependOn(&image_unit_run.step);
+    const mcp_install_unit = b.createModule(.{
+        .root_source_file = b.path("src/agent/mcp_install.zig"),
+        .target = test_modules.agent.resolved_target,
+        .optimize = test_modules.agent.optimize,
+    });
+    const mcp_install_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-mcp-installation", .root_module = mcp_install_unit }));
+    b.step("test-mcp-installation", "Run strict public MCP proposal codec tests").dependOn(&mcp_install_tests.step);
+    artifacts.tests.step.dependOn(&mcp_install_tests.step);
     const image_codec_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/image_generation.zig"),
         .target = test_modules.agent.resolved_target,

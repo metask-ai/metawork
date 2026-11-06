@@ -100,6 +100,9 @@ import {
   type McpManagementView,
   type McpMutationResult,
   type McpCreateResult,
+  type McpInstallation,
+  type McpInstallDraft,
+  type McpInstallDismissResult,
   type McpAuthorizationResult,
   type McpAuthorizationCancelResult,
   type McpRefreshResult,
@@ -5353,6 +5356,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "newTaskAdmission",
     "automaticWorkspaceRoot",
     "skillCatalog",
+    "mcpInstallation",
   ]);
   const management = object(view.management, "$.management", ["kind", "value"]);
   if (
@@ -6091,6 +6095,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       root.newTaskAdmission,
       "$.newTaskAdmission",
     ),
+    mcpInstallation: decodeMcpInstallation(
+      root.mcpInstallation,
+      "$.context.mcpInstallation",
+    ),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     skillManagement,
     mcp,
@@ -6509,6 +6517,101 @@ export function decodeMcpMutationResult(value: unknown): McpMutationResult {
   )
     fail("$.desiredGeneration", "known mutation outcome requires generation");
   return { outcome, desiredGeneration };
+}
+function decodeMcpInstallDraft(value: unknown, path: string): McpInstallDraft {
+  const raw = record(value, path);
+  const transport = enumValue(raw.transport, `${path}.transport`, [
+    "stdio",
+    "streamable_http",
+  ] as const);
+  const common = ["transport", "displayName", "negotiation", "timeoutMs"];
+  const item = object(
+    value,
+    path,
+    transport === "stdio"
+      ? [...common, "command", "arguments", "cwd", "environmentNames"]
+      : [...common, "endpoint", "authMode", "headerNames", "registration"],
+  );
+  const shared = {
+    displayName: nonEmptyString(item.displayName, `${path}.displayName`),
+    negotiation: enumValue(item.negotiation, `${path}.negotiation`, [
+      "automatic",
+      "modern_only",
+      "compat_only",
+    ] as const),
+    timeoutMs: positiveNumber(item.timeoutMs, `${path}.timeoutMs`),
+  };
+  const names = (v: unknown, field: string) =>
+    arrayValue(v, `${path}.${field}`, (entry, p) => nonEmptyString(entry, p));
+  if (transport === "stdio")
+    return {
+      ...shared,
+      transport,
+      command: nonEmptyString(item.command, `${path}.command`),
+      arguments: arrayValue(item.arguments, `${path}.arguments`, stringValue),
+      cwd: item.cwd === null ? null : nonEmptyString(item.cwd, `${path}.cwd`),
+      environmentNames: names(item.environmentNames, "environmentNames"),
+    };
+  const authMode = enumValue(item.authMode, `${path}.authMode`, [
+    "none",
+    "static",
+    "oauth",
+  ] as const);
+  let registration: { kind: "automatic" } | null = null;
+  if (authMode === "oauth") {
+    const plan = object(item.registration, `${path}.registration`, ["kind"]);
+    enumValue(plan.kind, `${path}.registration.kind`, ["automatic"] as const);
+    registration = { kind: "automatic" };
+  } else if (item.registration !== null)
+    fail(`${path}.registration`, "unexpected registration");
+  return {
+    ...shared,
+    transport,
+    endpoint: nonEmptyString(item.endpoint, `${path}.endpoint`),
+    authMode,
+    headerNames: names(item.headerNames, "headerNames"),
+    registration,
+  };
+}
+export function decodeMcpInstallation(
+  value: unknown,
+  path = "$",
+): McpInstallation {
+  const item = object(value, path, ["proposal", "notice"]);
+  const notice =
+    item.notice === null
+      ? null
+      : enumValue(item.notice, `${path}.notice`, [
+          "proposal_rejected",
+        ] as const);
+  if (item.proposal === null) return { proposal: null, notice };
+  const proposal = object(item.proposal, `${path}.proposal`, [
+    "id",
+    "taskId",
+    "runId",
+    "draft",
+  ]);
+  if (notice !== null) fail(path, "a pending proposal cannot also be rejected");
+  return {
+    notice,
+    proposal: {
+      id: positiveU64WireId(proposal.id, `${path}.proposal.id`),
+      taskId: positiveU64WireId(proposal.taskId, `${path}.proposal.taskId`),
+      runId: positiveU64WireId(proposal.runId, `${path}.proposal.runId`),
+      draft: decodeMcpInstallDraft(proposal.draft, `${path}.proposal.draft`),
+    },
+  };
+}
+export function decodeMcpInstallDismissResult(
+  value: unknown,
+): McpInstallDismissResult {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "dismissed",
+      "stale_proposal",
+    ] as const),
+  };
 }
 export function decodeMcpCreateResult(value: unknown): McpCreateResult {
   const item = object(value, "$", ["outcome", "desiredGeneration", "serverId"]);

@@ -11,6 +11,7 @@ const policy = @import("product_mcp_policy");
 const ports_module = @import("product_mcp_ports");
 const refresh_job = @import("product_mcp_refresh_job");
 const view = @import("product_mcp_view");
+const installation = @import("installation.zig");
 
 pub const Error = agent.Error || std.mem.Allocator.Error || error{
     ExecutorShuttingDown,
@@ -169,6 +170,9 @@ pub const Runtime = struct {
     /// Aggregate-owned MCP state. Production composition consumes it only
     /// through Runtime typed operations; direct access is test-seam only.
     state: state_module.McpProductState,
+    installation_mailbox: installation.Mailbox,
+    installation_proposal: ?installation.Payload = null,
+    installation_notice: bool = false,
     refresh_job: ?*refresh_job.Job = null,
     runtime_auth_delivery_pending: bool = false,
     shutting_down: bool = false,
@@ -183,6 +187,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .ports = ports,
             .state = initial_state,
+            .installation_mailbox = .{ .allocator = allocator, .notifier = ports.notifier },
         };
         runtime.observeOauthTime();
         return runtime;
@@ -200,6 +205,8 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        if (self.installation_proposal) |*value| value.deinit();
+        self.installation_mailbox.deinit();
         std.debug.assert(self.refresh_job == null);
         self.ports.timer.cancel();
         self.state.deinit();
@@ -1013,6 +1020,50 @@ pub const Runtime = struct {
         if (targeted) self.finishConvergence();
         self.releaseBoundary();
         return true;
+    }
+
+    pub fn installationInput(self: *Runtime, io: std.Io) ?agent.McpInstallationInput {
+        if (self.shutting_down) return null;
+        const management = if (self.state.management) |*value| value else return null;
+        if (management.inspect().health != .ready) return null;
+        return self.installation_mailbox.input(io);
+    }
+    pub fn takeInstallation(self: *Runtime, io: std.Io) bool {
+        const incoming = self.installation_mailbox.take(io) orelse return false;
+        std.debug.assert(self.installation_proposal == null);
+        self.installation_proposal = incoming;
+        self.installation_notice = false;
+        self.markChanged();
+        return true;
+    }
+    pub fn pendingInstallation(self: *const Runtime) ?struct { id: u64, task_id: u64, run_id: u64, json: []const u8 } {
+        const value = self.installation_proposal orelse return null;
+        return .{ .id = value.id, .task_id = value.task_id, .run_id = value.run_id, .json = value.draft.json };
+    }
+    pub fn dismissInstallation(self: *Runtime, io: std.Io, id: u64, rejected: bool) bool {
+        const value = if (self.installation_proposal) |*value| value else return false;
+        if (id == 0 or value.id != id) return false;
+        value.deinit();
+        self.installation_proposal = null;
+        _ = self.installation_mailbox.release(io, id);
+        self.installation_notice = rejected;
+        self.markChanged();
+        return true;
+    }
+    pub fn closeInstallation(self: *Runtime, io: std.Io) void {
+        self.installation_mailbox.close(io);
+        if (self.installation_proposal) |*value| value.deinit();
+        self.installation_proposal = null;
+        self.installation_notice = false;
+    }
+    pub fn writeInstallation(self: *const Runtime, writer: *std.Io.Writer) ViewError!void {
+        writer.writeAll("{\"proposal\":") catch return error.SnapshotTooLarge;
+        if (self.installation_proposal) |value| {
+            writer.print("{{\"id\":\"{d}\",\"taskId\":\"{d}\",\"runId\":\"{d}\",\"draft\":", .{ value.id, value.task_id, value.run_id }) catch return error.SnapshotTooLarge;
+            writer.writeAll(value.draft.json) catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(if (self.installation_notice) ",\"notice\":\"proposal_rejected\"}" else ",\"notice\":null}") catch return error.SnapshotTooLarge;
     }
 
     pub fn observeProcess(self: *Runtime, observation: configuration.ProcessObservation) Error!bool {

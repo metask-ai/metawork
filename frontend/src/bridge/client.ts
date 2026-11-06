@@ -77,6 +77,7 @@ import {
   decodeSkillDetailResult,
   decodeMcpMutationResult,
   decodeMcpCreateResult,
+  decodeMcpInstallDismissResult,
   decodeMcpRefreshResult,
   decodeMcpConfigurationApplyResult,
   decodeMcpConnectionTestResult,
@@ -618,13 +619,20 @@ export class BridgeClient {
       }),
     );
   }
+  async dismissMcpInstallProposal(proposalId: string) {
+    return decodeMcpInstallDismissResult(
+      await this.invoke(commands.mcpDismissInstallProposal, { proposalId }),
+    );
+  }
   async createMcpStdioServer(
     expectedDesiredGeneration: string,
     input: McpStdioConnectionInput,
+    proposalId: string | null = null,
   ) {
     return decodeMcpCreateResult(
       await this.invoke(commands.mcpCreateStdioServer, {
         expectedDesiredGeneration,
+        ...(proposalId === null ? {} : { proposalId }),
         ...input,
       }),
     );
@@ -632,10 +640,12 @@ export class BridgeClient {
   async createMcpHttpServer(
     expectedDesiredGeneration: string,
     input: McpHttpConnectionInput,
+    proposalId: string | null = null,
   ) {
     return decodeMcpCreateResult(
       await this.invoke(commands.mcpCreateHttpServer, {
         expectedDesiredGeneration,
+        ...(proposalId === null ? {} : { proposalId }),
         ...input,
       }),
     );

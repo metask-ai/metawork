@@ -18,6 +18,7 @@ import {
 } from "react";
 import type {
   FileReferenceView,
+  McpInstallationProposal,
   OutputActionHandler,
   PendingUi,
   RunInputView,
@@ -281,6 +282,8 @@ function TaskInput({ input }: { input: RunInputView }) {
 }
 export function TaskContent({
   task,
+  mcpInstallationProposal,
+  onReviewMcpProposal,
   snapshotReceivedAt,
   synchronized,
   requestingStop,
@@ -305,6 +308,8 @@ export function TaskContent({
   memory,
 }: {
   task: TaskView | null;
+  mcpInstallationProposal?: McpInstallationProposal | null;
+  onReviewMcpProposal?: (proposal: McpInstallationProposal) => void;
   memory?: TaskReadingMemory;
   history?: {
     available: boolean;
@@ -766,6 +771,24 @@ export function TaskContent({
           }
           const supplement = (
             <>
+              {mcpInstallationProposal?.taskId === task.id &&
+                mcpInstallationProposal.runId === run.id && (
+                  <section
+                    className="mcp-import"
+                    aria-label={t("mcp.proposal.title")}
+                  >
+                    <strong>{mcpInstallationProposal.draft.displayName}</strong>
+                    <p>{t("mcp.proposal.body")}</p>
+                    <Button
+                      variant="secondary"
+                      onClick={() =>
+                        onReviewMcpProposal?.(mcpInstallationProposal)
+                      }
+                    >
+                      {t("mcp.proposal.review")}
+                    </Button>
+                  </section>
+                )}
               {presentation.active && (
                 <RunProcess
                   presentation={presentation}

@@ -61,6 +61,158 @@ test.after(async () => {
   dom.window.close();
 });
 
+const proposalManagement = {
+  availability: "ready",
+  managementHealth: "ready",
+  operation: "idle",
+  desiredGeneration: "0",
+  runtimeAlignment: "current",
+  redacted: false,
+  servers: [],
+};
+const proposal = {
+  id: "71",
+  taskId: "3",
+  runId: "7",
+  draft: {
+    displayName: "Suggested",
+    transport: "stdio",
+    command: "node",
+    arguments: ["--filter=$HOME", ""],
+    cwd: null,
+    environmentNames: [],
+    negotiation: "automatic",
+    timeoutMs: 30000,
+  },
+};
+
+test("MCP suggestions require review and one explicit Add with the precise proposal identity", async () => {
+  const calls = [],
+    reviewed = [];
+  const props = {
+    installationProposal: proposal,
+    onReviewProposal: (value) => reviewed.push(value),
+    onCreateStdio: async (...args) => {
+      calls.push(args);
+      return { outcome: "saved", serverId: "created" };
+    },
+  };
+  const view = render(pageElement(proposalManagement, "", props));
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.equal(calls.length, 0);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Review MCP configuration" }),
+  );
+  assert.deepEqual(reviewed, [proposal]);
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      requestedProposalId: proposal.id,
+    }),
+  );
+  const form = await screen.findByRole("dialog", { name: "Add an MCP server" });
+  view.rerender(pageElement(proposalManagement, "", props));
+  assert.equal(calls.length, 0);
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0][2], proposal.id);
+  assert.deepEqual(calls[0][1].arguments, ["--filter=$HOME", ""]);
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      installationProposal: null,
+    }),
+  );
+  assert.equal(calls.length, 1);
+});
+
+for (const sourceInvalidated of [false, true]) {
+  test(`MCP missing proposal detaches only on explicit source cancellation (${sourceInvalidated})`, async () => {
+    const suggested = {
+      ...proposal,
+      draft: { ...proposal.draft, environmentNames: ["TOKEN"] },
+    };
+    const calls = [];
+    const props = {
+      installationProposal: suggested,
+      onCreateStdio: async (...args) => {
+        calls.push(args);
+        return { outcome: "saved", serverId: "created" };
+      },
+    };
+    const view = render(
+      pageElement(proposalManagement, "", {
+        ...props,
+        requestedProposalId: proposal.id,
+      }),
+    );
+    const form = await screen.findByRole("dialog", {
+      name: "Add an MCP server",
+    });
+    const password = form.querySelector('input[type="password"]');
+    assert.ok(password);
+    fireEvent.change(password, { target: { value: "synthetic-secret" } });
+    view.rerender(
+      pageElement(proposalManagement, "", {
+        ...props,
+        installationProposal: null,
+        proposalSourceInvalidated: sourceInvalidated,
+      }),
+    );
+    await waitFor(() => assert.equal(password.value, ""));
+    const add = within(form).getByRole("button", { name: "Add server" });
+    assert.equal(calls.length, 0);
+    fireEvent.change(password, { target: { value: "new-explicit-secret" } });
+    assert.equal(add.disabled, !sourceInvalidated);
+    if (sourceInvalidated) {
+      fireEvent.click(add);
+      await waitFor(() => assert.equal(calls.length, 1));
+      assert.equal(calls[0].length, 2);
+    }
+  });
+}
+
+test("MCP proposal removal during an uncertain create cannot detach or replay Add", async () => {
+  let resolveCreate;
+  const calls = [];
+  const props = {
+    installationProposal: proposal,
+    onCreateStdio: (...args) => {
+      calls.push(args);
+      return new Promise((resolve) => {
+        resolveCreate = resolve;
+      });
+    },
+  };
+  const view = render(
+    pageElement(proposalManagement, "", {
+      ...props,
+      requestedProposalId: proposal.id,
+    }),
+  );
+  const form = await screen.findByRole("dialog", { name: "Add an MCP server" });
+  view.rerender(pageElement(proposalManagement, "", props));
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  view.rerender(
+    pageElement(proposalManagement, "", {
+      ...props,
+      installationProposal: null,
+      proposalSourceInvalidated: true,
+    }),
+  );
+  resolveCreate({
+    outcome: "indeterminate",
+    serverId: null,
+    desiredGeneration: null,
+  });
+  await waitFor(() => assert.ok(screen.getByText(/suggestion has expired/)));
+  const add = within(form).getByRole("button", { name: "Add server" });
+  assert.equal(add.disabled, true);
+  fireEvent.click(add);
+  assert.equal(calls.length, 1);
+});
+
 const servers = [
   {
     id: "github-binding",

@@ -1311,3 +1311,32 @@ for (const [method, command] of [
       await assert.rejects(client[method]("1", "7"), /Invalid Host contract/);
     }
   });
+
+test("MCP proposal commands carry exact identities and strict result shapes", async () => {
+  const calls = [];
+  let result = { outcome: "dismissed" };
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return result;
+    }),
+  });
+  assert.deepEqual(await client.dismissMcpInstallProposal("71"), result);
+  assert.deepEqual(calls[0], {
+    command: "metawork.mcp.dismissInstallProposal",
+    payload: { proposalId: "71" },
+  });
+  result = { outcome: "saved", desiredGeneration: "1", serverId: "server-1" };
+  const input = { displayName: "Suggested", command: "node", arguments: [] };
+  await client.createMcpStdioServer("0", input, "71");
+  assert.deepEqual(calls[1].payload, {
+    expectedDesiredGeneration: "0",
+    proposalId: "71",
+    ...input,
+  });
+  result = { outcome: "dismissed", draft: {} };
+  await assert.rejects(
+    client.dismissMcpInstallProposal("71"),
+    /Invalid Host contract/,
+  );
+});
