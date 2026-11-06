@@ -7038,12 +7038,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-project-heading {
+  width: 100%;
   margin: 0;
   padding-block: 6px;
+  border: 0;
+  background: transparent;
   color: var(--ui-content-muted);
   font-size: var(--text-control);
   font-weight: 500;
   line-height: 18px;
+  text-align: left;
 }
 
 .task-project-heading svg {
@@ -7058,8 +7062,27 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: nowrap;
 }
 
+.task-project-items {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 160ms ease;
+}
+
+.task-project-items[aria-hidden="true"] {
+  grid-template-rows: 0fr;
+}
+
+.task-project-items-content {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .task-project-items .task-list-item {
   padding-left: 36px;
+}
+
+.task-project-items .task-list-item:focus-visible {
+  outline-offset: -2px;
 }
 
 .task-project-items .task-list-empty {
@@ -7087,6 +7110,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .sidebar-capability,
 .task-project-context,
+.task-project-heading,
 .task-list-item {
   border-radius: 8px;
 }
@@ -7097,7 +7121,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .sidebar-capability[data-active="true"],
 .task-project-context:hover,
 .task-project-context:has(.task-list-action:focus-visible),
-.task-project-context[aria-expanded="true"],
+.task-project-context[data-menu-open="true"],
 .task-list-entry:hover .task-list-item,
 .task-list-entry:has(.task-list-action:focus-visible) .task-list-item,
 .task-list-item[aria-expanded="true"],
@@ -7114,7 +7138,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-project-context:hover .task-project-heading,
 .task-project-context:has(.task-list-action:focus-visible)
   .task-project-heading,
-.task-project-context[aria-expanded="true"] .task-project-heading {
+.task-project-context[data-menu-open="true"] .task-project-heading {
   color: var(--ui-content-primary);
 }
 
@@ -7217,6 +7241,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .task-project-items {
+    transition: none;
+  }
+
   .task-signal[data-signal="running"] svg {
     animation: none;
   }

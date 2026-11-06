@@ -108,6 +108,20 @@ function taskRows(id) {
   return document.querySelectorAll(`.task-list [data-task-id="${id}"]`);
 }
 
+function projectHeading() {
+  return screen.getByRole("button", { name: "metawork-test", exact: true });
+}
+
+function assertFocused(element) {
+  // Report bounded diagnostics when waitFor observes focus in transit.
+  const actual = document.activeElement;
+  const describe = (node) => node?.outerHTML.slice(0, 240) ?? "none";
+  assert.ok(
+    actual === element,
+    `Expected focus on ${describe(element)}, received ${describe(actual)}`,
+  );
+}
+
 async function renderApp(
   ctx,
   {
@@ -227,10 +241,7 @@ async function renderApp(
     ),
   );
   if (projectHidden) await waitFor(() => assert.equal(taskRows("3").length, 1));
-  else
-    await screen.findByRole("group", {
-      name: "Project actions for metawork-test",
-    });
+  else await waitFor(projectHeading);
   const user = userEvent.setup({ document });
   return {
     user,
@@ -965,9 +976,7 @@ test("delete confirmation defaults to cancel and cancelling has no effect", asyn
 });
 
 async function openProjectRemoval(user) {
-  fireEvent.contextMenu(
-    screen.getByRole("group", { name: "Project actions for metawork-test" }),
-  );
+  fireEvent.contextMenu(projectHeading());
   await user.click(
     await screen.findByRole("menuitem", {
       name: "Remove project",
@@ -1011,7 +1020,7 @@ test("task ellipsis entries reuse the context menu without selecting a Task or c
     assert.equal(editor.value, "Keep the new Task draft");
     await user.keyboard("{Escape}");
     await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-    await waitFor(() => assert.equal(document.activeElement, trigger));
+    await waitFor(() => assertFocused(trigger));
   }
   fireEvent.contextMenu(rows[0]);
   const contextMenu = await screen.findByRole("menu", { name: "Task actions" });
@@ -1061,20 +1070,19 @@ test("task ellipsis supports keyboard navigation, anchors to its button, and res
     name: "Rename",
     exact: true,
   });
-  await waitFor(() => assert.equal(document.activeElement, rename));
+  await waitFor(() => assertFocused(rename));
   await waitFor(() =>
     assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
   );
   await user.keyboard("{ArrowDown}");
   await waitFor(() =>
-    assert.equal(
-      document.activeElement,
+    assertFocused(
       screen.getByRole("menuitem", { name: "Archive", exact: true }),
     ),
   );
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
   await user.keyboard(" ");
   const reopened = await screen.findByRole("menuitem", {
     name: "Rename",
@@ -1083,7 +1091,7 @@ test("task ellipsis supports keyboard navigation, anchors to its button, and res
   await waitFor(() => assert.ok(document.activeElement === reopened));
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
 });
 
 test("task quick archive uses the existing archive flow once and preserves the current draft", async (ctx) => {
@@ -1137,6 +1145,52 @@ test("task quick archive and menu share the running Task restriction", async (ct
     exact: true,
   });
   assert.equal(menuArchive.getAttribute("aria-disabled"), "true");
+});
+
+test("project heading toggles only its task list by pointer and keyboard", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  const heading = projectHeading();
+  const rows = screen.getAllByRole("button", { name: "Archive target" });
+  const [projectTask, recentTask] = rows;
+  await user.click(projectTask);
+  const editor = document.querySelector(".ai-composer textarea");
+  fireEvent.change(editor, { target: { value: "Keep the active task draft" } });
+  assert.equal(heading.getAttribute("aria-expanded"), "true");
+
+  await user.click(heading);
+  assert.equal(heading.getAttribute("aria-expanded"), "false");
+  assert.ok(
+    screen.getByRole("button", { name: "Archive target" }) === recentTask,
+  );
+  assert.equal(recentTask.getAttribute("aria-current"), "page");
+  assert.equal(editor.value, "Keep the active task draft");
+
+  await user.keyboard("{Enter}");
+  assert.equal(heading.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    screen.getAllByRole("button", { name: "Archive target" }).length,
+    2,
+  );
+  await user.keyboard(" ");
+  assert.equal(heading.getAttribute("aria-expanded"), "false");
+});
+
+test("project expansion is restored by Workspace identity after remount", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  await user.click(projectHeading());
+  cleanup();
+
+  await renderApp(ctx, { workspace: { id: "2" }, emptyProject: true });
+  assert.equal(projectHeading().getAttribute("aria-expanded"), "true");
+  cleanup();
+
+  const reopened = await renderApp(ctx);
+  assert.equal(projectHeading().getAttribute("aria-expanded"), "false");
+  await reopened.user.click(projectHeading());
+  cleanup();
+
+  await renderApp(ctx);
+  assert.equal(projectHeading().getAttribute("aria-expanded"), "true");
 });
 
 for (const emptyProject of [false, true])
@@ -1274,9 +1328,7 @@ test("unavailable project directory cannot be opened but its entry can still be 
     calls++;
     return { opened: true };
   });
-  fireEvent.contextMenu(
-    screen.getByRole("group", { name: "Project actions for metawork-test" }),
-  );
+  fireEvent.contextMenu(projectHeading());
   const open = await screen.findByRole("menuitem", {
     name: "Open project folder",
   });
@@ -1296,9 +1348,7 @@ for (const failure of ["unavailable", "rejected"])
       if (failure === "rejected") throw new Error("Host unavailable");
       return { opened: false };
     });
-    fireEvent.contextMenu(
-      screen.getByRole("group", { name: "Project actions for metawork-test" }),
-    );
+    fireEvent.contextMenu(projectHeading());
     await user.click(
       await screen.findByRole("menuitem", { name: "Open project folder" }),
     );
@@ -1321,15 +1371,7 @@ test("project removal requires confirmation and Cancel restores focus without a 
   await waitFor(() => assert.ok(document.activeElement === cancel));
   await user.click(cancel);
   assert.equal(calls, 0);
-  assert.ok(
-    screen.getByRole("group", { name: "Project actions for metawork-test" }),
-  );
-  await waitFor(() =>
-    assert.equal(
-      document.activeElement?.getAttribute("aria-label"),
-      "Project actions for metawork-test",
-    ),
-  );
+  await waitFor(() => assertFocused(projectHeading()));
 });
 
 async function confirmProjectRemoval(user) {
@@ -1477,9 +1519,7 @@ test("Host project removal survives remount and native folder selection restores
   await remounted.user.click(
     screen.getByRole("button", { name: "Add", exact: true }),
   );
-  await screen.findByRole("group", {
-    name: "Project actions for metawork-test",
-  });
+  await waitFor(projectHeading);
   assert.equal(taskRows("3").length, 2);
 });
 
@@ -1524,9 +1564,7 @@ for (const outcome of ["selected", "cancelled", "superseded"])
 
 test("project removal menu and confirmation can be operated with the keyboard", async (ctx) => {
   const { user } = await renderApp(ctx);
-  const trigger = screen.getByRole("group", {
-    name: "Project actions for metawork-test",
-  });
+  const trigger = projectHeading();
   await user.click(taskRows("3")[0]);
   await act(async () => trigger.focus());
   assert.ok(
@@ -1538,7 +1576,7 @@ test("project removal menu and confirmation can be operated with the keyboard", 
     name: "Open project folder",
     exact: true,
   });
-  await waitFor(() => assert.equal(document.activeElement, open));
+  await waitFor(() => assertFocused(open));
   await user.keyboard("{ArrowDown}");
   const remove = await screen.findByRole("menuitem", {
     name: "Remove project",
@@ -1568,10 +1606,8 @@ test("project ellipsis shares the heading context menu without selecting a Task 
   fireEvent.change(editor, {
     target: { value: "Keep the project menu draft" },
   });
-  const heading = screen.getByRole("group", {
-    name: "Project actions for metawork-test",
-  });
-  const trigger = within(heading).getByRole("button", {
+  const heading = projectHeading();
+  const trigger = screen.getByRole("button", {
     name: "Project actions for metawork-test",
   });
   const expected = ["Open project folder", "Remove project"];
@@ -1579,6 +1615,7 @@ test("project ellipsis shares the heading context menu without selecting a Task 
   assert.equal(screen.queryByRole("menu"), null);
   await user.click(trigger);
   let menu = await screen.findByRole("menu");
+  assert.equal(heading.getAttribute("aria-expanded"), "false");
   assert.deepEqual(
     within(menu)
       .getAllByRole("menuitem")
@@ -1594,7 +1631,7 @@ test("project ellipsis shares the heading context menu without selecting a Task 
   assert.equal(editor.value, "Keep the project menu draft");
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
   fireEvent.contextMenu(heading);
   menu = await screen.findByRole("menu");
   assert.deepEqual(
@@ -1605,7 +1642,7 @@ test("project ellipsis shares the heading context menu without selecting a Task 
   );
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-  await waitFor(() => assert.equal(document.activeElement, heading));
+  await waitFor(() => assertFocused(heading));
   fireEvent.keyDown(heading, { key: "ContextMenu" });
   await screen.findByRole("menuitem", { name: "Remove project", exact: true });
 });
@@ -1635,28 +1672,24 @@ test("project ellipsis anchors its menu, supports keyboard navigation and restor
     name: "Open project folder",
     exact: true,
   });
-  await waitFor(() => assert.equal(document.activeElement, open));
+  await waitFor(() => assertFocused(open));
   await waitFor(() =>
     assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
   );
   await user.keyboard("{ArrowDown}");
   await waitFor(() =>
-    assert.equal(
-      document.activeElement,
+    assertFocused(
       screen.getByRole("menuitem", { name: "Remove project", exact: true }),
     ),
   );
   await user.keyboard("{Enter}");
   const dialog = await screen.findByRole("alertdialog");
   await waitFor(() =>
-    assert.equal(
-      document.activeElement,
-      within(dialog).getByRole("button", { name: "Cancel" }),
-    ),
+    assertFocused(within(dialog).getByRole("button", { name: "Cancel" })),
   );
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
   await user.keyboard("{Shift>}{F10}{/Shift}");
   await screen.findByRole("menu");
   await waitFor(() =>
@@ -1664,7 +1697,7 @@ test("project ellipsis anchors its menu, supports keyboard navigation and restor
   );
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
   await user.keyboard(" ");
   const reopened = await screen.findByRole("menuitem", {
     name: "Open project folder",
@@ -1673,7 +1706,7 @@ test("project ellipsis anchors its menu, supports keyboard navigation and restor
   await waitFor(() => assert.ok(document.activeElement === reopened));
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
 });
 
 for (const kind of ["project", "task"])
@@ -1718,10 +1751,10 @@ for (const kind of ["project", "task"])
       assert.deepEqual(contextMenuPosition(), { x: 250, y: 134 }),
     );
     await user.keyboard("{ArrowDown}");
-    await waitFor(() => assert.equal(document.activeElement, items[0]));
+    await waitFor(() => assertFocused(items[0]));
     await user.keyboard("{Escape}");
     await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-    await waitFor(() => assert.equal(document.activeElement, trigger));
+    await waitFor(() => assertFocused(trigger));
   });
 
 function mockContextMenuGeometry(ctx) {
@@ -1777,12 +1810,7 @@ for (const kind of ["project", "task"])
   test(`${kind} context menu follows each right-click and stays inside window edges`, async (ctx) => {
     mockContextMenuGeometry(ctx);
     const { user } = await renderApp(ctx);
-    const target =
-      kind === "project"
-        ? screen.getByRole("group", {
-            name: "Project actions for metawork-test",
-          })
-        : taskRows("3")[0];
+    const target = kind === "project" ? projectHeading() : taskRows("3")[0];
     fireEvent.contextMenu(target, { clientX: 120, clientY: 180, button: 2 });
     await screen.findByRole("menu");
     await waitFor(() =>
@@ -1819,12 +1847,7 @@ for (const kind of ["project", "task"])
       async () =>
         new Promise((resolve) => window.requestAnimationFrame(resolve)),
     );
-    const target =
-      kind === "project"
-        ? screen.getByRole("group", {
-            name: "Project actions for metawork-test",
-          })
-        : taskRows("3")[0];
+    const target = kind === "project" ? projectHeading() : taskRows("3")[0];
     ctx.mock.method(target, "getBoundingClientRect", () => ({
       x: 16,
       y: 16,

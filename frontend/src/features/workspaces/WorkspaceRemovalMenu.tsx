@@ -41,7 +41,8 @@ export function WorkspaceRemovalMenu({
     "idle",
   );
   const cancel = useRef<HTMLButtonElement>(null);
-  const trigger = useRef<HTMLElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const popup = useRef<HTMLDivElement>(null);
   const removeItem = useRef<HTMLElement>(null);
   const openItem = useRef<HTMLElement>(null);
   const keyboardOpen = useRef(false);
@@ -54,19 +55,18 @@ export function WorkspaceRemovalMenu({
     event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
     anchorToElement = false,
   ) {
+    const button =
+      event.target instanceof Element ? event.target.closest("button") : null;
+    if (!button) return;
     event.preventDefault();
     event.stopPropagation();
-    trigger.current = event.currentTarget;
+    trigger.current = button;
     keyboardOpen.current =
       !("clientX" in event) || (anchorToElement && event.detail === 0);
     setMenuAnchor(
       "clientX" in event && !anchorToElement
-        ? createContextMenuAnchor(
-            event.currentTarget,
-            event.clientX,
-            event.clientY,
-          )
-        : event.currentTarget,
+        ? createContextMenuAnchor(button, event.clientX, event.clientY)
+        : button,
     );
     setMenuOpen(true);
   }
@@ -99,12 +99,8 @@ export function WorkspaceRemovalMenu({
   return (
     <>
       <div
-        className="task-project-context focus-ring"
-        role="group"
-        tabIndex={0}
-        aria-label={t("workspace.actions", { title: workspace.displayName })}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
+        className="task-project-context"
+        data-menu-open={menuOpen}
         onContextMenu={openMenu}
         onKeyDown={handleMenuKey}
       >
@@ -129,8 +125,6 @@ export function WorkspaceRemovalMenu({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={(event) => openMenu(event, true)}
-          onContextMenu={openMenu}
-          onKeyDown={handleMenuKey}
         >
           <Icon name="more" />
         </button>
@@ -147,7 +141,7 @@ export function WorkspaceRemovalMenu({
           if (open && keyboardOpen.current)
             // Let the menu register its items before focusing one for keyboard navigation.
             window.requestAnimationFrame(() => {
-              if (trigger.current?.getAttribute("aria-expanded") === "true")
+              if (popup.current?.hasAttribute("data-open"))
                 (cannotOpen ? removeItem : openItem).current?.focus();
             });
         }}
@@ -165,6 +159,7 @@ export function WorkspaceRemovalMenu({
             collisionPadding={8}
           >
             <Menu.Popup
+              ref={popup}
               className="task-menu-popover"
               finalFocus={() =>
                 confirming ? false : (trigger.current ?? false)
