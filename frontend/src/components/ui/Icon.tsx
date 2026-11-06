@@ -44,6 +44,7 @@ import {
   Square,
   SquarePen,
   Sunrise,
+  Terminal,
   TriangleAlert,
   Trash2,
   UserRound,
@@ -90,6 +91,7 @@ type IconName =
   | "copy"
   | "clock"
   | "new-task"
+  | "terminal"
   | "skills"
   | "skill-file"
   | "file-diff"
@@ -147,6 +149,7 @@ const icons: Record<IconName, LucideIcon> = {
   copy: Copy,
   clock: Clock3,
   "new-task": SquarePen,
+  terminal: Terminal,
   skills: Puzzle,
   "skill-file": FileText,
   "file-diff": FileDiff,

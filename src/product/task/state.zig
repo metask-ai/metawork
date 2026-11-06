@@ -1230,6 +1230,9 @@ pub const Task = struct {
     conversation_observation: ConversationObservation = .{},
     /// Runtime-only first catalog binding; never persisted or used for recovery eligibility.
     initial_catalog_preparation: enum { uninitialized, loading, unavailable } = .uninitialized,
+    /// Automatic creation can validate a personal selection before the Task has
+    /// a workspace catalog. This version pair is only for first input acceptance.
+    initial_personal_catalog: ?struct { revision: []u8, selection_revision: u64 } = null,
     /// One query ticket for the next Run, including a queued input or public
     /// run retry. No payload or lease is owned by this preparation marker.
     skill_preparation: ?struct { generation: u64, binding_epoch: u64 } = null,

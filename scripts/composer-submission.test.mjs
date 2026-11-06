@@ -314,6 +314,77 @@ async function renderSubmissionApp(
   };
 }
 
+test("App sends a selected Skill and its message from the first unscoped draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const refresh = ctx.mock.method(
+    BridgeClient.prototype,
+    "refreshSkillCatalog",
+    async () => ({ accepted: true, reason: null }),
+  );
+  const skill = (id, displayName, enabled = true) => ({
+    skillId: id,
+    skillPolicyKey: id,
+    invocationName: id,
+    displayName,
+    description: "Fixture Skill",
+    argumentNames: [],
+    maxValues: 1,
+    enabled,
+  });
+  fixture.snapshot.skillCatalog = {
+    availability: "ready",
+    redacted: false,
+    revision: "personal-catalog",
+    selectionRevision: "1",
+    skills: [
+      skill("docx", "Built-in Word"),
+      skill("review", "Personal Review"),
+      skill("pptx", "PPTX"),
+      skill("disabled", "Disabled Skill", false),
+    ],
+    issues: [],
+  };
+  await fixture.publish();
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "/");
+  assert.ok(await screen.findByRole("option", { name: /Built-in Word/ }));
+  const pptx = screen.getByRole("option", { name: /^pptx / });
+  assert.equal(within(pptx).queryByText("PPTX"), null);
+  const menu = screen.getByRole("listbox", { name: "Composer actions" });
+  for (const option of within(menu).getAllByRole("option")) {
+    assert.ok(option.querySelector('svg[aria-hidden="true"]'));
+  }
+  const commands = within(menu).getByRole("group", { name: "Commands" });
+  const [firstCommandIcon, secondCommandIcon] =
+    commands.querySelectorAll("svg");
+  assert.ok(firstCommandIcon.isEqualNode(secondCommandIcon));
+  assert.equal(screen.queryByRole("option", { name: /Disabled Skill/ }), null);
+  assert.equal(refresh.mock.callCount(), 1);
+  await user.click(screen.getByRole("option", { name: /Built-in Word/ }));
+  const message = "帮我把这些要点整理成 Word 周报。\n- 梳理本周交付";
+  fireEvent.change(fixture.textarea, { target: { value: message } });
+  assert.equal(fixture.textarea.value, message);
+  assert.equal(document.activeElement, fixture.textarea);
+  assert.equal(fixture.creations(), 0);
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  assert.equal(fixture.creations(), 1);
+  assert.deepEqual(fixture.createRequests[0][0], { kind: "automatic" });
+  assert.deepEqual(fixture.createRequests[0].slice(2, 4), [
+    "personal-catalog",
+    "1",
+  ]);
+  await fixture.created();
+  assert.deepEqual(fixture.inputs[0][2], {
+    kind: "skill",
+    skillId: "docx",
+    catalogRevision: "personal-catalog",
+    selectionRevision: "1",
+    argumentValues: [message],
+  });
+  await fixture.settle();
+});
+
 test("App image paste shares staging, rejects overlapping paste and sends the latest draft with existing images", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx);
   fixture.snapshot.capabilities.attachments.enabled = true;

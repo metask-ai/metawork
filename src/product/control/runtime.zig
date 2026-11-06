@@ -4183,9 +4183,20 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         try self.validateNewTaskModelAdmission(model_selection);
-        if (expected_skill_catalog_revision != null or
-            expected_skill_selection_revision != null)
-            return error.CatalogUnavailable;
+        if ((expected_skill_catalog_revision == null) != (expected_skill_selection_revision == null))
+            return error.StaleCatalog;
+        const personal_revision = if (expected_skill_catalog_revision) |expected| blk: {
+            const personal = self.skill.personalCatalogProjection();
+            switch (personal.availability) {
+                .ready, .degraded => {},
+                .loading => return error.CatalogLoading,
+                .uninitialized, .unavailable => return error.CatalogUnavailable,
+            }
+            if (!std.mem.eql(u8, personal.revision, expected) or personal.selection_revision != expected_skill_selection_revision)
+                return error.StaleCatalog;
+            break :blk try self.allocator.dupe(u8, personal.revision);
+        } else null;
+        errdefer if (personal_revision) |revision| self.allocator.free(revision);
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         if (!self.workspace.automaticCapacityAvailable())
             return error.WorkspaceCapacity;
@@ -4193,6 +4204,10 @@ pub const Runtime = struct {
         errdefer if (automatic.workspace.isActive()) automatic.rollback(self);
         const workspace = automatic.facts(self);
         const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true);
+        if (personal_revision) |revision| {
+            const task = self.task_runtime.find(task_id) orelse unreachable;
+            task.initial_personal_catalog = .{ .revision = revision, .selection_revision = expected_skill_selection_revision.? };
+        }
         self.workspace.setAutomaticOwner(workspace.id, task_id);
         automatic.complete(self);
         _ = self.syncInitialAutomaticCatalogsNoFail();
@@ -4849,7 +4864,12 @@ pub const Runtime = struct {
         defer if (staged.borrow) |*borrow| borrow.rollback();
         const task_input = try self.borrowTaskInput(task_id, input, &staged);
         var effects = self.taskRuntimeOperationEffects();
-        effects.input_catalog = try self.workspaceCatalog(task.durable.workspace_id);
+        effects.input_catalog = if (input == .skill and task.initial_personal_catalog != null and
+            std.mem.eql(u8, input.skill.catalog_revision, task.initial_personal_catalog.?.revision) and
+            input.skill.selection_revision == task.initial_personal_catalog.?.selection_revision)
+            self.skill.personalCatalogProjection()
+        else
+            try self.workspaceCatalog(task.durable.workspace_id);
         _ = try self.task_runtime.receiveInput(task_id, operation_id, task_input, effects);
         if (staged.borrow) |*borrow| {
             borrow.retainForTask();

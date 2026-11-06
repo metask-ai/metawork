@@ -37,7 +37,10 @@ import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runApprovalReadabilityVertical } from "./agentcore-approval-readability-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
-import { runSkillAutoRefreshVertical } from "./skill-auto-refresh-vertical.mjs";
+import {
+  runAutomaticFirstSkillVertical,
+  runSkillAutoRefreshVertical,
+} from "./skill-auto-refresh-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
@@ -180,6 +183,8 @@ const officeNamespace = JSON.parse(
   await readFile(join(root, "build_support/office-environment.json"), "utf8"),
 ).namespace.split("/");
 const builtinOfficeOnly = process.env.METAWORK_BUILTIN_OFFICE_ONLY === "1";
+const skillAutoRefreshOnly =
+  process.env.METAWORK_SKILL_AUTO_REFRESH_ONLY === "1";
 
 const nativeDialogsOnly = process.env.METAWORK_NATIVE_DIALOGS_ONLY === "1";
 const commandTimeoutMs = 20_000;
@@ -446,6 +451,9 @@ const provider = createProvider(responses, {
   // CLI snapshot polling needs an observation window during this larger probe.
   initialDelayMs: visualCaptureDir ? 1_500 : 120,
   frameDelayMs: 80,
+  titleInputs: skillAutoRefreshOnly
+    ? ["docx", "first-message-review"]
+    : ["Review"],
 });
 const baseUrl = await provider.listen();
 const chromeProbePort =
@@ -463,8 +471,6 @@ const attachmentCapacityOnly =
   process.env.METAWORK_ATTACHMENT_CAPACITY_ONLY === "1" ||
   process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1";
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
-const skillAutoRefreshOnly =
-  process.env.METAWORK_SKILL_AUTO_REFRESH_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
 const approvalReadabilityOnly =
@@ -593,6 +599,16 @@ desktopVertical: try {
     await verifyModelSwitch();
     await stopApplication("model switch verification complete");
     break desktopVertical;
+  }
+  if (skillAutoRefreshOnly) {
+    await runAutomaticFirstSkillVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      canonicalHome: canonicalWorkspace,
+    });
   }
   if (
     !skillAutoRefreshOnly &&
@@ -3972,7 +3988,10 @@ async function removeWorkspaceWithRetry() {
   throw lastError;
 }
 
-function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
+function createProvider(
+  queue,
+  { initialDelayMs = 0, frameDelayMs = 0, titleInputs = ["Review"] } = {},
+) {
   let modelProbeCredential = "metawork-agentcore-vertical-fixture-key";
   let served = 0;
   let titleCompletions = 0;
@@ -4143,7 +4162,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
             !Array.isArray(payload.messages) ||
             payload.messages.length !== 1 ||
             payload.messages[0]?.role !== "user" ||
-            payload.messages[0]?.content !== "Review"
+            !titleInputs.includes(payload.messages[0]?.content)
           )
             throw new Error(
               "automatic title Completion did not preserve its frozen Anthropic request",

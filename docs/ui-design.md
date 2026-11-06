@@ -811,14 +811,14 @@ Composer 是唯一 Task 停止入口，发送与停止共用一个主动作位�
 
 每次点击发送或使用允许的提交组合，将本次提交与当前草稿分离，立即清空本次编辑版本并允许编辑、发送下一条。逐条显示正在提交、等待或明确未执行；只有 Host 事实才能确认接收。未知回执不自动重发，用户可将失败/未确认内容放回编辑器检查后明确发送，不能覆盖已有草稿，失效附件需重新选择。旧响应不能修改较新草稿或抢走其他控件/Task 的焦点。
 
-普通文本与 Skill 参数使用一致的输入法保护：组合输入及用于确认或取消候选的按键只交给输入法，不提交消息、执行 Slash、浏览历史、停止执行或关闭反馈弹层与右栏，也不阻止输入法默认动作。确认候选的回车即使在组合结束事件之后交付，也不得作为提交；随后独立按下的有效提交组合正常生效。组词状态属于实际输入控件，New task 创建交接保留同一控件时不得中断仍在进行的组词。
+普通文本与带 Skill 标签的消息使用一致的输入法保护：组合输入及用于确认或取消候选的按键只交给输入法，不提交消息、执行 Slash、浏览历史、停止执行或关闭反馈弹层与右栏，也不阻止输入法默认动作。确认候选的回车即使在组合结束事件之后交付，也不得作为提交；随后独立按下的有效提交组合正常生效。组词状态属于实际输入控件，New task 创建交接保留同一控件时不得中断仍在进行的组词。
 
-| 按键 | 普通文本 | Skill 单行参数 |
-| --- | --- | --- |
-| 裸 `Enter` | 满足发送条件时提交 | 满足发送条件时提交 |
-| `Shift+Enter` | 换行 | 不提交 |
-| macOS `Cmd+Enter`、Windows/Linux `Ctrl+Enter` | 与发送按钮相同的提交 | 与发送按钮相同的提交 |
-| 其他修饰组合 | 不触发自定义提交 | 不触发自定义提交 |
+| 按键 | 消息编辑器 |
+| --- | --- |
+| 裸 `Enter` | 满足发送条件时提交 |
+| `Shift+Enter` | 换行 |
+| macOS `Cmd+Enter`、Windows/Linux `Ctrl+Enter` | 与发送按钮相同的提交 |
+| 其他修饰组合 | 保留原生编辑行为 |
 
 上述提交不增加强制中断或排队模式，也不绕过未解析 Slash 的限制。输入框的提交处理不得重复执行按钮原生的 Enter/Space 激活。
 
@@ -839,13 +839,13 @@ Composer 输入历史只召回当前 Task 中 Host 已确认接收且可安全�
 Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非空白字符为 `/` 时，输入框上方打开与 Composer 等宽的候选面；不位于首 token 的 `/`，以及 token 内仍含 `/` 的 URL、路径和代码片段不触发。单段绝对路径与 Slash identifier 在语法上不可区分，若未命中候选则按 unknown Slash 禁止发送，用户需要补充正文语境或改写。候选只有两处真值：
 
 - `Commands` 来自 Renderer 单一 registry，只注册当前产品真实存在且适合从 Composer 发起的动作；
-- `Skills` 来自 owning Workspace current catalog，表示下一轮候选；打开候选面时自动检查目录。Session 已安装的执行快照不要求用户手动推进；Renderer 只消费 Host 提供的逻辑 policy key 和已授权目录，不扫描或合并来源。
+- `Skills` 表示下一轮候选。已选工作目录的草稿和已有任务使用对应 Workspace current catalog。未选工作目录的新任务草稿使用 personal catalog，包含已启用的内置与个人 Skill。打开候选面时自动刷新对应范围，只有发送才创建 Task 和 Automatic Workspace。Session 已安装的执行快照不要求用户手动推进；Renderer 只消费 Host 提供的逻辑 policy key 和已授权目录，不扫描或合并来源。
 
-菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，使用确定性的大小写不敏感 prefix/substring 过滤；裸 `ArrowUp / ArrowDown` 移动，裸 `Enter` 选择当前可用候选，裸 `Escape` 关闭但保留可见文本。裸 `Tab` 只在当前候选真实可用时选择，否则关闭候选并正常移动焦点；`Shift+Tab` 关闭候选并正常反向移动焦点，`Shift+Enter` 保留换行，修饰方向键保留原生光标与选区操作。目录刷新后高亮候选失效也遵守该规则。菜单打开时 Enter 不得提交普通 Text，即使没有可用候选或带提交修饰键；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
+菜单贴附于 Composer，而不是全局模态命令面板。Command 与 Skill 分组显示，中文标题为「命令」和「技能」，键盘提示放在首个分组标题同行。命令候选统一使用终端图标，技能候选统一使用拼图图标。名称省略触发字符 `/`。宽面板单行显示调用名、不同于调用名的显示名称及说明，窄面板将说明放到第二行。使用确定性的大小写不敏感 prefix/substring 过滤；裸 `ArrowUp / ArrowDown` 移动，裸 `Enter` 选择当前可用候选，裸 `Escape` 或点击候选面与输入框所在容器之外会关闭菜单并保留可见文本。裸 `Tab` 只在当前候选真实可用时选择，否则关闭候选并正常移动焦点；`Shift+Tab` 关闭候选并正常反向移动焦点，`Shift+Enter` 保留换行，修饰方向键保留原生光标与选区操作。目录刷新后高亮候选失效也遵守该规则。菜单打开时 Enter 不得提交普通 Text，即使没有可用候选或带提交修饰键；IME composition 期间不打开、过滤或执行。textarea 使用 combobox 语义，候选容器使用 listbox/group/option，并同步 `aria-expanded`、`aria-controls` 与 `aria-activedescendant`。不可用 Command 保留可发现性并显示真实原因。
 
 Command 只是现有动作的键盘入口。选择后由 `App` action controller 消费，不创建 command history，也不把原始 `/command` 送入 Bridge。V1 registry 包含 `/new` 与 `/compact`：`/new` 从已有 Task 打开 New task；`/compact` 在已有 finalized Run、continuation available 且没有 active operation 时触发 typed Task maintenance action。不可用 Command 保留候选并明确显示各自的禁用原因；New task draft 中 `/new` 说明草稿已打开，`/compact` 说明尚无可压缩历史，不能让一个 Command 的 gate 覆盖另一个 Command。`/model`、`/status`、`/goal`、`/resume`、`/continue` 以及其他尚无正式产品 owner/合同的 CLI/TUI identifier 不注册。带尾随参数的 Command 不执行；无法解析的首 token Slash 保持可见但发送禁用，用户必须选择候选、删除 `/` 或改写为普通正文。Command 与 Skill 同名时，裸 `/name` 归 Command，Skill 通过 `/skill:name` 显式选择。
 
-选择 Skill 后，文本 draft 原子变为结构化 draft：左侧能力轨显示可移除的 Skill identity，右侧按 descriptor 顺序显示 positional argument 输入。Renderer 保留 catalog 的 `maxValues`，未命名的可选 positional argument 由用户逐项添加或移除，字段数不得超过该上限和产品的 64 项硬上限；发送前同时校验完整 Skill Run 输入的 64 KiB UTF-8 字节预算。`/review src/main.zig` 的可见尾随文本成为第一个参数，不实现 shell quote/escape parser；每次 Run 至多一个 Skill。Skill 原始 Slash 文本不进入 Bridge 或历史，发送只产生 `{ kind: "skill", skillId, catalogRevision, argumentValues }`。
+选择 Skill 后，在同一 Composer 输入框起始处显示带图标的可移除标签，继续用原多行编辑器写消息。`/review src/main.zig` 选择后把尾随文本保留为正文，光标位于标签之后、正文之前。正文起点无选区时，裸 Backspace 一次移除整枚标签并保留正文，其他位置沿用原生删除和输入法行为。Composer、失败提示、重试和历史统一使用标签与正文。发送时正文作为完整值随明确选择提交，适用现有 Skill 输入预算及 Host 校验；每条消息至多一个 Skill。已有草稿的历史值按原数据读入并显示为正文，编辑后按完整消息提交。
 
 Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；有效输入与失败/未知提交的恢复继续遵守既有草稿合同。草稿按 Core 逻辑 policy key 关联当前候选：参数定义不变时自动更新具体身份和双 revision，保留参数；参数定义改变时保留内容并提示检查，缺失、禁用或冲突时显示真实不可用原因。无关 Skill 更新不使草稿失效。旧 session 草稿没有逻辑 key 时，只能在原 concrete ID 与双 revision 仍精确匹配当前候选后补齐；否则保留参数并要求重选，不能按名称或路径迁移。用户发送后由 Host 接收并串行完成新 Run 的目录查询、恢复与绑定准备，Renderer 不执行“先刷新 Workspace、再刷新 Task”的两步流程，也不自动重放已发送命令。普通文字保持可编辑与可接收；刷新仅作为主动重查与异常恢复动作。
 

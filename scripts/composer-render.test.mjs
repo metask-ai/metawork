@@ -650,7 +650,7 @@ test("excluded conversation history is explained beside its owning Run", () => {
   assert.doesNotMatch(markup.slice(0, exchange), /restored model context/);
 });
 
-test("Task content preserves typed Skill identity and positional arguments", () => {
+test("Task content displays the selected Skill and message body", () => {
   const markup = renderCompletedSurface("Review complete", {
     kind: "skill",
     skillId: "builtin.review",
@@ -660,8 +660,8 @@ test("Task content preserves typed Skill identity and positional arguments", () 
     argumentValues: ["src/main.zig"],
     redacted: false,
   });
-  assert.match(markup, /task-skill-token/);
-  assert.match(markup, />\/review/);
+  assert.match(markup, /skill-message-tag/);
+  assert.match(markup, />Review<\/span>/);
   assert.match(markup, />src\/main\.zig</);
 });
 
