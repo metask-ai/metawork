@@ -38,6 +38,7 @@ import {
   ExternalLink,
   Ellipsis,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Info,
   Square,
@@ -74,6 +75,7 @@ type IconName =
   | "plus"
   | "settings"
   | "shield"
+  | "shield-alert"
   | "info"
   | "arrow-left"
   | "arrow-down"
@@ -130,6 +132,7 @@ const icons: Record<IconName, LucideIcon> = {
   plus: Plus,
   settings: Settings,
   shield: ShieldCheck,
+  "shield-alert": ShieldAlert,
   info: Info,
   "arrow-left": ArrowLeft,
   "arrow-down": ArrowDown,

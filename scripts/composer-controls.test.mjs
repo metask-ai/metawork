@@ -3555,8 +3555,7 @@ test("existing conversation approval selection is Host-controlled and restores k
   trigger.focus();
   await user.keyboard("{Enter}");
   assert.match(
-    (await screen.findByRole("option", { name: /Direct execution/ }))
-      .textContent,
+    (await screen.findByRole("option", { name: /Full access/ })).textContent,
     /Stops the current run/,
   );
   await user.keyboard("{ArrowDown}{Enter}");
@@ -3614,7 +3613,7 @@ test("approval pending, unavailable and unknown states admit no duplicate mode a
     }),
   );
   await user.click(trigger);
-  const full = await screen.findByRole("option", { name: /Direct execution/ });
+  const full = await screen.findByRole("option", { name: /Full access/ });
   assert.equal(full.getAttribute("aria-disabled"), "true");
   await user.click(full);
   assert.equal(selected, 0);
@@ -3854,7 +3853,7 @@ test("new Task approval menu explains each mode only when opened and changes the
         .querySelector(".selection-menu-item-copy > :first-child")
         .textContent.trim(),
     ),
-    ["Manual approval", "Automatic approval", "Direct execution"],
+    ["Manual approval", "Automatic approval", "Full access"],
   );
   assert.ok(
     options.every((option) =>

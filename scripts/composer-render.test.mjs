@@ -751,7 +751,7 @@ test("new Task keeps its approval choice inside the Composer toolbar without det
   for (const [mode, label] of [
     ["manual", "Manual approval"],
     ["auto_review", "Automatic approval"],
-    ["full_access", "Direct execution"],
+    ["full_access", "Full access"],
   ]) {
     const markup = renderNewTaskView(null, {
       approvalModes: ["manual", "auto_review", "full_access"],

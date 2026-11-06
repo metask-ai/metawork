@@ -4983,7 +4983,7 @@ test("new Task approval menu selects all three real modes without another confir
       },
     });
   }
-  for (const label of [/Automatic approval/, /Direct execution/]) {
+  for (const label of [/Automatic approval/, /Full access/]) {
     render(
       createElement(
         I18nContext.Provider,
@@ -6038,7 +6038,7 @@ test("task information keeps the full-access boundary visible without a mutation
     ),
   );
   await user.click(screen.getByRole("button", { name: "Task information" }));
-  assert.ok(screen.getByText("Direct execution"));
+  assert.ok(screen.getByText("Full access"));
   assert.match(
     document.body.textContent,
     /Routine approval is skipped.*AgentCore and system protections still apply/,
@@ -6911,9 +6911,7 @@ test("App switches the current Task only after Host commits and preserves its dr
   fireEvent.change(composer, { target: { value: "Keep this unsent draft" } });
   const trigger = screen.getByRole("combobox", { name: "Approval mode" });
   await user.click(trigger);
-  await user.click(
-    await screen.findByRole("option", { name: /Direct execution/ }),
-  );
+  await user.click(await screen.findByRole("option", { name: /Full access/ }));
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
     source.id,
@@ -6947,7 +6945,7 @@ test("App switches the current Task only after Host commits and preserves its dr
     activeOperation: null,
   });
   await publishAppFixture(fixture);
-  await waitFor(() => assert.match(trigger.textContent, /Direct execution/));
+  await waitFor(() => assert.match(trigger.textContent, /Full access/));
   assert.equal(trigger.disabled, false);
   assert.equal(composer.value, "Keep this unsent draft");
   assert.equal(fixture.snapshot.tasks.length, 2);

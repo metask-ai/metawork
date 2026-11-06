@@ -9,6 +9,16 @@ import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
+const approvalModeIcons = {
+  manual: "account",
+  auto_review: "shield",
+  full_access: "shield-alert",
+} as const;
+
+export function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
+  return <Icon name={approvalModeIcons[mode]} />;
+}
+
 export function ApprovalModeMenu({
   task,
   request,
@@ -37,6 +47,7 @@ export function ApprovalModeMenu({
         options={approvalModes.map((mode) => ({
           value: mode,
           label: t(`permission.mode.${mode}`),
+          leading: <ApprovalModeIcon mode={mode} />,
           description:
             t(`permission.mode.${mode}.help`) +
             (task.activeOperation?.kind === "run" &&
@@ -45,8 +56,6 @@ export function ApprovalModeMenu({
               : ""),
           descriptionKind: "text",
           disabled: !task.availableApprovalModes.includes(mode),
-          trailing:
-            mode === "full_access" ? <Icon name="warning" /> : undefined,
         }))}
         placeholder={t("permission.task.label")}
         ariaLabel={t("permission.task.label")}
@@ -59,6 +68,7 @@ export function ApprovalModeMenu({
           )
         }
         busy={busy}
+        leading={<ApprovalModeIcon mode={task.approvalMode} />}
         triggerClassName="task-approval-trigger"
         contentClassName="permission-profile-menu task-approval-menu"
         onValueChange={(mode) => onSelect(mode as ApprovalMode)}
