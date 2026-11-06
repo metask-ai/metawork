@@ -925,7 +925,8 @@ comptime {
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");
     if (std.meta.fields(wire.FileChangeWire).len != 11) @compileError("Review every history SQL field mapping after FileChangeWire changes");
     if (std.meta.fields(wire.CompactWire).len != 11) @compileError("Review every history SQL field mapping after CompactWire changes");
-    if (std.meta.fields(wire.UiRecordWire).len != 13) @compileError("Review every history SQL field mapping after UiRecordWire changes");
+    // task_ui_history.payload stores the complete typed record, including review.
+    if (std.meta.fields(wire.UiRecordWire).len != 14) @compileError("Review every history SQL field mapping after UiRecordWire changes");
     if (std.meta.fields(wire.CheckpointWire).len != 3) @compileError("Review every history SQL field mapping after CheckpointWire changes");
     if (std.meta.fields(wire.CheckpointBlobWire).len != 3) @compileError("Review history fixture coverage after CheckpointBlobWire changes");
     if (std.meta.fields(wire.CheckpointSessionWire).len != 4) @compileError("Review history fixture coverage after CheckpointSessionWire changes");
