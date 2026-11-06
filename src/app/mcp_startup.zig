@@ -330,7 +330,7 @@ test "MCP startup classifies registry and journal together without deleting quar
             return error.UnexpectedDeletion;
         }
     };
-    const current = "{\"schema_version\":2, \"generation\":4, \"oauth_operation\":null, \"servers\":[]}";
+    const current = "{\"schema_version\":3, \"generation\":4, \"oauth_operation\":null, \"servers\":[]}";
     const journal = "{\"schema_version\":1,\"base_generation\":0,\"target_generation\":1,\"candidate_locators\":[\"orphan\"],\"retired_locators\":[]}";
     const Case = struct {
         registry: ?[]const u8,

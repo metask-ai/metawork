@@ -6751,6 +6751,13 @@ pub const Runtime = struct {
         return runtime.captureOauthClientSecret(expected_generation, input) catch |err| return @errorCast(err);
     }
 
+    pub fn captureMcpOauthResource(self: *Runtime, expected_generation: u64, input: mcp_configuration.CaptureOauthResourceInput) Error!mcp_configuration.CaptureOauthResourceResult {
+        defer std.crypto.secureZero(u8, input.resource);
+        const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
+        defer self.publishMcpRuntimeChanges();
+        return runtime.captureOauthResource(expected_generation, input) catch |err| return @errorCast(err);
+    }
+
     pub fn renameMcpServer(
         self: *Runtime,
         expected_generation: u64,
@@ -10490,6 +10497,7 @@ pub const Runtime = struct {
             .validate_secret_capture_fn = controlMcpValidateSecretCapture,
             .capture_static_secret_fn = controlMcpCaptureStaticSecret,
             .capture_oauth_client_secret_fn = controlMcpCaptureOauthClientSecret,
+            .capture_oauth_resource_fn = controlMcpCaptureOauthResource,
             .begin_dynamic_registration_fn = controlMcpBeginDynamicRegistration,
             .complete_dynamic_registration_fn = controlMcpCompleteDynamicRegistration,
             .begin_code_exchange_fn = controlMcpBeginCodeExchange,
@@ -11064,6 +11072,9 @@ fn controlMcpCaptureStaticSecret(context: *anyopaque, generation: u64, input: mc
 }
 fn controlMcpCaptureOauthClientSecret(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureOauthClientSecretInput) anyerror!mcp_configuration.ManagementOutcome {
     return controlOwner(context).captureMcpOauthClientSecret(generation, input);
+}
+fn controlMcpCaptureOauthResource(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureOauthResourceInput) anyerror!mcp_configuration.CaptureOauthResourceResult {
+    return controlOwner(context).captureMcpOauthResource(generation, input);
 }
 fn controlMcpBeginDynamicRegistration(context: *anyopaque, input: mcp_configuration.OauthConsentInput) anyerror!McpOauthOperationBeginOutcome {
     return controlOwner(context).beginMcpOauthDynamicRegistration(input);

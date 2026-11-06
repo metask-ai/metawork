@@ -131,9 +131,11 @@ const JobFailure = enum {
 const DiscoveryResult = struct {
     resource: mcp_oauth.ResourceDiscovery,
     authorization: mcp_oauth.AuthorizationServer,
+    private_resource: bool = false,
 
     fn deinit(self: *DiscoveryResult) void {
         self.authorization.deinit();
+        if (self.private_resource) std.crypto.secureZero(u8, @constCast(self.resource.resource));
         self.resource.deinit();
         self.* = undefined;
     }
@@ -161,6 +163,7 @@ const JobResult = union(enum) {
 
 const DiscoveryInput = struct {
     endpoint: []u8,
+    private_resource: bool = false,
 };
 
 const RegistrationInput = struct {
@@ -239,7 +242,10 @@ const Job = struct {
             return;
         };
         var resource_owned = true;
-        defer if (resource_owned) resource.deinit();
+        defer if (resource_owned) {
+            if (input.private_resource) std.crypto.secureZero(u8, @constCast(resource.resource));
+            resource.deinit();
+        };
         const issuer = resource.authorization_servers[0];
         const authorization = mcp_oauth.discoverAuthorizationServer(
             self.allocator,
@@ -254,6 +260,7 @@ const Job = struct {
         self.result = .{ .discovery = .{
             .resource = resource,
             .authorization = authorization,
+            .private_resource = input.private_resource,
         } };
         self.finish();
     }
@@ -353,7 +360,7 @@ const Job = struct {
 
 fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
     switch (input.*) {
-        .discovery => |value| allocator.free(value.endpoint),
+        .discovery => |value| secureFree(allocator, value.endpoint),
         .registration => |value| allocator.free(value.redirect_uri),
         .callback => {},
         .exchange => |*value| {
@@ -362,7 +369,7 @@ fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
             value.code.deinit();
             secureFree(allocator, value.verifier);
             allocator.free(value.redirect_uri);
-            allocator.free(value.resource);
+            secureFree(allocator, value.resource);
         },
     }
     input.* = undefined;
@@ -376,6 +383,7 @@ const Flow = struct {
     job: ?*Job = null,
     durable_operation_id: ?[]u8 = null,
     durable_request_started: bool = false,
+    private_resource_identity: ?[35]u8 = null,
     cancelling: bool = false,
 
     fn deinit(self: *Flow, allocator: std.mem.Allocator) void {
@@ -684,6 +692,11 @@ pub const Coordinator = struct {
         )) orelse return .rejected;
         var start_owned = true;
         defer if (start_owned) start.deinit();
+        errdefer if (start_owned) {
+            _ = self.control.finishMcpAuthorization(start.operation_id);
+        };
+        if (start.private_endpoint) |endpoint|
+            start.endpoint = try mcp_configuration.resolvePrivateEndpoint(start.arena.allocator(), endpoint, self.credential_store.resolver(), mcp_startup.configuration_limits);
         const flow = try self.allocator.create(Flow);
         flow.* = .{
             .start = start,
@@ -1259,6 +1272,7 @@ pub const Coordinator = struct {
     fn startDiscovery(self: *Coordinator, flow: *Flow) !void {
         try self.installJob(flow, .{ .discovery = .{
             .endpoint = try self.allocator.dupe(u8, flow.start.endpoint),
+            .private_resource = flow.start.private_endpoint != null,
         } });
     }
 
@@ -1355,9 +1369,12 @@ pub const Coordinator = struct {
 
         const details_storage = try self.allocator.alloc(u8, oauth_consent_details_bytes);
         defer self.allocator.free(details_storage);
+        var displayed_resource = discovery.resource;
+        if (flow.start.private_endpoint != null)
+            displayed_resource.resource = mcp_configuration.endpointOrigin(discovery.resource.resource, mcp_startup.configuration_limits.max_oauth_uri_bytes) orelse return error.InvalidState;
         const details = try writeConsentDetails(
             details_storage,
-            &discovery.resource,
+            &displayed_resource,
             &discovery.authorization,
             attempt.redirectUri(),
             flow.start.registration_kind,
@@ -1380,12 +1397,21 @@ pub const Coordinator = struct {
     fn resumeConsent(self: *Coordinator, flow: *Flow) !void {
         const discovery = if (flow.discovery) |*value| value else return error.InvalidState;
         const attempt = flow.attempt orelse return error.InvalidState;
+        if (flow.start.private_endpoint != null and flow.private_resource_identity == null) {
+            const resource_copy = try self.allocator.dupe(u8, discovery.resource.resource);
+            defer secureFree(self.allocator, resource_copy);
+            const current = self.control.inspectMcpDesiredConfiguration() orelse return error.InvalidState;
+            const captured = try self.control.captureMcpOauthResource(current.desired_generation orelse return error.InvalidState, .{ .server_id = flow.start.server_id, .resource = resource_copy });
+            if (captured.outcome != .saved or captured.identity == null) return error.StateRejected;
+            flow.private_resource_identity = captured.identity;
+        }
         if (flow.start.client_id == null) {
             if (!std.mem.eql(u8, flow.start.registration_kind, "dynamic_registration"))
                 return error.InvalidState;
             const begin = try self.control.beginMcpOauthDynamicRegistration(.{
                 .server_id = flow.start.server_id,
                 .resource = discovery.resource.resource,
+                .private_resource_identity = if (flow.private_resource_identity) |*identity| identity else null,
                 .issuer = discovery.authorization.issuer,
                 .scopes = discovery.resource.requested_scopes,
                 .redirect_uri = attempt.redirectUri(),
@@ -1569,9 +1595,12 @@ pub const Coordinator = struct {
         const redirect_uri = try self.allocator.dupe(u8, binding.redirect_uri);
         var redirect_owned = true;
         errdefer if (redirect_owned) self.allocator.free(redirect_uri);
-        const resource = try self.allocator.dupe(u8, binding.resource);
+        const resource = if (binding.private_resource) |private|
+            try mcp_configuration.resolvePrivateEndpoint(self.allocator, private, self.credential_store.resolver(), mcp_startup.configuration_limits)
+        else
+            try self.allocator.dupe(u8, binding.resource);
         var resource_owned = true;
-        errdefer if (resource_owned) self.allocator.free(resource);
+        errdefer if (resource_owned) secureFree(self.allocator, resource);
         const now_unix_ms = self.host.nowUnixMs() orelse return error.ClockUnavailable;
         client_id_owned = false;
         verifier_owned = false;
@@ -1657,6 +1686,7 @@ pub const Coordinator = struct {
             .server_id = plan.server_id,
             .issuer = plan.issuer,
             .resource = plan.resource,
+            .private_resource_identity = if (self.flow) |flow| if (flow.private_resource_identity) |*identity| identity else null else null,
             .scopes = plan.scopes,
             .redirect_uri = plan.redirect_uri,
         }) catch return error.StatePersistenceFailed) {
@@ -1664,7 +1694,7 @@ pub const Coordinator = struct {
                 .attempt_id = binding.attempt_id,
                 .server_id = binding.server_id,
                 .issuer = binding.issuer,
-                .resource = binding.resource,
+                .resource = if (binding.private_resource != null) plan.resource else binding.resource,
                 .scopes = binding.scopes,
                 .redirect_uri = binding.redirect_uri,
                 .client_id = binding.client_id,

@@ -192,6 +192,7 @@ pub const McpManagementPort = struct {
     validate_secret_capture_fn: *const fn (*anyopaque, u64, []const u8, mcp.McpSecretCaptureTarget) anyerror!void,
     capture_static_secret_fn: *const fn (*anyopaque, u64, mcp_contract.CaptureStaticSecretInput) anyerror!mcp_contract.ManagementOutcome,
     capture_oauth_client_secret_fn: *const fn (*anyopaque, u64, mcp_contract.CaptureOauthClientSecretInput) anyerror!mcp_contract.ManagementOutcome,
+    capture_oauth_resource_fn: *const fn (*anyopaque, u64, mcp_contract.CaptureOauthResourceInput) anyerror!mcp_contract.CaptureOauthResourceResult,
     begin_dynamic_registration_fn: *const fn (*anyopaque, mcp_contract.OauthConsentInput) anyerror!mcp.McpOauthOperationBeginOutcome,
     complete_dynamic_registration_fn: *const fn (*anyopaque, mcp_contract.CompleteDynamicRegistrationInput) anyerror!mcp_contract.ManagementOutcome,
     begin_code_exchange_fn: *const fn (*anyopaque, []const u8) anyerror!mcp.McpOauthCodeExchangeBeginOutcome,
@@ -253,6 +254,9 @@ pub const McpManagementPort = struct {
     }
     pub fn captureMcpOauthClientSecret(self: McpManagementPort, generation: u64, input: mcp_contract.CaptureOauthClientSecretInput) anyerror!mcp_contract.ManagementOutcome {
         return self.capture_oauth_client_secret_fn(self.context, generation, input);
+    }
+    pub fn captureMcpOauthResource(self: McpManagementPort, generation: u64, input: mcp_contract.CaptureOauthResourceInput) anyerror!mcp_contract.CaptureOauthResourceResult {
+        return self.capture_oauth_resource_fn(self.context, generation, input);
     }
     pub fn beginMcpOauthDynamicRegistration(self: McpManagementPort, input: mcp_contract.OauthConsentInput) anyerror!mcp.McpOauthOperationBeginOutcome {
         return self.begin_dynamic_registration_fn(self.context, input);

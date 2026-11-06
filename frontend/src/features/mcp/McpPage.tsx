@@ -606,6 +606,7 @@ export function McpPage({
     ) {
       previousGeneration.current = management.desiredGeneration;
       clearImportSecrets();
+      if (sensitiveEndpoint) setEndpoint("");
     }
     if (management.managementHealth !== "ready" || disabled)
       captureOperation.current = null;
@@ -614,6 +615,7 @@ export function McpPage({
   const [environmentNames, setEnvironmentNames] = useState<string[]>([]);
   const [stdioAuthMode, setStdioAuthMode] = useState<"none" | "static">("none");
   const [endpoint, setEndpoint] = useState("");
+  const [sensitiveEndpoint, setSensitiveEndpoint] = useState(false);
   const [authMode, setAuthMode] = useState<"none" | "static" | "oauth">("none");
   const [headerNames, setHeaderNames] = useState<string[]>([]);
   const [registrationKind, setRegistrationKind] = useState<
@@ -761,6 +763,7 @@ export function McpPage({
     setEnvironmentNames([]);
     setStdioAuthMode("none");
     setEndpoint("");
+    setSensitiveEndpoint(false);
     setAuthMode("none");
     setHeaderNames([]);
     setRegistrationKind("automatic");
@@ -889,7 +892,12 @@ export function McpPage({
         : "none",
     );
     setEndpoint(
-      connection.kind === "streamable_http" ? connection.endpoint : "",
+      connection.kind === "streamable_http" && !connection.sensitiveEndpoint
+        ? connection.endpoint
+        : "",
+    );
+    setSensitiveEndpoint(
+      connection.kind === "streamable_http" && !!connection.sensitiveEndpoint,
     );
     setAuthMode(server.authMode);
     setHeaderNames(
@@ -932,6 +940,8 @@ export function McpPage({
   });
 
   function closePane(dismissProposal = true) {
+    setEndpoint("");
+    setSensitiveEndpoint(false);
     if (dismissProposal && proposalLink)
       void onDismissProposal?.(proposalLink).catch(() => {
         setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
@@ -1044,6 +1054,7 @@ export function McpPage({
           : ({
               ...shared,
               endpoint: endpoint.trim(),
+              ...(sensitiveEndpoint ? { sensitiveEndpoint: true } : {}),
               authMode,
               headerNames: headerNames.map((value) => value.trim()),
               registration:
@@ -1139,6 +1150,7 @@ export function McpPage({
         text: t(saved ? "mcp.import.capture_failed" : "mcp.mutation.failed"),
       });
     } finally {
+      if (sensitiveEndpoint) setEndpoint("");
       secretValues.length = 0;
       if (captureOperation.current === operation)
         captureOperation.current = null;
@@ -2145,6 +2157,7 @@ export function McpPage({
                         </span>
                         <Input
                           autoComplete="off"
+                          type={sensitiveEndpoint ? "password" : "text"}
                           inputMode="url"
                           placeholder="https://mcp.example.com"
                           value={endpoint}
@@ -2161,6 +2174,18 @@ export function McpPage({
                         <small id="mcp-add-endpoint-help">
                           {t("mcp.add.endpoint_help")}
                         </small>
+                      </label>
+                      <label>
+                        <Input
+                          type="checkbox"
+                          checked={sensitiveEndpoint}
+                          disabled={createPending}
+                          onChange={(event) => {
+                            setEndpoint("");
+                            setSensitiveEndpoint(event.target.checked);
+                          }}
+                        />
+                        {t("mcp.add.sensitive_endpoint")}
                       </label>
                       <fieldset className="mcp-auth-choice">
                         <legend>{t("mcp.add.authentication")}</legend>

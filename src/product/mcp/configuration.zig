@@ -103,6 +103,7 @@ pub const OauthAuthorizationWire = struct {
     registration: OauthRegistrationWire,
     consent: ?OauthConsentWire,
     grant: ?OauthGrantWire,
+    pending_resource: ?SensitiveEndpointWire = null,
 };
 
 pub const OauthRegistrationWire = struct {
@@ -118,6 +119,7 @@ pub const OauthConsentWire = struct {
     epoch: u64,
     fingerprint: []const u8,
     resource: []const u8,
+    private_resource: ?SensitiveEndpointWire = null,
     issuer: []const u8,
     scopes: []const []const u8,
     redirect_uri: []const u8,
@@ -134,6 +136,7 @@ pub const OauthGrantWire = struct {
 
 pub const OauthConsentDraftWire = struct {
     resource: []const u8,
+    private_resource: ?SensitiveEndpointWire = null,
     issuer: []const u8,
     scopes: []const []const u8,
     redirect_uri: []const u8,
@@ -199,6 +202,12 @@ pub const SensitiveEndpointWire = struct {
     origin: []const u8,
     identity: []const u8,
     credential_refs: []const []const u8,
+    secret_parts: []const u32 = &.{},
+};
+
+pub const EndpointPartInput = struct {
+    value: []const u8,
+    is_credential: bool,
 };
 
 pub fn endpointDisplay(transport: TransportWire) []const u8 {
@@ -242,6 +251,26 @@ pub fn resolveEndpoint(
     const value = transport.url orelse return error.InvalidEndpoint;
     if (!validEndpoint(value, max_bytes)) return error.InvalidEndpoint;
     return allocator.dupe(u8, value);
+}
+
+pub fn resolvePrivateEndpoint(allocator: std.mem.Allocator, endpoint: SensitiveEndpointWire, resolver: CredentialResolver, limits: Limits) (std.mem.Allocator.Error || error{ InvalidEndpoint, CredentialStoreUnavailable })![]u8 {
+    var credentials: std.ArrayList(ResolvedCredential) = .empty;
+    defer {
+        for (credentials.items) |credential| secureFree(allocator, credential.secret);
+        credentials.deinit(allocator);
+    }
+    for (endpoint.credential_refs) |locator|
+        if (!try resolveCredential(allocator, locator, resolver, limits, &credentials)) return error.InvalidEndpoint;
+    return resolveEndpoint(allocator, .{ .kind = "streamable_http", .sensitive_endpoint = endpoint }, credentials.items, limits.max_url_bytes);
+}
+
+pub fn ownSensitiveEndpoint(arena: *std.heap.ArenaAllocator, endpoint: ?SensitiveEndpointWire) std.mem.Allocator.Error!?SensitiveEndpointWire {
+    const value = endpoint orelse return null;
+    const allocator = arena.allocator();
+    const refs = try allocator.alloc([]const u8, value.credential_refs.len);
+    // Callers use an arena: the copied descriptor and references have one owner.
+    for (value.credential_refs, refs) |source, *dest| dest.* = try allocator.dupe(u8, source);
+    return .{ .origin = try allocator.dupe(u8, value.origin), .identity = try allocator.dupe(u8, value.identity), .credential_refs = refs, .secret_parts = try allocator.dupe(u32, value.secret_parts) };
 }
 
 /// Exactly one field must be present. `literal` is ordinary configuration;
@@ -582,6 +611,8 @@ pub const CreateOauthHttpServerInput = struct {
     negotiation: []const u8 = "automatic",
     timeout_ms: u32 = 30_000,
     url: []const u8,
+    sensitive_endpoint: bool = false,
+    endpoint_parts: []const EndpointPartInput = &.{},
     client: OauthClientPlan,
 };
 
@@ -591,6 +622,8 @@ pub const UpdateOauthHttpConnectionInput = struct {
     negotiation: []const u8,
     timeout_ms: u32,
     url: []const u8,
+    sensitive_endpoint: bool = false,
+    endpoint_parts: []const EndpointPartInput = &.{},
     client: OauthClientPlan,
 };
 
@@ -602,11 +635,22 @@ pub const CaptureOauthClientSecretInput = struct {
     secret: []u8,
 };
 
+pub const CaptureOauthResourceInput = struct {
+    server_id: []const u8,
+    resource: []u8,
+};
+
+pub const CaptureOauthResourceResult = struct {
+    outcome: ManagementOutcome,
+    identity: ?[35]u8 = null,
+};
+
 /// Metadata-validated consent facts supplied by the Application OAuth owner.
 /// Scopes must already be a strictly sorted set.
 pub const OauthConsentInput = struct {
     server_id: []const u8,
     resource: []const u8,
+    private_resource_identity: ?[]const u8 = null,
     issuer: []const u8,
     scopes: []const []const u8,
     redirect_uri: []const u8,
@@ -698,6 +742,7 @@ pub const CreateHttpServerInput = struct {
     timeout_ms: u32 = 30_000,
     url: []const u8,
     sensitive_endpoint: bool = false,
+    endpoint_parts: []const EndpointPartInput = &.{},
     auth_mode: StaticAuthMode = .none,
     header_names: []const []const u8 = &.{},
 };
@@ -721,6 +766,7 @@ pub const UpdateHttpConnectionInput = struct {
     timeout_ms: u32,
     url: []const u8,
     sensitive_endpoint: bool = false,
+    endpoint_parts: []const EndpointPartInput = &.{},
     auth_mode: StaticAuthMode,
     header_names: []const []const u8 = &.{},
 };
@@ -1185,8 +1231,17 @@ pub const ManagementPort = struct {
             },
             input.auth_mode,
         );
-        if (!input.sensitive_endpoint) return preparation;
-        return self.secureEndpointPreparation(&preparation, null, input.url);
+        if (!input.sensitive_endpoint) {
+            if (input.endpoint_parts.len != 0) {
+                switch (preparation) {
+                    .prepared => |*value| value.deinit(),
+                    else => {},
+                }
+                return .rejected;
+            }
+            return preparation;
+        }
+        return self.secureEndpointPreparation(&preparation, null, input.url, input.endpoint_parts);
     }
 
     pub fn prepareCreateOauthHttpServer(
@@ -1194,14 +1249,29 @@ pub const ManagementPort = struct {
         expected_generation: u64,
         input: CreateOauthHttpServerInput,
     ) std.mem.Allocator.Error!MutationPreparation {
-        return self.prepareCreateServerAuth(
+        const public_url = if (input.sensitive_endpoint)
+            endpointOrigin(input.url, self.limits.max_url_bytes) orelse return .rejected
+        else
+            input.url;
+        var preparation = try self.prepareCreateServerAuth(
             expected_generation,
             input.display_name,
             input.negotiation,
             input.timeout_ms,
-            .{ .kind = "streamable_http", .url = input.url },
+            .{ .kind = "streamable_http", .url = public_url },
             oauthAuth(input.client),
         );
+        if (!input.sensitive_endpoint) {
+            if (input.endpoint_parts.len != 0) {
+                switch (preparation) {
+                    .prepared => |*value| value.deinit(),
+                    else => {},
+                }
+                return .rejected;
+            }
+            return preparation;
+        }
+        return self.secureEndpointPreparation(&preparation, null, input.url, input.endpoint_parts);
     }
 
     pub fn prepareCreateStdioServer(
@@ -1373,8 +1443,17 @@ pub const ManagementPort = struct {
             index,
             replacement,
         );
-        if (!input.sensitive_endpoint) return preparation;
-        return self.secureEndpointPreparation(&preparation, input.server_id, input.url);
+        if (!input.sensitive_endpoint) {
+            if (input.endpoint_parts.len != 0) {
+                switch (preparation) {
+                    .prepared => |*value| value.deinit(),
+                    else => {},
+                }
+                return .rejected;
+            }
+            return preparation;
+        }
+        return self.secureEndpointPreparation(&preparation, input.server_id, input.url, input.endpoint_parts);
     }
 
     pub fn prepareUpdateOauthHttpConnection(
@@ -1387,13 +1466,17 @@ pub const ManagementPort = struct {
         const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
         if (!std.mem.eql(u8, base.servers[index].transport.kind, "streamable_http"))
             return .rejected;
+        const public_url = if (input.sensitive_endpoint)
+            endpointOrigin(input.url, self.limits.max_url_bytes) orelse return .rejected
+        else
+            input.url;
         var replacement = base.servers[index];
         replacement.display_name = input.display_name;
         replacement.negotiation = input.negotiation;
         replacement.timeout_ms = input.timeout_ms;
         replacement.transport = .{
             .kind = "streamable_http",
-            .url = input.url,
+            .url = public_url,
         };
         // Editing presentation or transport policy does not revoke an unchanged
         // OAuth destination/registration plan (including an issued DCR client).
@@ -1408,12 +1491,23 @@ pub const ManagementPort = struct {
                 replacement.auth.oauth.?.consent.?.fingerprint = &consent_fingerprint;
             }
         }
-        return self.prepareConnectionReplacement(
+        var preparation = try self.prepareConnectionReplacement(
             expected_generation,
             base,
             index,
             replacement,
         );
+        if (!input.sensitive_endpoint) {
+            if (input.endpoint_parts.len != 0) {
+                switch (preparation) {
+                    .prepared => |*value| value.deinit(),
+                    else => {},
+                }
+                return .rejected;
+            }
+            return preparation;
+        }
+        return self.secureEndpointPreparation(&preparation, input.server_id, input.url, input.endpoint_parts);
     }
 
     pub fn prepareUpdateStdioConnection(
@@ -1516,7 +1610,7 @@ pub const ManagementPort = struct {
 
     /// Replaces an effect-free public draft with one credential-journal target.
     /// No public-origin intermediate configuration is ever committed or connected.
-    fn secureEndpointPreparation(self: *ManagementPort, preparation: *MutationPreparation, server_id: ?[]const u8, endpoint: []const u8) std.mem.Allocator.Error!MutationPreparation {
+    fn secureEndpointPreparation(self: *ManagementPort, preparation: *MutationPreparation, server_id: ?[]const u8, endpoint: []const u8, supplied_parts: []const EndpointPartInput) std.mem.Allocator.Error!MutationPreparation {
         defer switch (preparation.*) {
             .prepared => |*value| value.deinit(),
             else => {},
@@ -1534,22 +1628,52 @@ pub const ManagementPort = struct {
         target.servers = try self.allocator.dupe(ServerWire, target.servers);
         defer self.allocator.free(target.servers);
         const index = if (server_id) |id| findServerIndex(target.servers, id) orelse return .rejected else target.servers.len - 1;
-        var locator_storage: [35]u8 = undefined;
-        const locator = self.freshCredentialLocator(target, &locator_storage) orelse return .rejected;
-        const refs = [_][]const u8{locator};
+        const default_parts = [_]EndpointPartInput{.{ .value = endpoint, .is_credential = true }};
+        const parts = if (supplied_parts.len == 0) &default_parts else supplied_parts;
+        if (parts.len > self.limits.max_credential_locators) return .rejected;
+        var offset: usize = 0;
+        for (parts) |part| {
+            if (part.value.len == 0 or part.value.len > endpoint.len - offset or
+                !std.mem.eql(u8, endpoint[offset..][0..part.value.len], part.value)) return .rejected;
+            offset += part.value.len;
+        }
+        if (offset != endpoint.len) return .rejected;
+        const storage = try self.allocator.alloc([35]u8, parts.len);
+        defer self.allocator.free(storage);
+        const refs = try self.allocator.alloc([]const u8, parts.len);
+        defer self.allocator.free(refs);
+        var secret_parts: std.array_list.Managed(u32) = .init(self.allocator);
+        defer secret_parts.deinit();
         var server = &target.servers[index];
         server.transport.url = null;
-        server.transport.sensitive_endpoint = .{ .origin = origin, .identity = locator, .credential_refs = &refs };
+        for (parts, 0..) |part, i| {
+            // Include the already generated locators in collision detection.
+            server.transport.sensitive_endpoint = .{ .origin = origin, .identity = "pending", .credential_refs = refs[0..i] };
+            refs[i] = self.freshCredentialLocator(target, &storage[i]) orelse return .rejected;
+            if (part.is_credential) try secret_parts.append(@intCast(i));
+        }
+        server.transport.sensitive_endpoint = .{ .origin = origin, .identity = refs[0], .credential_refs = refs, .secret_parts = secret_parts.items };
         const fingerprint = connectionFingerprint(server.*);
         server.connection_approval = .{ .fingerprint = &fingerprint };
-        var plan = (planMutation(self.allocator, if (self.desired) |value| value.value else null, target, if (self.desired) |value| value.value.generation else 0, &refs, self.limits) catch |err| switch (err) {
+        var plan = (planMutation(self.allocator, if (self.desired) |value| value.value else null, target, if (self.desired) |value| value.value.generation else 0, refs, self.limits) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return .rejected,
         }) orelse return .unchanged;
         errdefer plan.deinit();
-        const candidates = try self.allocator.alloc(CandidateCredential, 1);
-        errdefer self.allocator.free(candidates);
-        candidates[0] = .{ .locator = plan.transaction.candidate_locators[0], .secret = try self.allocator.dupe(u8, endpoint) };
+        const candidates = try self.allocator.alloc(CandidateCredential, parts.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (candidates[0..initialized]) |candidate| {
+                std.crypto.secureZero(u8, candidate.secret);
+                self.allocator.free(candidate.secret);
+            }
+            self.allocator.free(candidates);
+        }
+        for (parts, refs, candidates) |part, locator, *candidate| {
+            const owned_locator = findText(plan.transaction.candidate_locators, locator) orelse unreachable;
+            candidate.* = .{ .locator = owned_locator, .secret = try self.allocator.dupe(u8, part.value) };
+            initialized += 1;
+        }
         return .{ .prepared = .{ .allocator = self.allocator, .plan = plan, .candidates = candidates } };
     }
 
@@ -1678,6 +1802,22 @@ pub const ManagementPort = struct {
         );
     }
 
+    pub fn prepareCaptureOauthResource(self: *ManagementPort, expected_generation: u64, input: CaptureOauthResourceInput) std.mem.Allocator.Error!MutationPreparation {
+        defer std.crypto.secureZero(u8, input.resource);
+        if (!self.mutationReady(expected_generation)) return .rejected;
+        const base = if (self.desired) |value| value.value else return .rejected;
+        const index = findServerIndex(base.servers, input.server_id) orelse return .rejected;
+        const existing = base.servers[index];
+        if (existing.auth.oauth == null or existing.connection_approval == null or serverProblem(existing, self.limits) != null) return .rejected;
+        const origin = endpointOrigin(input.resource, self.limits.max_oauth_uri_bytes) orelse return .rejected;
+        var storage: [35]u8 = undefined;
+        const locator = self.freshCredentialLocator(base, &storage) orelse return .rejected;
+        const refs = [_][]const u8{locator};
+        var replacement = existing;
+        replacement.auth.oauth.?.pending_resource = .{ .origin = origin, .identity = locator, .credential_refs = &refs };
+        return self.prepareSecretTarget(base, index, replacement, locator, input.resource);
+    }
+
     pub fn prepareOauthConsent(
         self: *ManagementPort,
         expected_generation: u64,
@@ -1711,16 +1851,19 @@ pub const ManagementPort = struct {
         var replacement_auth = existing.auth;
         var replacement_oauth = oauth;
         replacement_oauth.registration.issuer = input.issuer;
+        const resource = consentResourceInput(existing, input) orelse return .rejected;
         var consent: OauthConsentWire = .{
             .epoch = next_epoch,
             .fingerprint = "0000000000000000000000000000000000000000000000000000000000000000",
-            .resource = input.resource,
+            .resource = resource.value,
+            .private_resource = resource.private,
             .issuer = input.issuer,
             .scopes = input.scopes,
             .redirect_uri = input.redirect_uri,
             .client_credential_revision = oauth.registration.client_credential_revision,
         };
         replacement_oauth.status = "awaiting_tokens";
+        replacement_oauth.pending_resource = null;
         replacement_oauth.consent = consent;
         replacement_oauth.grant = null;
         replacement_auth.oauth = replacement_oauth;
@@ -1806,8 +1949,10 @@ pub const ManagementPort = struct {
             oauth.registration.client_id != null or
             serverProblem(server, self.limits) != null)
             return .rejected;
+        const resource = consentResourceInput(server, input.consent) orelse return .rejected;
         const draft: OauthConsentDraftWire = .{
-            .resource = input.consent.resource,
+            .resource = resource.value,
+            .private_resource = resource.private,
             .issuer = input.consent.issuer,
             .scopes = input.consent.scopes,
             .redirect_uri = input.consent.redirect_uri,
@@ -1970,12 +2115,14 @@ pub const ManagementPort = struct {
             .epoch = operation.consent_epoch,
             .fingerprint = "0000000000000000000000000000000000000000000000000000000000000000",
             .resource = draft.resource,
+            .private_resource = draft.private_resource,
             .issuer = draft.issuer,
             .scopes = draft.scopes,
             .redirect_uri = draft.redirect_uri,
             .client_credential_revision = 1,
         };
         oauth.status = "awaiting_tokens";
+        oauth.pending_resource = null;
         oauth.consent = consent;
         oauth.grant = null;
         replacement_auth.oauth = oauth;
@@ -3154,6 +3301,7 @@ pub fn oauthConsentFingerprint(
     hashOptionalField(&hash, oauth.registration.token_endpoint_auth_method);
     hashInteger(&hash, oauth.registration.client_credential_revision);
     hashField(&hash, consent.resource);
+    hashSensitiveEndpoint(&hash, consent.private_resource);
     hashField(&hash, consent.issuer);
     hashInteger(&hash, consent.scopes.len);
     for (consent.scopes) |scope| hashField(&hash, scope);
@@ -3176,6 +3324,7 @@ pub fn oauthConsentDraftFingerprint(
     hashField(&hash, oauth.registration.kind);
     hashInteger(&hash, epoch);
     hashField(&hash, draft.resource);
+    hashSensitiveEndpoint(&hash, draft.private_resource);
     hashField(&hash, draft.issuer);
     hashInteger(&hash, draft.scopes.len);
     for (draft.scopes) |scope| hashField(&hash, scope);
@@ -3280,6 +3429,8 @@ fn hashSensitiveEndpoint(hash: *Sha256, endpoint: ?SensitiveEndpointWire) void {
         hashField(hash, value.identity);
         hashInteger(hash, value.credential_refs.len);
         for (value.credential_refs) |locator| hashField(hash, locator);
+        hashInteger(hash, value.secret_parts.len);
+        for (value.secret_parts) |part| hashInteger(hash, part);
     }
 }
 
@@ -3443,6 +3594,9 @@ fn serverReferencesCredential(server: ServerWire, locator: []const u8) bool {
     if (server.transport.sensitive_endpoint) |endpoint|
         for (endpoint.credential_refs) |candidate|
             if (std.mem.eql(u8, candidate, locator)) return true;
+    for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
+        for (endpoint.credential_refs) |candidate|
+            if (std.mem.eql(u8, candidate, locator)) return true;
     for (server.transport.arguments) |value|
         if (value.credential_ref) |candidate|
             if (std.mem.eql(u8, candidate, locator)) return true;
@@ -3474,6 +3628,10 @@ fn resolveServerCredentials(
     credentials: *std.ArrayList(ResolvedCredential),
 ) ResolveError!bool {
     var ready = true;
+    for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
+        for (endpoint.credential_refs) |locator| {
+            ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
+        };
     if (server.transport.sensitive_endpoint) |endpoint|
         for (endpoint.credential_refs) |locator| {
             ready = (try resolveCredential(allocator, locator, resolver, limits, credentials)) and ready;
@@ -3595,6 +3753,18 @@ fn validateResolvedServerCredentials(
     } else return .unusable;
 
     if (server.auth.oauth) |oauth| {
+        for (oauthPrivateResources(server)) |resource| if (resource) |endpoint| {
+            const resolved = resolveEndpoint(allocator, .{ .kind = "streamable_http", .sensitive_endpoint = endpoint }, credentials, limits.max_oauth_uri_bytes) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidEndpoint => return .unusable,
+            };
+            defer secureFree(allocator, resolved);
+            for (endpoint.credential_refs) |locator| {
+                const secret = resolvedCredential(credentials, locator) orelse return .unusable;
+                if (try appendUniqueSecret(allocator, &unique_secrets, secret))
+                    total_bytes = std.math.add(usize, total_bytes, secret.len) catch return .capacity_exceeded;
+            }
+        };
         if (oauth.registration.client_secret_ref) |locator| {
             const secret = resolvedCredential(credentials, locator) orelse return .unusable;
             if (!validHttpHeaderCredential(secret)) return .unusable;
@@ -3682,7 +3852,10 @@ fn migrateSchemaTwo(allocator: std.mem.Allocator, input: []const u8, limits: Lim
     };
     errdefer parsed.deinit();
     // Schema 2 never had the private endpoint representation.
-    for (parsed.value.servers) |server| if (server.transport.sensitive_endpoint != null) return error.RegistryCorrupt;
+    for (parsed.value.servers) |server| {
+        if (server.transport.sensitive_endpoint != null) return error.RegistryCorrupt;
+        for (oauthPrivateResources(server)) |resource| if (resource != null) return error.RegistryCorrupt;
+    }
     parsed.value.schema_version = schema_version;
     validateRegistryIdentity(&parsed.value, limits) catch return error.RegistryCorrupt;
     return parsed;
@@ -4143,6 +4316,7 @@ pub fn planOauthOperationRecovery(
     var oauth = auth.oauth orelse return error.InvalidMutation;
     oauth.status = "reauth_required";
     oauth.grant = null;
+    oauth.pending_resource = null;
     auth.oauth = oauth;
     servers[index].auth = auth;
     return (try planMutationWithMode(
@@ -4168,6 +4342,10 @@ fn collectCredentialReferences(
     limits: Limits,
 ) std.mem.Allocator.Error!void {
     for (registry.servers) |server| {
+        for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
+            for (endpoint.credential_refs) |locator|
+                if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
+                    try appendUniqueText(allocator, references, locator);
         if (server.transport.sensitive_endpoint) |endpoint|
             for (endpoint.credential_refs) |locator|
                 if (validCredentialLocator(locator, limits.max_credential_locator_bytes))
@@ -4270,6 +4448,7 @@ fn optionalOauthAuthorizationEqual(
     const left_oauth = left.?;
     const right_oauth = right.?;
     return std.mem.eql(u8, left_oauth.status, right_oauth.status) and
+        sensitiveEndpointEqual(left_oauth.pending_resource, right_oauth.pending_resource) and
         oauthRegistrationEqual(left_oauth.registration, right_oauth.registration) and
         optionalOauthConsentEqual(left_oauth.consent, right_oauth.consent) and
         optionalOauthGrantEqual(left_oauth.grant, right_oauth.grant);
@@ -4298,6 +4477,7 @@ fn optionalOauthConsentEqual(left: ?OauthConsentWire, right: ?OauthConsentWire) 
         left_consent.client_credential_revision == right_consent.client_credential_revision and
         std.mem.eql(u8, left_consent.fingerprint, right_consent.fingerprint) and
         std.mem.eql(u8, left_consent.resource, right_consent.resource) and
+        sensitiveEndpointEqual(left_consent.private_resource, right_consent.private_resource) and
         std.mem.eql(u8, left_consent.issuer, right_consent.issuer) and
         stringSlicesEqual(left_consent.scopes, right_consent.scopes) and
         std.mem.eql(u8, left_consent.redirect_uri, right_consent.redirect_uri);
@@ -4348,6 +4528,7 @@ fn optionalOauthConsentDraftEqual(
 ) bool {
     if (left == null or right == null) return left == null and right == null;
     return std.mem.eql(u8, left.?.resource, right.?.resource) and
+        sensitiveEndpointEqual(left.?.private_resource, right.?.private_resource) and
         std.mem.eql(u8, left.?.issuer, right.?.issuer) and
         stringSlicesEqual(left.?.scopes, right.?.scopes) and
         std.mem.eql(u8, left.?.redirect_uri, right.?.redirect_uri);
@@ -4376,7 +4557,8 @@ fn sensitiveEndpointEqual(left: ?SensitiveEndpointWire, right: ?SensitiveEndpoin
     if (left == null or right == null) return left == null and right == null;
     return std.mem.eql(u8, left.?.origin, right.?.origin) and
         std.mem.eql(u8, left.?.identity, right.?.identity) and
-        stringSlicesEqual(left.?.credential_refs, right.?.credential_refs);
+        stringSlicesEqual(left.?.credential_refs, right.?.credential_refs) and
+        std.mem.eql(u32, left.?.secret_parts, right.?.secret_parts);
 }
 
 fn secretSlotEqual(left: SecretSlotWire, right: SecretSlotWire) bool {
@@ -4534,6 +4716,8 @@ fn validateAuth(server: ServerWire, limits: Limits) ?ServerProblem {
         server.transport.headers.len != 0)
         return .invalid_authentication;
     const oauth = server.auth.oauth orelse return .invalid_authentication;
+    for (oauthPrivateResources(server)) |resource| if (resource) |endpoint|
+        if (!validSensitiveEndpoint(endpoint, limits)) return .invalid_authentication;
     if (!validateOauthRegistration(oauth.registration, limits))
         return .invalid_authentication;
     if (oauth.consent != null and server.connection_approval == null)
@@ -4631,6 +4815,8 @@ fn validateOauthConsent(
     limits: Limits,
 ) bool {
     const oauth = server.auth.oauth orelse return false;
+    if (consent.private_resource) |resource|
+        if (!std.mem.eql(u8, consent.resource, resource.origin)) return false;
     if (oauth.registration.client_id == null or
         oauth.registration.issuer == null or
         !std.mem.eql(u8, oauth.registration.issuer.?, consent.issuer) or
@@ -4659,6 +4845,8 @@ fn validateOauthConsentDraft(
     draft: OauthConsentDraftWire,
     limits: Limits,
 ) bool {
+    if (draft.private_resource) |resource|
+        if (!validSensitiveEndpoint(resource, limits) or !std.mem.eql(u8, draft.resource, resource.origin)) return false;
     if (!validEndpoint(draft.resource, limits.max_oauth_uri_bytes) or
         !validHttpsUri(draft.issuer, limits.max_oauth_uri_bytes) or
         !validEndpoint(draft.redirect_uri, limits.max_oauth_uri_bytes) or
@@ -4707,6 +4895,7 @@ fn validateOauthOperation(
             oauth.registration.client_credential_revision != 0)
             return error.Invalid;
         const draft = operation.consent_draft orelse return error.Invalid;
+        if (!sensitiveEndpointEqual(draft.private_resource, oauth.pending_resource)) return error.Invalid;
         if (!validateOauthConsentDraft(draft, limits)) return error.Invalid;
         const draft_fingerprint = oauthConsentDraftFingerprint(
             server,
@@ -4742,6 +4931,9 @@ fn validateOauthOperation(
 
 fn credentialReferenceCount(server: ServerWire) usize {
     var count = transportCredentialReferenceCount(server.transport);
+    for (oauthPrivateResources(server)) |resource| if (resource) |endpoint| {
+        count += endpoint.credential_refs.len;
+    };
     if (server.auth.oauth) |oauth| {
         if (oauth.registration.client_secret_ref != null) count += 1;
         if (oauth.grant) |grant| {
@@ -4811,14 +5003,7 @@ fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
         transport.headers.len > limits.max_header_count)
         return .invalid_transport;
     if (transport.sensitive_endpoint) |endpoint| {
-        if (transport.url != null or
-            !validText(endpoint.identity, limits.max_identity_bytes, false) or
-            endpoint.credential_refs.len == 0 or endpoint.credential_refs.len > limits.max_credential_locators)
-            return .invalid_transport;
-        const origin = endpointOrigin(endpoint.origin, limits.max_url_bytes) orelse return .invalid_transport;
-        if (!std.mem.eql(u8, origin, endpoint.origin)) return .invalid_transport;
-        for (endpoint.credential_refs) |locator|
-            if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return .invalid_credential_locator;
+        if (transport.url != null or !validSensitiveEndpoint(endpoint, limits)) return .invalid_transport;
     } else {
         const url = transport.url orelse return .invalid_transport;
         if (!validEndpoint(url, limits.max_url_bytes)) return .invalid_transport;
@@ -4836,6 +5021,40 @@ fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
                 return .invalid_transport;
     }
     return null;
+}
+
+fn validSensitiveEndpoint(endpoint: SensitiveEndpointWire, limits: Limits) bool {
+    if (!validText(endpoint.identity, limits.max_identity_bytes, false) or endpoint.credential_refs.len == 0 or endpoint.credential_refs.len > limits.max_credential_locators) return false;
+    for (endpoint.secret_parts, 0..) |part, i| {
+        if (part >= endpoint.credential_refs.len or (i > 0 and part <= endpoint.secret_parts[i - 1])) return false;
+    }
+    const origin = endpointOrigin(endpoint.origin, limits.max_url_bytes) orelse return false;
+    if (!std.mem.eql(u8, origin, endpoint.origin)) return false;
+    for (endpoint.credential_refs) |locator|
+        if (!validCredentialLocator(locator, limits.max_credential_locator_bytes)) return false;
+    return true;
+}
+
+fn oauthPrivateResources(server: ServerWire) [2]?SensitiveEndpointWire {
+    const oauth = server.auth.oauth orelse return .{ null, null };
+    return .{ oauth.pending_resource, if (oauth.consent) |consent| consent.private_resource else null };
+}
+
+fn consentResourceInput(server: ServerWire, input: OauthConsentInput) ?struct { value: []const u8, private: ?SensitiveEndpointWire } {
+    if (input.private_resource_identity) |identity| {
+        const oauth = server.auth.oauth orelse return null;
+        const resource = oauth.pending_resource orelse return null;
+        if (!std.mem.eql(u8, identity, resource.identity)) return null;
+        return .{ .value = resource.origin, .private = resource };
+    }
+    if (server.transport.sensitive_endpoint != null) return null;
+    return .{ .value = input.resource, .private = null };
+}
+
+pub fn consentResourceMatches(consent: OauthConsentWire, resource: []const u8, identity: ?[]const u8) bool {
+    if (consent.private_resource) |private|
+        return if (identity) |expected| std.mem.eql(u8, expected, private.identity) else false;
+    return identity == null and std.mem.eql(u8, consent.resource, resource);
 }
 
 fn reservedHttpHeader(name: []const u8) bool {
@@ -5849,6 +6068,58 @@ test "sensitive endpoint creation journals its complete URL without a public int
     changed.sensitive_endpoint = private;
     try std.testing.expectError(error.InvalidEndpoint, resolveEndpoint(std.testing.allocator, changed, &credentials, 4096));
     try std.testing.expectError(error.InvalidEndpoint, resolveEndpoint(std.testing.allocator, transport, &.{}, 4096));
+}
+
+test "private endpoint parts remain ordered and protect only credential substitutions" {
+    const Entropy = struct {
+        next: u8 = 0,
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.next += 1;
+            @memset(output, self.next);
+            return true;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) CredentialPresence {
+            return .missing;
+        }
+    };
+    var entropy: Entropy = .{};
+    var management = try ManagementPort.init(std.testing.allocator, null, .{
+        .persistence = .{ .available = true },
+        .credentials = .{ .available = true, .probe_fn = Entropy.probe },
+        .identity_generator = .{ .context = &entropy, .available = true, .fill_fn = Entropy.fill },
+        .locator_generator = .{ .context = &entropy, .available = true, .fill_fn = Entropy.fill },
+        .limits = test_limits,
+    });
+    defer management.deinit();
+    const parts = [_]EndpointPartInput{
+        .{ .value = "https://mcp.example.test/k/", .is_credential = false },
+        .{ .value = "synthetic-key", .is_credential = true },
+        .{ .value = "?route=one", .is_credential = false },
+    };
+    const url = "https://mcp.example.test/k/synthetic-key?route=one";
+    var mutation = switch (try management.prepareCreateHttpServer(0, .{ .display_name = "Template", .url = url, .sensitive_endpoint = true, .endpoint_parts = &parts })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer mutation.deinit();
+    const transport = mutation.target().servers[0].transport;
+    try std.testing.expectEqualSlices(u32, &.{1}, transport.sensitive_endpoint.?.secret_parts);
+    var credentials: [3]ResolvedCredential = undefined;
+    for (mutation.candidates, &credentials) |candidate, *credential| credential.* = .{ .locator = candidate.locator, .secret = candidate.secret };
+    const resolved = try resolveEndpoint(std.testing.allocator, transport, &credentials, 4096);
+    defer secureFree(std.testing.allocator, resolved);
+    try std.testing.expectEqualStrings(url, resolved);
+    // Swapping stored parts cannot silently redirect the connection.
+    std.mem.swap(ResolvedCredential, &credentials[0], &credentials[2]);
+    const resolved_again = try resolveEndpoint(std.testing.allocator, transport, &credentials, 4096);
+    defer secureFree(std.testing.allocator, resolved_again);
+    try std.testing.expectEqualStrings(url, resolved_again);
+    var buffer: [max_store_bytes]u8 = undefined;
+    const encoded = try encode(&buffer, mutation.target(), test_limits);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "route=one") == null);
+    try std.testing.expectEqual(std.meta.Tag(MutationPreparation).rejected, std.meta.activeTag(try management.prepareCreateHttpServer(0, .{ .display_name = "Mismatch", .url = "https://elsewhere.test/", .sensitive_endpoint = true, .endpoint_parts = &parts })));
 }
 
 test "schema two migration preserves approved public connections and tool grants" {

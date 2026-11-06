@@ -502,6 +502,8 @@ export const enUS = {
   "mcp.client_auth.client_secret_basic": "Client secret (HTTP Basic)",
   "mcp.client_auth.client_secret_post": "Client secret (request body)",
   "mcp.add.remove_row": "Remove row",
+  "mcp.add.sensitive_endpoint":
+    "This address contains credentials (stored securely; enter the full address to replace it)",
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",

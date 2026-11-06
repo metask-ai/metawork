@@ -1673,6 +1673,7 @@ export type McpHttpConnectionInput = {
   negotiation: "automatic" | "modern_only" | "compat_only";
   timeoutMs: number;
   endpoint: string;
+  sensitiveEndpoint?: boolean;
   authMode: "none" | "static" | "oauth";
   headerNames: string[];
   registration:
@@ -1731,6 +1732,7 @@ export type McpManagementView = {
       | {
           kind: "streamable_http";
           endpoint: string;
+          sensitiveEndpoint?: boolean;
           headers: {
             name: string;
             status: "missing" | "set";

@@ -7,6 +7,8 @@ const control_ports = @import("metawork_product_control_ports");
 const mcp_types = @import("metawork_product_mcp");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const mcp_platform = @import("metawork_mcp_platform");
+const mcp_configuration = mcp_types.contract;
+const mcp_startup = @import("mcp_startup.zig");
 const app_platform = @import("platform.zig");
 
 const refresh_timeout: std.Io.Clock.Duration = .{
@@ -119,7 +121,10 @@ const RefreshJob = struct {
             self.publish(.clear_marker);
             return;
         };
-        defer resource.deinit();
+        defer {
+            if (self.binding.private_resource != null or self.binding.private_endpoint != null) std.crypto.secureZero(u8, @constCast(resource.resource));
+            resource.deinit();
+        }
         if (!refreshDiscoveryCoveredByConsent(
             &self.binding,
             resource.resource,
@@ -365,6 +370,18 @@ pub const Coordinator = struct {
         };
         var binding_owned = true;
         defer if (binding_owned) binding.deinit();
+        if (binding.private_endpoint) |endpoint| {
+            binding.endpoint = mcp_configuration.resolvePrivateEndpoint(binding.arena.allocator(), endpoint, self.credential_store.resolver(), mcp_startup.configuration_limits) catch |err| {
+                self.recover(binding.operation_id);
+                return err;
+            };
+        }
+        if (binding.private_resource) |resource| {
+            binding.resource = mcp_configuration.resolvePrivateEndpoint(binding.arena.allocator(), resource, self.credential_store.resolver(), mcp_startup.configuration_limits) catch |err| {
+                self.recover(binding.operation_id);
+                return err;
+            };
+        }
         const method = mcp_oauth.TokenEndpointAuthMethod.fromWire(
             binding.token_endpoint_auth_method,
         ) orelse {

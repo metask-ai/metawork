@@ -1205,6 +1205,25 @@ pub const Runtime = struct {
         return self.commitPreparedMutation(&preparation);
     }
 
+    pub fn captureOauthResource(self: *Runtime, expected_generation: u64, input: configuration.CaptureOauthResourceInput) Error!configuration.CaptureOauthResourceResult {
+        defer std.crypto.secureZero(u8, input.resource);
+        if (self.shutting_down or !policy.authorizationAt(&self.state, input.server_id, &.{.awaiting_consent})) return .{ .outcome = .rejected };
+        const management = if (self.state.management) |*value| value else return .{ .outcome = .rejected };
+        var prepared = try management.prepareCaptureOauthResource(expected_generation, input);
+        const outcome = try self.commitPreparedMutation(&prepared);
+        var result: configuration.CaptureOauthResourceResult = .{ .outcome = outcome };
+        if (outcome == .saved) {
+            const registry = management.desiredRegistry() orelse return result;
+            const server = state_module.findMcpServer(registry.servers, input.server_id) orelse return result;
+            const resource = server.auth.oauth.?.pending_resource orelse return result;
+            if (resource.identity.len != 35) return result;
+            var identity: [35]u8 = undefined;
+            @memcpy(&identity, resource.identity);
+            result.identity = identity;
+        }
+        return result;
+    }
+
     pub fn renameServer(
         self: *Runtime,
         expected_generation: u64,
@@ -1519,7 +1538,8 @@ pub const Runtime = struct {
             &.{};
         const owned_operation_id = try owned.dupe(u8, operation_id);
         const owned_server_id = try owned.dupe(u8, server.id);
-        const owned_endpoint = try owned.dupe(u8, server.transport.url orelse return null);
+        const owned_endpoint = try owned.dupe(u8, configuration.endpointDisplay(server.transport));
+        const private_endpoint = try configuration.ownSensitiveEndpoint(&arena, server.transport.sensitive_endpoint);
         const owned_registration_kind = try owned.dupe(u8, oauth.registration.kind);
         const owned_client_id = if (oauth.registration.client_id) |value|
             try owned.dupe(u8, value)
@@ -1540,6 +1560,7 @@ pub const Runtime = struct {
             .operation_id = owned_operation_id,
             .server_id = owned_server_id,
             .endpoint = owned_endpoint,
+            .private_endpoint = private_endpoint,
             .registration_kind = owned_registration_kind,
             .client_id = owned_client_id,
             .token_endpoint_auth_method = owned_auth_method,
@@ -1619,7 +1640,7 @@ pub const Runtime = struct {
         const consent_already_bound = if (before_oauth.consent) |consent|
             std.mem.eql(u8, before_oauth.status, "awaiting_tokens") and
                 std.mem.eql(u8, consent.issuer, plan.issuer) and
-                std.mem.eql(u8, consent.resource, plan.resource) and
+                configuration.consentResourceMatches(consent, plan.resource, plan.private_resource_identity) and
                 std.mem.eql(u8, consent.redirect_uri, plan.redirect_uri) and
                 textSetsEqual(consent.scopes, plan.scopes)
         else
@@ -1630,6 +1651,7 @@ pub const Runtime = struct {
                 .{
                     .server_id = plan.server_id,
                     .resource = plan.resource,
+                    .private_resource_identity = plan.private_resource_identity,
                     .issuer = plan.issuer,
                     .scopes = plan.scopes,
                     .redirect_uri = plan.redirect_uri,
@@ -1649,7 +1671,7 @@ pub const Runtime = struct {
         const client_id = oauth.registration.client_id orelse return .rejected;
         if (!std.mem.eql(u8, oauth.status, "awaiting_tokens") or
             !std.mem.eql(u8, consent.issuer, plan.issuer) or
-            !std.mem.eql(u8, consent.resource, plan.resource) or
+            !configuration.consentResourceMatches(consent, plan.resource, plan.private_resource_identity) or
             !std.mem.eql(u8, consent.redirect_uri, plan.redirect_uri) or
             !textSetsEqual(consent.scopes, plan.scopes))
             return .rejected;
@@ -1658,6 +1680,7 @@ pub const Runtime = struct {
             .server_id = server.id,
             .issuer = consent.issuer,
             .resource = consent.resource,
+            .private_resource = consent.private_resource,
             .scopes = consent.scopes,
             .redirect_uri = consent.redirect_uri,
             .client_id = client_id,
@@ -1738,6 +1761,7 @@ pub const Runtime = struct {
                 return .rejected,
             .client_secret_ref = oauth.registration.client_secret_ref,
             .resource = consent.resource,
+            .private_resource = consent.private_resource,
             .redirect_uri = consent.redirect_uri,
         } };
     }
@@ -2449,6 +2473,78 @@ fn testRetainOauthTaskReference(runtime: *Runtime) !void {
     };
     runtime.state.task_references.appendAssumeCapacity(reference);
     runtime.updateMemberReferenceCounts();
+}
+
+test "private OAuth endpoints keep resource bytes out of durable consent including dynamic registration" {
+    for ([_]bool{ false, true }) |dynamic| {
+        var effects: OauthTestEffects = .{};
+        var harness: TestHarness = .{};
+        var runtime = try effects.coldRuntime(&harness, if (dynamic) "client_registration_required" else "consent_required");
+        defer runtime.deinit();
+        const private_url = "https://mcp.example.test/k/synthetic?route=private";
+        try std.testing.expectEqual(.saved, try runtime.updateOauthHttpConnection(1, .{
+            .server_id = "oauth",
+            .display_name = "Private OAuth",
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .url = private_url,
+            .sensitive_endpoint = true,
+            .client = if (dynamic) .dynamic_registration else .{ .pre_registered = .{ .client_id = "client" } },
+        }));
+        var start = (try runtime.beginAuthorization(2, "oauth", "private-attempt")).?;
+        defer start.deinit();
+        try std.testing.expectEqualStrings("https://mcp.example.test", start.endpoint);
+        try std.testing.expect(start.private_endpoint != null);
+        try std.testing.expect(runtime.advanceAuthorization("private-attempt", .awaiting_consent));
+        const resource_copy = try std.testing.allocator.dupe(u8, private_url);
+        defer std.testing.allocator.free(resource_copy);
+        const captured = try runtime.captureOauthResource(2, .{ .server_id = "oauth", .resource = resource_copy });
+        try std.testing.expectEqual(.saved, captured.outcome);
+        const resource_identity = captured.identity.?;
+        if (dynamic) {
+            const operation = (try runtime.beginOauthDynamicRegistration(.{
+                .server_id = "oauth",
+                .resource = private_url,
+                .private_resource_identity = &resource_identity,
+                .issuer = "https://issuer.example.test",
+                .scopes = &.{"read"},
+                .redirect_uri = "http://127.0.0.1/callback",
+            })).started;
+            try std.testing.expect(runtime.advanceAuthorization("private-attempt", .registering));
+            try std.testing.expectEqual(.saved, try runtime.completeOauthDynamicRegistration(.{
+                .operation_id = operation.id,
+                .server_id = "oauth",
+                .client_id = "issued-client",
+                .token_endpoint_auth_method = "none",
+            }));
+        }
+        const authorized = try runtime.authorizeOauth(.{
+            .attempt_id = 1,
+            .server_id = "oauth",
+            .resource = private_url,
+            .private_resource_identity = &resource_identity,
+            .issuer = "https://issuer.example.test",
+            .scopes = &.{"read"},
+            .redirect_uri = "http://127.0.0.1/callback",
+        });
+        try std.testing.expect(authorized == .ready);
+        try std.testing.expectEqualStrings("https://mcp.example.test", authorized.ready.resource);
+        const private_resource = authorized.ready.private_resource.?;
+        const resolved = try configuration.resolvePrivateEndpoint(std.testing.allocator, private_resource, .{ .context = &effects, .available = true, .resolve_fn = OauthTestEffects.resolve }, test_limits);
+        defer {
+            std.crypto.secureZero(u8, resolved);
+            std.testing.allocator.free(resolved);
+        }
+        try std.testing.expectEqualStrings(private_url, resolved);
+        var encoded: [configuration.max_store_bytes]u8 = undefined;
+        const bytes = try configuration.encode(&encoded, runtime.state.management.?.desiredRegistry().?, test_limits);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "synthetic") == null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "route=private") == null);
+        try std.testing.expect(runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.pending_resource == null);
+        try std.testing.expect(runtime.advanceAuthorization("private-attempt", .awaiting_browser));
+        const exchange = (try runtime.beginOauthCodeExchange("oauth")).started;
+        try std.testing.expectEqualStrings(&resource_identity, exchange.private_resource.?.identity);
+    }
 }
 
 fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, refreshable: bool, expiry: ?u64) !Runtime {

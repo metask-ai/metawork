@@ -1973,12 +1973,19 @@ fn createHttpOwner(
     };
     errdefer std.crypto.secureZero(u8, @constCast(context.url));
     context.custom_headers = try owned.alloc(std.http.Header, server.transport.headers.len);
-    context.secret_values = try owned.alloc([]u8, server.transport.headers.len + @as(usize, if (server.transport.sensitive_endpoint != null) 1 else 0));
+    const private_secret_count = if (server.transport.sensitive_endpoint) |endpoint| 1 + endpoint.secret_parts.len else 0;
+    context.secret_values = try owned.alloc([]u8, server.transport.headers.len + private_secret_count);
     for (context.secret_values) |*secret| secret.* = &.{};
     errdefer for (context.secret_values) |secret|
         if (secret.len != 0) std.crypto.secureZero(u8, secret);
-    if (server.transport.sensitive_endpoint != null)
+    if (server.transport.sensitive_endpoint) |endpoint| {
         context.secret_values[server.transport.headers.len] = @constCast(context.url);
+        for (endpoint.secret_parts, 0..) |part, i| {
+            if (part >= endpoint.credential_refs.len) return error.InvalidConfig;
+            const value = resolvedCredential(preparation, endpoint.credential_refs[part]) orelse return error.InvalidConfig;
+            context.secret_values[server.transport.headers.len + 1 + i] = try owned.dupe(u8, value);
+        }
+    }
     for (server.transport.headers, context.custom_headers, context.secret_values[0..server.transport.headers.len]) |source, *header, *secret_value| {
         const locator = source.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse

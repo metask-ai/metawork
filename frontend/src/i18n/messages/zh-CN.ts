@@ -441,6 +441,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.client_auth.client_secret_basic": "Client Secret（HTTP Basic）",
   "mcp.client_auth.client_secret_post": "Client Secret（请求体）",
   "mcp.add.remove_row": "删除此行",
+  "mcp.add.sensitive_endpoint":
+    "此地址包含凭据（安全保存；替换时填写完整地址）",
   "mcp.add.endpoint": "Endpoint",
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息和 fragment。",

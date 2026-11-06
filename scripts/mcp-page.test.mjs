@@ -2467,3 +2467,70 @@ test("MCP explains the global connection wait during browser authorization", () 
     ),
   );
 });
+
+test("MCP sensitive address uses a one-shot password field and never refills a saved private address", async () => {
+  const calls = [];
+  render(
+    pageElement({ ...proposalManagement, desiredGeneration: "9" }, "", {
+      onCreateHttp: async (...args) => {
+        calls.push(args);
+        return { outcome: "rejected", desiredGeneration: "9", serverId: null };
+      },
+    }),
+  );
+  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
+  let form = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.click(
+    within(form).getByRole("button", { name: /Streamable HTTP/ }),
+  );
+  fireEvent.change(
+    within(form).getByRole("textbox", { name: "Display name" }),
+    { target: { value: "Private" } },
+  );
+  fireEvent.click(
+    within(form).getByRole("checkbox", {
+      name: /This address contains credentials/,
+    }),
+  );
+  const endpoint = within(form).getByLabelText("Endpoint");
+  assert.equal(endpoint.type, "password");
+  fireEvent.change(endpoint, {
+    target: { value: "https://mcp.example/k/synthetic-key?scope=one" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  await waitFor(() => assert.equal(endpoint.value, ""));
+  assert.equal(calls[0][1].sensitiveEndpoint, true);
+  assert.equal(
+    calls[0][1].endpoint,
+    "https://mcp.example/k/synthetic-key?scope=one",
+  );
+  cleanup();
+  const server = {
+    ...servers[0],
+    connection: {
+      ...servers[0].connection,
+      endpoint: "https://mcp.example",
+      sensitiveEndpoint: true,
+    },
+  };
+  render(
+    pageElement({
+      ...proposalManagement,
+      desiredGeneration: "9",
+      servers: [server],
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
+  form = screen.getByRole("dialog", { name: "Edit connection settings" });
+  const replacement = within(form).getByLabelText("Endpoint");
+  assert.equal(replacement.type, "password");
+  assert.equal(replacement.value, "");
+  assert.equal(
+    within(form).getByRole("checkbox", {
+      name: /This address contains credentials/,
+    }).checked,
+    true,
+  );
+});

@@ -4289,12 +4289,15 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayloadWithLimit(
+        if (invocation.request.payload.len > 256 * 1024) return error.InvalidBridgePayload;
+        var parsed = std.json.parseFromSlice(
             handlers.McpCreateHttpServer,
+            std.heap.c_allocator,
             invocation.request.payload,
-            256 * 1024,
-        );
+            .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
+        ) catch return error.InvalidBridgePayload;
         defer parsed.deinit();
+        defer if (parsed.value.sensitiveEndpoint) std.crypto.secureZero(u8, @constCast(parsed.value.endpoint));
         try validateMcpConnectionFields(
             parsed.value.negotiation,
             parsed.value.timeoutMs,
@@ -4311,6 +4314,7 @@ pub const Dispatcher = struct {
                 .negotiation = parsed.value.negotiation,
                 .timeout_ms = parsed.value.timeoutMs,
                 .url = parsed.value.endpoint,
+                .sensitive_endpoint = parsed.value.sensitiveEndpoint,
                 .client = try mcpOauthClientPlan(parsed.value.registration),
             });
         } else try workbench.createMcpHttpServer(expected, .{
@@ -4319,6 +4323,7 @@ pub const Dispatcher = struct {
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
             .url = parsed.value.endpoint,
+            .sensitive_endpoint = parsed.value.sensitiveEndpoint,
             .auth_mode = try mcpStaticAuthMode(
                 parsed.value.authMode,
                 parsed.value.registration,
@@ -4377,12 +4382,15 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayloadWithLimit(
+        if (invocation.request.payload.len > 256 * 1024) return error.InvalidBridgePayload;
+        var parsed = std.json.parseFromSlice(
             handlers.McpUpdateHttpConnection,
+            std.heap.c_allocator,
             invocation.request.payload,
-            256 * 1024,
-        );
+            .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
+        ) catch return error.InvalidBridgePayload;
         defer parsed.deinit();
+        defer if (parsed.value.sensitiveEndpoint) std.crypto.secureZero(u8, @constCast(parsed.value.endpoint));
         try validateMcpConnectionFields(
             parsed.value.negotiation,
             parsed.value.timeoutMs,
@@ -4401,6 +4409,7 @@ pub const Dispatcher = struct {
                 .negotiation = parsed.value.negotiation,
                 .timeout_ms = parsed.value.timeoutMs,
                 .url = parsed.value.endpoint,
+                .sensitive_endpoint = parsed.value.sensitiveEndpoint,
                 .client = try mcpOauthClientPlan(parsed.value.registration),
             });
         } else try workbench.updateMcpHttpConnection(expected, .{
@@ -4409,6 +4418,7 @@ pub const Dispatcher = struct {
             .negotiation = parsed.value.negotiation,
             .timeout_ms = parsed.value.timeoutMs,
             .url = parsed.value.endpoint,
+            .sensitive_endpoint = parsed.value.sensitiveEndpoint,
             .auth_mode = try mcpStaticAuthMode(
                 parsed.value.authMode,
                 parsed.value.registration,

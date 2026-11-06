@@ -4728,6 +4728,9 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
               exactKeys(item, `${serverPath}.connection`, [
                 "kind",
                 "endpoint",
+                ...(item.sensitiveEndpoint === undefined
+                  ? []
+                  : ["sensitiveEndpoint"]),
                 "headers",
                 "registrationKind",
                 "clientId",
@@ -4740,6 +4743,14 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
                   item.endpoint,
                   `${serverPath}.connection.endpoint`,
                 ),
+                ...(item.sensitiveEndpoint === undefined
+                  ? {}
+                  : {
+                      sensitiveEndpoint: booleanValue(
+                        item.sensitiveEndpoint,
+                        `${serverPath}.connection.sensitiveEndpoint`,
+                      ),
+                    }),
                 headers: decodeSlots(
                   item.headers,
                   `${serverPath}.connection.headers`,
