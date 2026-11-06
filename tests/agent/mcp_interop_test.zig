@@ -195,6 +195,10 @@ const DurableRegistry = struct {
     storage: []u8,
     len: usize = 0,
     identity_counter: u8 = 0,
+    credential_locator: [256]u8 = undefined,
+    credential_locator_len: usize = 0,
+    credential: [128]u8 = undefined,
+    credential_len: usize = 0,
 
     fn persistence(self: *DurableRegistry) mcp_configuration.MutationPersistence {
         return .{
@@ -240,16 +244,35 @@ const DurableRegistry = struct {
         return .committed;
     }
 
-    fn probeCredential(_: ?*anyopaque, _: []const u8) mcp_configuration.CredentialPresence {
-        return .missing;
+    fn probeCredential(raw: ?*anyopaque, locator: []const u8) mcp_configuration.CredentialPresence {
+        const self: *DurableRegistry = @ptrCast(@alignCast(raw.?));
+        return if (self.credential_locator_len != 0 and std.mem.eql(u8, locator, self.credential_locator[0..self.credential_locator_len])) .present else .missing;
     }
-
-    fn createCredential(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+    fn createCredential(raw: ?*anyopaque, locator: []const u8, value: []const u8) bool {
+        const self: *DurableRegistry = @ptrCast(@alignCast(raw.?));
+        if (locator.len > self.credential_locator.len or value.len > self.credential.len) return false;
+        @memcpy(self.credential_locator[0..locator.len], locator);
+        self.credential_locator_len = locator.len;
+        @memcpy(self.credential[0..value.len], value);
+        self.credential_len = value.len;
         return true;
     }
-
-    fn deleteCredential(_: ?*anyopaque, _: []const u8) bool {
+    fn deleteCredential(raw: ?*anyopaque, locator: []const u8) bool {
+        const self: *DurableRegistry = @ptrCast(@alignCast(raw.?));
+        if (probeCredential(raw, locator) == .present) {
+            std.crypto.secureZero(u8, &self.credential);
+            self.credential_len = 0;
+            self.credential_locator_len = 0;
+        }
         return true;
+    }
+    fn resolveCredential(raw: ?*anyopaque, allocator: std.mem.Allocator, locator: []const u8) mcp_configuration.CredentialResolution {
+        const self: *DurableRegistry = @ptrCast(@alignCast(raw.?));
+        if (probeCredential(raw, locator) != .present) return .missing;
+        return .{ .value = allocator.dupe(u8, self.credential[0..self.credential_len]) catch return .out_of_memory };
+    }
+    fn resolver(self: *DurableRegistry) mcp_configuration.CredentialResolver {
+        return .{ .available = true, .context = self, .resolve_fn = resolveCredential };
     }
 
     fn fillIdentity(context: ?*anyopaque, output: *[16]u8) bool {
@@ -277,6 +300,7 @@ fn managementConfiguration(
         .persistence = store.persistence(),
         .credentials = store.credentials(),
         .identity_generator = store.identityGenerator(),
+        .locator_generator = .{ .available = true, .context = store, .fill_fn = DurableRegistry.fillIdentity },
         .limits = product_mcp_limits,
         .runtime_manifest = manifest,
     };
@@ -2714,6 +2738,15 @@ fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpT
 }
 
 fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.McpTransportKind, race: McpCreationRace) !void {
+    try expectMcpProductAdmissionWithAuth(protocol_version, transport, race, false);
+}
+
+test "static HTTP header and STDIO env reach a new Product Task real MCP call" {
+    try expectMcpProductAdmissionWithAuth("2025-11-25", .streamable_http, .expiry, true);
+    try expectMcpProductAdmissionWithAuth("2025-11-25", .stdio, .expiry, true);
+}
+
+fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: agent.McpTransportKind, race: McpCreationRace, static_auth: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -2727,14 +2760,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
     const gate = try std.fmt.allocPrint(std.testing.allocator, "{s}/publication", .{root_storage[0..root_len]});
     defer std.testing.allocator.free(gate);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
-    var fixture = try HttpFixture.startWithGate(
-        protocol_version,
-        "json",
-        trace_path,
-        2_000,
-        "text",
-        gate,
-    );
+    var fixture = try HttpFixture.startWithBearer(protocol_version, "json", trace_path, 2_000, "text", gate, 0, if (static_auth and transport == .streamable_http) "mcp-static-fixture-secret" else "");
     defer fixture.deinit();
     const registry_storage = try std.testing.allocator.alloc(
         u8,
@@ -2742,6 +2768,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
     );
     defer std.testing.allocator.free(registry_storage);
     var durable_registry: DurableRegistry = .{ .storage = registry_storage };
+    defer std.crypto.secureZero(u8, &durable_registry.credential);
 
     const initial_runtime = try agent.Runtime.init(
         std.testing.io,
@@ -2798,12 +2825,16 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
             .negotiation = "automatic",
             .timeout_ms = 2000,
             .command = options.node_path,
-            .arguments = &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path },
+            .arguments = if (static_auth) &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path, "--require-env" } else &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path },
+            .auth_mode = if (static_auth) .static else .none,
+            .environment_names = if (static_auth) &.{"MCP_FIXTURE_TOKEN"} else &.{},
         })).outcome else (try initial_workbench.createMcpHttpServer(0, .{
             .display_name = "Deterministic HTTP",
             .negotiation = if (std.mem.eql(u8, protocol_version, "2026-07-28")) "modern_only" else "automatic",
             .timeout_ms = 2000,
             .url = fixture.endpoint,
+            .auth_mode = if (static_auth) .static else .none,
+            .header_names = if (static_auth) &.{"Authorization"} else &.{},
         })).outcome,
     );
     var created = try mcp_configuration.decode(
@@ -2814,6 +2845,14 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
     const server_id = try std.testing.allocator.dupe(u8, created.value.servers[0].id);
     created.deinit();
     defer std.testing.allocator.free(server_id);
+    if (static_auth) {
+        var secret_buffer: [128]u8 = undefined;
+        const secret = try std.fmt.bufPrint(&secret_buffer, "{s}mcp-static-fixture-secret", .{if (transport == .stdio) @as([]const u8, "") else "Bearer "});
+        try std.testing.expectEqual(.saved, try initial_workbench.captureMcpStaticSecret(1, .{ .server_id = server_id, .slot_name = if (transport == .stdio) "MCP_FIXTURE_TOKEN" else "Authorization", .secret = secret }));
+        for (secret) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+        try std.testing.expect(std.mem.indexOf(u8, durable_registry.storage[0..durable_registry.len], "mcp-static-fixture-secret") == null);
+    }
+
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.restart_required,
         initial_workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
@@ -2826,7 +2865,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         durable_registry.storage[0..durable_registry.len],
         true,
         false,
-        .{},
+        durable_registry.resolver(),
         product_mcp_limits,
     );
     var restarted_preparation_owned = true;
@@ -2874,6 +2913,8 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         restarted_runtime,
         .{ .worker_count = 1, .queue_capacity = 4 },
         .{
+            .directories = .{ .canonical_user_home = if (static_auth) root_storage[0..root_len] else null },
+            .skill_sources = if (static_auth) .{ .restored = .{ .loaded = .{ .ready = .{} } } } else .{},
             .mcp_refresh_timer = refresh_timer.capability(),
             .mcp = .{
                 .preparation = &restarted_preparation,
@@ -2895,12 +2936,12 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         &restarted_workbench,
         restarted_runtime,
     );
-    try installExecution(&restarted_workbench);
+    if (!static_auth) try installExecution(&restarted_workbench);
     try std.testing.expect(refresh_timer.armed_at_ms != null);
     try std.testing.expect(refresh_timer.arm_count > 0);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try restarted_workbench.setMcpAllowedTools(1, .{
+        try restarted_workbench.setMcpAllowedTools(if (static_auth) 2 else 1, .{
             .server_id = server_id,
             .tools = &.{"echo"},
         }),
@@ -2920,11 +2961,44 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         .trust = .explicitly_trusted,
     });
     const workspace_epoch = try restarted_workbench.workspaceEpoch(workspace_id);
-    const fresh_task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
+    var vault: TaskSwitchVault = .{};
+    defer for (&vault.keys) |*key| std.crypto.secureZero(u8, key);
+    defer if (static_auth) restarted_workbench.stopCustomProviders();
+    const model_selection = if (static_auth) model: {
+        try restarted_workbench.startCustomProviders(root_storage[0..root_len], vault.port());
+        break :model try configureTaskSwitchProvider(&restarted_workbench, fixture.provider_endpoint, "source-model", .anthropic_messages);
+    } else try product_control.TestSupport.fixtureModelSelection(&restarted_workbench);
+    const fresh_task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, model_selection, null, null, .{ .interactive = if (static_auth) .manual else null });
     try std.testing.expectEqual(
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(fresh_task_id),
     );
+    if (static_auth) {
+        const run_id = try @import("lifecycle_fixture").runPreparedTask(&restarted_workbench, fresh_task_id, .{ .text = "Call the selected echo tool." });
+        const task = restarted_workbench.task_runtime.find(fresh_task_id).?;
+        var previous: ?u64 = null;
+        for (0..10000) |_| {
+            try restarted_workbench.drainAgentEvents();
+            restarted_workbench.syncLifecycle();
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            if (access.pendingUiObservation()) |request| if (previous == null or previous.? != request.request_id) {
+                try restarted_workbench.respondUi(fresh_task_id, run_id, request.request_id, .{ .permission = .allow_once });
+                previous = request.request_id;
+            };
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) {
+                const run = product_task.testing.state_module.findRun(task.durable.runs, run_id).?;
+                try std.testing.expectEqual(.completed, product_task.testing.state_module.productTerminalFacts(run).?.outcome);
+                break;
+            }
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        const trace = try tmp.dir.readFileAlloc(std.testing.io, "product-trace.jsonl", std.testing.allocator, .limited(4 * 1024 * 1024));
+        defer std.testing.allocator.free(trace);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "tools/call") != null);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "mcp-static-fixture-secret") == null);
+        return;
+    }
     if (race == .retain_disabled or race == .retain_deleted or race == .revoked_then_deleted or race == .disabled_edit) {
         const mcp = &restarted_workbench.mcp.?;
         const task = restarted_workbench.task_runtime.find(fresh_task_id).?;

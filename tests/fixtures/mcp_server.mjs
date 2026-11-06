@@ -12,6 +12,11 @@ if (options.transport === "stdio") startStdio();
 else startHttp();
 
 function startStdio() {
+  if (
+    options.requireEnv &&
+    process.env.MCP_FIXTURE_TOKEN !== "mcp-static-fixture-secret"
+  )
+    process.exit(72);
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   input.on("line", (line) => {
     if (Buffer.byteLength(line, "utf8") > 1024 * 1024) process.exit(70);
@@ -53,7 +58,7 @@ function startHttp() {
     request.on("end", () => {
       try {
         if (bytes > 1024 * 1024) throw new Error("request too large");
-        if (options.expectedBearer) {
+        if (options.expectedBearer && request.url.startsWith("/mcp")) {
           const matched =
             request.headers.authorization ===
             `Bearer ${options.expectedBearer}`;
@@ -745,6 +750,7 @@ function parseOptions(args) {
   let resultKind = "text";
   let refreshGate = null;
   let expectedBearer = null;
+  let requireEnv = false;
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
       case "--protocol":
@@ -773,6 +779,9 @@ function parseOptions(args) {
         break;
       case "--refresh-gate":
         refreshGate = args[(index += 1)] ?? null;
+        break;
+      case "--require-env":
+        requireEnv = true;
         break;
       case "--expected-bearer":
         expectedBearer = args[(index += 1)] ?? null;
@@ -805,5 +814,6 @@ function parseOptions(args) {
     resultKind,
     refreshGate,
     expectedBearer,
+    requireEnv,
   };
 }

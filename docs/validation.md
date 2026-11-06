@@ -713,7 +713,7 @@ MiniMax-M3 的真实文本 Run 返回 `OK`，证明这份 artifact 的 Chat 端�
 - 新增普通测试、测试改名、测试文件移动、artifact rebuild、checksum 或 lock refresh 不要求更新本文；只有测试层或归属规则、标准入口、证据结论或未闭合缺口变化时才更新。
 - `rg`、格式检查、文件存在性和源码关键词检查只属于卫生或结构验证，不能替代合同、运行时和平台行为测试。
 
-MCP 通用配置输入的纯解析与平台分词往返由 `scripts/mcp-configuration-input.test.mjs` 验证，MCP 页 suite 覆盖 password 粘贴、逐项显式 Add、结构化 Edit、create 回执 identity 与外部 generation 变化终止后续秘密提交。Bridge result decoder 必须拒绝失败携带 identity 或成功缺少 identity。`test-product-control-mcp`、`test-product-mcp-runtime` 与 `test-mcp-app` 分别验证已知凭据写前拒绝、owned create 回执和正式协调调用；这些 fixture 不替代真实系统凭据存储、远端 OAuth 或新 Task 实际调用验收。
+MCP 通用配置输入的纯解析与平台分词往返由 `scripts/mcp-configuration-input.test.mjs` 验证，MCP 页 suite 覆盖 password 粘贴、逐项显式 Add、结构化 Edit、create 回执 identity 与外部 generation 变化终止后续秘密提交。Bridge result decoder 必须拒绝失败携带 identity 或成功缺少 identity。`test-product-control-mcp`、`test-product-mcp-runtime` 与 `test-mcp-app` 分别验证已知凭据写前拒绝、owned create 回执和正式协调调用；隔离 synthetic credential store 的正式 `test-mcp-interop` 另覆盖静态 header HTTP 与 env STDIO：专用 capture 输入清零、registry 不含值、恢复后正式 transport 取得凭据、用户选择工具、新 Task 完成真实调用，trace 不含凭据。该 fixture 不替代真实系统凭据存储或远端服务/OAuth 验收。
 
 STDIO 诊断由 `test-mcp-platform` 观察真实进程未启动与启动后关闭，`test-product-mcp-runtime`/View 验证 source、attempt 与呈现，`test-mcp-app` 验证协调交接；transport ownership 回归覆盖成员替换后保留引用和释放。`zig build test-mcp-npx` 使用无依赖的本地固定 npm 包与隔离 cache/config，通过正式 STDIO owner 和 canonical Core 验证 bare npx、Windows npx.cmd 与带空格 shim 路径的握手/工具发现。`-Dmcp-npx-release-probe=true` 额外在空 cache 下载并激活测试中固定版本的公开参考 server；此发布前联网证据不进入默认离线回归，须记录 Node/npm、网络与代理条件，不以 `--version` 代替。EOF、取消或 Host 清理不能伪装成自然退出码；原始 stderr 不发布，未取得退出状态时保持未知。
 
