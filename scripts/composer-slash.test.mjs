@@ -11,7 +11,6 @@ import {
   reconcileSkillDraft,
   reviewSkillDraft,
   skillDraftProblem,
-  skillDraftVisibleArgumentCount,
   slashCommandNames,
   skillDraftFromCandidate,
 } from "../frontend/src/features/composer/slash.ts";
@@ -316,7 +315,6 @@ test("logical Skill drafts automatically follow compatible winners and preserve 
   assert.equal(reconcileSkillDraft(draft, next), draft);
   const reviewed = reviewSkillDraft(draft, next);
   assert.deepEqual(reviewed.argumentValues, ["src"]);
-  assert.equal(skillDraftVisibleArgumentCount(reviewed), 1);
   assert.equal(composerDraftWithinLimits(reviewed), false);
   next.skills[1].enabled = false;
   assert.equal(skillDraftProblem(draft, next), "disabled");

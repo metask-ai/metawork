@@ -1,5 +1,28 @@
 import type { ReactNode } from "react";
 import { Message } from "../../components/ai/index.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
+
+export function SkillMessageBody({
+  skill,
+}: {
+  skill: {
+    displayName: string;
+    invocationName: string;
+    argumentValues: readonly string[];
+  };
+}) {
+  return (
+    <div className="task-skill-input">
+      <span className="skill-message-tag">
+        <Icon name="skills" />
+        {skill.displayName || skill.invocationName}
+      </span>
+      {skill.argumentValues.length > 0 && (
+        <p className="task-input-copy">{skill.argumentValues.join("\n")}</p>
+      )}
+    </div>
+  );
+}
 
 /** The same user-message surface serves local, waiting and executing input. */
 export function UserInputMessage({

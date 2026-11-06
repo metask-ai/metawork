@@ -3160,32 +3160,24 @@ button.run-process-tool:hover {
   color: var(--ui-action-primary);
 }
 
-.task-skill-input,
-.task-skill-arguments {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+.task-skill-input {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
 }
 
-.task-skill-token {
+.skill-message-tag {
   display: inline-flex;
-  align-items: baseline;
-  gap: 7px;
-  font-family: var(--font-mono);
-}
-
-.task-skill-token small {
-  color: var(--ui-content-muted);
-  font-family: var(--font-sans);
-}
-
-.task-skill-arguments code {
-  padding: 2px 5px;
-  border: 1px solid var(--ui-border);
-  border-radius: 5px;
-  background: var(--ui-surface-panel);
-  font-family: var(--font-mono);
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 7px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 6px;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel-2);
+  font-size: var(--text-label);
+  font-weight: 600;
 }
 
 @media (max-width: 560px) {
@@ -8606,129 +8598,38 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
 }
 
-.skill-draft {
-  display: grid;
-  padding: 3px 4px 1px;
-  grid-template-columns: 168px minmax(0, 1fr);
-  gap: 12px;
-}
-
-.skill-draft-identity {
-  position: relative;
-  display: grid;
-  min-height: 58px;
-  padding: 8px 30px 8px 10px;
-  grid-template-columns: 24px minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  border-left: 2px solid var(--ui-action-primary);
-  border-radius: 8px;
-  background: var(--ui-surface-panel-2);
-}
-
-.skill-draft-mark {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border-radius: 7px;
-  color: var(--ui-content-on-primary);
-  background: var(--ui-action-primary);
-  font-family: var(--font-mono);
-  font-weight: 760;
-}
-
-.skill-draft-identity > span:nth-child(2) {
+.composer-message {
   display: flex;
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
 }
 
-.skill-draft-identity strong,
-.skill-draft-identity small {
+.composer-skill-tag {
+  max-width: 40%;
+  margin: 7px 0 0 10px;
+}
+
+.composer-skill-tag > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.skill-draft-identity strong {
-  font-size: var(--text-label);
+.composer-message > textarea {
+  flex: 1;
 }
 
-.skill-draft-identity small {
-  color: var(--ui-content-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-}
-
-.skill-draft-remove {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: grid;
-  width: 23px;
-  height: 23px;
+.composer-skill-remove {
+  width: 22px;
+  height: 22px;
   padding: 0;
-  place-items: center;
-  border: 0;
-  border-radius: 6px;
+  flex: none;
   color: var(--ui-content-muted);
-  background: transparent;
-}
-
-.skill-draft-remove:hover {
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel-2);
-}
-
-.skill-arguments {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 7px;
-}
-
-.skill-arguments label {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 3px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  font-weight: 660;
-}
-
-.skill-arguments input {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 0 9px;
-  border: 1px solid var(--ui-border);
-  border-radius: 8px;
-  outline: 0;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel);
-  font-family: var(--font-mono);
-  font-size: var(--text-label);
-}
-
-.skill-arguments input:focus {
-  border-color: var(--ui-action-primary);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--ui-action-primary) 7%, transparent);
-}
-
-.skill-argument-actions {
-  display: flex;
-  min-height: 34px;
-  align-items: end;
-  gap: 8px;
 }
 
 .skill-draft-warning {
   display: flex;
   padding: 0 4px 2px;
-  grid-column: 1 / -1;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -9204,12 +9105,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .composer-attachment-add[data-busy="true"] svg {
     animation: none;
-  }
-}
-
-@media (max-width: 620px) {
-  .skill-draft {
-    grid-template-columns: 1fr;
   }
 }
 

@@ -3,7 +3,10 @@ import {
   type LocalReadingInput,
 } from "../features/tasks/assistant-output.ts";
 import { editCustomModel } from "./edit-custom-model.ts";
-import { UserInputMessage } from "../features/tasks/UserInputMessage.tsx";
+import {
+  SkillMessageBody,
+  UserInputMessage,
+} from "../features/tasks/UserInputMessage.tsx";
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
 import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import {
@@ -4105,11 +4108,11 @@ export default function App() {
           </>
         }
       >
-        <div className="task-input-copy">
-          {entry.draft.kind === "skill"
-            ? `/${entry.draft.invocationName} ${entry.draft.argumentValues.join(" ")}`
-            : entry.draft.text}
-        </div>
+        {entry.draft.kind === "skill" ? (
+          <SkillMessageBody skill={entry.draft} />
+        ) : (
+          <div className="task-input-copy">{entry.draft.text}</div>
+        )}
         {entry.draft.kind === "multimodal" &&
           entry.draft.attachments.map((attachment) => (
             <p key={attachment.token}>{attachment.displayName}</p>

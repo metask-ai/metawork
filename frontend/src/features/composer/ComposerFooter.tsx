@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -13,25 +14,20 @@ import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
 import { Composer } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Input } from "../../components/ui/input.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
-import { maxComposerCharacters } from "./drafts.ts";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
   composerDraftWithinLimits,
   emptyComposerDraft,
-  isSkillDraftCurrent,
   reviewSkillDraft,
   skillDraftProblem,
   parseSlashInput,
   resolveSlashCandidates,
   skillDraftFromCandidate,
-  skillDraftVisibleArgumentCount,
   type ComposerDraft,
   type ComposerAttachment,
-  type ComposerSkillDraft,
   type SlashCandidate,
   type SlashCommandName,
   type SlashCommandState,
@@ -151,7 +147,6 @@ export function ComposerFooter({
   onRemoveAttachment,
   onSubmit,
   sendDisabledReason,
-  quietDraftChange = false,
   onStop,
   onSlashCommand,
   onRefreshSkillCatalog,
@@ -215,7 +210,6 @@ export function ComposerFooter({
   onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
   sendDisabledReason?: MessageId;
-  quietDraftChange?: boolean;
   onStop: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
   onRefreshSkillCatalog: () => void;
@@ -258,11 +252,8 @@ export function ComposerFooter({
     },
     [],
   );
-  const footerRef = useRef<HTMLElement>(null);
   const composerShellRef = useRef<HTMLDivElement>(null);
-  const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
-  const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
-  const sendButtonRef = useRef<HTMLButtonElement>(null);
+  const placeCaretAfterSkill = useRef(false);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
   const onDropFilesRef = useRef(onDropFiles);
   onDropFilesRef.current = onDropFiles;
@@ -272,12 +263,8 @@ export function ComposerFooter({
     removedToken: string;
     adjacentToken: string | null;
   } | null>(null);
-  const text = draft.kind === "skill" ? "" : draft.text;
-  const draftFocusIdentity =
-    draft.kind === "skill"
-      ? `skill:${draft.skillId}:${draft.catalogRevision}:${draft.selectionRevision}`
-      : draft.kind;
-  const previousDraftFocusIdentity = useRef(draftFocusIdentity);
+  const text =
+    draft.kind === "skill" ? draft.argumentValues.join("\n") : draft.text;
   const slashInput = useMemo(
     () => (draft.kind === "text" ? parseSlashInput(draft.text) : null),
     [draft],
@@ -293,8 +280,6 @@ export function ComposerFooter({
   const draftProblem =
     draft.kind === "skill" ? skillDraftProblem(draft, skillCatalog) : null;
 
-  const skillDraftCurrent =
-    draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
   const sendEnabled =
     canSubmit && !attachmentBusy && slashInput === null && draftWithinLimits;
@@ -303,12 +288,13 @@ export function ComposerFooter({
     draft.text.length > 0 ||
     (draft.kind === "multimodal" && draft.attachments.length > 0);
   const submitPrimary = () => {
-    const input =
-      draft.kind === "skill"
-        ? firstSkillArgumentRef.current
-        : textareaRef.current;
+    const input = textareaRef.current;
     if (input && !input.disabled) input.focus({ preventScroll: true });
     onSubmit();
+  };
+  const removeSkill = () => {
+    onDraftChange({ kind: "text", text });
+    textareaRef.current?.focus({ preventScroll: true });
   };
   const candidates = useMemo(
     () =>
@@ -343,6 +329,8 @@ export function ComposerFooter({
     },
     onSubmit: submitPrimary,
     onNavigateHistory: navigateInputHistory,
+    onRemoveSkill:
+      draft.kind === "skill" && !composeDisabled ? removeSkill : undefined,
   });
   const composing = keyboard.composing;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
@@ -419,6 +407,7 @@ export function ComposerFooter({
     (candidate: SlashCandidate) => {
       if (!candidate.enabled) return;
       if (candidate.kind === "skill") {
+        placeCaretAfterSkill.current = true;
         onDraftChange(skillDraftFromCandidate(candidate));
       } else {
         onDraftChange(emptyComposerDraft());
@@ -430,29 +419,13 @@ export function ComposerFooter({
     [onDraftChange, onSlashCommand],
   );
 
-  useEffect(() => {
-    if (previousDraftFocusIdentity.current === draftFocusIdentity) return;
-    previousDraftFocusIdentity.current = draftFocusIdentity;
-    if (quietDraftChange || pendingAttachmentFocusRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      const firstArgument = firstSkillArgumentRef.current;
-      const sendButton = sendButtonRef.current;
-      const target =
-        draft.kind === "skill"
-          ? firstArgument && !firstArgument.disabled
-            ? firstArgument
-            : sendButton && !sendButton.disabled
-              ? sendButton
-              : skillRemoveButtonRef.current
-          : textareaRef.current;
-      if (
-        document.activeElement === document.body ||
-        footerRef.current?.contains(document.activeElement)
-      )
-        target?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [draft.kind, draftFocusIdentity, textareaRef, quietDraftChange]);
+  useLayoutEffect(() => {
+    if (draft.kind !== "skill" || !placeCaretAfterSkill.current) return;
+    placeCaretAfterSkill.current = false;
+    const input = textareaRef.current;
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(0, 0);
+  }, [draft.kind, textareaRef]);
 
   useEffect(() => {
     const pending = pendingAttachmentFocusRef.current;
@@ -583,6 +556,11 @@ export function ComposerFooter({
 
   function updateText(value: string) {
     pendingAttachmentFocusRef.current = null;
+    if (draft.kind === "skill") {
+      if (value !== text)
+        onDraftChange({ ...draft, argumentValues: value ? [value] : [] });
+      return;
+    }
     if (draft.kind === "multimodal") {
       onDraftChange({ ...draft, text: value });
       return;
@@ -597,7 +575,7 @@ export function ComposerFooter({
   }
 
   function pasteImages(event: ClipboardEvent<HTMLTextAreaElement>) {
-    if (composeDisabled || !onPasteImages) return;
+    if (draft.kind === "skill" || composeDisabled || !onPasteImages) return;
     const files: File[] = [];
     for (const item of Array.from(event.clipboardData.items)) {
       if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
@@ -630,34 +608,6 @@ export function ComposerFooter({
     onRemoveAttachment(attachment.token);
   }
 
-  function updateSkillArgument(
-    skill: ComposerSkillDraft,
-    index: number,
-    value: string,
-  ) {
-    const values = [...skill.argumentValues];
-    values[index] = value.slice(0, maxComposerCharacters);
-    onDraftChange({ ...skill, argumentValues: values });
-  }
-
-  function appendSkillArgument(skill: ComposerSkillDraft) {
-    const visible = skillDraftVisibleArgumentCount(skill);
-    if (visible >= skill.maxValues) return;
-    const values = Array.from(
-      { length: visible + 1 },
-      (_, index) => skill.argumentValues[index] ?? "",
-    );
-    onDraftChange({ ...skill, argumentValues: values });
-  }
-
-  function removeLastSkillArgument(skill: ComposerSkillDraft) {
-    if (skill.argumentValues.length <= skill.argumentNames.length) return;
-    onDraftChange({
-      ...skill,
-      argumentValues: skill.argumentValues.slice(0, -1),
-    });
-  }
-
   const workspaceContext = (
     <WorkspaceContextSelector
       accessRequired={accessRequired}
@@ -674,7 +624,6 @@ export function ComposerFooter({
 
   return (
     <footer
-      ref={footerRef}
       className="composer-bar"
       onCompositionStartCapture={keyboard.onCompositionStartCapture}
       onCompositionEndCapture={keyboard.onCompositionEndCapture}
@@ -717,258 +666,191 @@ export function ComposerFooter({
                 : "normal"
           }
         >
-          {draft.kind !== "skill" ? (
-            <>
-              {draft.kind === "multimodal" && (
+          {draft.kind === "multimodal" && (
+            <div
+              className="composer-attachments"
+              role="list"
+              aria-label={t("attachment.selected")}
+            >
+              {draft.attachments.map((attachment, index) => (
                 <div
-                  className="composer-attachments"
-                  role="list"
-                  aria-label={t("attachment.selected")}
+                  className="composer-attachment"
+                  role="listitem"
+                  key={attachment.token}
                 >
-                  {draft.attachments.map((attachment, index) => (
-                    <div
-                      className="composer-attachment"
-                      role="listitem"
-                      key={attachment.token}
-                    >
-                      <span
-                        className="composer-attachment-kind"
-                        aria-hidden="true"
-                      >
-                        {attachment.kind === "image" ? (
-                          attachment.format.toUpperCase()
-                        ) : (
-                          <Icon name="skill-file" />
-                        )}
-                      </span>
-                      <span className="composer-attachment-copy">
-                        <strong dir="auto" title={attachment.displayName}>
-                          {attachment.displayName}
-                        </strong>
-                        <small>
-                          {attachmentTypeLabel(attachment, t)} ·{" "}
-                          {formatAttachmentSize(attachment.sizeBytes)}
-                        </small>
-                      </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        ref={(node) => {
-                          if (node)
-                            attachmentRemoveRefs.current.set(
-                              attachment.token,
-                              node,
-                            );
-                          else
-                            attachmentRemoveRefs.current.delete(
-                              attachment.token,
-                            );
-                        }}
-                        className="composer-attachment-remove"
-                        aria-label={t("attachment.remove", {
-                          name: attachment.displayName,
-                        })}
-                        disabled={
-                          composeDisabled ||
-                          attachmentActionsDisabled ||
-                          attachmentBusy
-                        }
-                        onClick={() => removeAttachment(attachment, index)}
-                      >
-                        <Icon name="close" />
-                      </Button>
-                    </div>
-                  ))}
+                  <span className="composer-attachment-kind" aria-hidden="true">
+                    {attachment.kind === "image" ? (
+                      attachment.format.toUpperCase()
+                    ) : (
+                      <Icon name="skill-file" />
+                    )}
+                  </span>
+                  <span className="composer-attachment-copy">
+                    <strong dir="auto" title={attachment.displayName}>
+                      {attachment.displayName}
+                    </strong>
+                    <small>
+                      {attachmentTypeLabel(attachment, t)} ·{" "}
+                      {formatAttachmentSize(attachment.sizeBytes)}
+                    </small>
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    ref={(node) => {
+                      if (node)
+                        attachmentRemoveRefs.current.set(
+                          attachment.token,
+                          node,
+                        );
+                      else
+                        attachmentRemoveRefs.current.delete(attachment.token);
+                    }}
+                    className="composer-attachment-remove"
+                    aria-label={t("attachment.remove", {
+                      name: attachment.displayName,
+                    })}
+                    disabled={
+                      composeDisabled ||
+                      attachmentActionsDisabled ||
+                      attachmentBusy
+                    }
+                    onClick={() => removeAttachment(attachment, index)}
+                  >
+                    <Icon name="close" />
+                  </Button>
                 </div>
-              )}
-              {draft.kind === "text" && draft.attachmentsReloadRequired && (
-                <p className="composer-attachment-notice" role="status">
-                  {t("attachment.reload_required")}
-                </p>
-              )}
-              {attachmentSkillConflict && (
-                <p className="composer-attachment-notice" role="status">
-                  {t("attachment.skill_conflict")}
-                </p>
-              )}
-              {attachmentModelWarning && (
-                <p className="composer-attachment-capability" role="status">
-                  {t(`attachment.model_warning.${attachmentModelWarning}`)}
-                </p>
-              )}
-              <Textarea
-                ref={textareaRef}
-                value={draft.text}
-                disabled={composeDisabled}
-                role="combobox"
-                aria-autocomplete="list"
-                aria-expanded={menuOpen}
-                aria-controls={menuOpen ? "composer-slash-menu" : undefined}
-                aria-activedescendant={
-                  menuOpen && activeCandidate
-                    ? `slash-option-${activeCandidate.key.replaceAll(":", "-")}`
-                    : undefined
-                }
-                placeholder={
-                  closing
-                    ? t("run.placeholder_closing")
-                    : unavailable
-                      ? t(
-                          unavailableReason === "session_recovery_required" ||
-                            unavailableReason ===
-                              "session_recovery_in_progress" ||
-                            unavailableReason === "session_recovery_failed"
-                            ? "run.placeholder"
-                            : unavailableReason === "execution_rebind_required"
-                              ? "run.placeholder_execution_rebind_required"
-                              : unavailableReason === "history_read_only"
-                                ? "run.placeholder_history_read_only"
-                                : "run.placeholder_unavailable",
-                        )
-                      : archived
-                        ? t("run.placeholder_archived")
-                        : t("run.placeholder")
-                }
-                onCompositionEnd={(event) => {
-                  updateText(event.currentTarget.value);
-                }}
-                onChange={(event) => {
-                  setMenuDismissed(false);
-                  updateText(event.target.value);
-                }}
-                onKeyDown={keyboard.onTextKeyDown}
-                onPaste={pasteImages}
-              />
-              {historyRead && (
-                <p className="composer-attachment-notice" role="status">
-                  {t(`run.input_history_${historyRead}`)}
-                </p>
-              )}
-              {!draftWithinLimits && (
-                <p className="composer-attachment-error" role="status">
-                  {t("run.text_input_too_large")}
-                </p>
-              )}
-            </>
-          ) : (
-            <div className="skill-draft">
-              <div className="skill-draft-identity">
-                <span className="skill-draft-mark" aria-hidden="true">
-                  /
-                </span>
-                <span>
-                  <strong>{draft.displayName || draft.invocationName}</strong>
-                  <small>/skill:{draft.invocationName}</small>
+              ))}
+            </div>
+          )}
+          {draft.kind === "text" && draft.attachmentsReloadRequired && (
+            <p className="composer-attachment-notice" role="status">
+              {t("attachment.reload_required")}
+            </p>
+          )}
+          {attachmentSkillConflict && (
+            <p className="composer-attachment-notice" role="status">
+              {t("attachment.skill_conflict")}
+            </p>
+          )}
+          {attachmentModelWarning && (
+            <p className="composer-attachment-capability" role="status">
+              {t(`attachment.model_warning.${attachmentModelWarning}`)}
+            </p>
+          )}
+          <div className="composer-message">
+            {draft.kind === "skill" && (
+              <span className="skill-message-tag composer-skill-tag">
+                <Icon name="skills" />
+                <span title={draft.displayName || draft.invocationName}>
+                  {draft.displayName || draft.invocationName}
                 </span>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  ref={skillRemoveButtonRef}
-                  className="skill-draft-remove"
+                  className="composer-skill-remove"
                   aria-label={t("slash.remove_skill")}
-                  onClick={() => onDraftChange(emptyComposerDraft())}
+                  disabled={composeDisabled}
+                  onClick={removeSkill}
                 >
                   <Icon name="close" />
                 </Button>
-              </div>
-              {skillDraftVisibleArgumentCount(draft) > 0 && (
-                <div
-                  className="skill-arguments"
-                  role="group"
-                  aria-label={t("slash.arguments")}
-                >
-                  {Array.from({
-                    length: skillDraftVisibleArgumentCount(draft),
-                  }).map((_, index) => (
-                    <label
-                      key={`${draft.argumentNames[index] ?? "arg"}:${index}`}
-                    >
-                      <span>
-                        {draft.argumentNames[index] ||
-                          t("slash.argument", { index: String(index + 1) })}
-                      </span>
-                      <Input
-                        ref={index === 0 ? firstSkillArgumentRef : undefined}
-                        value={draft.argumentValues[index] ?? ""}
-                        maxLength={maxComposerCharacters}
-                        disabled={composeDisabled}
-                        onChange={(event) =>
-                          updateSkillArgument(draft, index, event.target.value)
-                        }
-                        onKeyDown={keyboard.onSkillKeyDown}
-                      />
-                    </label>
-                  ))}
-                  <div className="skill-argument-actions">
-                    {skillDraftVisibleArgumentCount(draft) <
-                      draft.maxValues && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="slash-refresh"
-                        disabled={composeDisabled}
-                        onClick={() => appendSkillArgument(draft)}
-                      >
-                        {t("slash.add_argument")}
-                      </Button>
-                    )}
-                    {draft.argumentValues.length >
-                      draft.argumentNames.length && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="slash-refresh"
-                        disabled={composeDisabled}
-                        onClick={() => removeLastSkillArgument(draft)}
-                      >
-                        {t("slash.remove_argument")}
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              )}
-              {!skillDraftCurrent && (
-                <div className="skill-draft-warning" role="status">
-                  <span>
-                    {t(
-                      draftProblem === "arguments"
-                        ? "slash.skill_arguments_changed"
-                        : draftProblem === "disabled"
-                          ? "slash.skill_disabled"
-                          : draftProblem === "catalog"
-                            ? "slash.skills_unavailable"
-                            : "slash.skill_stale",
-                    )}
-                  </span>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="slash-refresh"
-                    onClick={() =>
-                      draftProblem === "arguments"
-                        ? onDraftChange(reviewSkillDraft(draft, skillCatalog))
-                        : onRefreshSkillCatalog()
-                    }
-                  >
-                    {t(
-                      draftProblem === "arguments"
-                        ? "slash.review_arguments"
-                        : "slash.refresh",
-                    )}
-                  </Button>
-                </div>
-              )}
-              {!draftWithinLimits && (
-                <div className="skill-draft-warning" role="status">
-                  <span>{t("slash.skill_input_too_large")}</span>
-                </div>
-              )}
+              </span>
+            )}
+            <Textarea
+              ref={textareaRef}
+              value={text}
+              disabled={composeDisabled}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={menuOpen}
+              aria-controls={menuOpen ? "composer-slash-menu" : undefined}
+              aria-activedescendant={
+                menuOpen && activeCandidate
+                  ? `slash-option-${activeCandidate.key.replaceAll(":", "-")}`
+                  : undefined
+              }
+              placeholder={
+                closing
+                  ? t("run.placeholder_closing")
+                  : unavailable
+                    ? t(
+                        unavailableReason === "session_recovery_required" ||
+                          unavailableReason ===
+                            "session_recovery_in_progress" ||
+                          unavailableReason === "session_recovery_failed"
+                          ? "run.placeholder"
+                          : unavailableReason === "execution_rebind_required"
+                            ? "run.placeholder_execution_rebind_required"
+                            : unavailableReason === "history_read_only"
+                              ? "run.placeholder_history_read_only"
+                              : "run.placeholder_unavailable",
+                      )
+                    : archived
+                      ? t("run.placeholder_archived")
+                      : t("run.placeholder")
+              }
+              onCompositionEnd={(event) => {
+                updateText(event.currentTarget.value);
+              }}
+              onChange={(event) => {
+                setMenuDismissed(false);
+                updateText(event.target.value);
+              }}
+              onKeyDown={keyboard.onTextKeyDown}
+              onPaste={pasteImages}
+            />
+          </div>
+          {historyRead && (
+            <p className="composer-attachment-notice" role="status">
+              {t(`run.input_history_${historyRead}`)}
+            </p>
+          )}
+          {draft.kind === "skill" && draftProblem && (
+            <div className="skill-draft-warning" role="status">
+              <span>
+                {t(
+                  draftProblem === "arguments"
+                    ? "slash.skill_changed"
+                    : draftProblem === "disabled"
+                      ? "slash.skill_disabled"
+                      : draftProblem === "catalog"
+                        ? "slash.skills_unavailable"
+                        : "slash.skill_stale",
+                )}
+              </span>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="slash-refresh"
+                onClick={() =>
+                  draftProblem === "arguments"
+                    ? onDraftChange(reviewSkillDraft(draft, skillCatalog))
+                    : onRefreshSkillCatalog()
+                }
+              >
+                {t(
+                  draftProblem === "arguments"
+                    ? "slash.review_skill"
+                    : "slash.refresh",
+                )}
+              </Button>
             </div>
+          )}
+          {!draftWithinLimits && (
+            <p className="composer-attachment-error" role="status">
+              {t(
+                draft.kind === "skill" &&
+                  draft.argumentValues.length > draft.maxValues
+                  ? "slash.skill_message_unsupported"
+                  : draft.kind === "skill"
+                    ? "slash.skill_message_too_large"
+                    : "run.text_input_too_large",
+              )}
+            </p>
           )}
           <div
             className="ai-composer-toolbar"
@@ -1080,7 +962,6 @@ export function ComposerFooter({
                   type="button"
                   variant="primary"
                   size="icon"
-                  ref={sendButtonRef}
                   className="composer-send"
                   aria-label={t("run.submit")}
                   title={t(sendDisabledReason ?? "run.submit")}

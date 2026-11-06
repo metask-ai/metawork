@@ -57,51 +57,69 @@ export async function runAutomaticFirstSkillVertical({
   });
   assert.equal(stale.reason, "stale_catalog");
   assert.equal((await snapshot()).workspaces.length, 0);
-  const created = await invoke("metawork.tasks.create", request);
-  assert.equal(created.accepted, true, JSON.stringify(created));
-  const requestsBefore = provider.requests.length;
-  provider.enqueue((payload) => {
-    assert.ok(JSON.stringify(payload.messages).includes(marker));
-    return textSse("first-personal-skill", "First Skill complete.");
-  });
-  const result = await invoke("metawork.tasks.sendInput", {
-    operationId: "first-personal-skill",
-    taskId: created.taskId,
-    input: {
-      kind: "skill",
-      skillId: skill.skillId,
-      catalogRevision: catalog.revision,
-      selectionRevision: catalog.selectionRevision,
-      argumentValues: [],
-    },
-  });
-  assert.equal(result.outcome, "accepted", JSON.stringify(result));
-  const task = await poll(
-    async () => {
-      if (provider.error) throw provider.error;
-      const state = await snapshot();
-      const task = state.tasks.find(
-        (candidate) => candidate.id === created.taskId,
-      );
-      const failed = task?.inputSubmissions.find(
-        (input) => input.state === "failed",
-      );
-      assert.equal(failed, undefined, JSON.stringify(failed));
-      if (!task?.runs[0]?.terminal) return null;
-      assert.equal(
-        state.workspaces.find((workspace) => workspace.id === task.workspaceId)
-          ?.kind,
-        "automatic",
-      );
-      return task;
-    },
-    30_000,
-    "personal Skill completes as the first Run",
+  const docx = catalog.skills.find(
+    (candidate) => candidate.invocationName === "docx",
   );
-  assert.equal(task.runs.length, 1);
-  assert.equal(task.runs[0].input.kind, "skill");
-  assert.equal(task.runs[0].terminal.outcome, "completed");
-  assert.equal(provider.requests.length, requestsBefore + 1);
+  for (const [selected, expectedInstructions, message] of [
+    [
+      docx,
+      "DOCX creation, editing, and analysis",
+      "帮我把这些要点整理成 Word 周报。\n- 梳理本周交付",
+    ],
+    [skill, marker, "Review the complete first message.\nCheck the evidence."],
+  ]) {
+    assert.ok(selected.maxValues >= 1);
+    const created = await invoke("metawork.tasks.create", request);
+    assert.equal(created.accepted, true, JSON.stringify(created));
+    const requestsBefore = provider.requests.length;
+    provider.enqueue((payload) => {
+      const messages = JSON.stringify(payload.messages);
+      assert.ok(messages.includes(expectedInstructions));
+      assert.ok(messages.includes(JSON.stringify(message).slice(1, -1)));
+      return textSse("first-skill", "First Skill complete.");
+    });
+    const result = await invoke("metawork.tasks.sendInput", {
+      operationId: `first-skill-${selected.invocationName}`,
+      taskId: created.taskId,
+      input: {
+        kind: "skill",
+        skillId: selected.skillId,
+        catalogRevision: catalog.revision,
+        selectionRevision: catalog.selectionRevision,
+        argumentValues: [message],
+      },
+    });
+    assert.equal(result.outcome, "accepted", JSON.stringify(result));
+    const task = await poll(
+      async () => {
+        if (provider.error) throw provider.error;
+        const state = await snapshot();
+        const task = state.tasks.find(
+          (candidate) => candidate.id === created.taskId,
+        );
+        const failed = task?.inputSubmissions.find(
+          (input) => input.state === "failed",
+        );
+        assert.equal(failed, undefined, JSON.stringify(failed));
+        if (!task?.runs[0]?.terminal) return null;
+        assert.equal(
+          state.workspaces.find(
+            (workspace) => workspace.id === task.workspaceId,
+          )?.kind,
+          "automatic",
+        );
+        return task;
+      },
+      30_000,
+      `Skill ${selected.invocationName} completes as the first Run`,
+    );
+    assert.equal(task.runs.length, 1);
+    assert.equal(task.runs[0].input.kind, "skill");
+    assert.equal(task.runs[0].input.invocationName, selected.invocationName);
+    assert.deepEqual(task.runs[0].input.argumentValues, [message]);
+    assert.equal(task.runs[0].terminal.outcome, "completed");
+    assert.equal(provider.requests.length, requestsBefore + 1);
+  }
 }
 
 // Real Desktop → Bridge → Product → canonical AgentCore; only model replies

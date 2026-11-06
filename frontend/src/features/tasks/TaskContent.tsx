@@ -7,7 +7,7 @@ import {
   type FilePreviewLoader,
 } from "./GeneratedImagePreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
-import { UserInputMessage } from "./UserInputMessage.tsx";
+import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
 import { MessageInfoBar } from "./MessageInfoBar.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
@@ -235,19 +235,7 @@ function TaskInput({ input }: { input: RunInputView }) {
     input.kind === "text" ? (
       <p className="task-input-copy">{input.text}</p>
     ) : input.kind === "skill" ? (
-      <div className="task-skill-input">
-        <span className="task-skill-token">
-          /{input.invocationName}
-          <small>{t("slash.group.skills")}</small>
-        </span>
-        {input.argumentValues.length > 0 && (
-          <span className="task-skill-arguments">
-            {input.argumentValues.map((value, index) => (
-              <code key={index}>{value}</code>
-            ))}
-          </span>
-        )}
-      </div>
+      <SkillMessageBody skill={input} />
     ) : (
       <div className="task-multimodal-input">
         {input.text && <p className="task-input-copy">{input.text}</p>}

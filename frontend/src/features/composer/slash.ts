@@ -205,17 +205,6 @@ export function isSkillDraftCurrent(
   return draft.kind === "skill" && skillDraftProblem(draft, catalog) === null;
 }
 
-export function skillDraftVisibleArgumentCount(draft: ComposerSkillDraft) {
-  return Math.min(
-    maxSkillArguments,
-    Math.max(
-      draft.argumentNames.length,
-      draft.argumentValues.length,
-      draft.argumentNames.length === 0 && draft.maxValues > 0 ? 1 : 0,
-    ),
-  );
-}
-
 export const slashCommandNames = ["new", "compact"] as const;
 
 export type SlashCommandName = (typeof slashCommandNames)[number];
@@ -414,10 +403,6 @@ export function skillDraftFromCandidate(
   candidate: Extract<SlashCandidate, { kind: "skill" }>,
 ): ComposerSkillDraft {
   const maxValues = Math.min(candidate.maxValues, maxSkillArguments);
-  const valueCount = Math.max(
-    Math.min(candidate.argumentNames.length, maxValues),
-    candidate.tail && maxValues > 0 ? 1 : 0,
-  );
   return {
     kind: "skill",
     skillId: candidate.skillId,
@@ -427,9 +412,7 @@ export function skillDraftFromCandidate(
     catalogRevision: candidate.catalogRevision,
     selectionRevision: candidate.selectionRevision,
     argumentNames: candidate.argumentNames.slice(0, maxValues),
-    argumentValues: Array.from({ length: valueCount }, (_, index) =>
-      index === 0 ? candidate.tail : "",
-    ),
+    argumentValues: candidate.tail ? [candidate.tail] : [],
     maxValues,
   };
 }

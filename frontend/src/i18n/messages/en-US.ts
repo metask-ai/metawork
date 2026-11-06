@@ -1159,18 +1159,17 @@ export const enUS = {
   "slash.skills_unavailable": "Skills are unavailable in this context.",
   "slash.refresh": "Refresh Skills",
   "slash.remove_skill": "Remove selected Skill",
-  "slash.arguments": "Skill arguments",
-  "slash.argument": "Argument {index}",
-  "slash.add_argument": "Add argument",
-  "slash.remove_argument": "Remove last argument",
-  "slash.skill_input_too_large":
-    "This Skill input exceeds the supported argument limit.",
-  "slash.skill_arguments_changed":
-    "This Skill’s parameters changed. Your input is preserved; review the new parameters before sending.",
-  "slash.skill_disabled": "This Skill is disabled. Your input is preserved.",
-  "slash.review_arguments": "Review new parameters",
+  "slash.skill_message_unsupported":
+    "This Skill cannot use this message. Remove the Skill or edit the message to continue.",
+  "slash.skill_message_too_large":
+    "This message is too long for the selected Skill. Shorten it to continue.",
+  "slash.skill_changed":
+    "This Skill has changed. Review your message before sending.",
+  "slash.skill_disabled":
+    "This Skill is disabled. Remove it or choose another Skill.",
+  "slash.review_skill": "Review Skill",
   "slash.skill_stale":
-    "This Skill was removed, conflicts, or its previous selection cannot be confirmed. Arguments are preserved; choose it again.",
+    "This Skill is no longer available. Remove it or choose another Skill.",
   "slash.disabled_unavailable": "This action is temporarily unavailable.",
   "slash.disabled_already_new_task": "A new task draft is already open.",
   "slash.disabled_task_busy": "Wait for the current task operation to finish.",
@@ -1748,7 +1747,7 @@ export const enUS = {
   "cause.skill_not_found":
     "Skill execution did not start because the skill is no longer available",
   "cause.invalid_skill_arguments":
-    "Skill execution did not start because its arguments were rejected",
+    "This Skill could not start with the message provided",
   "cause.skill_policy_violation":
     "Skill execution did not start because it is not allowed in this task",
   "cause.skill_unavailable":
@@ -1807,7 +1806,7 @@ export const enUS = {
   "mutation.reason.skill_unavailable":
     "The selected skill is disabled for this task.",
   "mutation.reason.invalid_skill_arguments":
-    "Review the skill arguments and try again.",
+    "Review the message or choose another Skill, then try again.",
   "mutation.reason.missing_instruction":
     "Describe what you want the Agent to do with the attached text.",
   "mutation.reason.unsupported_attachment":

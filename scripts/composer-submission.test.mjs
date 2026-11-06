@@ -314,7 +314,7 @@ async function renderSubmissionApp(
   };
 }
 
-test("App lists and sends a personal Skill from the first unscoped draft", async (ctx) => {
+test("App sends a selected Skill and its message from the first unscoped draft", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
   const refresh = ctx.mock.method(
@@ -329,7 +329,7 @@ test("App lists and sends a personal Skill from the first unscoped draft", async
     displayName,
     description: "Fixture Skill",
     argumentNames: [],
-    maxValues: 0,
+    maxValues: 1,
     enabled,
   });
   fixture.snapshot.skillCatalog = {
@@ -361,7 +361,11 @@ test("App lists and sends a personal Skill from the first unscoped draft", async
   assert.ok(firstCommandIcon.isEqualNode(secondCommandIcon));
   assert.equal(screen.queryByRole("option", { name: /Disabled Skill/ }), null);
   assert.equal(refresh.mock.callCount(), 1);
-  await user.click(screen.getByRole("option", { name: /Personal Review/ }));
+  await user.click(screen.getByRole("option", { name: /Built-in Word/ }));
+  const message = "帮我把这些要点整理成 Word 周报。\n- 梳理本周交付";
+  fireEvent.change(fixture.textarea, { target: { value: message } });
+  assert.equal(fixture.textarea.value, message);
+  assert.equal(document.activeElement, fixture.textarea);
   assert.equal(fixture.creations(), 0);
   await user.click(screen.getByRole("button", { name: "Send" }));
   assert.equal(fixture.creations(), 1);
@@ -373,10 +377,10 @@ test("App lists and sends a personal Skill from the first unscoped draft", async
   await fixture.created();
   assert.deepEqual(fixture.inputs[0][2], {
     kind: "skill",
-    skillId: "review",
+    skillId: "docx",
     catalogRevision: "personal-catalog",
     selectionRevision: "1",
-    argumentValues: [],
+    argumentValues: [message],
   });
   await fixture.settle();
 });

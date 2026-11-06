@@ -2235,7 +2235,7 @@ function renderSkillComposer(overrides = {}) {
   });
   return {
     ...composer,
-    input: screen.getByRole("textbox", { name: "target" }),
+    input: composer.textarea,
   };
 }
 
@@ -2639,23 +2639,27 @@ test("Composer menu Escape closes only the menu before stopping can be armed", a
 });
 
 for (const action of ["submit", "feedback"]) {
-  test(`a replacement editor clears stale IME state before ${action}`, async () => {
+  test(`changing draft kind in the same editor keeps IME protected before ${action}`, () => {
     const composer = renderSkillComposer({ shell: composerShell() });
+    const details = document.querySelector(".commandbar-alert");
+    if (action === "feedback")
+      fireEvent.click(details.querySelector("summary"));
     composer.input.focus();
     fireEvent.compositionStart(composer.input);
-    // Draft owner replaces the editor without a native blur/compositionend.
     act(() => composer.setDraft({ kind: "text", text: "next draft" }));
-    assert.equal(composer.input.isConnected, false);
-    await new Promise((resolve) => window.requestAnimationFrame(resolve));
     const input = screen.getByRole("combobox", { name: "" });
-    assert.equal(document.activeElement === input, true);
+    assert.equal(composer.input, input);
+    assert.equal(document.activeElement, input);
     if (action === "submit") {
+      fireEvent.keyDown(input, { key: "Enter" });
+      assert.equal(composer.submissions(), 0);
+      fireEvent.compositionEnd(input);
       fireEvent.keyDown(input, { key: "Enter" });
       assert.equal(composer.submissions(), 1);
     } else {
-      const details = document.querySelector(".commandbar-alert");
-      fireEvent.click(details.querySelector("summary"));
-      input.focus();
+      fireEvent.keyDown(input, { key: "Escape", isComposing: true });
+      assert.equal(details.open, true);
+      fireEvent.compositionEnd(input);
       fireEvent.keyDown(input, { key: "Escape" });
       assert.equal(details.open, false);
       assert.equal(composer.submissions(), 0);
@@ -2878,9 +2882,9 @@ test("opening the chooser queries once per opening rather than per edit or rende
   assert.equal(refreshes, 2);
 });
 
-test("changed Skill parameters require review and retain surplus input visibly", async () => {
+test("a changed Skill requires review and keeps the message editable", async () => {
   let latest;
-  renderComposer({
+  const { textarea } = renderComposer({
     draft: {
       kind: "skill",
       skillId: "old",
@@ -2918,25 +2922,20 @@ test("changed Skill parameters require review and retain surplus input visibly",
     canSubmit: false,
   });
   const user = userEvent.setup();
-  await user.click(
-    screen.getByRole("button", { name: "Review new parameters" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Review Skill" }));
   assert.equal(latest.skillId, "new");
   assert.deepEqual(latest.argumentValues, ["keep this"]);
-  assert.equal(
-    screen.getByRole("textbox", { name: "Argument 1" }).value,
-    "keep this",
-  );
+  assert.equal(textarea.value, "keep this");
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
   await user.click(
-    screen.getByRole("button", { name: "Remove last argument" }),
+    screen.getByRole("button", { name: "Remove selected Skill" }),
   );
-  assert.deepEqual(latest.argumentValues, []);
+  assert.deepEqual(latest, { kind: "text", text: "keep this" });
 });
 
-test("keyboard Skill selection moves focus into the structured draft", async () => {
+test("Slash selection and Backspace use the same editor and preserve the message", () => {
   const composer = renderComposer({
-    draft: { kind: "text", text: "/review" },
+    draft: { kind: "text", text: "/review keep this" },
     skillCatalog: {
       availability: "ready",
       redacted: false,
@@ -2962,14 +2961,35 @@ test("keyboard Skill selection moves focus into the structured draft", async () 
     shiftKey: false,
     isComposing: false,
   });
-  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  const { textarea } = composer;
+  const remove = () =>
+    screen.queryByRole("button", { name: "Remove selected Skill" });
+  assert.equal(document.activeElement, textarea);
+  assert.equal(screen.getByRole("combobox"), textarea);
+  assert.equal(textarea.value, "keep this");
+  assert.equal(textarea.selectionStart, 0);
+  assert.ok(remove());
+  textarea.setSelectionRange(0, 4);
+  assert.equal(fireEvent.keyDown(textarea, { key: "Backspace" }), true);
+  assert.ok(remove());
+  textarea.setSelectionRange(0, 0);
+  fireEvent.compositionStart(textarea);
   assert.equal(
-    document.activeElement,
-    screen.getByRole("textbox", { name: "target" }),
+    fireEvent.keyDown(textarea, { key: "Backspace", isComposing: true }),
+    true,
   );
+  assert.ok(remove());
+  fireEvent.compositionEnd(textarea);
+  assert.equal(fireEvent.keyDown(textarea, { key: "Backspace" }), false);
+  assert.equal(remove(), null);
+  assert.equal(textarea.value, "keep this");
+  assert.deepEqual(composer.currentDraft(), {
+    kind: "text",
+    text: "keep this",
+  });
 });
 
-test("a no-argument Skill moves keyboard focus to the real Send action", async () => {
+test("a Skill that cannot accept a message keeps the same editor and explains the conflict", () => {
   const composer = renderComposer({
     draft: { kind: "text", text: "/review" },
     skillCatalog: {
@@ -2997,11 +3017,14 @@ test("a no-argument Skill moves keyboard focus to the real Send action", async (
     shiftKey: false,
     isComposing: false,
   });
-  await new Promise((resolve) => window.requestAnimationFrame(resolve));
-  assert.equal(
-    document.activeElement,
-    screen.getByRole("button", { name: "Send" }),
+  assert.equal(document.activeElement, composer.textarea);
+  fireEvent.change(composer.textarea, { target: { value: "keep my message" } });
+  assert.equal(composer.textarea.value, "keep my message");
+  assert.match(
+    screen.getByRole("status").textContent,
+    /cannot use this message/,
   );
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
 });
 
 test("unknown leading Slash text cannot leak through ordinary submit", () => {
@@ -3024,8 +3047,8 @@ test("unknown leading Slash text cannot leak through ordinary submit", () => {
   assert.equal(composer.submissions(), 0);
 });
 
-test("a positional Skill tail remains visible even without a named label", () => {
-  renderComposer({
+test("a restored Skill message remains visible as ordinary text", () => {
+  const { textarea } = renderComposer({
     draft: {
       kind: "skill",
       skillId: "builtin.review",
@@ -3057,15 +3080,12 @@ test("a positional Skill tail remains visible even without a named label", () =>
       issues: [],
     },
   });
-  assert.equal(
-    screen.getByRole("textbox", { name: "Argument 1" }).value,
-    "src/main.zig",
-  );
+  assert.equal(textarea.value, "src/main.zig");
 });
 
-test("variadic Skills expose unnamed argument slots up to maxValues", () => {
+test("editing a legacy Skill draft combines its contents into the message", () => {
   const changes = [];
-  renderComposer({
+  const { textarea } = renderComposer({
     draft: {
       kind: "skill",
       skillId: "builtin.review",
@@ -3074,7 +3094,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       catalogRevision: "17",
       selectionRevision: "3",
       argumentNames: [],
-      argumentValues: [],
+      argumentValues: ["src/main.zig", "src/lib.zig"],
       maxValues: 3,
     },
     skillCatalog: {
@@ -3098,8 +3118,9 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
     },
     onDraftChange: (draft) => changes.push(draft),
   });
-  assert.equal(screen.getByRole("textbox", { name: "Argument 1" }).value, "");
-  fireEvent.click(screen.getByRole("button", { name: "Add argument" }));
+  assert.equal(textarea.value, "src/main.zig\nsrc/lib.zig");
+  const message = "Review both files:\nsrc/main.zig\nsrc/lib.zig";
+  fireEvent.change(textarea, { target: { value: message } });
   assert.deepEqual(changes, [
     {
       kind: "skill",
@@ -3109,7 +3130,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       catalogRevision: "17",
       selectionRevision: "3",
       argumentNames: [],
-      argumentValues: ["", ""],
+      argumentValues: [message],
       maxValues: 3,
     },
   ]);

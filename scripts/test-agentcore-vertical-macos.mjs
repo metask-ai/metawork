@@ -451,7 +451,9 @@ const provider = createProvider(responses, {
   // CLI snapshot polling needs an observation window during this larger probe.
   initialDelayMs: visualCaptureDir ? 1_500 : 120,
   frameDelayMs: 80,
-  titleInput: skillAutoRefreshOnly ? "first-message-review" : "Review",
+  titleInputs: skillAutoRefreshOnly
+    ? ["docx", "first-message-review"]
+    : ["Review"],
 });
 const baseUrl = await provider.listen();
 const chromeProbePort =
@@ -3988,7 +3990,7 @@ async function removeWorkspaceWithRetry() {
 
 function createProvider(
   queue,
-  { initialDelayMs = 0, frameDelayMs = 0, titleInput = "Review" } = {},
+  { initialDelayMs = 0, frameDelayMs = 0, titleInputs = ["Review"] } = {},
 ) {
   let modelProbeCredential = "metawork-agentcore-vertical-fixture-key";
   let served = 0;
@@ -4160,7 +4162,7 @@ function createProvider(
             !Array.isArray(payload.messages) ||
             payload.messages.length !== 1 ||
             payload.messages[0]?.role !== "user" ||
-            payload.messages[0]?.content !== titleInput
+            !titleInputs.includes(payload.messages[0]?.content)
           )
             throw new Error(
               "automatic title Completion did not preserve its frozen Anthropic request",

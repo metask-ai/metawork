@@ -32,6 +32,7 @@ export function useComposerKeyboard({
   onSubmit,
   onStop,
   onNavigateHistory,
+  onRemoveSkill,
 }: {
   draftScope: string;
   sendEnabled: boolean;
@@ -47,6 +48,7 @@ export function useComposerKeyboard({
   onSubmit: () => void;
   onStop: () => void;
   onNavigateHistory: (direction: 1 | -1) => boolean;
+  onRemoveSkill?: () => void;
 }) {
   // Composition belongs to the focused DOM editor, including New-task handoff.
   const compositionTarget = useRef<EventTarget | null>(null);
@@ -94,9 +96,20 @@ export function useComposerKeyboard({
     );
   }
 
-  function handleInputKeyDown(event: KeyboardEvent, kind: "text" | "skill") {
+  function handleInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.defaultPrevented || inputMethodKey(event)) return;
-    if (kind === "text" && slash.open) {
+    if (
+      onRemoveSkill &&
+      event.key === "Backspace" &&
+      bareKey(event) &&
+      event.currentTarget.selectionStart === 0 &&
+      event.currentTarget.selectionEnd === 0
+    ) {
+      event.preventDefault();
+      onRemoveSkill();
+      return;
+    }
+    if (slash.open) {
       if (bareKey(event)) {
         if (event.key === "ArrowUp" || event.key === "ArrowDown") {
           event.preventDefault();
@@ -125,7 +138,6 @@ export function useComposerKeyboard({
       return;
     }
     if (
-      kind === "text" &&
       bareKey(event) &&
       (event.key === "ArrowUp" || event.key === "ArrowDown") &&
       onNavigateHistory(event.key === "ArrowUp" ? -1 : 1)
@@ -181,10 +193,7 @@ export function useComposerKeyboard({
     },
     onPointerDownCapture: clearConfirmation,
     onChangeCapture: clearConfirmation,
-    onTextKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) =>
-      handleInputKeyDown(event, "text"),
-    onSkillKeyDown: (event: KeyboardEvent<HTMLInputElement>) =>
-      handleInputKeyDown(event, "skill"),
+    onTextKeyDown: handleInputKeyDown,
     onCompositionStartCapture(event: CompositionEvent<HTMLElement>) {
       clearConfirmation();
       compositionTarget.current = event.target;
