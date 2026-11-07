@@ -2251,6 +2251,27 @@ test "startup claim recovery is fail closed on allocation failure and explicit r
     }
 }
 
+test "backward wall-clock movement cannot replay a consumed timer occurrence" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("clock", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    effects.now = 100;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+}
+
 test "failed Schedule mutations cancel an existing timer without publishing their candidate" {
     for ([_]PersistenceCommit{ .failed, .outcome_unknown }) |commit| {
         var effects: TestEffects = .{};
@@ -2322,4 +2343,70 @@ test "unrelated mutations retain in-process redaction facts" {
     _ = try runtime.create(testDefinition("unrelated", "inspect"), testBinding(), redaction);
     try std.testing.expect(runtime.store.find(first).?.title_redacted);
     try std.testing.expect(runtime.store.find(first).?.input.redacted);
+}
+
+test "title-only edit must not replay a consumed timer occurrence" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("before", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    definition.title = "after";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "pause and resume after clock rollback must not replay a consumed point" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("clock", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
+    effects.now = 150;
+    _ = try runtime.setEnabled(id, 2, true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "consumed one-time schedules stay completed after editing and enabling" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("once", "inspect");
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    effects.now = 150;
+    definition.title = "renamed";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    try std.testing.expect(!try runtime.setEnabled(id, 2, true, testBinding(), redaction));
+    try std.testing.expectEqual(Health.completed, runtime.store.find(id).?.health);
+    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
 }

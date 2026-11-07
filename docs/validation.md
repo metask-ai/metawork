@@ -362,7 +362,7 @@ Schedule 定向入口为 `zig build test-product-schedule test-product-control t
 
 Schedule 执行正确性的回归还必须覆盖：连续跳过超过有界历史容量时，活跃 Task blocker 与待收口 submitted 仍保留，手动和定时路径均不重叠；无可淘汰项时停止计时，持久化失败或结果未知不对旧到期点空转；完整 source resolve 的瞬态拒绝发生在 durable claim 前，replacement 内正常到期不推进游标或写成定义失败；迟到固定间隔只接纳最新到期点；needs_attention 不能经暂停、恢复或立即运行绕过编辑确认。跨语言 fixture 必须验证实际安装 protocol、skipped blocker 和连接 generation 约束下的真实 Task 导航；Renderer 必须验证错误可见、确认提示、过期单次字段、timeout 刷新而不重放。
 
-Schedule 执行事务的回归必须覆盖初始 Run 结果关联、同秒多次手动运行、claim 前内存失败、未知提交是否实际落盘，以及单个定义的瞬态预检拒绝不阻塞其他计划。 全部中断 claim 的恢复、恢复 rollback 与重试失败、解码资源耗尽和不合法游标也必须有独立回归。
+Schedule 执行事务的回归必须覆盖初始 Run 结果关联、同秒多次手动运行、claim 前内存失败、未知提交是否实际落盘，以及单个定义的瞬态预检拒绝不阻塞其他计划。 全部中断 claim 的恢复、恢复 rollback 与重试失败、解码资源耗尽和不合法游标也必须有独立回归。 消费边界必须覆盖同秒编辑、时钟回拨后的暂停恢复、规则变更、单次完成、历史淘汰后的暂停重启，以及旧记录边界恢复时不丢定义。
 
 真实桌面组合入口复用 `scripts/test-agentcore-vertical-macos.mjs`，以 `METAWORK_SCHEDULE_ONLY=1` 选择 Schedule 场景；它使用隔离 HOME、现有进程内测试 vault 与合成 Provider 回复，执行真实 Product、canonical staged AgentCore、OS timer、权限停止与重启恢复。SDK notification action → Application command → Bridge 和 Renderer 定位分别验证；这些自动化证据不替代系统通知中心的真实点击、关闭窗口后的后台运行、其他原生平台或日历/DST 时间语义验收。
 

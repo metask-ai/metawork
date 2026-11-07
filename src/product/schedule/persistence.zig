@@ -513,6 +513,7 @@ const ItemWire = struct {
     failure_reason: ?[]const u8,
     next_run_at_unix_seconds: ?u64,
     occurrences: []OccurrenceWire,
+    last_timer_planned_at_unix_seconds: ?u64 = null,
 };
 
 const BindingWire = struct {
@@ -641,6 +642,7 @@ fn decodeCurrent(
             else
                 null,
             .next_run_at_unix_seconds = wire.next_run_at_unix_seconds,
+            .last_timer_planned_at_unix_seconds = wire.last_timer_planned_at_unix_seconds,
             .occurrences = occurrences[0..wire.occurrences.len],
         }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ScheduledTaskStoreCorrupt;
     }
@@ -675,6 +677,8 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
     try encodeInput(writer, item.input.borrowed());
     try writer.writeAll(",\"recurrence\":");
     try encodeRecurrence(writer, item.recurrence);
+    if (item.last_timer_planned_at_unix_seconds) |last|
+        try writer.print(",\"last_timer_planned_at_unix_seconds\":{d}", .{last});
     try writer.print(
         ",\"enabled\":{s},\"health\":",
         .{if (item.enabled) "true" else "false"},
@@ -1227,4 +1231,78 @@ test "Schedule decoder rejects cursors outside the saved recurrence" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Decode.check, .{bytes});
+}
+
+test "timer consumption survives history eviction and a paused-store restart" {
+    for ([_]scheduled.Recurrence{
+        .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } },
+    }) |recurrence| {
+        var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer store.deinit();
+        const id = try store.create(.{
+            .title = "boundary",
+            .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+            .permission_profile = .approval_required,
+            .input = "inspect",
+            .recurrence = recurrence,
+        }, 100);
+        const item = store.find(id).?;
+        try store.markSubmitted(item, 200, 200, .timer, 42);
+        try store.finalizeOccurrenceTask(item, 200, .timer, 42, .completed, null);
+        for (0..scheduled.max_occurrence_history) |index| {
+            const planned = 201 + index;
+            const task_id = 100 + index;
+            try store.markSubmitted(item, planned, planned, .manual, task_id);
+            try store.finalizeOccurrenceTask(item, planned, .manual, task_id, .completed, null);
+        }
+        for (item.occurrences()) |occurrence| try std.testing.expectEqual(scheduled.OccurrenceSource.manual, occurrence.source);
+        try store.setEnabled(id, 1, false, 300);
+        var output: [max_store_bytes]u8 = undefined;
+        var restored = try decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer restored.deinit();
+        try std.testing.expectEqual(@as(?u64, 200), restored.find(id).?.last_timer_planned_at_unix_seconds);
+        try restored.setEnabled(id, 2, true, 100);
+        try std.testing.expectEqual(try recurrence.firstStrictlyAfter(200), restored.find(id).?.next_run_at_unix_seconds);
+    }
+}
+
+test "legacy timer facts repair a rewound cursor without discarding definitions" {
+    for ([_]scheduled.Recurrence{
+        .{ .once = .{ .at_unix_seconds = 200 } },
+        .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } },
+    }) |recurrence| {
+        var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer store.deinit();
+        const id = try store.create(.{
+            .title = "legacy",
+            .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+            .permission_profile = .approval_required,
+            .input = "inspect",
+            .recurrence = recurrence,
+        }, 100);
+        const item = store.find(id).?;
+        try store.markSubmitted(item, 200, 200, .timer, 42);
+        try store.finalizeOccurrenceTask(item, 200, .timer, 42, .completed, null);
+        // A schema-1 record written by the previous edit/resume path.
+        item.last_timer_planned_at_unix_seconds = null;
+        item.enabled = true;
+        item.health = .ready;
+        item.next_run_at_unix_seconds = 200;
+        var output: [max_store_bytes]u8 = undefined;
+        var restored = try decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer restored.deinit();
+        const copy = restored.find(id).?;
+        try std.testing.expectEqual(@as(?u64, 200), copy.last_timer_planned_at_unix_seconds);
+        try std.testing.expectEqual(try recurrence.firstStrictlyAfter(200), copy.next_run_at_unix_seconds);
+        try std.testing.expectEqualStrings("legacy", copy.title);
+        try std.testing.expectEqual(@as(usize, 1), copy.occurrence_count);
+        // Explicit new-format boundaries must not contradict saved state.
+        item.last_timer_planned_at_unix_seconds = 200;
+        try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+        item.last_timer_planned_at_unix_seconds = 199;
+        item.next_run_at_unix_seconds = null;
+        item.enabled = false;
+        item.health = .paused;
+        try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    }
 }

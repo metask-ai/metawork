@@ -192,10 +192,11 @@ pub const Item = struct {
     health: Health = .ready,
     failure_reason: ?FailureReason = null,
     next_run_at_unix_seconds: ?u64,
+    /// Monotonic automatic-occurrence boundary, independent of bounded history.
+    last_timer_planned_at_unix_seconds: ?u64 = null,
     last_occurrence: ?Occurrence = null,
     occurrence_history: [max_occurrence_history]Occurrence = undefined,
     occurrence_count: usize = 0,
-
     /// Transient resolve refusal, cleared by an authority refresh or edit.
     /// Never persisted: it does not invalidate the captured definition.
     preflight_blocked: bool = false,
@@ -229,6 +230,7 @@ pub const RestoredItem = struct {
     failure_reason: ?FailureReason,
     next_run_at_unix_seconds: ?u64,
     occurrences: []const Occurrence,
+    last_timer_planned_at_unix_seconds: ?u64 = null,
 };
 
 pub const Limits = struct {
@@ -294,6 +296,7 @@ pub const Store = struct {
                 .failure_reason = item.failure_reason,
                 .next_run_at_unix_seconds = item.next_run_at_unix_seconds,
                 .occurrences = item.occurrences(),
+                .last_timer_planned_at_unix_seconds = item.last_timer_planned_at_unix_seconds,
             });
             const copied = result.find(item.id).?;
             copied.preflight_blocked = item.preflight_blocked;
@@ -318,20 +321,50 @@ pub const Store = struct {
         try restored.definition.recurrence.validate();
         if (!validRestoredState(restored))
             return error.InvalidScheduledTaskRestore;
+        var snapshot = restored;
+        if (snapshot.last_timer_planned_at_unix_seconds == 0)
+            return error.InvalidScheduledTaskRestore;
+        for (restored.occurrences) |occurrence| {
+            if (!validOccurrence(occurrence)) return error.InvalidScheduledTaskRestore;
+            if (occurrence.source != .timer) continue;
+            if (restored.last_timer_planned_at_unix_seconds) |last|
+                if (occurrence.planned_at_unix_seconds > last) return error.InvalidScheduledTaskRestore;
+            snapshot.last_timer_planned_at_unix_seconds = @max(
+                snapshot.last_timer_planned_at_unix_seconds orelse 0,
+                occurrence.planned_at_unix_seconds,
+            );
+        }
+        // Older schema-1 stores have no independent boundary. Recover it
+        // from retained timer facts, and repair a cursor rewound by the old
+        // edit/resume path without discarding the persisted definitions.
+        if (restored.last_timer_planned_at_unix_seconds == null and snapshot.enabled) {
+            if (snapshot.last_timer_planned_at_unix_seconds) |last| {
+                if (snapshot.next_run_at_unix_seconds) |next| {
+                    if (next <= last) {
+                        snapshot.next_run_at_unix_seconds = try snapshot.definition.recurrence.firstStrictlyAfter(last);
+                        if (snapshot.next_run_at_unix_seconds == null) {
+                            snapshot.enabled = false;
+                            snapshot.health = .completed;
+                        }
+                    }
+                }
+            }
+        }
+        if (!validRestoredState(snapshot))
+            return error.InvalidScheduledTaskRestore;
         const slot = self.emptySlot() orelse return error.ScheduledTaskCapacity;
         var item = try self.cloneDefinition(
             restored.id,
             restored.epoch,
             restored.definition,
-            restored.next_run_at_unix_seconds,
+            snapshot.next_run_at_unix_seconds,
         );
         errdefer self.deinitItem(&item);
-        item.enabled = restored.enabled;
-        item.health = restored.health;
+        item.enabled = snapshot.enabled;
+        item.health = snapshot.health;
         item.failure_reason = restored.failure_reason;
+        item.last_timer_planned_at_unix_seconds = snapshot.last_timer_planned_at_unix_seconds;
         for (restored.occurrences, 0..) |occurrence, index| {
-            if (!validOccurrence(occurrence))
-                return error.InvalidScheduledTaskRestore;
             item.occurrence_history[index] = occurrence;
         }
         item.occurrence_count = restored.occurrences.len;
@@ -391,9 +424,7 @@ pub const Store = struct {
         if (current.epoch == std.math.maxInt(u64))
             return error.ScheduledTaskIdentityExhausted;
         const preserve_paused = current.health == .paused;
-        const next_run = (try definition.recurrence.firstAtOrAfter(
-            now_unix_seconds,
-        )) orelse return error.InvalidSchedule;
+        const next_run = try nextUnconsumedAtOrAfter(current, definition.recurrence, now_unix_seconds);
         var replacement = try self.cloneDefinition(
             id,
             current.epoch + 1,
@@ -402,6 +433,7 @@ pub const Store = struct {
         );
         errdefer self.deinitItem(&replacement);
         replacement.last_occurrence = current.last_occurrence;
+        replacement.last_timer_planned_at_unix_seconds = current.last_timer_planned_at_unix_seconds;
         replacement.occurrence_count = current.occurrence_count;
         @memcpy(
             replacement.occurrence_history[0..current.occurrence_count],
@@ -412,6 +444,9 @@ pub const Store = struct {
             replacement.health = .paused;
             replacement.failure_reason = null;
             replacement.next_run_at_unix_seconds = null;
+        } else if (next_run == null) {
+            replacement.enabled = false;
+            replacement.health = .completed;
         }
         self.deinitItem(current);
         self.items[slot] = replacement;
@@ -433,11 +468,9 @@ pub const Store = struct {
         if (item.epoch == std.math.maxInt(u64))
             return error.ScheduledTaskIdentityExhausted;
         if (enabled) {
-            item.next_run_at_unix_seconds =
-                (try item.recurrence.firstAtOrAfter(now_unix_seconds)) orelse
-                return error.InvalidSchedule;
-            item.enabled = true;
-            item.health = .ready;
+            item.next_run_at_unix_seconds = try nextUnconsumedAtOrAfter(item, item.recurrence, now_unix_seconds);
+            item.enabled = item.next_run_at_unix_seconds != null;
+            item.health = if (item.enabled) .ready else .completed;
             item.failure_reason = null;
         } else {
             item.enabled = false;
@@ -680,6 +713,11 @@ pub const Store = struct {
         item.occurrence_history[item.occurrence_count] = occurrence;
         item.occurrence_count += 1;
         item.last_occurrence = occurrence;
+        if (occurrence.source == .timer)
+            item.last_timer_planned_at_unix_seconds = @max(
+                item.last_timer_planned_at_unix_seconds orelse 0,
+                occurrence.planned_at_unix_seconds,
+            );
     }
 
     fn cloneDefinition(
@@ -799,9 +837,24 @@ fn advanceAfterTimer(
     }
 }
 
+fn nextUnconsumedAtOrAfter(item: *const Item, recurrence: Recurrence, now: u64) error{InvalidSchedule}!?u64 {
+    const next = try recurrence.firstAtOrAfter(now);
+    if (item.last_timer_planned_at_unix_seconds) |last| {
+        if (next) |value| if (value > last) return value;
+        const following = try recurrence.firstStrictlyAfter(last);
+        // An exhausted consumed rule stays completed; a newly selected past
+        // one-time target which was never consumed remains invalid.
+        if (next == null and following != null) return error.InvalidSchedule;
+        return following;
+    }
+    return next orelse return error.InvalidSchedule;
+}
+
 fn validRestoredState(restored: RestoredItem) bool {
     if (restored.enabled) {
         const next = restored.next_run_at_unix_seconds orelse return false;
+        if (restored.last_timer_planned_at_unix_seconds) |last|
+            if (next <= last) return false;
         switch (restored.definition.recurrence) {
             .once => |once| if (next != once.at_unix_seconds) return false,
             .interval => |interval| {
