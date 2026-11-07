@@ -81,10 +81,21 @@ fn writeItem(
         return error.SnapshotTooLarge;
     writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
     switch (item.recurrence) {
-        .calendar => |rule| writer.print(
-            "{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"{d}\",\"timezone\":\"{s}\",\"frequency\":\"{s}\"}}",
-            .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) },
-        ) catch return error.SnapshotTooLarge,
+        .calendar => |rule| {
+            writer.print("{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"{d}\",\"timezone\":\"{s}\",\"frequency\":\"{s}\"", .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) }) catch return error.SnapshotTooLarge;
+            if (rule.frequency == .weekly or rule.frequency == .monthly) {
+                writer.writeAll(",\"days\":[") catch return error.SnapshotTooLarge;
+                var count: usize = 0;
+                for (0..31) |day| {
+                    if (rule.selectedDays() & (@as(u32, 1) << @as(u5, @intCast(day))) == 0) continue;
+                    if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                    writer.print("{d}", .{day + 1}) catch return error.SnapshotTooLarge;
+                    count += 1;
+                }
+                writer.writeByte(']') catch return error.SnapshotTooLarge;
+            }
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        },
         .once => |once| writer.print(
             "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
             .{once.at_unix_seconds},

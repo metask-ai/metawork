@@ -2476,3 +2476,31 @@ test "calendar edits and resume respect the consumed absolute boundary" {
     try std.testing.expectEqual(@as(?u64, 259), effects.armed_at);
     try std.testing.expectEqual(@as(u64, 5), try runtime.epoch(id));
 }
+
+test "multiple weekdays admit only the latest due occurrence and keep the consumed boundary" {
+    var effects: TestEffects = .{};
+    effects.now = 1793606400 - 1;
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("weekdays", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1793606400, .timezone = .UTC, .frequency = .weekly, .days = 10 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 1793692800), effects.armed_at);
+    effects.now = 1793952000;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    const item = runtime.store.find(id).?;
+    try std.testing.expectEqual(@as(usize, 1), item.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, 1793865600), item.last_timer_planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 1794297600), item.next_run_at_unix_seconds);
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
+    effects.now = 1793692800;
+    _ = try runtime.setEnabled(id, 2, true, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 1794297600), runtime.store.find(id).?.next_run_at_unix_seconds);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+}

@@ -11,23 +11,71 @@ pub const Rule = struct {
     start_at_unix_seconds: u64,
     timezone: Zone,
     frequency: Frequency,
+    // Zero preserves the single anchor date of existing persisted rules.
+    days: u32 = 0,
+
+    pub fn selectedDays(self: Rule) u32 {
+        if (self.days != 0) return self.days;
+        const start: i64 = @intCast(self.start_at_unix_seconds);
+        const date = wallDate(start + offsetAt(self.timezone, start));
+        const day: u5 = @intCast(switch (self.frequency) {
+            .weekly => date.week_day().as_iso() - 1,
+            .monthly => date.ymd().day.as_number() - 1,
+            else => return 0,
+        });
+        return @as(u32, 1) << day;
+    }
+
+    pub fn withDays(self: Rule, days: []const u8) error{InvalidSchedule}!Rule {
+        const limit: u8 = switch (self.frequency) {
+            .weekly => 7,
+            .monthly => 31,
+            else => return error.InvalidSchedule,
+        };
+        if (days.len == 0 or days.len > limit) return error.InvalidSchedule;
+        var mask: u32 = 0;
+        var previous: u8 = 0;
+        for (days) |day| {
+            if (day <= previous or day > limit) return error.InvalidSchedule;
+            mask |= @as(u32, 1) << @as(u5, @intCast(day - 1));
+            previous = day;
+        }
+        var result = self;
+        result.days = mask;
+        try result.validate();
+        return result;
+    }
+
+    fn anchorSelected(self: Rule) bool {
+        if (self.frequency != .weekly and self.frequency != .monthly) return true;
+        var anchor = self;
+        anchor.days = 0;
+        return self.selectedDays() & anchor.selectedDays() != 0;
+    }
 
     pub fn validate(self: Rule) error{InvalidSchedule}!void {
         if (self.start_at_unix_seconds == 0 or self.start_at_unix_seconds > max_timestamp)
             return error.InvalidSchedule;
+        const allowed: u32 = switch (self.frequency) {
+            .weekly => 0x7f,
+            .monthly => 0x7fffffff,
+            else => 0,
+        };
+        if (self.days & ~allowed != 0) return error.InvalidSchedule;
     }
 
     pub fn firstAtOrAfter(self: Rule, query: u64) error{InvalidSchedule}!?u64 {
         try self.validate();
         if (query > max_timestamp) return null;
-        if (query <= self.start_at_unix_seconds) return self.start_at_unix_seconds;
-        return self.aligned(query, .forward);
+        if (query <= self.start_at_unix_seconds and self.anchorSelected()) return self.start_at_unix_seconds;
+        return self.aligned(@max(query, self.start_at_unix_seconds), .forward);
     }
 
     pub fn lastAtOrBefore(self: Rule, query: u64) error{InvalidSchedule}!?u64 {
         try self.validate();
         if (query < self.start_at_unix_seconds) return null;
-        return (try self.aligned(@min(query, max_timestamp), .backward)) orelse self.start_at_unix_seconds;
+        return (try self.aligned(@min(query, max_timestamp), .backward)) orelse
+            if (self.anchorSelected()) self.start_at_unix_seconds else null;
     }
 
     fn aligned(self: Rule, query: u64, direction: Direction) error{InvalidSchedule}!?u64 {
@@ -51,21 +99,25 @@ pub const Rule = struct {
         const period: i64 = switch (self.frequency) {
             .hourly => 3600,
             .daily => 86400,
-            .weekly => 604800,
+            .weekly => 86400,
             .monthly, .yearly => unreachable,
         };
         var wall = anchor + @divFloor(local_bound - anchor, period) * period;
         // Cover both the conservative starting bound and the largest possible
         // wall-time gap, plus the adjacent grid points. This includes full-day
         // date-line changes as well as sub-period DST gaps.
-        const attempts: usize = @intCast(@divFloor(2 * (maximum - minimum) + period - 1, period) + 3);
+        const attempts: usize = @intCast(@divFloor(2 * (maximum - minimum) + period - 1, period) + if (self.frequency == .weekly) @as(i64, 10) else @as(i64, 3));
         for (0..attempts) |_| {
             if (direction == .forward and wall - maximum > max_timestamp) return null;
             if (direction == .backward and wall < anchor) return null;
-            if (resolveWall(self.timezone, wall)) |instant| {
-                if (instant >= start and instant <= max_timestamp and
-                    ((direction == .forward and instant >= current) or
-                        (direction == .backward and instant <= current))) return @intCast(instant);
+            const selected = self.frequency != .weekly or
+                self.selectedDays() & (@as(u32, 1) << @as(u5, @intCast(wallDate(wall).week_day().as_iso() - 1))) != 0;
+            if (selected) {
+                if (resolveWall(self.timezone, wall)) |instant| {
+                    if (instant >= start and instant <= max_timestamp and
+                        ((direction == .forward and instant >= current) or
+                            (direction == .backward and instant <= current))) return @intCast(instant);
+                }
             }
             wall += if (direction == .forward) period else -period;
         }
@@ -85,16 +137,20 @@ pub const Rule = struct {
                 continue;
             }
             const month = @mod(index, 12) + 1;
-            const date = tempora.Date.from_ymd_numbers(@divFloor(index, 12), month, anchor_date.day.as_number());
-            // The date constructor normalizes missing days. Never turn a
-            // monthly 31st or February 29th into a different calendar date.
-            if (date.month().as_number() != month) continue;
-            const days: i64 = @intFromEnum(date) - @intFromEnum(tempora.Date.unix_epoch);
-            const wall = days * 86400 + @mod(anchor, 86400);
-            if (resolveWall(self.timezone, wall)) |instant| {
-                if (instant >= self.start_at_unix_seconds and instant <= max_timestamp and
-                    ((direction == .forward and instant >= current) or
-                        (direction == .backward and instant <= current))) return @intCast(instant);
+            for (0..31) |position| {
+                const day: u5 = @intCast(if (direction == .forward) position else 30 - position);
+                const mask: u32 = if (self.frequency == .monthly) self.selectedDays() else @as(u32, 1) << @as(u5, @intCast(anchor_date.day.as_number() - 1));
+                if (mask & (@as(u32, 1) << day) == 0) continue;
+                const date = tempora.Date.from_ymd_numbers(@divFloor(index, 12), month, @as(i32, day) + 1);
+                // Missing days are skipped rather than normalized into another month.
+                if (date.month().as_number() != month) continue;
+                const days: i64 = @intFromEnum(date) - @intFromEnum(tempora.Date.unix_epoch);
+                const wall = days * 86400 + @mod(anchor, 86400);
+                if (resolveWall(self.timezone, wall)) |instant| {
+                    if (instant >= self.start_at_unix_seconds and instant <= max_timestamp and
+                        ((direction == .forward and instant >= current) or
+                            (direction == .backward and instant <= current))) return @intCast(instant);
+                }
             }
         }
         return null;

@@ -542,6 +542,7 @@ export type ScheduledTaskRecurrence =
       startAtUnixSeconds: string;
       timezone: string;
       frequency: ScheduledTaskCalendarFrequency;
+      days?: number[];
     }
   | {
       kind: "once";

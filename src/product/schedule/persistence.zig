@@ -540,6 +540,7 @@ const RecurrenceWire = struct {
     every_seconds: ?u64 = null,
     timezone: ?[]const u8 = null,
     frequency: ?[]const u8 = null,
+    days: ?[]const u8 = null,
 };
 
 const OccurrenceWire = struct {
@@ -752,10 +753,21 @@ fn encodeInput(writer: *std.Io.Writer, input: []const u8) !void {
 
 fn encodeRecurrence(writer: *std.Io.Writer, recurrence: scheduled.Recurrence) !void {
     switch (recurrence) {
-        .calendar => |rule| try writer.print(
-            "{{\"kind\":\"calendar\",\"start_at_unix_seconds\":{d},\"timezone\":\"{s}\",\"frequency\":\"{s}\"}}",
-            .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) },
-        ),
+        .calendar => |rule| {
+            try writer.print("{{\"kind\":\"calendar\",\"start_at_unix_seconds\":{d},\"timezone\":\"{s}\",\"frequency\":\"{s}\"", .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) });
+            if (rule.frequency == .weekly or rule.frequency == .monthly) {
+                try writer.writeAll(",\"days\":[");
+                var count: usize = 0;
+                for (0..31) |day| {
+                    if (rule.selectedDays() & (@as(u32, 1) << @as(u5, @intCast(day))) == 0) continue;
+                    if (count != 0) try writer.writeByte(',');
+                    try writer.print("{d}", .{day + 1});
+                    count += 1;
+                }
+                try writer.writeByte(']');
+            }
+            try writer.writeByte('}');
+        },
         .once => |once| try writer.print(
             "{{\"kind\":\"once\",\"at_unix_seconds\":{d}}}",
             .{once.at_unix_seconds},
@@ -778,15 +790,16 @@ fn decodeInput(wire: InputWire) Error![]const u8 {
 fn decodeRecurrence(wire: RecurrenceWire) Error!scheduled.Recurrence {
     if (std.mem.eql(u8, wire.kind, "calendar")) {
         if (wire.at_unix_seconds != null or wire.every_seconds != null) return error.ScheduledTaskStoreCorrupt;
-        const result: scheduled.Recurrence = .{ .calendar = .{
+        var result: scheduled.Recurrence = .{ .calendar = .{
             .start_at_unix_seconds = wire.start_at_unix_seconds orelse return error.ScheduledTaskStoreCorrupt,
             .timezone = parseEnum(scheduled.TimeZone, wire.timezone orelse return error.ScheduledTaskStoreCorrupt) orelse return error.ScheduledTaskStoreCorrupt,
             .frequency = parseEnum(scheduled.CalendarFrequency, wire.frequency orelse return error.ScheduledTaskStoreCorrupt) orelse return error.ScheduledTaskStoreCorrupt,
         } };
+        if (wire.days) |days| result.calendar = result.calendar.withDays(days) catch return error.ScheduledTaskStoreCorrupt;
         result.validate() catch return error.ScheduledTaskStoreCorrupt;
         return result;
     }
-    if (wire.timezone != null or wire.frequency != null) return error.ScheduledTaskStoreCorrupt;
+    if (wire.timezone != null or wire.frequency != null or wire.days != null) return error.ScheduledTaskStoreCorrupt;
     if (std.mem.eql(u8, wire.kind, "once")) {
         if (wire.start_at_unix_seconds != null or wire.every_seconds != null)
             return error.ScheduledTaskStoreCorrupt;
@@ -1377,4 +1390,21 @@ test "all calendar frequencies preserve their rule through persistence" {
         try std.testing.expectEqual(frequency, restored.find(id).?.recurrence.calendar.frequency);
         try std.testing.expectEqual(store.find(id).?.next_run_at_unix_seconds, restored.find(id).?.next_run_at_unix_seconds);
     }
+}
+
+test "multiple calendar days survive persistence and legacy anchors retain their single date" {
+    for ([_]scheduled.CalendarFrequency{ .weekly, .monthly }) |frequency| {
+        const recurrence = try decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1793606400, .timezone = "UTC", .frequency = @tagName(frequency), .days = &.{ 1, 3, 7 } });
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try encodeRecurrence(&writer, recurrence);
+        const parsed = try std.json.parseFromSlice(RecurrenceWire, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const restored = try decodeRecurrence(parsed.value);
+        try std.testing.expectEqual(recurrence.calendar.selectedDays(), restored.calendar.selectedDays());
+        try std.testing.expectEqual(try recurrence.firstStrictlyAfter(1793606400), try restored.firstStrictlyAfter(1793606400));
+        const legacy = try decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1793606400, .timezone = "UTC", .frequency = @tagName(frequency) });
+        try std.testing.expectEqual(@as(u32, 1), @as(u32, @popCount(legacy.calendar.selectedDays())));
+    }
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1000, .timezone = "UTC", .frequency = "weekly", .days = &.{} }));
 }

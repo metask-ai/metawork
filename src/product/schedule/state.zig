@@ -1116,3 +1116,33 @@ test "monthly calendar skips a DST gap and resumes at the original local time" {
     try std.testing.expectEqual(@as(?u64, 1775629800), try rule.firstStrictlyAfter(1770535800));
     try std.testing.expectEqual(@as(?u64, 1770535800), try rule.lastAtOrBefore(1775001600));
 }
+
+test "weekly selections schedule only selected weekdays on both sides of a query" {
+    const rule = try (Recurrence{ .calendar = .{ .start_at_unix_seconds = 1793606400, .timezone = .UTC, .frequency = .weekly } }).calendar.withDays(&.{ 2, 4 });
+    const recurrence: Recurrence = .{ .calendar = rule };
+    try std.testing.expectEqual(@as(?u64, 1793692800), try recurrence.firstAtOrAfter(1793606400));
+    try std.testing.expectEqual(@as(?u64, 1793865600), try recurrence.firstStrictlyAfter(1793692800));
+    try std.testing.expectEqual(@as(?u64, 1793692800), try recurrence.lastAtOrBefore(1793833200));
+    try std.testing.expectEqual(@as(?u64, null), try recurrence.lastAtOrBefore(1793606400));
+    try std.testing.expectEqual(@as(?u64, 1794297600), try recurrence.firstStrictlyAfter(1793865600));
+}
+
+test "monthly selections cross months and skip absent dates" {
+    const rule = try (Recurrence{ .calendar = .{ .start_at_unix_seconds = 1769760000, .timezone = .UTC, .frequency = .monthly } }).calendar.withDays(&.{ 1, 15, 31 });
+    const recurrence: Recurrence = .{ .calendar = rule };
+    try std.testing.expectEqual(@as(?u64, 1769846400), try recurrence.firstAtOrAfter(1769760000));
+    try std.testing.expectEqual(@as(?u64, 1769932800), try recurrence.firstStrictlyAfter(1769846400));
+    try std.testing.expectEqual(@as(?u64, 1771142400), try recurrence.firstStrictlyAfter(1769932800));
+    try std.testing.expectEqual(@as(?u64, 1772352000), try recurrence.firstStrictlyAfter(1771142400));
+    try std.testing.expectEqual(@as(?u64, 1771142400), try recurrence.lastAtOrBefore(1772352000 - 1));
+    try std.testing.expectEqual(@as(?u64, null), try recurrence.lastAtOrBefore(1769760000));
+}
+
+test "calendar selections reject empty duplicate unordered or invalid days" {
+    const weekly: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1000, .timezone = .UTC, .frequency = .weekly } };
+    for ([_][]const u8{ &.{}, &.{0}, &.{8}, &.{ 1, 1 }, &.{ 2, 1 } }) |days| try std.testing.expectError(error.InvalidSchedule, weekly.calendar.withDays(days));
+    const monthly: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1000, .timezone = .UTC, .frequency = .monthly } };
+    try std.testing.expectError(error.InvalidSchedule, monthly.calendar.withDays(&.{32}));
+    const daily: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1000, .timezone = .UTC, .frequency = .daily } };
+    try std.testing.expectError(error.InvalidSchedule, daily.calendar.withDays(&.{1}));
+}

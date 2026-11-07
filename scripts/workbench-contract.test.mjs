@@ -4124,6 +4124,8 @@ test("calendar Schedule projection strictly validates frequency, zone and timest
   snapshot.scheduledTasks = [entries[0]];
   for (const frequency of ["hourly", "daily", "weekly", "monthly", "yearly"]) {
     snapshot.scheduledTasks[0].recurrence.frequency = frequency;
+    if (frequency !== "weekly" && frequency !== "monthly")
+      delete snapshot.scheduledTasks[0].recurrence.days;
     assert.equal(
       decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.frequency,
       frequency,
@@ -4141,4 +4143,39 @@ test("calendar Schedule projection strictly validates frequency, zone and timest
     Object.assign(invalid.scheduledTasks[0].recurrence, patch);
     assert.throws(() => decodeWorkbenchSnapshot(invalid));
   }
+});
+
+test("calendar day sets decode strictly and preserve all selected dates", () => {
+  const snapshot = clone(fixture);
+  Object.assign(snapshot.capabilities, {
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  const entries = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/schedule/renderer_projection.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  snapshot.scheduledTasks = [entries[0]];
+  Object.assign(snapshot.scheduledTasks[0].recurrence, {
+    frequency: "weekly",
+    days: [1, 3, 7],
+  });
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.days,
+    [1, 3, 7],
+  );
+  for (const days of [[], [0], [8], [1, 1], [3, 1], [1.5], ["1"], null]) {
+    const invalid = clone(snapshot);
+    invalid.scheduledTasks[0].recurrence.days = days;
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+  snapshot.scheduledTasks[0].recurrence.frequency = "daily";
+  assert.throws(() => decodeWorkbenchSnapshot(snapshot));
 });

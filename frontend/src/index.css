@@ -6500,12 +6500,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 400;
 }
 
-.scheduled-time-select .selection-trigger-leading {
-  color: inherit;
-  font-size: var(--text-control);
-  white-space: nowrap;
-}
-
 .scheduled-editor .scheduled-inline-input {
   display: flex;
   min-width: 0;
@@ -6593,17 +6587,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-editor input[type="number"]::-webkit-outer-spin-button {
   margin: 0;
   appearance: none;
-}
-
-.scheduled-editor input[type="datetime-local"] {
-  color-scheme: light;
-  font-variant-numeric: tabular-nums;
-}
-
-.scheduled-editor
-  input[type="datetime-local"]::-webkit-calendar-picker-indicator {
-  opacity: 0.52;
-  cursor: pointer;
 }
 
 .scheduled-interval {

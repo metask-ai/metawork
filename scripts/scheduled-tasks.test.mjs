@@ -118,6 +118,22 @@ async function chooseTime(user, value) {
   );
 }
 
+async function chooseFrequency(user, label) {
+  await user.click(screen.getByRole("button", { name: "Repeat", exact: true }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: label, exact: true }),
+  );
+  if (label === "Weekly" || label === "Monthly") {
+    await screen.findAllByRole("menuitemcheckbox");
+    assert.match(
+      screen.getByRole("button", { name: "Repeat", exact: true }).textContent,
+      new RegExp(label),
+    );
+  }
+  for (let i = 0; i < 3 && screen.queryAllByRole("menu").length; i++)
+    await user.keyboard("{Escape}");
+}
+
 function scheduleSnapshot(overrides = {}) {
   const snapshot = structuredClone(fixture);
   Object.assign(snapshot.capabilities, {
@@ -232,8 +248,10 @@ test("list action failures stay visible without opening an editor", async () => 
   );
 });
 
-test("expired one-time schedules require a future time and validate again at submit", async () => {
-  let saves = 0;
+test("expired one-time edits use the shared clock picker and recalculate at submission", async (ctx) => {
+  let now = new Date("2032-01-31T12:00").getTime();
+  ctx.mock.method(Date, "now", () => now);
+  let saved;
   renderDom(
     scheduledElement(
       scheduleSnapshot({
@@ -243,29 +261,27 @@ test("expired one-time schedules require a future time and validate again at sub
         nextRunAtUnixSeconds: null,
       }),
       {
-        onUpdate: async () => {
-          saves++;
+        onUpdate: async (_id, _epoch, input) => {
+          saved = input;
         },
       },
     ),
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
-  );
-  const time = screen.getByLabelText("Starts");
+  const user = userEvent.setup({ document });
+  await user.click(document.querySelector(".scheduled-row-main"));
+  const time = screen.getByRole("group", { name: "Time" });
   assert.equal(time.getAttribute("aria-invalid"), "true");
+  assert.equal(screen.queryByLabelText("Starts"), null);
   assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
-  fireEvent.change(time, { target: { value: "2099-01-01T12:00" } });
+  await chooseTime(user, "13:00");
   assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, false);
-  const now = Date.now;
-  try {
-    Date.now = () => new Date("2100-01-01T12:00").getTime();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
-    assert.equal(saves, 0);
-    assert.equal(time.getAttribute("aria-invalid"), "true");
-  } finally {
-    Date.now = now;
-  }
+  now = new Date("2032-02-02T14:00").getTime();
+  await user.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(saved));
+  assert.equal(
+    saved.recurrence.atUnixSeconds,
+    String(new Date("2032-02-03T13:00").getTime() / 1000),
+  );
 });
 
 test("unavailable history is distinct from failure and delay retains its planned time", () => {
@@ -604,22 +620,18 @@ test("schedule editor controls have explicit semantics and no native chrome", as
   );
   assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
 
-  await user.click(screen.getByRole("combobox", { name: "Repeat" }));
+  await user.click(screen.getByRole("button", { name: "Repeat", exact: true }));
   assert.deepEqual(
-    (await screen.findAllByRole("option")).map(
-      (option) =>
-        option.querySelector(".selection-menu-item-label").textContent,
+    (await screen.findAllByRole("menuitem")).map(
+      (option) => option.textContent,
     ),
-    ["Once", "Daily", "Weekly", "Monthly", "Yearly"],
+    ["Once", "Daily", "Weekly", "Monthly"],
   );
   await user.click(
-    await screen.findByRole("option", { name: "Daily", exact: true }),
+    await screen.findByRole("menuitem", { name: "Daily", exact: true }),
   );
   assert.equal(screen.queryByRole("spinbutton", { name: "Every" }), null);
-  await user.click(screen.getByRole("combobox", { name: "Repeat" }));
-  await user.click(
-    await screen.findByRole("option", { name: "Once", exact: true }),
-  );
+  await chooseFrequency(user, "Once");
   assert.equal(dialog.querySelectorAll("select").length, 0);
   assert.ok(dialog.querySelector('[role="combobox"]'));
 
@@ -947,8 +959,13 @@ test("a confirmed local pause retains edits and adopts only the acknowledged epo
   assert.equal(updated[2].title, "Keep this name");
 });
 
-test("new calendar choices submit explicit frequencies and the local IANA zone", async () => {
-  for (const frequency of ["daily", "weekly", "monthly", "yearly"]) {
+test("new calendar choices submit their selected days and use one shared time picker", async (ctx) => {
+  ctx.mock.method(Date, "now", () => new Date("2032-01-31T12:00").getTime());
+  for (const [frequency, date, days] of [
+    ["daily", "2032-02-01T09:30", undefined],
+    ["weekly", "2032-02-07T09:30", [6]],
+    ["monthly", "2032-03-31T09:30", [31]],
+  ]) {
     const snapshot = scheduleSnapshot();
     snapshot.scheduledTasks = [];
     let created;
@@ -959,44 +976,28 @@ test("new calendar choices submit explicit frequencies and the local IANA zone",
         },
       }),
     );
-    const user = userEvent.setup({ document: dom.window.document });
+    const user = userEvent.setup({ document });
     await user.click(screen.getByRole("button", { name: "New" }));
     fireEvent.change(screen.getByLabelText("Name"), {
-      target: { value: "Calendar report" },
+      target: { value: "Calendar" },
     });
     fireEvent.change(screen.getByLabelText("Instruction"), {
-      target: { value: "Summarize work" },
+      target: { value: "Inspect" },
     });
-    await user.click(screen.getByRole("combobox", { name: "Repeat" }));
-    await user.click(
-      await screen.findByRole("option", {
-        name: frequency[0].toUpperCase() + frequency.slice(1),
-        exact: true,
-      }),
+    await chooseFrequency(
+      user,
+      frequency[0].toUpperCase() + frequency.slice(1),
     );
-    const timeOnly = frequency === "daily";
-    if (timeOnly) {
-      await chooseTime(user, "09:30");
-    } else {
-      const time = screen.getByLabelText("Starts");
-      assert.equal(time.type, "datetime-local");
-      fireEvent.change(time, { target: { value: "2032-01-31T09:30" } });
-    }
-    const expected = timeOnly
-      ? new Date(Date.now())
-      : new Date("2032-01-31T09:30");
-    if (timeOnly) {
-      expected.setHours(9, 30, 0, 0);
-      if (expected.getTime() <= Date.now())
-        expected.setDate(expected.getDate() + 1);
-    }
+    assert.equal(screen.queryByLabelText("Starts"), null);
+    await chooseTime(user, "09:30");
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() => assert.ok(created));
     assert.deepEqual(created.recurrence, {
       kind: "calendar",
       frequency,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      startAtUnixSeconds: String(expected.getTime() / 1000),
+      startAtUnixSeconds: String(new Date(date).getTime() / 1000),
+      ...(days ? { days } : {}),
     });
     cleanup();
   }
@@ -1006,6 +1007,7 @@ test("calendar edits preserve the stored recurrence", async () => {
   const recurrence = {
     kind: "calendar",
     frequency: "monthly",
+    days: [1, 15, 31],
     timezone: "America/New_York",
     startAtUnixSeconds: "1793514637",
   };
@@ -1017,7 +1019,7 @@ test("calendar edits preserve the stored recurrence", async () => {
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: /Review.*Monthly/ }));
+  fireEvent.click(document.querySelector(".scheduled-row-main"));
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "Renamed" },
   });
@@ -1037,9 +1039,9 @@ test("legacy fixed intervals stay editable without being reinterpreted as calend
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: /^Review / }));
+  fireEvent.click(document.querySelector(".scheduled-row-main"));
   assert.match(
-    screen.getByRole("combobox", { name: "Repeat" }).textContent,
+    screen.getByRole("button", { name: "Repeat", exact: true }).textContent,
     /Fixed interval/,
   );
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
@@ -1132,4 +1134,202 @@ test("one time panel contains both columns and supports keyboard navigation", as
   assert.ok(screen.getByRole("dialog", { name: "New schedule" }));
   await waitFor(() => assert.ok(document.activeElement === trigger));
   assert.equal(within(picker).queryByRole("textbox"), null);
+});
+
+test("weekly and monthly submenus default to today, enforce one selection, and submit sorted sets", async (ctx) => {
+  ctx.mock.method(Date, "now", () => new Date("2032-01-31T12:00").getTime());
+  for (const [label, defaultLabel, extraLabels, expectedDays, expectedDate] of [
+    ["Weekly", "Sat", ["Wed", "Mon"], [1, 3], "2032-02-02T09:30"],
+    ["Monthly", "31", ["15", "1"], [1, 15], "2032-02-01T09:30"],
+  ]) {
+    const snapshot = scheduleSnapshot();
+    snapshot.scheduledTasks = [];
+    let saved;
+    renderDom(
+      scheduledElement(snapshot, {
+        onCreate: async (input) => {
+          saved = input;
+        },
+      }),
+    );
+    const user = userEvent.setup({ document });
+    await user.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Multiple days" },
+    });
+    fireEvent.change(screen.getByLabelText("Instruction"), {
+      target: { value: "Inspect" },
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Repeat", exact: true }),
+    );
+    assert.equal(
+      screen.queryByRole("menuitem", { name: "Yearly", exact: true }),
+      null,
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: label, exact: true }),
+    );
+    const initial = await screen.findByRole("menuitemcheckbox", {
+      name: defaultLabel,
+      exact: true,
+    });
+    assert.equal(initial.getAttribute("aria-checked"), "true");
+    assert.equal(initial.getAttribute("aria-disabled"), "true");
+    await user.click(initial);
+    assert.equal(initial.getAttribute("aria-checked"), "true");
+    for (const name of extraLabels)
+      await user.click(
+        screen.getByRole("menuitemcheckbox", { name, exact: true }),
+      );
+    assert.equal(initial.getAttribute("aria-disabled"), null);
+    await user.click(initial);
+    for (let i = 0; i < 3 && screen.queryAllByRole("menu").length; i++)
+      await user.keyboard("{Escape}");
+    assert.match(
+      screen.getByRole("button", { name: "Repeat", exact: true }).textContent,
+      label === "Weekly" ? /Weekly Mon, Wed/ : /Monthly 1, 15/,
+    );
+    await chooseTime(user, "09:30");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => assert.ok(saved));
+    assert.deepEqual(saved.recurrence.days, expectedDays);
+    assert.equal(
+      saved.recurrence.startAtUnixSeconds,
+      String(new Date(expectedDate).getTime() / 1000),
+    );
+    cleanup();
+  }
+});
+
+test("editing day selections and time preserves untouched rules and refills all choices", async (ctx) => {
+  ctx.mock.method(Date, "now", () => new Date("2032-01-31T12:00").getTime());
+  for (const [frequency, days] of [
+    ["daily", undefined],
+    ["weekly", [1, 3]],
+    ["monthly", [1, 15, 31]],
+  ]) {
+    const recurrence = {
+      kind: "calendar",
+      frequency,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      startAtUnixSeconds: String(
+        new Date("2032-01-01T08:30:37").getTime() / 1000,
+      ),
+      ...(days ? { days } : {}),
+    };
+    let saved;
+    renderDom(
+      scheduledElement(scheduleSnapshot({ recurrence }), {
+        onUpdate: async (_id, _epoch, input) => {
+          saved = input;
+        },
+      }),
+    );
+    const user = userEvent.setup({ document });
+    await user.click(document.querySelector(".scheduled-row-main"));
+    assert.equal(screen.queryByLabelText("Starts"), null);
+    assert.ok(screen.getByRole("group", { name: "Time" }));
+    if (days) {
+      await user.click(
+        screen.getByRole("button", { name: "Repeat", exact: true }),
+      );
+      await user.click(
+        await screen.findByRole("menuitem", {
+          name: frequency[0].toUpperCase() + frequency.slice(1),
+          exact: true,
+        }),
+      );
+      const choices = await screen.findAllByRole("menuitemcheckbox");
+      assert.equal(
+        choices.filter((item) => item.getAttribute("aria-checked") === "true")
+          .length,
+        days.length,
+      );
+      for (let i = 0; i < 3 && screen.queryAllByRole("menu").length; i++)
+        await user.keyboard("{Escape}");
+    }
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Renamed" },
+    });
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => assert.ok(saved));
+    assert.deepEqual(saved.recurrence, recurrence);
+    await user.click(document.querySelector(".scheduled-row-main"));
+    await chooseTime(user, "09:45");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    const expected =
+      frequency === "weekly" ? "2032-02-02T09:45" : "2032-02-01T09:45";
+    await waitFor(() =>
+      assert.equal(
+        saved.recurrence.startAtUnixSeconds,
+        String(new Date(expected).getTime() / 1000),
+      ),
+    );
+    cleanup();
+  }
+});
+
+test("Chinese recurrence summaries use the agreed weekday and month-day text", async () => {
+  const { ScheduleRecurrencePicker } = await vite.ssrLoadModule(
+    "/src/features/scheduled-tasks/ScheduleRecurrencePicker.tsx",
+  );
+  for (const [value, expected] of [
+    ["weekly", "每周 周一、周三"],
+    ["monthly", "每月 1日、15日"],
+  ]) {
+    const markup = renderToStaticMarkup(
+      createElement(
+        I18nContext.Provider,
+        {
+          value: {
+            locale: "zh-CN",
+            setLocale() {},
+            t: (id, values) => translate("zh-CN", id, values),
+          },
+        },
+        createElement(ScheduleRecurrencePicker, {
+          value,
+          weekdays: [1, 3],
+          monthDays: [1, 15],
+          onKindChange() {},
+          onDaysChange() {},
+        }),
+      ),
+    );
+    assert.ok(markup.includes(expected));
+  }
+});
+
+test("editing a saved weekly rule keeps its local clock and selected weekdays", async (ctx) => {
+  ctx.mock.method(Date, "now", () => Date.parse("2032-01-31T12:00:00Z"));
+  let saved;
+  const recurrence = {
+    kind: "calendar",
+    frequency: "weekly",
+    timezone: "America/New_York",
+    days: [1, 3],
+    startAtUnixSeconds: String(Date.parse("2032-01-01T08:30:37-05:00") / 1000),
+  };
+  renderDom(
+    scheduledElement(scheduleSnapshot({ recurrence }), {
+      onUpdate: async (_id, _epoch, input) => {
+        saved = input;
+      },
+    }),
+  );
+  const user = userEvent.setup({ document });
+  await user.click(document.querySelector(".scheduled-row-main"));
+  assert.match(
+    within(screen.getByRole("group", { name: "Time" })).getByRole("button")
+      .textContent,
+    /08:30/,
+  );
+  await chooseTime(user, "09:45");
+  await user.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(saved));
+  assert.deepEqual(saved.recurrence, {
+    ...recurrence,
+    startAtUnixSeconds: String(Date.parse("2032-02-02T09:45:00-05:00") / 1000),
+  });
 });

@@ -9,6 +9,34 @@ type MenuItemProps = ComponentProps<typeof BaseMenu.Item> & {
 
 export const Menu = {
   Root: BaseMenu.Root,
+  SubmenuRoot: BaseMenu.SubmenuRoot,
+  SubmenuTrigger: ({
+    className,
+    ...props
+  }: ComponentProps<typeof BaseMenu.SubmenuTrigger>) => (
+    <BaseMenu.SubmenuTrigger
+      className={cn(
+        "flex min-h-8 cursor-default items-center gap-2 rounded-[6px] px-[9px] outline-none data-highlighted:bg-(--ui-action-hover-surface) data-disabled:opacity-40",
+        focusRing,
+        className,
+      )}
+      {...props}
+    />
+  ),
+  CheckboxItem: ({
+    className,
+    ...props
+  }: ComponentProps<typeof BaseMenu.CheckboxItem>) => (
+    <BaseMenu.CheckboxItem
+      className={cn(
+        "flex min-h-8 cursor-default items-center gap-2 rounded-[6px] px-[9px] outline-none data-highlighted:bg-(--ui-action-hover-surface) data-disabled:opacity-40",
+        focusRing,
+        className,
+      )}
+      {...props}
+    />
+  ),
+  CheckboxItemIndicator: BaseMenu.CheckboxItemIndicator,
   Trigger: ({
     className,
     ...props

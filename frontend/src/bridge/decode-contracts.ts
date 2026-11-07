@@ -4410,6 +4410,12 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
                 "startAtUnixSeconds",
                 "timezone",
                 "frequency",
+                ...(Object.hasOwn(
+                  record(item.recurrence, `${path}.recurrence`),
+                  "days",
+                )
+                  ? ["days"]
+                  : []),
               ]);
               const timezone = stringValue(
                 rule.timezone,
@@ -4431,15 +4437,44 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
                   `${path}.recurrence.startAtUnixSeconds`,
                   "out of calendar range",
                 );
+              const frequency = enumValue(
+                rule.frequency,
+                `${path}.recurrence.frequency`,
+                ["hourly", "daily", "weekly", "monthly", "yearly"] as const,
+              );
+              let days: number[] | undefined;
+              if (rule.days !== undefined) {
+                const limit =
+                  frequency === "weekly" ? 7 : frequency === "monthly" ? 31 : 0;
+                const values = arrayValue(
+                  rule.days,
+                  `${path}.recurrence.days`,
+                  (value) => value,
+                );
+                if (!limit || !values.length || values.length > limit)
+                  fail(`${path}.recurrence.days`, "invalid calendar days");
+                let previous = 0;
+                days = values.map((value, index) => {
+                  if (
+                    typeof value !== "number" ||
+                    !Number.isInteger(value) ||
+                    value <= previous ||
+                    value > limit
+                  )
+                    fail(
+                      `${path}.recurrence.days[${index}]`,
+                      "expected ordered unique calendar day",
+                    );
+                  previous = value as number;
+                  return value as number;
+                });
+              }
               return {
                 kind: "calendar" as const,
                 startAtUnixSeconds: start,
                 timezone,
-                frequency: enumValue(
-                  rule.frequency,
-                  `${path}.recurrence.frequency`,
-                  ["hourly", "daily", "weekly", "monthly", "yearly"] as const,
-                ),
+                frequency,
+                ...(days ? { days } : {}),
               };
             })()
           : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");

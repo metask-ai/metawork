@@ -27,6 +27,17 @@ import { useI18n } from "../../i18n/context.ts";
 import { persistenceRecoveryErrorMessageId } from "../../i18n/persistence-recovery.ts";
 import { BridgeCommandTimeoutError } from "../../bridge/client.ts";
 
+import {
+  ScheduleRecurrencePicker,
+  calendarDays,
+} from "./ScheduleRecurrencePicker.tsx";
+
+import {
+  calendarDateTime,
+  calendarInstant,
+  nextCalendarTime,
+} from "./calendar-time.ts";
+
 type Draft = {
   modelId: string;
   modelChanged: boolean;
@@ -34,6 +45,8 @@ type Draft = {
   text: string;
   permissionProfile: PermissionProfile;
   recurrenceKind: "once" | "interval" | ScheduledTaskCalendarFrequency;
+  weekdays: number[];
+  monthDays: number[];
   timezone: string;
   originalStart: { text: string; unixSeconds: number } | null;
   start: string;
@@ -55,6 +68,8 @@ function defaultDraft(permissionProfile: PermissionProfile): Draft {
     text: "",
     permissionProfile,
     recurrenceKind: "once",
+    weekdays: [new Date(Date.now()).getDay() || 7],
+    monthDays: [new Date(Date.now()).getDate()],
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     originalStart: null,
     start: localDateTime(Math.floor(Date.now() / 1000) + 3600),
@@ -72,7 +87,10 @@ function draftFromTask(task: ScheduledTaskView): Draft {
     task.recurrence.kind === "calendar"
       ? task.recurrence.timezone
       : Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const startText = localDateTime(Number(start));
+  const startText =
+    task.recurrence.kind === "calendar"
+      ? calendarDateTime(Number(start), timezone)
+      : localDateTime(Number(start));
   const everySeconds =
     task.recurrence.kind === "interval"
       ? Number(task.recurrence.everySeconds)
@@ -94,6 +112,16 @@ function draftFromTask(task: ScheduledTaskView): Draft {
       task.recurrence.kind === "calendar"
         ? task.recurrence.frequency
         : task.recurrence.kind,
+    weekdays:
+      task.recurrence.kind === "calendar" &&
+      task.recurrence.frequency === "weekly"
+        ? calendarDays(task.recurrence)
+        : [new Date(Date.now()).getDay() || 7],
+    monthDays:
+      task.recurrence.kind === "calendar" &&
+      task.recurrence.frequency === "monthly"
+        ? calendarDays(task.recurrence)
+        : [new Date(Date.now()).getDate()],
     timezone,
     originalStart: { text: startText, unixSeconds: Number(start) },
     start: startText,
@@ -109,35 +137,44 @@ function modelOptions(snapshot: WorkbenchSnapshot) {
   ].flatMap((provider) => readyModelOptions(snapshot.models, provider.id));
 }
 
-function draftUnixSeconds(draft: Draft, timeOnly = false): number | null {
-  if (timeOnly) {
-    const time = draft.start.slice(11);
-    if (!/^\d{2}:\d{2}$/.test(time)) return null;
-    const [hour, minute] = time.split(":").map(Number);
-    if (hour > 23 || minute > 59) return null;
-    const now = Date.now();
-    const next = new Date(now);
-    next.setHours(hour, minute, 0, 0);
-    if (next.getTime() <= now) {
-      next.setDate(next.getDate() + 1);
-      next.setHours(hour, minute, 0, 0);
-    }
-    return Math.floor(next.getTime() / 1000);
+function draftUnixSeconds(draft: Draft): number | null {
+  const days =
+    draft.recurrenceKind === "weekly" ? draft.weekdays : draft.monthDays;
+  if (["weekly", "monthly"].includes(draft.recurrenceKind)) {
+    const limit = draft.recurrenceKind === "weekly" ? 7 : 31;
+    if (
+      !days.length ||
+      days.some(
+        (day, i) =>
+          !Number.isInteger(day) ||
+          day < 1 ||
+          day > limit ||
+          (i > 0 && day <= days[i - 1]),
+      )
+    )
+      return null;
   }
   if (draft.originalStart && draft.start === draft.originalStart.text)
     return draft.originalStart.unixSeconds;
-  const start = Math.floor(new Date(draft.start).getTime() / 1000);
-  return Number.isSafeInteger(start) && start > 0 && start <= 253402300799
-    ? start
-    : null;
+  const time = draft.start.slice(11);
+  if (!/^\d{2}:\d{2}$/.test(time)) return null;
+  const [hour, minute] = time.split(":").map(Number);
+  if (hour > 23 || minute > 59) return null;
+  if (
+    draft.recurrenceKind === "interval" ||
+    draft.recurrenceKind === "hourly" ||
+    draft.recurrenceKind === "yearly"
+  ) {
+    return calendarInstant(draft.start, draft.timezone);
+  }
+  return nextCalendarTime(time, draft.recurrenceKind, days, draft.timezone);
 }
 
 function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
-  timeOnly = false,
 ): ScheduledTaskMutation | null {
-  const start = draftUnixSeconds(draft, timeOnly);
+  const start = draftUnixSeconds(draft);
   if (!draft.title.trim() || start === null) return null;
   if (draft.recurrenceKind === "once" && start <= Math.floor(Date.now() / 1000))
     return null;
@@ -188,6 +225,11 @@ function toMutation(
               startAtUnixSeconds: String(start),
               timezone: draft.timezone,
               frequency: draft.recurrenceKind,
+              ...(draft.recurrenceKind === "weekly"
+                ? { days: draft.weekdays }
+                : draft.recurrenceKind === "monthly"
+                  ? { days: draft.monthDays }
+                  : {}),
             },
   };
 }
@@ -260,12 +302,9 @@ export function ScheduledTasksPage({
   const editorStale =
     selected !== null && selected.epoch !== editingEpoch && !busy;
   const hasScheduledTasks = snapshot.scheduledTasks.length > 0;
-  const timeOnly =
-    creating &&
-    (draft.recurrenceKind === "once" || draft.recurrenceKind === "daily");
-  const timeLabel = t(timeOnly ? "scheduled.time" : "scheduled.starts");
-  const mutation = toMutation(snapshot, draft, timeOnly);
-  const draftStart = draftUnixSeconds(draft, timeOnly);
+  const timeLabel = t("scheduled.time");
+  const mutation = toMutation(snapshot, draft);
+  const draftStart = draftUnixSeconds(draft);
   const invalidStart = draftStart === null;
   const expiredOnce =
     draft.recurrenceKind === "once" &&
@@ -312,14 +351,6 @@ export function ScheduledTasksPage({
       setCreating(false);
     }
   }, [selectedId, snapshot.scheduledTasks]);
-
-  useEffect(() => {
-    if (!editorOpen || creating) return;
-    const frame = window.requestAnimationFrame(() =>
-      editorHeading.current?.focus(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [creating, editorOpen, selectedId]);
 
   function rememberEditorTrigger() {
     editorTrigger.current =
@@ -369,7 +400,7 @@ export function ScheduledTasksPage({
       setError(t("scheduled.changed"));
       return;
     }
-    const mutation = toMutation(snapshot, draft, timeOnly);
+    const mutation = toMutation(snapshot, draft);
     if (!mutation) {
       setError(t(expiredOnce ? "scheduled.expired_once" : "scheduled.error"));
       return;
@@ -741,7 +772,7 @@ export function ScheduledTasksPage({
                 ? "scheduled-editor scheduled-editor-neutral w-[min(640px,calc(100vw-32px))] gap-0 overflow-hidden bg-(--ui-surface-panel) p-0"
                 : "scheduled-editor scheduled-editor-neutral w-[min(472px,calc(100vw-28px))] max-[920px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
             }
-            initialFocus={creating ? () => editorName.current : undefined}
+            initialFocus={() => editorName.current}
           >
             <header>
               <div>
@@ -966,38 +997,50 @@ export function ScheduledTasksPage({
                   {t("scheduled.when")}
                 </h3>
                 <div className="scheduled-time-fields">
-                  <SelectionMenu
+                  <ScheduleRecurrencePicker
                     value={draft.recurrenceKind}
-                    ariaLabel={t("scheduled.repeat")}
-                    placeholder={t("scheduled.repeat")}
-                    leading={<span>{t("scheduled.repeat")}:</span>}
-                    triggerClassName="scheduled-time-select h-10 px-3 text-sm"
-                    contentClassName="scheduled-editor-neutral"
-                    disabled={false}
-                    options={[
-                      ...([
-                        "once",
-                        "daily",
-                        "weekly",
-                        "monthly",
-                        "yearly",
-                      ] as const),
-                      ...(selected?.recurrence.kind === "interval"
-                        ? ["interval" as const]
-                        : []),
-                      ...(selected?.recurrence.kind === "calendar" &&
-                      selected.recurrence.frequency === "hourly"
-                        ? ["hourly" as const]
-                        : []),
-                    ].map((kind) => ({
-                      value: kind,
-                      label: t(`scheduled.recurrence.${kind}`),
-                    }))}
-                    onValueChange={(recurrenceKind) =>
+                    weekdays={draft.weekdays}
+                    monthDays={draft.monthDays}
+                    legacyKind={
+                      selected?.recurrence.kind === "interval"
+                        ? "interval"
+                        : selected?.recurrence.kind === "calendar" &&
+                            selected.recurrence.frequency === "hourly"
+                          ? "hourly"
+                          : undefined
+                    }
+                    onKindChange={(kind) =>
+                      setDraft((value) =>
+                        value.recurrenceKind === kind
+                          ? value
+                          : {
+                              ...value,
+                              recurrenceKind: kind,
+                              originalStart: null,
+                              ...(kind === "weekly"
+                                ? {
+                                    weekdays: [
+                                      new Date(Date.now()).getDay() || 7,
+                                    ],
+                                  }
+                                : kind === "monthly"
+                                  ? {
+                                      monthDays: [
+                                        new Date(Date.now()).getDate(),
+                                      ],
+                                    }
+                                  : {}),
+                            },
+                      )
+                    }
+                    onDaysChange={(kind, days) =>
                       setDraft((value) => ({
                         ...value,
-                        recurrenceKind:
-                          recurrenceKind as Draft["recurrenceKind"],
+                        recurrenceKind: kind,
+                        originalStart: null,
+                        ...(kind === "weekly"
+                          ? { weekdays: days }
+                          : { monthDays: days }),
                       }))
                     }
                   />
@@ -1008,39 +1051,26 @@ export function ScheduledTasksPage({
                     )}
                   >
                     <span>{timeLabel}:</span>
-                    {timeOnly ? (
-                      <TimePicker
-                        aria-label={timeLabel}
-                        value={draft.start.slice(11)}
-                        hourLabel={t("scheduled.hours")}
-                        minuteLabel={t("scheduled.minutes")}
-                        className="flex-1 border-0 bg-transparent px-0"
-                        onValueChange={(time) =>
-                          setDraft((value) => ({
-                            ...value,
-                            start: `${value.start.slice(0, 11)}${time}`,
-                          }))
-                        }
-                      />
-                    ) : (
-                      <Input
-                        type="datetime-local"
-                        aria-label={timeLabel}
-                        aria-invalid={expiredOnce || invalidStart}
-                        aria-describedby={
-                          expiredOnce || invalidStart
-                            ? "scheduled-time-error"
-                            : undefined
-                        }
-                        value={draft.start}
-                        onChange={(event) =>
-                          setDraft((value) => ({
-                            ...value,
-                            start: event.target.value,
-                          }))
-                        }
-                      />
-                    )}
+                    <TimePicker
+                      aria-label={timeLabel}
+                      aria-invalid={expiredOnce || invalidStart}
+                      aria-describedby={
+                        expiredOnce || invalidStart
+                          ? "scheduled-time-error"
+                          : undefined
+                      }
+                      value={draft.start.slice(11)}
+                      hourLabel={t("scheduled.hours")}
+                      minuteLabel={t("scheduled.minutes")}
+                      className="flex-1 border-0 bg-transparent px-0"
+                      onValueChange={(time) =>
+                        setDraft((value) => ({
+                          ...value,
+                          start: `${value.start.slice(0, 11)}${time}`,
+                          originalStart: null,
+                        }))
+                      }
+                    />
                   </div>
                   {draft.recurrenceKind === "interval" && (
                     <div
@@ -1079,7 +1109,10 @@ export function ScheduledTasksPage({
                           }))
                         }
                         options={[
-                          { value: "minutes", label: t("scheduled.minutes") },
+                          {
+                            value: "minutes",
+                            label: t("scheduled.minutes"),
+                          },
                           { value: "hours", label: t("scheduled.hours") },
                           { value: "days", label: t("scheduled.days") },
                         ]}
