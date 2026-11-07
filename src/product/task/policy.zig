@@ -266,7 +266,7 @@ pub fn classifyAgentTerminal(
 
 fn effectiveTerminationSignal(result: *const agent.TerminalResult) ?agent.TerminationSignal {
     if (result.first_host_failure) |failure| return failure.asSignal();
-    if (result.controlled_ui_close) |interruption|
+    if (result.controlled_callback_close) |interruption|
         return .{ .interrupted = interruption };
     return switch (result.terminationEffect()) {
         .prevented_core_call, .aborted => result.termination_signal,
@@ -847,9 +847,9 @@ test "Host failure and controlled close stay attributable after an earlier Stop"
     };
     try std.testing.expectEqual(@as(?task_state.RunCause, .event_pipeline_failure), classifyAgentTerminal(&terminal).cause);
     terminal.first_host_failure = null;
-    terminal.controlled_ui_close = .session_close;
+    terminal.controlled_callback_close = .session_close;
     try std.testing.expectEqual(@as(?task_state.RunCause, .session_close), classifyAgentTerminal(&terminal).cause);
-    terminal.controlled_ui_close = null;
+    terminal.controlled_callback_close = null;
     terminal.abi_status = .ok;
     terminal.raw_status_code = @intFromEnum(agent.Status.ok);
     terminal.stop_reason = .api_error;

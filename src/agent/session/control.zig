@@ -102,7 +102,7 @@ pub const TerminalFailure = enum {
 /// First observation under this Session's mutex, not a global causal ordering.
 /// Contains only fixed enums and counts; callback payloads never enter it.
 pub const CallbackRejection = struct {
-    pub const Boundary = enum { admission, event_decode, input_event, output_event, model_error, event_copy, event_pump, notifier, ui_decode, ui_admission, ui_response, core_return };
+    pub const Boundary = enum { admission, host_tool, event_decode, input_event, output_event, model_error, event_copy, event_pump, notifier, ui_decode, ui_admission, ui_response, core_return };
     pub const Reason = enum { invalid_context, identity_mismatch, invalid_state, counter_exhausted, invalid_bytes, decode_failed, oversized, allocation, queue_rejected, consumer_unavailable, unsupported_request, invalid_input_transition, callbacks_in_flight, invalid_response, invalid_model_error, duplicate_model_error, model_error_after_terminal, missing_model_error, unexpected_model_error, invalid_terminal, invalid_output_segment, fatal_returned_ok };
     boundary: Boundary,
     reason: Reason,
@@ -289,7 +289,7 @@ pub const TerminalResult = struct {
     input_counts: ?InputCounts = null,
     first_callback_rejection: ?CallbackRejection = null,
     first_host_failure: ?HostFailure = null,
-    controlled_ui_close: ?ExternalInterruption = null,
+    controlled_callback_close: ?ExternalInterruption = null,
     /// Validated supplemental observation; only OK + api_error makes it the
     /// explanation of the Run's model failure. Dependency failures suppress it.
     model_error: ?ModelError = null,
@@ -300,7 +300,7 @@ pub const TerminalResult = struct {
 
     pub fn terminationEffect(self: *const TerminalResult) TerminationEffect {
         if (self.failure == .dependency_contract) return .unknown;
-        if (self.controlled_ui_close != null) return .controlled_close;
+        if (self.controlled_callback_close != null) return .controlled_close;
         if (self.termination_signal == null) return .not_requested;
         if (self.raw_status_code == null) return .prevented_core_call;
         if (self.abi_status == .ok and self.stop_reason == .aborted) return .aborted;

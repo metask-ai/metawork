@@ -263,7 +263,7 @@ usage 留在 Product，继续消费 SDK 明确规定的 delta，保持唯一消�
 
 不削弱现有 fail-closed guard，不把“容量不足不能 fatal”泛化到无法继续安全处理的 Host 故障。也不为了把所有校验前移而将合法 Core 观察升级为 fatal。
 
-Session 锁只保护有界状态更新和调用登记。Core 调用、队列等待和 Product effect 在锁外执行。starting 补发不建立循环重试；首发、补发、返回和 close 通过同一 abort 调用登记保证静止。
+Session 锁只保护有界状态更新和调用登记。Core effect 调用、队列等待和 Product effect 在锁外执行。歧义终态的一次 session_describe 保留明确的锁内只读例外：该 SDK 入口不回调 Host，Run 操作槽与静止屏障仍由当前收尾持有，Session 锁阻止凭据 mutation 和 close 穿过确认；不把此例外扩展到 Run、abort 或队列等待。starting 补发不建立循环重试；首发、补发、返回和 close 通过同一 abort 调用登记保证静止。
 
 ## 9 实施阶段与完成条件
 
@@ -417,3 +417,5 @@ fork 场景必须使用实际可被模型调用、声明 context fork 的 Skill�
 运行日志保留于 `.zig-cache/agentcore-boundary-*.log`，边界场景快照位于 `.zig-cache/agentcore-boundary-evidence/agent-boundary.json`。这些可重现的自动化记录不进入长期平台证据账本。
 
 正式 `npm test` 的 Node 阶段出现四项范围外失败：两个 dev 用例受既有 5173 端口占用影响；另两项为未修改的 Renderer 依赖方向和 Task MCP 建议按钮用例。后两项独立重跑仍失败，相关 frontend 与测试相对实施前 revision 没有差异；未修改其 guard、实现或既有开发进程。首轮 Native 暴露的两处旧 Product 状态预期已按本方案修正。最终正式 Native 图通过（253/253 steps，1840 passed / 10 skipped），`npm run check` 通过；Windows 输出交付、Agent 边界、模型错误三个专项及 Agent/Office 针对回归通过。`npm test` 整体仍因上述四项 Node 失败不通过，不绕过或弱化 guard。
+
+评审后补充收口：段外提交容量不足和 final/partial 后续输出按保留缺口处理，后续 frame 不因本地保留失败失去接受状态，已保存回答与历史保持合法。Host 工具实际 fatal 记录故障或受控关闭事实，并参与 fatal/OK 对账；缺少边界事实的 CALLBACK_FAILED 才使用后备归因。describe 锁内只读例外已明确。本轮补充修复已通过评审。新增回归已先复现输出容量/后续段与 Host fatal 故障；修复后相关根、正式 Native 图（253/253 steps，1844 passed / 10 skipped）和 strict check 通过，本轮未重跑完整 Node 或桌面专项。独立复核提及的旧 Product→Agent Stop 交接竞态仅作为待复核线索，不在此轮修改。

@@ -318,9 +318,92 @@ test "closing validates UI payloads and retains real faults without undoing clos
     var terminal = work.result.?;
     defer terminal.deinit();
     try std.testing.expectEqual(lifecycle.HostFailure{ .callback_failure = .ui }, terminal.first_host_failure.?);
-    try std.testing.expect(terminal.controlled_ui_close == null);
+    try std.testing.expect(terminal.controlled_callback_close == null);
     try std.testing.expectEqual(.closing, terminal.session_disposition_at_completion);
     try std.testing.expectEqual(.closed, session.snapshot().state);
+}
+
+test "Host tool fatal replies retain failure facts and reject a successful Core return" {
+    for ([_]wire.HostExecuteFnV1{ lifecycle.Session.executeImage, lifecycle.Session.executeDelivery, lifecycle.Session.executeMcpInstallation }) |execute| {
+        for ([_]bool{ false, true }) |core_ok| {
+            fake_core.reset();
+            fake_core.setNextPlan(if (core_ok) .controlled else .controlled_callback_failed);
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer {
+                runtime.shutdown() catch unreachable;
+                runtime.deinit();
+            }
+            const session = try openSession(runtime);
+            const id = try session.prepareRun(.{ .text = "fatal Host callback" });
+            var work = ImageRunWork{ .session = session, .id = id };
+            {
+                const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+                defer worker.join();
+                defer fake_core.releaseControlled();
+                fake_core.waitRunEntered();
+                const identity = imageIdentity(session, id);
+                try std.testing.expectEqual(wire.HOST_FATAL, execute(runtime, &identity, sdk.bytesView("{}"), null));
+            }
+            var terminal = work.result.?;
+            defer terminal.deinit();
+            try std.testing.expectEqual(lifecycle.HostFailure{ .callback_failure = .event }, terminal.first_host_failure.?);
+            try std.testing.expectEqual(if (core_ok) lifecycle.TerminalFailure.dependency_contract else .abi_status, terminal.failure.?);
+            const decision = fixture.product_task.testing.policy_module.classifyAgentTerminal(&terminal);
+            try std.testing.expectEqual(if (core_ok) fixture.product_task.testing.state_module.RunCause.dependency_contract_failure else .event_pipeline_failure, decision.cause.?);
+            try session.close(.session_close);
+        }
+    }
+}
+
+test "closing Host tool fatal is controlled while unexplained callback failure has a cause" {
+    for ([_]wire.HostExecuteFnV1{ lifecycle.Session.executeImage, lifecycle.Session.executeDelivery, lifecycle.Session.executeMcpInstallation }) |execute| {
+        fake_core.reset();
+        fake_core.setNextPlan(.controlled_callback_failed);
+        fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "Host callback meets close" });
+        var work = ImageRunWork{ .session = session, .id = id };
+        {
+            const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+            defer worker.join();
+            defer fake_core.releaseControlled();
+            fake_core.waitRunEntered();
+            const closer = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+            defer closer.join();
+            defer fake_core.releaseControlled();
+            try session.waitForState(.closing);
+            const identity = imageIdentity(session, id);
+            var result: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
+            try std.testing.expectEqual(wire.HOST_FATAL, execute(runtime, &identity, sdk.bytesView("{}"), &result));
+        }
+        var terminal = work.result.?;
+        defer terminal.deinit();
+        try std.testing.expect(terminal.first_host_failure == null);
+        try std.testing.expectEqual(.controlled_close, terminal.terminationEffect());
+        const decision = fixture.product_task.testing.policy_module.classifyAgentTerminal(&terminal);
+        try std.testing.expectEqual(.session_close, decision.cause.?);
+    }
+    fake_core.reset();
+    fake_core.setNextPlan(.callback_failed);
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "Core callback failure without a captured boundary" });
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    run.deinit();
+    defer terminal.deinit();
+    const decision = fixture.product_task.testing.policy_module.classifyAgentTerminal(&terminal);
+    try std.testing.expectEqual(.event_pipeline_failure, decision.cause.?);
+    try session.close(.session_close);
 }
 
 test "Host failure remains independent when Stop occupied the control slot first" {

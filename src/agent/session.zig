@@ -722,7 +722,7 @@ pub const Session = struct {
     termination_signal: ?TerminationSignal = null,
     first_callback_rejection: ?CallbackRejection = null,
     first_host_failure: ?HostFailure = null,
-    controlled_ui_close: ?ExternalInterruption = null,
+    controlled_callback_close: ?ExternalInterruption = null,
     close_interruption: ExternalInterruption = .session_close,
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
@@ -889,7 +889,7 @@ pub const Session = struct {
         self.termination_signal = null;
         self.first_callback_rejection = null;
         self.first_host_failure = null;
-        self.controlled_ui_close = null;
+        self.controlled_callback_close = null;
         self.abort_status = null;
         self.raw_abort_status_code = null;
         self.abort_retry_pending = false;
@@ -2023,7 +2023,7 @@ pub const Session = struct {
                 self.finishPreparedCompactLocked();
         } else {
             if (!self.run_done) setTerminationSignalLocked(self, signal);
-            if (self.ui_active) self.controlled_ui_close = interruption;
+            if (self.ui_active) self.controlled_callback_close = interruption;
             wakeUiLocked(self);
             if (!self.run_done and !self.run_started) self.finishPreparedRunLocked();
             should_abort_now = self.registerRunAbortLocked(false);
@@ -2212,6 +2212,12 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
+            // Core reports a callback failure, but the failed boundary may be
+            // unrouteable (for example an invalid Host tool context).
+            if (known_status == .callback_failed and !self.dependency_contract_failure and
+                self.first_host_failure == null and self.controlled_callback_close == null)
+                setTerminationSignalLocked(self, .{ .callback_failure = .event });
+
             // Counts are defined on every known status, including failed Runs.
             if (!self.submitted_inputs.reconcile(result.input_accepted_count, result.input_adopted_count)) {
                 self.dependency_contract_failure = true;
@@ -2555,7 +2561,7 @@ pub const Session = struct {
             .termination_signal = self.termination_signal,
             .first_callback_rejection = self.first_callback_rejection,
             .first_host_failure = self.first_host_failure,
-            .controlled_ui_close = self.controlled_ui_close,
+            .controlled_callback_close = self.controlled_callback_close,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
             .event_delivery_lost = self.event_delivery_lost.load(.acquire),
             .receipts = self.takeTerminalReceiptsLocked(),
@@ -2569,6 +2575,9 @@ pub const Session = struct {
 
     /// Only admitted + failed + statically reusable errors need confirmation.
     /// Background jobs can make describe BUSY; retain the static disposition.
+    // Deliberate read-only exception to unlocked Core effects: describe does
+    // not invoke Host callbacks. The Run still owns its operation slot; keeping
+    // the mutex here excludes credential mutation and close through confirmation.
     fn confirmRunDispositionLocked(self: *Session) void {
         var encoded = emptyOwnedBytes();
         defer releaseOwned(self.agent_runtime.api, &encoded);
@@ -2669,7 +2678,7 @@ pub const Session = struct {
             const matches = candidate.raw != null and candidate.raw.? == identity.session;
             candidate.unlock();
             if (matches) {
-                if (candidate.retainCoreCallback(raw_run, false) != null) retained = candidate;
+                if (candidate.retainCoreCallback(raw_run, true) != null) retained = candidate;
                 break;
             }
         }
@@ -2677,12 +2686,31 @@ pub const Session = struct {
         return retained;
     }
 
+    fn rejectClosingHostCallback(self: *Session) bool {
+        self.lock();
+        defer self.unlock();
+        if (self.state != .closing) return false;
+        self.callback_fatal_observed = true;
+        self.controlled_callback_close = self.close_interruption;
+        return true;
+    }
+
+    fn failHostCallback(self: *Session) u32 {
+        self.lock();
+        defer self.unlock();
+        self.callback_fatal_observed = true;
+        self.recordCallbackRejectionLocked(.{ .boundary = .host_tool, .reason = .invalid_response });
+        setTerminationSignalLocked(self, .{ .callback_failure = .event });
+        return wire.HOST_FATAL;
+    }
+
     pub fn executeImage(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
         const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
         // Keep working and result capacity in one reservation through publication.
         // Allocate the owned result before sending or committing anything.
         const limits = self.imageLimits();
@@ -2793,10 +2821,11 @@ pub const Session = struct {
     const mcp_busy_result = "{\"status\":\"busy\"}";
     pub fn executeMcpInstallation(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
         const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
         const previous = runtime.mcp_results_outstanding.fetchAdd(1, .acq_rel);
         if (previous >= runtime.sessions.len * 8) {
             _ = runtime.mcp_results_outstanding.fetchSub(1, .acq_rel);
@@ -2813,7 +2842,7 @@ pub const Session = struct {
         };
         defer if (!transferred) runtime.allocator.free(allocation);
         const outcome = self.performMcpInstallation(arguments);
-        const encoded = mcp_install.result(allocation[@sizeOf(McpResultHeader)..], outcome) catch return wire.HOST_FATAL;
+        const encoded = mcp_install.result(allocation[@sizeOf(McpResultHeader)..], outcome) catch return self.failHostCallback();
         std.mem.bytesAsValue(McpResultHeader, allocation[0..@sizeOf(McpResultHeader)]).* = .{ .allocation_len = allocation.len };
         result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         transferred = true;
@@ -2863,10 +2892,11 @@ pub const Session = struct {
 
     pub fn executeDelivery(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
         const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
         const previous = runtime.delivery_results_outstanding.fetchAdd(1, .acq_rel);
         if (previous >= runtime.sessions.len * deliver_file.max_receipts_per_run) {
             _ = runtime.delivery_results_outstanding.fetchSub(1, .acq_rel);
@@ -2884,7 +2914,7 @@ pub const Session = struct {
         };
         defer if (!transferred) runtime.allocator.free(allocation);
         const outcome = self.performDelivery(arguments);
-        const encoded = deliver_file.result(allocation[@sizeOf(DeliveryResultHeader)..], outcome) catch return wire.HOST_FATAL;
+        const encoded = deliver_file.result(allocation[@sizeOf(DeliveryResultHeader)..], outcome) catch return self.failHostCallback();
         std.mem.bytesAsValue(DeliveryResultHeader, allocation[0..@sizeOf(DeliveryResultHeader)]).* = .{ .allocation_len = allocation_len };
         result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         transferred = true;
@@ -3305,7 +3335,7 @@ pub const Session = struct {
             return wire.UI_FATAL;
         }
         if (self.state == .closing) {
-            self.controlled_ui_close = self.close_interruption;
+            self.controlled_callback_close = self.close_interruption;
             self.unlock();
             if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
             return wire.UI_FATAL;

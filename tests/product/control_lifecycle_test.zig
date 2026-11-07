@@ -148,8 +148,8 @@ test "recording gaps continue execution while later retention or Host failures r
             .none => {},
             .retention => {
                 try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":999,\"turn\":999,\"group\":999,\"disposition\":\"final\",\"bytes\":1}}"));
-                try std.testing.expectError(error.InvalidOutputRetention, control.drainAgentEvents());
-                try std.testing.expectEqual(error.InvalidOutputRetention, run.first_event_rejection.?.failure);
+                try control.drainAgentEvents();
+                try std.testing.expect(run.first_event_rejection == null);
             },
             .usage => {
                 run.usage = .{ .input_tokens = 10, .output_tokens = 20, .cache_read_input_tokens = 30, .cache_creation_input_tokens = std.math.maxInt(u64) };
@@ -185,9 +185,9 @@ test "recording gaps continue execution while later retention or Host failures r
         switch (failure) {
             .none => try std.testing.expectEqual(.completed, terminal.outcome),
             .retention => {
-                try std.testing.expectEqual(.failed, terminal.outcome);
+                try std.testing.expectEqual(.completed, terminal.outcome);
                 try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
-                try std.testing.expect(run.event_pipeline_failed);
+                try std.testing.expect(!run.event_pipeline_failed);
                 try std.testing.expect(!task_state.recordEventProjectionFailure(run));
             },
             .receipt, .allocation, .usage, .input_record => {

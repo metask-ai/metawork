@@ -1639,7 +1639,6 @@ pub const EventProjectionError = std.mem.Allocator.Error || error{
 };
 pub const EventApplyError = EventProjectionError || error{
     NoSuchRun,
-    InvalidOutputRetention,
     InvalidInputRecord,
     InvalidUsage,
 };
@@ -1824,17 +1823,35 @@ fn outputBytes(run: *const RunRecord) EventProjectionError!usize {
 
 /// Finalizes only retained bytes. Capacity failures never become Core violations.
 fn commitPendingOutput(projection: EventProjection, run: *RunRecord, kind: enum { commentary, partial }, continued_only: bool) EventProjectionError!void {
+    defer {
+        clearTrackedText(&run.output_continued);
+        run.output_continued_group = null;
+        run.output_continued_redacted = false;
+        run.output_continued_incomplete = false;
+        if (!continued_only) {
+            clearTrackedText(&run.output_segment);
+            run.output_segment_redacted = false;
+            run.output_segment_incomplete = false;
+        }
+    }
     const first = run.output_continued.list.items;
     const second: []const u8 = if (continued_only) &.{} else run.output_segment.list.items;
+    if (run.output_continued_incomplete or (!continued_only and run.output_segment_incomplete)) _ = recordEventProjectionFailure(run);
     if (first.len == 0 and second.len == 0) return;
-    if (kind == .commentary and (run.commentary_count >= projection.max_commentary_segments_per_run or run.commentary_count >= run.commentary_ends.len)) return error.ProjectionCapacity;
+    if (kind == .commentary and (run.commentary_count >= projection.max_commentary_segments_per_run or run.commentary_count >= run.commentary_ends.len)) {
+        _ = recordEventProjectionFailure(run);
+        return;
+    }
     const start = run.assistant.committed_len;
-    const redacted = try projection.appendGroup(&run.assistant, first, second, run.initial_credentials[0]);
+    const redacted = projection.appendGroup(&run.assistant, first, second, run.initial_credentials[0]) catch |err| {
+        _ = recordEventProjectionFailure(run);
+        if (err == error.ProjectionCapacity) return;
+        return err;
+    };
     // The sanitizer examined the whole closed part. A held prefix cannot
     // continue into the next product part; no raw suffix crosses that boundary.
     run.assistant.committed_len = run.assistant.list.items.len;
     run.assistant_redacted = run.assistant_redacted or redacted or run.output_continued_redacted or (!continued_only and run.output_segment_redacted);
-    if (run.output_continued_incomplete or (!continued_only and run.output_segment_incomplete)) _ = recordEventProjectionFailure(run);
     switch (kind) {
         .commentary => {
             run.commentary_ends[run.commentary_count] = @intCast(run.assistant.committed_len);
@@ -1844,15 +1861,6 @@ fn commitPendingOutput(projection: EventProjection, run: *RunRecord, kind: enum 
             run.assistant_output_start = start;
             run.assistant_output_kind = .partial;
         },
-    }
-    clearTrackedText(&run.output_continued);
-    run.output_continued_group = null;
-    run.output_continued_redacted = false;
-    run.output_continued_incomplete = false;
-    if (!continued_only) {
-        clearTrackedText(&run.output_segment);
-        run.output_segment_redacted = false;
-        run.output_segment_incomplete = false;
     }
 }
 
@@ -1960,6 +1968,15 @@ pub fn applyEvent(
         .known => |known| known,
     };
     if (envelope.delivered_file != null and event != .tool_result) return error.InvalidDeliveryReceipt;
+    // The persisted output model has one classified response. Additional
+    // legal Core output is a recording gap, never a second response/boundary.
+    if (run.assistant_output_kind != null) switch (event) {
+        .text_chunk, .output_segment_begin, .output_segment_end => {
+            _ = recordEventProjectionFailure(run);
+            return .{ .applied = .{ .durable_boundary = false } };
+        },
+        else => {},
+    };
     var durable_boundary = false;
     switch (event) {
         .prompt_manifest, .model_error => return .unchanged,
@@ -2153,6 +2170,8 @@ pub fn applyEvent(
                 try commitPendingOutput(projection, run, .commentary, false);
             if (run.output_continued_group != null and run.output_continued_group.? != segment.group)
                 try commitPendingOutput(projection, run, .commentary, true);
+            if (run.output_segment_incomplete) _ = recordEventProjectionFailure(run);
+            run.output_segment_incomplete = false;
             run.output_segment_protocol_seen = true;
             run.open_output_segment = .{
                 .index = segment.index,
@@ -2162,7 +2181,13 @@ pub fn applyEvent(
             run.model_activity = .none;
         },
         .output_segment_end => |segment| {
-            if (run.open_output_segment == null) return error.InvalidOutputRetention;
+            if (run.open_output_segment == null) {
+                _ = recordEventProjectionFailure(run);
+                clearTrackedText(&run.output_segment);
+                run.output_segment_redacted = false;
+                run.output_segment_incomplete = false;
+                return .{ .applied = .{ .durable_boundary = true } };
+            }
             var retention_failure: ?EventProjectionError = null;
             defer {
                 run.open_output_segment = null;

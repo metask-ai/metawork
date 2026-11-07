@@ -66,7 +66,6 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     CompactCapacity,
     ToolCapacity,
     InvalidDeliveryReceipt,
-    InvalidOutputRetention,
     InvalidInputRecord,
     InvalidUsage,
     SnapshotTooLarge,
@@ -17043,6 +17042,85 @@ test "unframed output counts and projects before committing separately from the 
     try std.testing.expectEqualSlices(u64, &.{8}, run.commentary_ends[0..run.commentary_count]);
     try std.testing.expectEqual(@as(?usize, 8), run.assistant_output_start);
     try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+}
+
+test "unframed capacity gaps still open the next segment and retain its answer" {
+    for ([_]bool{ false, true }) |empty_pending| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        const budget = control.limits.max_projection_bytes;
+        if (empty_pending) control.limits.max_projection_bytes = control.projection_bytes;
+        var text = try testEnvelope(task.runtime.routeId(), run.id, "{\"text_chunk\":\"fork text\"}");
+        defer text.deinit();
+        if (empty_pending) {
+            try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&text));
+            control.limits.max_projection_bytes = budget;
+        } else {
+            try control.applyEvent(&text);
+            control.limits.max_projection_bytes = control.projection_bytes;
+        }
+        var begin = try testEnvelope(task.runtime.routeId(), run.id, "{\"output_segment_begin\":{\"index\":3,\"turn\":2,\"group\":9}}");
+        defer begin.deinit();
+        try control.applyEvent(&begin);
+        try std.testing.expect(run.open_output_segment != null);
+        control.limits.max_projection_bytes = budget;
+        const rest = [_][]const u8{
+            "{\"text_chunk\":\"answer\"}",
+            "{\"output_segment_end\":{\"index\":3,\"turn\":2,\"group\":9,\"disposition\":\"final\",\"bytes\":6}}",
+        };
+        for (rest) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        try std.testing.expectEqualStrings("answer", run.assistant.list.items);
+        try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+        try std.testing.expectEqual(@as(usize, 0), run.commentary_count);
+        try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        try std.testing.expect(!run.event_pipeline_failed);
+    }
+}
+
+test "output after a classified answer is a retention gap with restorable history" {
+    for ([_][]const u8{ "final", "partial" }) |kind| {
+        var control = try testRuntime();
+        defer control.deinit();
+        defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        var end_storage: [256]u8 = undefined;
+        const end = try std.fmt.bufPrint(&end_storage, "{{\"output_segment_end\":{{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"{s}\",\"bytes\":6}}}}", .{kind});
+        const events = [_][]const u8{
+            "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+            "{\"text_chunk\":\"answer\"}",
+            end,
+            "{\"text_chunk\":\"late unframed\"}",
+            "{\"output_segment_begin\":{\"index\":8,\"turn\":2,\"group\":4}}",
+            "{\"text_chunk\":\"late commentary\"}",
+            "{\"output_segment_end\":{\"index\":8,\"turn\":2,\"group\":4,\"disposition\":\"commentary\",\"bytes\":15}}",
+        };
+        for (events) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        try std.testing.expectEqualStrings("answer", run.assistant.list.items);
+        try std.testing.expectEqualStrings(kind, @tagName(run.assistant_output_kind.?));
+        try std.testing.expectEqual(@as(?usize, 0), run.assistant_output_start);
+        try std.testing.expectEqual(@as(usize, 0), run.commentary_count);
+        try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+        control.markTerminalRunsBeforeEventDrain();
+        finalizeTestTerminalDrain(&control);
+        var storage: [96 * 1024]u8 = undefined;
+        _ = try control.writeAggregateFixture(&storage);
+        var wire = try control.buildTaskStateWire();
+        defer wire.deinit();
+        try task_persistence.validateRestorableTask(std.testing.allocator, wire.state.tasks[0], control.taskPersistenceLimits());
+        try std.testing.expectEqual(.completed, productTerminalFacts(run).?.outcome);
+    }
 }
 
 test "terminal drain retains unframed commentary and closed continued text" {

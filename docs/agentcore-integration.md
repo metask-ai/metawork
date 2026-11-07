@@ -347,7 +347,7 @@ RunControl / RunControlLease
 
 终止意图、abort 接受和实际结束分别表达。Host 进入 Core 调用交接区间不证明 Run 已准入；准入前的 `stale_run`、预算 preflight 的 `invalid_state` 等未成功回应不清除意图。有效 `starting` 上，本轮存在终止意图且尚未记录 abort OK 时，在事件入队之前登记一次匹配 Run/generation 的补发；已有 abort 在途时只登记 pending，等待其返回后再决定，最多一个 abort 在途且准入补发至多一次。Stop、RunControlLease、close 和 shutdown 共享该登记，close 不依赖 `cancel_requested`。匹配的 abort OK 是单调事实，后续非 OK 不覆盖它；无准入即返回或本轮结束后不循环补发。所有已登记调用仍须在下一轮、checkpoint 或销毁前静止。
 
-`TerminalResult.terminationEffect()` 区分未请求、调用前阻止、实际 aborted、受控关闭、未按请求中止及未知；abort OK 本身不证明本轮已停止。Agent 独立保留 `first_host_failure` 的有界类型，不因控制槽已被较早 Stop 占据而丢失真实 Host 故障。因关闭合法拒绝或唤醒 UI callback 的事实单独保留，不仅凭 `UI_FATAL` 推造 Host 故障；真实解码、身份或接管故障仍按原边界收口。Product 的归因与恢复入口以 [Product 架构](product-architecture.md#31-产品视图与执行推进)为准。
+`TerminalResult.terminationEffect()` 区分未请求、调用前阻止、实际 aborted、受控关闭、未按请求中止及未知；abort OK 本身不证明本轮已停止。Agent 独立保留 `first_host_failure` 的有界类型，不因控制槽已被较早 Stop 占据而丢失真实 Host 故障。因关闭合法拒绝或唤醒 UI/Host 工具 callback 的事实以 `controlled_callback_close` 单独保留，不仅凭 fatal 回应推造 Host 故障；真实解码、身份或接管故障仍按原边界收口。Host 工具的实际 fatal 回应也在 callback lease 内记录，参与 fatal 后返回 OK 的合同检查；已观察到的真实故障优先于控制意图。Core 返回 CALLBACK_FAILED 且没有真实故障或受控关闭事实时，才以非 UI callback 故障提供后备归因，不覆盖已有事实。Product 的归因与恢复入口以 [Product 架构](product-architecture.md#31-产品视图与执行推进)为准。
 
 wire abort reason 只作为 AgentCore 中断机制。`TerminalResult` 同时保留 typed/raw ABI status、typed/raw StopReason、typed/raw abort status、最终 termination latch、completion-time Session disposition，以及 bounded owned diagnostic。产品 `RunOutcome` 与 durable cause 只由 Product Control 映射。Renderer transport 不是 active Run cause，不得写入 Agent termination latch。
 
@@ -465,7 +465,7 @@ revision、Snapshot、连接隔离、容量与重试规则统一由 [Renderer Br
 
 普通 Run 的成功返回必须恰有一次 terminal；`STOP_ABORTED` 必须对应 `aborted`，成功 terminal 不得为 `poisoned`，实际 callback fatal 后返回 OK 是合同违约。其他 phase 与 StopReason 不建立完整映射；非 OK 不要求 terminal，terminal 已捕获后入队失败可以合法返回 CALLBACK_FAILED。
 
-Agent 在发布结果和恢复准入前决定 Session disposition：terminal poisoned、已 starting 而非 OK 且没有 terminal 均禁止复用；准入前按 operation 静态表处理。starting + failed + 静态可复用非 OK 仅调用一次 describe：可信 idle 可复用，poisoned 或确认失败隔离；后台 job 导致 BUSY 时保留静态处置，不重试，也不声称已确认 idle。Run 与 compact 通过 `coreWasInvoked()` 提供调用事实，raw 返回记录只用于诊断。
+Agent 在发布结果和恢复准入前决定 Session disposition：terminal poisoned、已 starting 而非 OK 且没有 terminal 均禁止复用；准入前按 operation 静态表处理。starting + failed + 静态可复用非 OK 仅调用一次 describe：可信 idle 可复用，poisoned 或确认失败隔离；后台 job 导致 BUSY 时保留静态处置，不重试，也不声称已确认 idle。Run 与 compact 通过 `coreWasInvoked()` 提供调用事实，raw 返回记录只用于诊断。健康确认的单次 session_describe 是锁内只读例外：SDK 此调用不回调 Host，当前 Run 的操作槽和静止屏障仍被持有；Session 锁防止凭据更新和 close 穿过确认窗口。它不允许锁内 Run、abort、事件入队等待或 Product effect，也不扩大为其他 Core 操作的例外。
 
 checkpoint 后处理交付更新后的 Session disposition；Product 在执行终态折叠后、解除后处理准入门禁前应用，按原操作和 binding epoch 对齐。该实时健康更新不改写已发布的执行结果和完成时快照。
 
