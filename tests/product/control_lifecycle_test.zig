@@ -125,7 +125,7 @@ test "ordinary Task creation does not retry MCP errors on null Selection or gene
 }
 
 test "recording gaps continue execution while later retention or Host failures remain fatal" {
-    const Failure = enum { none, retention, receipt, allocation };
+    const Failure = enum { none, retention, receipt, allocation, usage, input_record };
     inline for (std.meta.tags(Failure)) |failure| {
         const scenario = try ReviewScenario.initForInput(.controlled);
         defer scenario.deinit();
@@ -150,6 +150,17 @@ test "recording gaps continue execution while later retention or Host failures r
                 try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":999,\"turn\":999,\"group\":999,\"disposition\":\"final\",\"bytes\":1}}"));
                 try std.testing.expectError(error.InvalidOutputRetention, control.drainAgentEvents());
                 try std.testing.expectEqual(error.InvalidOutputRetention, run.first_event_rejection.?.failure);
+            },
+            .usage => {
+                run.usage = .{ .input_tokens = 10, .output_tokens = 20, .cache_read_input_tokens = 30, .cache_creation_input_tokens = std.math.maxInt(u64) };
+                const before = run.usage;
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":1,\"cache_creation_input_tokens\":1}}"));
+                try std.testing.expectError(error.InvalidUsage, control.drainAgentEvents());
+                try std.testing.expectEqualDeep(before, run.usage);
+            },
+            .input_record => {
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"input_adopted\":{\"input_id\":999,\"sequence\":1,\"turn\":1}}"));
+                try std.testing.expectError(error.InvalidInputRecord, control.drainAgentEvents());
             },
             .receipt => {
                 var envelope = try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"not a delivery\"}}");
@@ -179,7 +190,7 @@ test "recording gaps continue execution while later retention or Host failures r
                 try std.testing.expect(run.event_pipeline_failed);
                 try std.testing.expect(!task_state.recordEventProjectionFailure(run));
             },
-            .receipt, .allocation => {
+            .receipt, .allocation, .usage, .input_record => {
                 try std.testing.expect(run.event_pipeline_failed);
                 try std.testing.expectEqual(.failed, terminal.outcome);
                 try std.testing.expectEqual(.event_pipeline_failure, terminal.cause.?);

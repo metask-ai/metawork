@@ -4379,18 +4379,6 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn recordDependencyContractFailure(
-        self: *Runtime,
-        route_id: u64,
-        run_id: u64,
-    ) bool {
-        const task = self.findByRouteId(route_id) orelse return false;
-        const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
-        if (!task_state.recordDependencyContractFailure(run)) return false;
-        task.durable.recent_order = self.takeRecentOrder();
-        return true;
-    }
-
     /// Main-loop-only diagnostic consumption. The first owner-local fact is
     /// retained; this only marks that its safe outlet has been attempted.
     pub fn takeEventRejectionDiagnostic(self: *Runtime, route_id: u64, run_id: u64) ?task_state.EventRejection {

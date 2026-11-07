@@ -67,7 +67,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     ToolCapacity,
     InvalidDeliveryReceipt,
     InvalidOutputRetention,
-    InvalidInputAdoption,
+    InvalidInputRecord,
     InvalidUsage,
     SnapshotTooLarge,
     CloseInProgress,
@@ -6156,7 +6156,6 @@ pub const Runtime = struct {
                         self.recordEventProjectionFailure(envelope.session_id, envelope.run_id);
                         continue;
                     },
-                    error.InvalidInputAdoption, error.InvalidUsage => self.recordDependencyContractFailure(envelope.session_id, envelope.run_id),
                     else => self.recordEventPipelineFailure(envelope.session_id, envelope.run_id),
                 }
                 if (first_projection_error.* == null) first_projection_error.* = err;
@@ -6243,16 +6242,6 @@ pub const Runtime = struct {
 
     fn recordEventPipelineFailure(self: *Runtime, route_id: u64, run_id: u64) void {
         if (!self.task_runtime.recordEventPipelineFailure(route_id, run_id)) return;
-        self.commitTaskStateNoFail();
-        self.bumpRevision();
-    }
-
-    fn recordDependencyContractFailure(
-        self: *Runtime,
-        route_id: u64,
-        run_id: u64,
-    ) void {
-        if (!self.task_runtime.recordDependencyContractFailure(route_id, run_id)) return;
         self.commitTaskStateNoFail();
         self.bumpRevision();
     }

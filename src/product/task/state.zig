@@ -1654,7 +1654,7 @@ pub const EventProjectionError = std.mem.Allocator.Error || error{
 pub const EventApplyError = EventProjectionError || error{
     NoSuchRun,
     InvalidOutputRetention,
-    InvalidInputAdoption,
+    InvalidInputRecord,
     InvalidUsage,
 };
 
@@ -1984,7 +1984,7 @@ pub fn applyEvent(
                 if (record.id != input.input_id) continue;
                 if (record.adopted_turn != null or input.sequence == 0 or input.turn == 0 or
                     (record.sequence != null and record.sequence.? != input.sequence) or
-                    run.next_activity_order == std.math.maxInt(u64)) return error.InvalidInputAdoption;
+                    run.next_activity_order == std.math.maxInt(u64)) return error.InvalidInputRecord;
                 record.sequence = input.sequence;
                 record.adopted_turn = input.turn;
                 record.state = .adopted;
@@ -1993,7 +1993,7 @@ pub fn applyEvent(
                 found = true;
                 break;
             };
-            if (!found) return error.InvalidInputAdoption;
+            if (!found) return error.InvalidInputRecord;
             durable_boundary = true;
         },
         .thinking_chunk => |text| return if (text.len == 0) .unchanged else observeModelActivity(run, .thinking),
@@ -2072,16 +2072,11 @@ pub fn applyEvent(
             durable_boundary = true;
         },
         .usage => |usage| {
-            run.usage.input_tokens = try addU64(run.usage.input_tokens, usage.input_tokens);
-            run.usage.output_tokens = try addU64(run.usage.output_tokens, usage.output_tokens);
-            run.usage.cache_read_input_tokens = try addU64(
-                run.usage.cache_read_input_tokens,
-                usage.cache_read_input_tokens,
-            );
-            run.usage.cache_creation_input_tokens = try addU64(
-                run.usage.cache_creation_input_tokens,
-                usage.cache_creation_input_tokens,
-            );
+            const input = try addU64(run.usage.input_tokens, usage.input_tokens);
+            const output = try addU64(run.usage.output_tokens, usage.output_tokens);
+            const cache_read = try addU64(run.usage.cache_read_input_tokens, usage.cache_read_input_tokens);
+            const cache_creation = try addU64(run.usage.cache_creation_input_tokens, usage.cache_creation_input_tokens);
+            run.usage = .{ .input_tokens = input, .output_tokens = output, .cache_read_input_tokens = cache_read, .cache_creation_input_tokens = cache_creation };
         },
         .context_warning => |warning| {
             if (!validContextWarning(warning)) {
