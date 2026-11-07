@@ -79,7 +79,10 @@ import {
   TaskApprovalRequests,
   type ApprovalObservation,
 } from "../features/approvals/mode-state.ts";
-import { ApprovalModeMenu } from "../features/approvals/ApprovalModeMenu.tsx";
+import {
+  ApprovalModeMenu,
+  NewTaskApprovalModeMenu,
+} from "../features/approvals/ApprovalModeMenu.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { automaticWorkspaceOptionId } from "../features/composer/WorkspaceContextSelector.tsx";
 import { createTaskInputHistoryReader } from "../features/composer/input-history.ts";
@@ -97,6 +100,8 @@ import {
   type SkillRefreshRequests,
 } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
+import { McpInstallationCard } from "../features/mcp/McpInstallationCard.tsx";
+import { WorkspaceDirectoryFact } from "../features/workspaces/WorkspaceDirectoryFact.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
 import { TaskInformation } from "../features/tasks/TaskInformation.tsx";
 import { ConversationContext } from "../features/composer/ConversationContext.tsx";
@@ -125,10 +130,7 @@ import {
   useWorkspaceFileTree,
 } from "../features/task-panel/WorkspaceFileTree.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
-import {
-  NewTaskApprovalModeMenu,
-  TaskWorkspace,
-} from "../features/tasks/NewTaskView.tsx";
+import { TaskWorkspace } from "../features/tasks/NewTaskView.tsx";
 import {
   TaskContent,
   createTaskReadingMemory,
@@ -4548,16 +4550,20 @@ export default function App() {
                 key={activeTask.id}
                 task={activeTask}
                 models={snapshot.models}
-                workspace={composerWorkspace}
-                workspaceOpenDisabled={workbenchMutationDisabled}
-                onOpenWorkspace={
-                  composerWorkspace
-                    ? () =>
-                        client.openWorkspace(
-                          composerWorkspace.id,
-                          composerWorkspace.epoch,
-                        )
-                    : undefined
+                workspaceDirectory={
+                  <WorkspaceDirectoryFact
+                    workspace={composerWorkspace}
+                    disabled={workbenchMutationDisabled}
+                    onOpen={
+                      composerWorkspace
+                        ? () =>
+                            client.openWorkspace(
+                              composerWorkspace.id,
+                              composerWorkspace.epoch,
+                            )
+                        : undefined
+                    }
+                  />
                 }
                 workspaceDiagnostic={composerCatalogFeedback?.diagnostic}
                 permissionProfilesEnabled={
@@ -5391,13 +5397,32 @@ export default function App() {
               <TaskContent
                 key={`${bridgeGeneration}:${snapshot.securityEpoch}:${snapshot.historyEpoch}`}
                 task={activeTask}
-                mcpInstallations={snapshot.mcpInstallation.operations}
-                mcpInstallationNotice={snapshot.mcpInstallation.notice}
-                onCancelInstallation={cancelMcpInstallation}
-                onCaptureInstallation={captureMcpInstallation}
-                installationSecretMaxBytes={
-                  snapshot.capabilities.mcpSecretMaxBytes
-                }
+                renderRunSupplement={({ taskId, runId, disabled }) => (
+                  <>
+                    {snapshot.mcpInstallation.operations
+                      .filter(
+                        (operation) =>
+                          operation.taskId === taskId &&
+                          operation.runId === runId,
+                      )
+                      .map((operation) => (
+                        <McpInstallationCard
+                          key={operation.serverId}
+                          operation={operation}
+                          disabled={disabled}
+                          secretMaxBytes={
+                            snapshot.capabilities.mcpSecretMaxBytes
+                          }
+                          onCancelInstallation={cancelMcpInstallation}
+                          onCaptureInstallation={captureMcpInstallation}
+                        />
+                      ))}
+                    {snapshot.mcpInstallation.notice?.taskId === taskId &&
+                      snapshot.mcpInstallation.notice.runId === runId && (
+                        <p role="status">{t("mcp.install.rejected")}</p>
+                      )}
+                  </>
+                )}
                 memory={taskReadingMemory}
                 history={{
                   available: Boolean(nextHistoryCursor),

@@ -1,8 +1,4 @@
 import {
-  McpInstallationCard,
-  type McpInstallationActions,
-} from "../mcp/McpInstallationCard.tsx";
-import {
   GeneratedImagePreview,
   type FilePreviewLoader,
 } from "./GeneratedImagePreview.tsx";
@@ -22,7 +18,6 @@ import {
 } from "react";
 import type {
   FileReferenceView,
-  McpInstallationOperation,
   OutputActionHandler,
   PendingUi,
   RunInputView,
@@ -300,11 +295,7 @@ function PermissionReviewRecord({ record }: { record: UiRecord }) {
 
 export function TaskContent({
   task,
-  mcpInstallations = [],
-  mcpInstallationNotice = null,
-  onCancelInstallation,
-  onCaptureInstallation,
-  installationSecretMaxBytes = 2560,
+  renderRunSupplement,
   snapshotReceivedAt,
   synchronized,
   requestingStop,
@@ -329,11 +320,11 @@ export function TaskContent({
   memory,
 }: {
   task: TaskView | null;
-  mcpInstallations?: McpInstallationOperation[];
-  mcpInstallationNotice?: { taskId: string; runId: string } | null;
-  onCancelInstallation?: McpInstallationActions["onCancelInstallation"];
-  onCaptureInstallation?: McpInstallationActions["onCaptureInstallation"];
-  installationSecretMaxBytes?: number;
+  renderRunSupplement?: (props: {
+    taskId: string;
+    runId: string;
+    disabled: boolean;
+  }) => ReactNode;
   memory?: TaskReadingMemory;
   history?: {
     available: boolean;
@@ -821,25 +812,11 @@ export function TaskContent({
             ) : null;
           const supplement = (
             <>
-              {mcpInstallations
-                .filter(
-                  (operation) =>
-                    operation.taskId === task.id && operation.runId === run.id,
-                )
-                .map((operation) => (
-                  <McpInstallationCard
-                    key={operation.serverId}
-                    operation={operation}
-                    disabled={!synchronized || requestingStop}
-                    secretMaxBytes={installationSecretMaxBytes}
-                    onCancelInstallation={onCancelInstallation}
-                    onCaptureInstallation={onCaptureInstallation}
-                  />
-                ))}
-              {mcpInstallationNotice?.taskId === task.id &&
-                mcpInstallationNotice.runId === run.id && (
-                  <p role="status">{t("mcp.install.rejected")}</p>
-                )}
+              {renderRunSupplement?.({
+                taskId: task.id,
+                runId: run.id,
+                disabled: !synchronized || requestingStop,
+              })}
               {presentation.active && (
                 <RunProcess
                   presentation={presentation}

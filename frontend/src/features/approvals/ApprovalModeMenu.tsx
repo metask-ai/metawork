@@ -15,8 +15,43 @@ const approvalModeIcons = {
   full_access: "shield-alert",
 } as const;
 
-export function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
+function ApprovalModeIcon({ mode }: { mode: ApprovalMode }) {
   return <Icon name={approvalModeIcons[mode]} />;
+}
+
+export function NewTaskApprovalModeMenu({
+  approvalModes,
+  approvalMode,
+  disabled,
+  onApprovalModeChange,
+}: {
+  approvalModes: ApprovalMode[];
+  approvalMode: ApprovalMode;
+  disabled: boolean;
+  onApprovalModeChange: (mode: ApprovalMode) => void;
+}) {
+  const { t } = useI18n();
+  if (approvalModes.length === 0) return null;
+  return (
+    <SelectionMenu
+      triggerId="new-task-permission-profile"
+      value={approvalMode}
+      options={approvalModes.map((mode) => ({
+        value: mode,
+        label: t(`permission.mode.${mode}`),
+        leading: <ApprovalModeIcon mode={mode} />,
+        description: t(`permission.mode.${mode}.help`),
+        descriptionKind: "text",
+      }))}
+      placeholder={t("permission.new_task.label")}
+      ariaLabel={t("permission.new_task.label")}
+      disabled={disabled}
+      leading={<ApprovalModeIcon mode={approvalMode} />}
+      triggerClassName="task-approval-trigger w-auto"
+      contentClassName="task-approval-menu w-72 max-w-[calc(100vw-32px)]"
+      onValueChange={(value) => onApprovalModeChange(value as ApprovalMode)}
+    />
+  );
 }
 
 export function ApprovalModeMenu({
