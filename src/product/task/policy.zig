@@ -255,7 +255,7 @@ pub fn classifyAgentTerminal(
             .cause = .resource_limit,
         },
     };
-    if (result.termination_signal != null and result.raw_status_code == null)
+    if (result.termination_signal != null and !result.coreWasInvoked())
         return decisionForSignal(result.termination_signal);
     return .{
         .phase = .failed,

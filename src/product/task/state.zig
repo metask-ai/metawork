@@ -788,6 +788,9 @@ pub const CheckpointPostprocess = struct {
     state: std.atomic.Value(CheckpointPostprocessState) = .init(.none),
     cancelled: std.atomic.Value(bool) = .init(false),
     payload: CheckpointPostprocessPayload = .none,
+    /// Later than the immutable execution terminal; published with readiness.
+    session_disposition: ?agent.SessionDisposition = null,
+    binding_epoch: u64 = 0,
     lease: ?worker_lease.WorkerLease = null,
 };
 

@@ -103,7 +103,7 @@ pub const TerminalFailure = enum {
 /// Contains only fixed enums and counts; callback payloads never enter it.
 pub const CallbackRejection = struct {
     pub const Boundary = enum { admission, event_decode, input_event, model_error, event_copy, event_pump, notifier, ui_decode, ui_admission, ui_response, core_return };
-    pub const Reason = enum { invalid_context, identity_mismatch, invalid_state, counter_exhausted, invalid_bytes, decode_failed, oversized, allocation, queue_rejected, consumer_unavailable, unsupported_request, invalid_input_transition, callbacks_in_flight, invalid_response, invalid_model_error, duplicate_model_error, model_error_after_terminal, missing_model_error, unexpected_model_error };
+    pub const Reason = enum { invalid_context, identity_mismatch, invalid_state, counter_exhausted, invalid_bytes, decode_failed, oversized, allocation, queue_rejected, consumer_unavailable, unsupported_request, invalid_input_transition, callbacks_in_flight, invalid_response, invalid_model_error, duplicate_model_error, model_error_after_terminal, missing_model_error, unexpected_model_error, invalid_terminal, fatal_returned_ok };
     boundary: Boundary,
     reason: Reason,
     event: ?CoreEventKind = null,
@@ -294,6 +294,10 @@ pub const TerminalResult = struct {
     /// explanation of the Run's model failure. Dependency failures suppress it.
     model_error: ?ModelError = null,
 
+    pub fn coreWasInvoked(self: *const TerminalResult) bool {
+        return self.raw_status_code != null;
+    }
+
     pub fn terminationEffect(self: *const TerminalResult) TerminationEffect {
         if (self.failure == .dependency_contract) return .unknown;
         if (self.controlled_ui_close != null) return .controlled_close;
@@ -342,6 +346,10 @@ pub const CompactTerminalResult = struct {
     interruption: ?ExternalInterruption,
     failure: ?TerminalFailure,
     session_disposition_at_completion: SessionDisposition,
+
+    pub fn coreWasInvoked(self: *const CompactTerminalResult) bool {
+        return self.raw_status_code != null;
+    }
 
     pub fn diagnostic(self: *const CompactTerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];

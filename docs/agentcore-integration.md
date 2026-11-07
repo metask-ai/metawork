@@ -463,6 +463,12 @@ Renderer 从仍存活的 Host canonical Product projection 重建视图，重连
 
 revision、Snapshot、连接隔离、容量与重试规则统一由 [Renderer Bridge 合同](renderer-bridge-contract.md#2-productdelivery-与-snapshot-transport)定义。Agent 不参与视图范围和运输，不因读取范围改变事件接纳、Session identity 或终态 drain 屏障。
 
+普通 Run 的成功返回必须恰有一次 terminal；`STOP_ABORTED` 必须对应 `aborted`，成功 terminal 不得为 `poisoned`，实际 callback fatal 后返回 OK 是合同违约。其他 phase 与 StopReason 不建立完整映射；非 OK 不要求 terminal，terminal 已捕获后入队失败可以合法返回 CALLBACK_FAILED。
+
+Agent 在发布结果和恢复准入前决定 Session disposition：terminal poisoned、已 starting 而非 OK 且没有 terminal 均禁止复用；准入前按 operation 静态表处理。starting + failed + 静态可复用非 OK 仅调用一次 describe：可信 idle 可复用，poisoned 或确认失败隔离；后台 job 导致 BUSY 时保留静态处置，不重试，也不声称已确认 idle。Run 与 compact 通过 `coreWasInvoked()` 提供调用事实，raw 返回记录只用于诊断。
+
+checkpoint 后处理交付更新后的 Session disposition；Product 在执行终态折叠后、解除后处理准入门禁前应用，按原操作和 binding epoch 对齐。该实时健康更新不改写已发布的执行结果和完成时快照。
+
 ## 10. RunResult 与 StopReason
 
 `session_run_input` 的处理顺序固定：

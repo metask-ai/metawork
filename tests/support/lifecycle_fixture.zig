@@ -156,6 +156,11 @@ pub const Plan = enum {
     invalid_skill_arguments,
     skill_policy_violation,
     skill_unavailable,
+    terminal_missing,
+    terminal_duplicate,
+    terminal_poisoned,
+    terminal_abort_mismatch,
+    fatal_returned_ok,
     unknown_stop_result,
     invalid_result_layout,
     invalid_checkpoint_outcome,
@@ -451,6 +456,7 @@ pub const FakeCore = struct {
     forced_session_destroy_status: ?u32 = null,
     forced_checkpoint_export_status: ?u32 = null,
     forced_checkpoint_describe_status: ?u32 = null,
+    description_poisoned: bool = false,
     forced_checkpoint_restore_status: ?u32 = null,
     forced_prompt_status: ?u32 = null,
     malformed_prompt_diagnostic: bool = false,
@@ -1714,6 +1720,7 @@ pub fn sessionDescribe(
     const session_id_mismatch = fake_core.checkpoint_description_session_id_mismatch;
     fake_core.checkpoint_description_session_id_mismatch = false;
     const generation = fake_core.checkpoint_generation;
+    const lifecycle_name: []const u8 = if (fake_core.description_poisoned) "poisoned" else "idle";
     fake_core.checkpoint_descriptions += 1;
     fake_core.unlock();
     if (forced_status) |status| {
@@ -1752,10 +1759,11 @@ pub fn sessionDescribe(
         (if (session.restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"{s}\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
+                    lifecycle_name,
                     session.run_id,
                     session.compact_id,
                     generation,
@@ -1768,10 +1776,11 @@ pub fn sessionDescribe(
         else
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"{s}\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
+                    lifecycle_name,
                     session.run_id,
                     session.compact_id,
                     generation,
@@ -2435,6 +2444,7 @@ pub fn sessionRunInput(
         return wire.STATUS_CALLBACK_FAILED;
     }
     if (plan == .resource_limit) {
+        if (!emitModelRunState(session, handle, run_id, "failed", 3)) return wire.STATUS_CALLBACK_FAILED;
         diagnostic(out_error);
         return wire.STATUS_RESOURCE_LIMIT;
     }
@@ -2531,10 +2541,15 @@ pub fn sessionRunInput(
         diagnostic(out_error);
         return wire.STATUS_CORE_ERROR;
     }
-    if (model_failure and !emitModelRunState(session, handle, run_id, if (plan == .model_error_wrong_stop) "completed" else "failed", 3)) {
-        diagnostic(out_error);
-        return wire.STATUS_CALLBACK_FAILED;
+    if (plan == .fatal_returned_ok) _ = emitInputEvent(session, handle, run_id, "{}");
+    if (plan != .terminal_missing) {
+        const phase = if (plan == .terminal_poisoned) "poisoned" else if (aborted and plan != .terminal_abort_mismatch) "aborted" else if (model_failure and plan != .model_error_wrong_stop or plan == .tool_loop) "failed" else "completed";
+        if (!emitModelRunState(session, handle, run_id, phase, 3)) return wire.STATUS_CALLBACK_FAILED;
+        if (plan == .terminal_duplicate) _ = emitModelRunState(session, handle, run_id, phase, 4);
     }
+    if (plan == .terminal_abort_mismatch) if (out_result) |result| {
+        result.stop_reason_code = wire.STOP_ABORTED;
+    };
     if (plan == .unexpected_input_receipt_failure) return wire.STATUS_RESOURCE_LIMIT;
     if (fake_core.forced_input_run_status) |status| return status;
     return wire.STATUS_OK;

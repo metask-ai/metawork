@@ -4570,7 +4570,7 @@ pub const Runtime = struct {
             const task = entry.* orelse continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (!run.event_stream_finalized) continue;
+                if (!run.event_stream_finalized or !run.terminal_observed) continue;
                 if (!self.syncCheckpointPostprocess(task, &run.checkpoint, effects))
                     continue;
                 changed = true;
@@ -4695,7 +4695,14 @@ pub const Runtime = struct {
         postprocess: *task_state.CheckpointPostprocess,
         effects: CheckpointEffects,
     ) bool {
-        switch (postprocess.state.load(.acquire)) {
+        const ready = postprocess.state.load(.acquire);
+        if ((ready == .failure_ready or ready == .candidate_ready) and
+            postprocess.binding_epoch == task.durable.binding_epoch)
+        {
+            if (postprocess.session_disposition) |disposition|
+                task_policy.foldTerminalDisposition(task, disposition);
+        }
+        switch (ready) {
             .none, .exporting, .settled => return false,
             .failure_ready => {
                 const attempt = postprocess.payload.failure;

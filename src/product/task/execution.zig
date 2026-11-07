@@ -295,7 +295,7 @@ pub fn executeRun(context: *anyopaque) void {
     var terminal = agent_run.execute();
     run.agent_handoff.store(.finishing, .release);
     _ = commitAgentTerminal(job.projector, run, &terminal);
-    const checkpoint_eligible = terminal.raw_status_code != null and
+    const checkpoint_eligible = terminal.coreWasInvoked() and
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     agent_run.deinit();
@@ -371,7 +371,7 @@ pub fn executeCompact(context: *anyopaque) void {
     };
     compact.agent_handoff.store(.finishing, .release);
     commitCompactTerminal(job.projector, compact, &terminal);
-    const checkpoint_eligible = terminal.raw_status_code != null and
+    const checkpoint_eligible = terminal.coreWasInvoked() and
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     _ = checkpoint_eligible and postprocessCheckpoint(
@@ -719,6 +719,7 @@ fn postprocessCheckpoint(
         postprocess.lease = lease.take();
     } else unreachable;
     checkpoint_lease.* = null;
+    postprocess.binding_epoch = context.binding_epoch;
     postprocess.state.store(.exporting, .release);
     if (postprocess.cancelled.load(.acquire)) {
         publishCheckpointFailure(postprocess, .cancelled);
@@ -738,6 +739,11 @@ fn postprocessCheckpoint(
         context.last_compact_id,
         context.model,
     ) catch {
+        postprocess.session_disposition = switch (access.sessionState()) {
+            .poisoned => .poisoned,
+            .closing, .closed => .closing,
+            else => .reusable,
+        };
         publishCheckpointFailure(postprocess, .export_failed);
         return true;
     };
@@ -746,11 +752,13 @@ fn postprocessCheckpoint(
     switch (outcome) {
         .failure => |failure| {
             const attempt = policy.checkpointFailureAttempt(failure);
+            postprocess.session_disposition = failure.disposition;
             outcome.deinit();
             publishCheckpointFailure(postprocess, attempt);
             return true;
         },
         .success => |*success| {
+            postprocess.session_disposition = .reusable;
             const chunk_count = success.checkpoint.chunk_count;
             var candidate = state.CheckpointCandidate{
                 .record = takeCheckpointRecord(

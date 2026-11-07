@@ -21,6 +21,60 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "Agent checks only the promised terminal and fatal return invariants" {
+    for ([_]Plan{ .terminal_missing, .terminal_duplicate, .terminal_poisoned, .terminal_abort_mismatch, .fatal_returned_ok, .max_turns, .tool_loop }) |plan| {
+        fake_core.reset();
+        fake_core.setNextPlan(plan);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "finite terminal checks" });
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        const valid = plan == .max_turns or plan == .tool_loop;
+        try std.testing.expect(terminal.coreWasInvoked());
+        try std.testing.expectEqual(if (valid) @as(?lifecycle.TerminalFailure, null) else .dependency_contract, terminal.failure);
+        try std.testing.expectEqual(if (valid) lifecycle.SessionDisposition.reusable else .poisoned, terminal.session_disposition_at_completion);
+        try session.close(.session_close);
+    }
+}
+
+test "admitted reusable errors confirm Session health once and BUSY stays reusable" {
+    for ([_]u32{ wire.STATUS_OK, wire.STATUS_BUSY, wire.STATUS_RESOURCE_LIMIT }) |status| {
+        for ([_]bool{ false, true }) |poisoned| {
+            fake_core.reset();
+            fake_core.setNextPlan(.resource_limit);
+            var gate = fixture.CallbackSignal{};
+            gate.markFinished();
+            fake_core.admission_gate = &gate;
+            fake_core.description_poisoned = poisoned;
+            fake_core.forced_checkpoint_describe_status = if (status == wire.STATUS_OK) null else status;
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer {
+                runtime.shutdown() catch unreachable;
+                runtime.deinit();
+            }
+            const session = try openSession(runtime);
+            const before = fake_core.checkpoint_descriptions;
+            const id = try session.prepareRun(.{ .text = "ambiguous admitted failure" });
+            var run = try session.beginRun(id);
+            var terminal = run.execute();
+            run.deinit();
+            defer terminal.deinit();
+            try std.testing.expectEqual(.abi_status, terminal.failure.?);
+            const reusable = status == wire.STATUS_BUSY or (status == wire.STATUS_OK and !poisoned);
+            try std.testing.expectEqual(if (reusable) lifecycle.SessionDisposition.reusable else .poisoned, terminal.session_disposition_at_completion);
+            try std.testing.expectEqual(before + 1, fake_core.checkpoint_descriptions);
+            try session.close(.session_close);
+        }
+    }
+}
+
 test "Stop and close deliver once at admission after stale or preflight refusal" {
     const Work = struct {
         session: *lifecycle.Session,
@@ -3545,7 +3599,7 @@ test "oversized file changes degrade without terminating the Run" {
         .worker_count = 1,
         .queue_capacity = 1,
         .max_sessions = 1,
-        .max_event_bytes = 64,
+        .max_event_bytes = 256,
     });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
@@ -3561,6 +3615,8 @@ test "oversized file changes degrade without terminating the Run" {
     try std.testing.expect(terminal.termination_signal == null);
     try std.testing.expect(terminal.file_changes_lost);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    var terminal_event = runtime.takeEvent().?;
+    terminal_event.deinit();
     try std.testing.expect(runtime.takeEvent() == null);
 
     fake_core.setSessionPlan(.event_callback);
@@ -3750,6 +3806,9 @@ test "valid unknown observations are ignored without consuming pump capacity" {
     try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
     try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), terminal.stop_reason);
     try std.testing.expectEqual(lifecycle.SessionState.idle, snapshot.state);
+    var terminal_event = runtime.takeEvent().?;
+    defer terminal_event.deinit();
+    try std.testing.expectEqual(lifecycle.CoreEventKind.run_state, std.meta.activeTag(terminal_event.event.value.known));
     try std.testing.expect(runtime.takeEvent() == null);
     try closeSession(session, .session_close);
 }
@@ -3761,8 +3820,8 @@ test "typed Core events are deep-copied into a bounded routed sink" {
         .worker_count = 1,
         .queue_capacity = 1,
         .max_sessions = 1,
-        .event_capacity = 2,
-        .per_session_event_capacity = 2,
+        .event_capacity = 4,
+        .per_session_event_capacity = 4,
         .control_reserved_capacity = 0,
         .per_session_control_reserved_capacity = 0,
     });
@@ -3791,6 +3850,8 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     try std.testing.expectEqual(first_run, envelope.run_id);
     try std.testing.expectEqualStrings("{\"text_chunk\":\"typed event\"}", envelope.json);
     try std.testing.expectEqualStrings("typed event", try textChunk(envelope.event.value));
+    var first_end = runtime.takeEvent().?;
+    first_end.deinit();
     var second = runtime.takeEvent().?;
     try std.testing.expectEqual(second_run, second.run_id);
     second.deinit();
@@ -3805,8 +3866,8 @@ test "saturated event queue waits beyond the old deadline and resumes without po
             .worker_count = 1,
             .queue_capacity = 1,
             .max_sessions = 1,
-            .event_capacity = 1,
-            .per_session_event_capacity = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
             .control_reserved_capacity = 0,
             .per_session_control_reserved_capacity = 0,
         });
@@ -3825,6 +3886,8 @@ test "saturated event queue waits beyond the old deadline and resumes without po
         try std.testing.expectEqual(lifecycle.SessionState.running, session.snapshot().state);
         var first = runtime.takeEvent().?;
         first.deinit();
+        var first_end = runtime.takeEvent().?;
+        first_end.deinit();
         try session.waitRun(second_run);
         var terminal = takeTestTerminal(session, second_run);
         defer terminal.deinit();
@@ -3848,8 +3911,8 @@ test "close wakes a saturated event callback without fatal or poison" {
             .worker_count = 1,
             .queue_capacity = 1,
             .max_sessions = 1,
-            .event_capacity = 1,
-            .per_session_event_capacity = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
             .control_reserved_capacity = 0,
             .per_session_control_reserved_capacity = 0,
         });
@@ -3875,6 +3938,8 @@ test "close wakes a saturated event callback without fatal or poison" {
         var retained = runtime.takeEvent().?;
         defer retained.deinit();
         try std.testing.expectEqual(first_run, retained.run_id);
+        var first_end = runtime.takeEvent().?;
+        first_end.deinit();
         try std.testing.expect(runtime.takeEvent() == null);
     }
 }
@@ -3966,8 +4031,8 @@ test "ordinary Stop leaves the saturated event callback waiting for consumption"
             .worker_count = 1,
             .queue_capacity = 1,
             .max_sessions = 1,
-            .event_capacity = 1,
-            .per_session_event_capacity = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
             .control_reserved_capacity = 0,
             .per_session_control_reserved_capacity = 0,
         });
@@ -3986,6 +4051,8 @@ test "ordinary Stop leaves the saturated event callback waiting for consumption"
         try cancelSession(session, second_run, .user_cancel);
         var first = runtime.takeEvent().?;
         first.deinit();
+        var first_end = runtime.takeEvent().?;
+        first_end.deinit();
         try session.waitRun(second_run);
         var terminal = takeTestTerminal(session, second_run);
         defer terminal.deinit();
@@ -4025,6 +4092,8 @@ test "file changes that cannot fit the entire queue degrade without waiting" {
     try std.testing.expect(terminal.file_changes_lost);
     try std.testing.expect(terminal.first_callback_rejection == null);
     try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, terminal.session_disposition_at_completion);
+    var terminal_event = runtime.takeEvent().?;
+    terminal_event.deinit();
     try std.testing.expect(runtime.takeEvent() == null);
     try session.close(.session_close);
 }

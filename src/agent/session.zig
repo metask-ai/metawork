@@ -715,7 +715,8 @@ pub const Session = struct {
     terminal_diagnostic_len: usize = 0,
     terminal_diagnostic_truncated: bool = false,
     model_error: ?ModelError = null,
-    terminal_run_state_seen: bool = false,
+    terminal_phase: ?RunStatePhase = null,
+    callback_fatal_observed: bool = false,
     termination_signal: ?TerminationSignal = null,
     first_callback_rejection: ?CallbackRejection = null,
     first_host_failure: ?HostFailure = null,
@@ -879,7 +880,8 @@ pub const Session = struct {
         self.terminal_diagnostic_len = 0;
         self.terminal_diagnostic_truncated = false;
         self.model_error = null;
-        self.terminal_run_state_seen = false;
+        self.terminal_phase = null;
+        self.callback_fatal_observed = false;
         self.termination_signal = null;
         self.first_callback_rejection = null;
         self.first_host_failure = null;
@@ -2268,6 +2270,25 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         }
+        if (!self.dependency_contract_failure and typed_status == .ok and
+            (self.callback_fatal_observed or self.terminal_phase == null or
+                self.terminal_phase == .poisoned or
+                (stop_reason == .aborted and self.terminal_phase != .aborted)))
+        {
+            self.recordCallbackRejectionLocked(.{ .boundary = .core_return, .reason = if (self.callback_fatal_observed) .fatal_returned_ok else .invalid_terminal });
+            self.failCoreIdentityLocked();
+        }
+        if (!self.dependency_contract_failure and self.state != .closing) {
+            if (self.terminal_phase == .poisoned or
+                (self.input_window_started and typed_status != .ok and self.terminal_phase == null))
+            {
+                self.state = .poisoned;
+            } else if (self.input_window_started and self.terminal_phase == .failed and typed_status != .ok and
+                self.state != .poisoned)
+            {
+                self.confirmRunDispositionLocked();
+            }
+        }
         // Reconcile while this Run still owns admission, before the common
         // dependency-failure/disposition epilogue can return the Session idle.
         if (!self.dependency_contract_failure and typed_status == .ok and stop_reason != null and
@@ -2383,7 +2404,8 @@ pub const Session = struct {
             self.terminal_diagnostic = null;
         }
         self.model_error = null;
-        self.terminal_run_state_seen = false;
+        self.terminal_phase = null;
+        self.callback_fatal_observed = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
@@ -2511,7 +2533,8 @@ pub const Session = struct {
         const final_failure: ?TerminalFailure = if (self.dependency_contract_failure) .dependency_contract else failure;
         const observed_model_error = self.model_error;
         self.model_error = null;
-        self.terminal_run_state_seen = false;
+        self.terminal_phase = null;
+        self.callback_fatal_observed = false;
         return .{
             .allocator = self.agent_runtime.allocator,
             .diagnostic_storage = storage,
@@ -2536,6 +2559,36 @@ pub const Session = struct {
             .durable_budget = durable_budget,
             .input_counts = if (self.dependency_contract_failure) null else self.input_counts,
         };
+    }
+
+    /// Only admitted + failed + statically reusable errors need confirmation.
+    /// Background jobs can make describe BUSY; retain the static disposition.
+    fn confirmRunDispositionLocked(self: *Session) void {
+        var encoded = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &encoded);
+        var diagnostic = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &diagnostic);
+        const code = self.agent_runtime.api.sessionControl().describe()(self.raw, &encoded, &diagnostic);
+        if (code == wire.STATUS_BUSY and encoded.ptr == null and encoded.len == 0) return;
+        if (code != wire.STATUS_OK) {
+            self.state = .poisoned;
+            return;
+        }
+        const bytes = sdk.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }) catch {
+            self.state = .poisoned;
+            return;
+        };
+        var parsed = sdk.decodeSessionDescription(self.agent_runtime.allocator, bytes) catch {
+            self.state = .poisoned;
+            return;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        const matches = switch (self.core_session_identity) {
+            .bound => |identity| std.mem.eql(u8, identity.bytes[0..identity.len], value.session_id),
+            .unbound, .failed => false,
+        };
+        if (!value.registered or !matches or value.lifecycle != .idle) self.state = .poisoned;
     }
 
     fn dispositionLocked(self: *const Session) SessionDisposition {
@@ -2976,7 +3029,26 @@ pub const Session = struct {
         return receipts;
     }
 
-    pub fn onEvent(
+    pub fn onEvent(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, event_json: wire.BytesViewV1) callconv(.c) u32 {
+        const reply = handleEvent(context, raw_run, event_json);
+        if (reply == wire.EVENT_FATAL) recordFatalReply(context);
+        return reply;
+    }
+
+    pub fn onUiRequest(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, request_json: wire.BytesViewV1, out_response: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const reply = handleUiRequest(context, raw_run, request_json, out_response);
+        if (reply == wire.UI_FATAL) recordFatalReply(context);
+        return reply;
+    }
+
+    fn recordFatalReply(context: ?*anyopaque) void {
+        const self: *Session = @ptrCast(@alignCast(context orelse return));
+        self.lock();
+        defer self.unlock();
+        if (!self.run_done) self.callback_fatal_observed = true;
+    }
+
+    fn handleEvent(
         context: ?*anyopaque,
         raw_run: ?*const wire.RunContextV1,
         event_json: wire.BytesViewV1,
@@ -3045,7 +3117,9 @@ pub const Session = struct {
                     .finalizing => self.input_ready = false,
                     .completed, .failed, .aborted, .poisoned => {
                         self.input_ready = false;
-                        self.terminal_run_state_seen = true;
+                        if (self.terminal_phase != null) {
+                            input_event_valid = false;
+                        } else self.terminal_phase = state.phase;
                     },
                     else => {},
                 }
@@ -3145,7 +3219,7 @@ pub const Session = struct {
         return wire.EVENT_CONTINUE;
     }
 
-    pub fn onUiRequest(
+    fn handleUiRequest(
         context: ?*anyopaque,
         raw_run: ?*const wire.RunContextV1,
         request_json: wire.BytesViewV1,
@@ -3315,7 +3389,7 @@ pub const Session = struct {
     fn captureModelErrorLocked(self: *Session, value: ModelError.View, run_id: u64, encoded_bytes: usize) bool {
         const rejection: CallbackRejection.Reason = if (value.run_id != run_id)
             .identity_mismatch
-        else if (self.terminal_run_state_seen)
+        else if (self.terminal_phase != null)
             .model_error_after_terminal
         else if (self.model_error != null)
             .duplicate_model_error
