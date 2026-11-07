@@ -59,6 +59,7 @@ const Host = struct {
 
     fn start(context: *anyopaque, runtime: *native.Runtime) !void {
         const self: *Host = @ptrCast(@alignCast(context));
+        try line(self.init, .{ .kind = "account_evaluation_stage", .stage = "runtime_started" });
         self.runtime = runtime;
         runtime.hideWindow(1) catch {};
         self.platform = try Platform.init(runtime, self.init.io, std.Thread.getCurrentId());
@@ -213,6 +214,7 @@ pub fn run(init: std.process.Init) !void {
     const revision = init.environ_map.get("METAWORK_REVIEW_EVAL_REVISION") orelse return error.MissingEvaluationRevision;
     const repeats = try std.fmt.parseInt(usize, init.environ_map.get("METAWORK_REVIEW_EVAL_REPEATS") orelse "3", 10);
     if (model.len == 0 or repeats < 1 or repeats > 5) return error.InvalidEvaluationConfiguration;
+    try line(init, .{ .kind = "account_evaluation_stage", .stage = "starting" });
     var paths: Paths = undefined;
     try paths.init(init.io, init.gpa, init.environ_map, null);
     defer paths.deinit();
@@ -221,6 +223,7 @@ pub fn run(init: std.process.Init) !void {
     // production refresh token concurrently with another MetaWork Host.
     _ = try single_instance.init(init.io, init.gpa, init.minimal.args, paths.dataDir(), identity.runnerBundleId(), false, true);
     defer single_instance.deinit();
+    try line(init, .{ .kind = "account_evaluation_stage", .stage = "primary_acquired" });
     var http = Http{ .allocator = init.gpa, .io = init.io };
     var loopback = Loopback.init(init.io);
     defer loopback.deinit();

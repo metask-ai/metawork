@@ -95,11 +95,26 @@ pub const PermissionReviewIdentity = struct {
 
 pub const PermissionReviewState = struct {
     pub const Phase = enum { idle, reviewing, needs_user };
-    pub const Cause = enum { unavailable, reviewer_concern, context_incomplete, timeout, call_failed, invalid_response, capacity, unsupported_tool, input_changed, state_changed };
+    pub const Cause = enum { unavailable, reviewer_concern, rejection_limit, context_incomplete, timeout, call_failed, invalid_response, capacity, input_changed, state_changed };
+    pub const rejection_limit = 3;
+    pub const Outcome = enum { allow_once, deny, needs_user, failed, not_started };
+    pub const Audit = struct {
+        outcome: Outcome,
+        cause: ?Cause = null,
+        reason: [512]u8 = @splat(0),
+        reason_len: usize = 0,
+
+        pub fn reasonText(self: *const Audit) ?[]const u8 {
+            return if (self.reason_len == 0) null else self.reason[0..self.reason_len];
+        }
+    };
     /// Reason must already have passed the Host text projection. Borrowed only
-    /// for settle; it never becomes a durable approval record.
+    /// for settle; the audit is copied only when the request resolves.
     pub const Explanation = struct { cause: Cause = .unavailable, reason: []const u8 = "" };
 
+    audit: ?Audit = null,
+    sequence_run_id: u64 = 0,
+    consecutive_denials: u8 = 0,
     generation: u64 = 1,
     exhausted: bool = false,
     phase: Phase = .idle,
@@ -121,18 +136,36 @@ pub const PermissionReviewState = struct {
         self.cause = .unavailable;
         std.crypto.secureZero(u8, &self.reason);
         self.reason_len = 0;
+        if (self.audit) |*audit| std.crypto.secureZero(u8, &audit.reason);
+        self.audit = null;
     }
 
     pub fn settle(self: *PermissionReviewState, request_id: u64, explanation: Explanation) void {
         if (self.phase == .needs_user and self.settled_request_id == request_id) return;
+        var audit = self.audit orelse Audit{ .outcome = if (self.phase == .reviewing) .failed else .not_started };
+        audit.cause = explanation.cause;
+        if (explanation.cause == .reviewer_concern or explanation.cause == .rejection_limit) {
+            audit.outcome = if (explanation.cause == .rejection_limit) .deny else .needs_user;
+            if (explanation.reason.len <= audit.reason.len) {
+                @memcpy(audit.reason[0..explanation.reason.len], explanation.reason);
+                audit.reason_len = explanation.reason.len;
+            }
+        }
         self.invalidate();
+        self.audit = audit;
+        self.consecutive_denials = 0;
         self.phase = .needs_user;
         self.settled_request_id = request_id;
         self.cause = explanation.cause;
-        if (explanation.cause == .reviewer_concern and explanation.reason.len <= self.reason.len) {
+        if ((explanation.cause == .reviewer_concern or explanation.cause == .rejection_limit) and explanation.reason.len <= self.reason.len) {
             @memcpy(self.reason[0..explanation.reason.len], explanation.reason);
             self.reason_len = explanation.reason.len;
         }
+    }
+
+    pub fn auditFor(self: *const PermissionReviewState, run_id: u64, request_id: u64) ?Audit {
+        if (self.phaseForRequest(run_id, request_id) == .idle) return null;
+        return self.audit orelse Audit{ .outcome = .failed, .cause = .state_changed };
     }
 
     pub fn matches(self: *const PermissionReviewState, identity: PermissionReviewIdentity) bool {

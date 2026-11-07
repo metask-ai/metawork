@@ -1193,6 +1193,7 @@ export const zhCN: Record<MessageId, string> = {
   "approval.action.web_fetch": "允许访问这个网址吗？",
   "approval.manual_mode": "当前为人工审批模式，请确认本次操作。",
   "approval.confirm_request": "请确认是否继续执行本次操作。",
+  "approval.review_history": "自动审核记录",
   "approval.reviewer_note": "审核意见：",
   "approval.agent_purpose": "Agent 说明：",
   "approval.command": "将执行的命令",
@@ -1202,6 +1203,7 @@ export const zhCN: Record<MessageId, string> = {
   "approval.command_unavailable": "暂时无法显示命令，请查看具体操作。",
   "approval.full_request": "查看具体操作",
   "approval.hide_request": "收起具体操作",
+  "approval.handoff.rejection_limit": "连续审核未通过，请确认本次操作。处理后将恢复自动审批。",
   "approval.handoff.unavailable": "自动审核未能完成，需要你确认。",
   "approval.handoff.reviewer_concern": "自动审核提出了需要你确认的事项。",
   "approval.handoff.context_incomplete": "自动审核缺少必要信息，需要你确认。",
@@ -1209,7 +1211,6 @@ export const zhCN: Record<MessageId, string> = {
   "approval.handoff.call_failed": "自动审核暂时不可用，需要你确认。",
   "approval.handoff.invalid_response": "自动审核未能给出有效结果，需要你确认。",
   "approval.handoff.capacity": "自动审核繁忙，需要你确认。",
-  "approval.handoff.unsupported_tool": "此工具暂不支持自动审核，需要你确认。",
   "approval.handoff.input_changed": "自动审核尚未考虑你的新指令，需要你确认。",
   "approval.handoff.state_changed": "授权设置已变化，需要你重新确认。",
   "approval.allow_tool": "允许 {tool}？",
@@ -1368,7 +1369,7 @@ export const zhCN: Record<MessageId, string> = {
   "permission.mode.full_access": "完全访问",
   "permission.mode.full_access.help": "常规操作无需审批，系统保护仍生效",
   "permission.auto_review.boundary":
-    "自动评审使用任务模型，产生额外调用费用；不是安全保证，仅决定本次操作。评审失败转人工，MCP 请求暂由你处理。",
+    "自动评审使用任务模型，产生额外调用费用；不是安全保证，仅决定本次操作。按任务自动审核内置、Host 和 MCP 工具；需要你决定或评审失败时转人工。",
   "permission.profile.approval_required.help":
     "常规工作区编辑自动执行；当前策略之外的其他操作需要批准。",
   "permission.profile.full_access": "完全访问",

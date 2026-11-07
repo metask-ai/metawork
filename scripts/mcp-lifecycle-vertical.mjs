@@ -164,7 +164,7 @@ export async function runMcpLifecycleVertical({
     // captured CAS input so creation at the held refresh boundary is a single
     // Bridge mutation, as it is for an already-rendered New Task form.
     const modelSnapshot = await snapshot();
-    const create = async () => {
+    const create = async (approvalMode = "manual") => {
       const result = await invoke("metawork.tasks.create", {
         workspace: {
           kind: "manual",
@@ -175,7 +175,7 @@ export async function runMcpLifecycleVertical({
         modelSelection: fixtureModelSelection(modelSnapshot),
         expectedSkillCatalogRevision: null,
         expectedSkillSelectionRevision: null,
-        approvalMode: "manual",
+        approvalMode,
       });
       assert.equal(result.accepted, true, JSON.stringify(result));
       assert.deepEqual(result.mcpAuthority, {
@@ -188,7 +188,7 @@ export async function runMcpLifecycleVertical({
       });
       return result.taskId;
     };
-    const run = async (taskId, label) => {
+    const run = async (taskId, label, automatic = false) => {
       provider.enqueue(
         (payload) => {
           const selected = payload.tools.filter((tool) =>
@@ -236,28 +236,38 @@ export async function runMcpLifecycleVertical({
         "fresh MCP Session catalog preparation",
       );
       assert.equal(started.accepted, true, JSON.stringify(started));
-      const pending = await wait(
-        async () => {
-          const current = await task(taskId);
-          return current.pendingUi?.runId === started.runId
-            ? current.pendingUi
-            : null;
-        },
-        60_000,
-        `${label} permission`,
-      );
-      assert.equal(pending.kind, "permission");
-      const answer = await invoke("metawork.tasks.respondUi", {
-        taskId,
-        runId: started.runId,
-        requestId: pending.requestId,
-        kind: "permission",
-        permission: "allow_once",
-      });
-      assert.equal(answer.answered, true, JSON.stringify(answer));
+      let pending = null;
+      if (!automatic) {
+        pending = await wait(
+          async () => {
+            const current = await task(taskId);
+            return current.pendingUi?.runId === started.runId
+              ? current.pendingUi
+              : null;
+          },
+          60_000,
+          `${label} permission`,
+        );
+        assert.equal(pending.kind, "permission");
+        const answer = await invoke("metawork.tasks.respondUi", {
+          taskId,
+          runId: started.runId,
+          requestId: pending.requestId,
+          kind: "permission",
+          permission: "allow_once",
+        });
+        assert.equal(answer.answered, true, JSON.stringify(answer));
+      }
       const finished = await wait(
         async () => {
           const current = await task(taskId);
+          if (automatic) {
+            assert.notEqual(
+              current.permissionReviewState,
+              "needs_user",
+              "MCP permission must reach the reviewer without human handoff",
+            );
+          }
           const last = current.runs.find((item) => item.id === started.runId);
           return last?.terminal && !current.activeOperation ? current : null;
         },
@@ -268,9 +278,21 @@ export async function runMcpLifecycleVertical({
         finished.runs.find((item) => item.id === started.runId).phase,
         "completed",
       );
+      const record = finished.uiHistory.find(
+        (entry) => entry.runId === started.runId && entry.kind === "permission",
+      );
+      assert.equal(record.permission.toolNamespace, "mcp");
+      if (automatic) {
+        assert.equal(finished.approvalMode, "auto_review");
+        assert.equal(finished.pendingUi, null);
+        assert.equal(record.answeredBy, "reviewer");
+        assert.equal(record.state, "allowed_once");
+        assert.equal(record.review.outcome, "allow_once");
+        assert.equal(record.permission.usedSessionRule, false);
+      }
       return {
         runId: started.runId,
-        requestId: pending.requestId,
+        requestId: pending?.requestId ?? record.requestId,
         bindingEpoch: finished.binding.epoch,
       };
     };
@@ -333,6 +355,22 @@ export async function runMcpLifecycleVertical({
     );
     const final = await mcpView();
     assert.equal(final.servers[0].newTaskAccess, "available");
+    assert.equal(provider.mcpReviewRequests, 0);
+    const automaticTask = await create("auto_review");
+    const automaticFirst = await run(
+      automaticTask,
+      "mcp-automatic-first",
+      true,
+    );
+    const automaticSecond = await run(
+      automaticTask,
+      "mcp-automatic-second",
+      true,
+    );
+    assert.notEqual(automaticFirst.requestId, automaticSecond.requestId);
+    assert.equal(automaticFirst.bindingEpoch, automaticSecond.bindingEpoch);
+    assert.equal(provider.mcpReviewRequests, 2);
+    assert.equal((await requests("tools/call")).length, 5);
     const report = {
       protocol: protocolVersion,
       transport,
@@ -343,7 +381,11 @@ export async function runMcpLifecycleVertical({
       finalToolsLists: finalLists,
       automaticRefreshes: automatic.length,
       refreshIntervalsMs,
-      actualToolCalls: 3,
+      actualToolCalls: 5,
+      automaticReviews: provider.mcpReviewRequests,
+      automaticHumanAnswers: 0,
+      automaticDistinctRequests:
+        automaticFirst.requestId !== automaticSecond.requestId,
       originalTaskRuns: 2,
       distinctOnceRequests: firstRun.requestId !== secondRun.requestId,
       originalBindingPreserved:

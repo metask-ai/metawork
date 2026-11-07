@@ -5760,12 +5760,10 @@ pub const Runtime = struct {
                 vacant = slot;
                 break;
             };
-            // MCP has no trusted secret-field projection in the current SDK.
-            // Do not send opaque MCP arguments to another model by guessing.
-            if (vacant == null or prepared.tool_namespace != .builtin or
+            if (vacant == null or
                 !self.permissionReviewAuthorized(prepared.identity))
             {
-                _ = self.task_runtime.finishPermissionReview(prepared.identity, .{ .cause = if (prepared.tool_namespace != .builtin) .unsupported_tool else if (vacant == null) .capacity else .state_changed });
+                _ = self.task_runtime.finishPermissionReview(prepared.identity, .{ .cause = if (vacant == null) .capacity else .state_changed });
                 prepared.deinit();
                 self.bumpRevision();
                 continue;

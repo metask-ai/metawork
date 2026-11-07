@@ -1375,6 +1375,7 @@ export const enUS = {
     "This task uses manual approval. Please confirm this operation.",
   "approval.confirm_request":
     "Please decide whether to proceed with this operation.",
+  "approval.review_history": "Automatic review record",
   "approval.reviewer_note": "Reviewer’s note:",
   "approval.agent_purpose": "Agent’s description:",
   "approval.command": "Command to run",
@@ -1386,6 +1387,7 @@ export const enUS = {
     "The command is unavailable. View operation details.",
   "approval.full_request": "View operation details",
   "approval.hide_request": "Hide operation details",
+  "approval.handoff.rejection_limit": "Repeated review denials require your decision for this operation. Automatic review resumes afterward.",
   "approval.handoff.unavailable":
     "Automatic review could not finish. Please confirm.",
   "approval.handoff.reviewer_concern":
@@ -1398,8 +1400,6 @@ export const enUS = {
   "approval.handoff.invalid_response":
     "Automatic review returned no valid decision. Please confirm.",
   "approval.handoff.capacity": "Automatic review is busy. Please confirm.",
-  "approval.handoff.unsupported_tool":
-    "This tool does not support automatic review. Please confirm.",
   "approval.handoff.input_changed":
     "Automatic review has not considered your new instructions. Please confirm.",
   "approval.handoff.state_changed":
@@ -1573,7 +1573,7 @@ export const enUS = {
   "permission.mode.full_access.help":
     "Routine actions skip approval while system protections still apply",
   "permission.auto_review.boundary":
-    "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Failure returns to manual approval. MCP requests remain manual.",
+    "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Built-in, Host and MCP tools are reviewed against your task. Decisions requiring your input or review failures return to manual approval.",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. Other operations outside this policy require approval.",
   "permission.profile.full_access": "Full access",

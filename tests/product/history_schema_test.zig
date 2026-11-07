@@ -201,6 +201,38 @@ test "history schema preserves optional source-qualified Task model intent" {
     }
 }
 
+test "history SQL preserves manual and cancelled review summaries without reviewer attribution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    for ([_]bool{ false, true }) |cancelled| {
+        const state = try history.fixture(allocator);
+        const record = &state.tasks[0].ui_history[0];
+        record.state = if (cancelled) "cancelled" else "allowed_once";
+        record.answered_by = if (cancelled) null else "user";
+        record.review_reason = null;
+        record.review = .{ .outcome = "deny", .cause = "rejection_limit", .reason = "当前拒绝达到阈值 late-credential" };
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const path = try temporaryPath(allocator, temporary.dir);
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(allocator, database.capability(), state);
+        try expectSame(allocator, database.capability(), state);
+        var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+        defer repository.deinit();
+        try repository.seed(state, .{});
+        try repository.sanitize("late-credential", @splat(3));
+        const restored = try history.load(allocator, database.capability());
+        const actual = restored.tasks[0].ui_history[0];
+        try std.testing.expectEqualStrings(record.answered_by orelse "", actual.answered_by orelse "");
+        try std.testing.expect(actual.review_reason == null);
+        try std.testing.expectEqualStrings("deny", actual.review.?.outcome);
+        try std.testing.expectEqualStrings("rejection_limit", actual.review.?.cause.?);
+        try std.testing.expect(std.mem.indexOf(u8, actual.review.?.reason.?, "late-credential") == null);
+    }
+}
+
 test "history input JSON preserves reading anchors beyond surviving output" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

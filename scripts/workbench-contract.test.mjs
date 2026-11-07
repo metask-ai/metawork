@@ -148,7 +148,6 @@ test("manual review explanations are bounded request-only facts with typed failu
     "timeout",
     "call_failed",
     "capacity",
-    "unsupported_tool",
     "context_incomplete",
     "invalid_response",
     "input_changed",
@@ -182,6 +181,7 @@ test("review audit only describes once-only reviewer decisions and keeps legal o
     detailTruncated: false,
     redacted: false,
     answeredBy: "reviewer",
+    review: null,
     reviewReason: "Matches the user request",
     agentRequestId: "",
     permission: null,
@@ -3011,6 +3011,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     detailTruncated: false,
     redacted: false,
     answeredBy: "user",
+    review: null,
     reviewReason: null,
     agentRequestId: "",
     permission: null,
@@ -3032,6 +3033,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     detailTruncated: false,
     redacted: false,
     answeredBy: "user",
+    review: null,
     reviewReason: null,
     agentRequestId: "",
     permission: null,
@@ -3130,6 +3132,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     detailTruncated: false,
     redacted: false,
     answeredBy: "user",
+    review: null,
     reviewReason: null,
     agentRequestId: "",
     permission: null,
@@ -3176,6 +3179,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     detailTruncated: false,
     redacted: false,
     answeredBy: "user",
+    review: null,
     reviewReason: null,
     agentRequestId: "",
     permission: null,
@@ -3197,6 +3201,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     detailTruncated: false,
     redacted: false,
     answeredBy: "user",
+    review: null,
     reviewReason: null,
     agentRequestId: "agent-request-11",
     permission: {
@@ -3509,6 +3514,7 @@ test("approval mode changes preserve historical Run permissions and reviewer pro
     detailTruncated: false,
     redacted: false,
     answeredBy: "reviewer",
+    review: null,
     reviewReason: "Matches the user request",
     agentRequestId: "",
     permission: null,
@@ -4012,4 +4018,59 @@ test("presentation anchors are strict and lossless for both messages and generat
   assert.throws(() => decodeWorkbenchSnapshot(missing), /presentationOrder/);
   delete value.tasks[0].runs[0].tools[0].fileRefs[0].presentationAnchor;
   assert.throws(() => decodeWorkbenchSnapshot(value), /presentationAnchor/);
+});
+
+test("handoff history keeps model advice separate from user and cancellation attribution", () => {
+  const value = clone(fixture);
+  const record = {
+    requestId: "18",
+    runId: "7",
+    order: "1",
+    kind: "permission",
+    state: "allowed_once",
+    detail: "",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+    answeredBy: "user",
+    reviewReason: null,
+    agentRequestId: "",
+    permission: null,
+    review: {
+      outcome: "needs_user",
+      cause: "reviewer_concern",
+      reason: "Confirm this publication.",
+    },
+  };
+  value.tasks[0].uiHistory.push(record);
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  record.state = "cancelled";
+  record.answeredBy = null;
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  record.reviewReason = "Wrong attribution";
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+  record.reviewReason = null;
+  record.review.reason = "bad\nreason";
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+  record.review = { outcome: "failed", cause: "timeout", reason: null };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+});
+
+test("rejection-limit handoff keeps the model reason and no new approval mode", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.approvalMode = "auto_review";
+  task.permissionReviewState = "needs_user";
+  task.permissionReviewExplanation = {
+    cause: "rejection_limit",
+    reason: "Confirm this operation.",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  task.permissionReviewExplanation.reason = "bad\nreason";
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+  task.permissionReviewExplanation = {
+    cause: "timeout",
+    reason: "Not a model reason",
+  };
+  assert.throws(() => decodeWorkbenchSnapshot(value));
 });

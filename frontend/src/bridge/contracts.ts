@@ -931,7 +931,24 @@ export type PendingUi = {
 };
 export type PermissionChoice =
   "deny_once" | "deny_session" | "allow_once" | "allow_session";
+export type PermissionReviewCause =
+  | "unavailable"
+  | "reviewer_concern"
+  | "rejection_limit"
+  | "context_incomplete"
+  | "timeout"
+  | "call_failed"
+  | "invalid_response"
+  | "capacity"
+  | "input_changed"
+  | "state_changed";
+export type PermissionReview = {
+  outcome: "allow_once" | "deny" | "needs_user" | "failed" | "not_started";
+  cause: PermissionReviewCause | null;
+  reason: string | null;
+};
 export type UiRecord = {
+  review: PermissionReview | null;
   answeredBy: "user" | "reviewer" | null;
   reviewReason: string | null;
   requestId: string;
@@ -1100,17 +1117,7 @@ export type TaskView = {
   approvalResult: TaskApprovalResult | null;
   permissionReviewState: "idle" | "reviewing" | "needs_user";
   permissionReviewExplanation: {
-    cause:
-      | "unavailable"
-      | "reviewer_concern"
-      | "context_incomplete"
-      | "timeout"
-      | "call_failed"
-      | "invalid_response"
-      | "capacity"
-      | "unsupported_tool"
-      | "input_changed"
-      | "state_changed";
+    cause: PermissionReviewCause;
     reason: string | null;
   } | null;
   id: string;

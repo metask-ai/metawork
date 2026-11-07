@@ -31,6 +31,7 @@ pub const Input = struct {
     user_history_json: []const u8 = "",
     omitted_user_messages: usize = 0,
     request: struct {
+        tool_namespace: []const u8 = "builtin",
         tool_name: []const u8,
         arguments_json: []const u8,
         working_directory: []const u8,
@@ -117,9 +118,9 @@ fn encodeInput(allocator: std.mem.Allocator, input: Input) EncodeError!EncodedIn
         return error.InvalidInput;
     var total: usize = 0;
     for ([_][]const u8{
-        input.host.constraints,  input.host.authorization,     input.user_intent,
-        input.request.tool_name, input.request.arguments_json, input.request.working_directory,
-        input.context,
+        input.host.constraints,          input.host.authorization, input.user_intent,
+        input.request.tool_namespace,    input.request.tool_name,  input.request.arguments_json,
+        input.request.working_directory, input.context,
     }) |field| {
         total = std.math.add(usize, total, field.len) catch return error.InputLimit;
         if (total > max_input_bytes) return error.InputLimit;
@@ -199,6 +200,7 @@ fn writeEncodedInput(bytes: []u8, input: Input, arguments: std.json.Value, histo
             .earlier_user_instructions = history,
             .omitted_earlier_user_messages = omitted,
             .request = .{
+                .tool_namespace = input.request.tool_namespace,
                 .tool_name = input.request.tool_name,
                 .arguments = arguments,
                 .working_directory = input.request.working_directory,

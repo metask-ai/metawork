@@ -1595,6 +1595,14 @@ fn writeUiHistory(
         if (record.answered_by) |source| jsonValue(writer, @tagName(source)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"reviewReason\":") catch return error.SnapshotTooLarge;
         if (record.review_reason_len != 0) try text.writeJson(writer, record.review_reason[0..record.review_reason_len]) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"review\":") catch return error.SnapshotTooLarge;
+        if (record.review) |*review| {
+            writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(review.outcome)}) catch return error.SnapshotTooLarge;
+            if (review.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
+            if (review.reasonText()) |reason| try text.writeJson(writer, reason) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{},\"agentRequestId\":", .{
             record.item_count,
             record.detail_truncated,

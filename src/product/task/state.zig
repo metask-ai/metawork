@@ -1067,12 +1067,16 @@ pub const UiRecordState = enum {
 };
 
 pub const UiRecord = struct {
+    pub const Review = task_attachment.PermissionReviewState.Audit;
+    pub const ReviewOutcome = task_attachment.PermissionReviewState.Outcome;
+    pub const ReviewCause = task_attachment.PermissionReviewState.Cause;
     request_id: u64,
     run_id: u64,
     order: u64 = 0,
     kind: UiRecordKind,
     state: UiRecordState,
     answered_by: ?enum { user, reviewer } = null,
+    review: ?Review = null,
     review_reason: [ui_record_detail_capacity]u8 = undefined,
     review_reason_len: usize = 0,
     agent_request_id: [permission_summary_field_capacity]u8 = undefined,
