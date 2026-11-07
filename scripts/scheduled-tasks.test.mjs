@@ -33,6 +33,7 @@ Object.defineProperty(globalThis, "navigator", {
   value: dom.window.navigator,
 });
 const {
+  act,
   cleanup,
   fireEvent,
   render: renderDom,
@@ -70,14 +71,14 @@ const fixture = JSON.parse(
   ),
 );
 
-function scheduledElement(snapshot, overrides = {}) {
+function scheduledElement(snapshot, overrides = {}, locale = "en-US") {
   return createElement(
     I18nContext.Provider,
     {
       value: {
-        locale: "en-US",
+        locale,
         setLocale() {},
-        t: (id, values) => translate("en-US", id, values),
+        t: (id, values) => translate(locale, id, values),
       },
     },
     createElement(ScheduledTasksPage, {
@@ -177,7 +178,7 @@ function scheduleSnapshot(overrides = {}) {
   return snapshot;
 }
 
-test("attention explains its cause and requires confirmation while deletion stays available", async () => {
+test("confirming a changed connection renews the same model binding with current source proof", async () => {
   let updated;
   let deleted = 0;
   const snapshot = scheduleSnapshot({
@@ -186,6 +187,8 @@ test("attention explains its cause and requires confirmation while deletion stay
     failureReason: "execution_changed",
     nextRunAtUnixSeconds: null,
   });
+  snapshot.scheduledTasks[0].binding.modelRef.modelId = "fixture-model";
+  snapshot.models.providers[0].sourceGeneration = "7";
   renderDom(
     scheduledElement(snapshot, {
       onUpdate: async (...args) => {
@@ -200,26 +203,306 @@ test("attention explains its cause and requires confirmation while deletion stay
     document.body.textContent,
     /The model or connection changed\. Edit and confirm\./,
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  assert.equal(
+    screen
+      .getByRole("switch", { name: "Enable schedule: Review" })
+      .getAttribute("aria-disabled"),
+    "true",
   );
-  for (const button of screen.getAllByRole("button", { name: "Run now" }))
-    assert.equal(button.disabled, true);
-  for (const button of screen.getAllByRole("button", { name: "Resume" }))
-    assert.equal(button.disabled, true);
+  assert.equal(screen.getByRole("button", { name: "Run now" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   assert.equal(
     screen.getByRole("button", { name: "Delete schedule" }).disabled,
     false,
   );
   assert.equal(screen.getByRole("combobox", { name: "Model" }) != null, true);
+  assert.doesNotMatch(document.body.textContent, /Saving confirms/);
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(updated));
+  assert.deepEqual(updated.slice(0, 2), ["8", "1"]);
+  assert.deepEqual(updated[2].modelSelection, {
+    targetModelRef: { sourceId: "metask", modelId: "fixture-model" },
+    expectedSourceGeneration: "7",
+    expectedCatalogGeneration: "4",
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete schedule" }));
+  await waitFor(() => assert.equal(deleted, 1));
+});
+
+test("connection recovery requires a ready model without silently choosing a replacement", async () => {
+  let updated;
+  renderDom(
+    scheduledElement(
+      scheduleSnapshot({
+        enabled: false,
+        health: "needs_attention",
+        failureReason: "execution_changed",
+        nextRunAtUnixSeconds: null,
+      }),
+      {
+        onUpdate: async (...args) => {
+          updated = args;
+        },
+      },
+    ),
+  );
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
+  assert.equal(updated, undefined);
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Fixture model" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(updated));
+  assert.equal(
+    updated[2].modelSelection.targetModelRef.modelId,
+    "fixture-model",
+  );
+});
+
+test("confirming a different attention cause retains the pinned model binding", async () => {
+  let updated;
+  renderDom(
+    scheduledElement(
+      scheduleSnapshot({
+        enabled: false,
+        health: "needs_attention",
+        failureReason: "permission_required",
+        nextRunAtUnixSeconds: null,
+      }),
+      {
+        onUpdate: async (...args) => {
+          updated = args;
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(updated));
   assert.equal(updated[2].modelSelection, null);
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
+});
+
+test("list actions run, pause, resume and open results without an overflow menu", async () => {
+  const snapshot = scheduleSnapshot({
+    epoch: "7",
+    occurrences: [finishedOccurrence()],
+  });
+  const runs = [],
+    toggles = [],
+    opened = [];
+  const overrides = {
+    onRunNow: async (...args) => {
+      runs.push(args);
+      return { taskId: "51" };
+    },
+    onSetEnabled: async (...args) => {
+      toggles.push(args);
+      return { epoch: "8" };
+    },
+    onOpenTask: (id) => opened.push(id),
+  };
+  const view = renderDom(scheduledElement(snapshot, overrides));
+  const user = userEvent.setup({ document });
+  const actions = screen.getByRole("group", {
+    name: "Schedule actions: Review",
+  });
+  for (const button of within(actions).getAllByRole("button")) {
+    assert.equal(button.textContent, "");
+    assert.ok(button.querySelector("svg"));
+    assert.equal(button.title, button.getAttribute("aria-label"));
+  }
+  assert.equal(screen.queryByRole("menu"), null);
+  assert.equal(
+    screen.queryByRole("button", { name: "Schedule actions: Review" }),
+    null,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Delete schedule" }));
-  await waitFor(() => assert.equal(deleted, 1));
+  await user.click(within(actions).getByRole("button", { name: "Run now" }));
+  assert.deepEqual(runs, [["8", "7"]]);
+  assert.deepEqual(opened, ["51"]);
+  const toggle = within(actions).getByRole("switch", {
+    name: "Enable schedule: Review",
+  });
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  assert.equal(document.querySelector(".scheduled-state"), null);
+  await user.click(toggle);
+  assert.deepEqual(toggles, [["8", "7", false]]);
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  await user.click(
+    within(document.querySelector(".scheduled-row-result")).getByRole(
+      "button",
+      { name: "View result" },
+    ),
+  );
+  assert.equal(
+    within(actions).queryByRole("button", { name: "View result" }),
+    null,
+  );
+  assert.deepEqual(opened, ["51", "3"]);
+  assert.equal(screen.queryByRole("dialog"), null);
+  view.rerender(
+    scheduledElement(
+      scheduleSnapshot({ epoch: "8", health: "paused", enabled: false }),
+      overrides,
+    ),
+  );
+  const resumed = screen.getByRole("switch", {
+    name: "Enable schedule: Review",
+  });
+  assert.equal(resumed.getAttribute("aria-checked"), "false");
+  assert.equal(document.querySelector(".scheduled-state"), null);
+  await user.click(resumed);
+  assert.deepEqual(toggles, [
+    ["8", "7", false],
+    ["8", "8", true],
+  ]);
+});
+
+test("editing owns the task definition and deletion while the history icon shows records only", async () => {
+  renderDom(scheduledElement(scheduleSnapshot()));
+  const user = userEvent.setup({ document });
+  const actions = screen.getByRole("group", {
+    name: "Schedule actions: Review",
+  });
+  const summary = document.querySelector(".scheduled-row-main");
+  assert.equal(summary.tagName, "DIV");
+  assert.equal(summary.querySelector("button, svg"), null);
+  await user.click(summary);
+  assert.equal(screen.queryByRole("dialog"), null);
+  const edit = within(actions).getByRole("button", { name: "Edit" });
+  assert.equal(edit.textContent, "");
+  assert.ok(edit.querySelector("svg"));
+  await user.click(edit);
+  const dialog = await screen.findByRole("dialog", {
+    name: "Editing schedule",
+  });
+  await waitFor(() =>
+    assert.ok(document.activeElement === screen.getByLabelText("Name")),
+  );
+  assert.equal(dialog.querySelector(".scheduled-detail-summary"), null);
+  assert.equal(dialog.querySelector(".scheduled-history"), null);
+  const deletion = within(dialog).getByRole("button", {
+    name: "Delete schedule",
+  });
+  assert.equal(deletion.textContent, "");
+  assert.ok(deletion.querySelector("svg"));
+  assert.equal(deletion.title, "Delete schedule");
+  assert.equal(within(dialog).queryByRole("button", { name: "Pause" }), null);
+  assert.equal(within(dialog).queryByRole("button", { name: "Run now" }), null);
+  assert.ok(within(dialog).getByRole("button", { name: "Cancel" }));
+  assert.ok(within(dialog).getByRole("button", { name: "Confirm" }));
+  assert.equal(screen.getByLabelText("Name").value, "Review");
+  assert.equal(
+    screen.getByLabelText("Instruction").value,
+    "Review every line\nAnd explain the result",
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  await waitFor(() => assert.ok(document.activeElement === edit));
+  await user.click(screen.getByRole("button", { name: "Run history: Review" }));
+  const details = await screen.findByRole("dialog", {
+    name: "Run history: Review",
+  });
+  assert.ok(details.querySelector(".scheduled-history"));
+  assert.equal(details.querySelector(".scheduled-detail-summary"), null);
+  assert.doesNotMatch(
+    details.textContent,
+    /Review every line|And explain the result|Next run|Every hour/,
+  );
+  assert.equal(
+    within(details).queryByRole("button", { name: "Edit", exact: true }),
+    null,
+  );
+  assert.equal(
+    within(details).queryByRole("button", { name: "Delete schedule" }),
+    null,
+  );
+  assert.equal(within(details).queryByRole("textbox"), null);
+  assert.equal(within(details).queryByRole("combobox"), null);
+  assert.equal(
+    within(details).queryByRole("button", { name: "Confirm" }),
+    null,
+  );
+  assert.equal(
+    within(details).queryByRole("button", { name: "Run now" }),
+    null,
+  );
+  assert.equal(within(details).queryByRole("button", { name: "Pause" }), null);
+  assert.equal(within(details).queryByRole("button", { name: "Resume" }), null);
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement ===
+        within(actions).getByRole("button", {
+          name: "Run history: Review",
+        }),
+    ),
+  );
+});
+
+test("history stays compact and links each available real Task without management controls", async () => {
+  let opened;
+  renderDom(
+    scheduledElement(
+      scheduleSnapshot({
+        occurrences: [
+          finishedOccurrence({
+            plannedAtUnixSeconds: "1799996400",
+            triggeredAtUnixSeconds: "1799996400",
+            taskId: "1",
+            taskOutcome: "unavailable",
+          }),
+          finishedOccurrence({ taskId: "2" }),
+          finishedOccurrence({
+            plannedAtUnixSeconds: "1800003600",
+            triggeredAtUnixSeconds: "1800003600",
+            taskId: "3",
+            taskOutcome: null,
+          }),
+        ],
+      }),
+      {
+        onOpenTask: (id) => {
+          opened = id;
+        },
+      },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Run history: Review" }));
+  const dialog = screen.getByRole("dialog", { name: "Run history: Review" });
+  assert.ok(dialog.classList.contains("scheduled-history-dialog"));
+  assert.equal(dialog.querySelector("footer"), null);
+  assert.equal(dialog.querySelector("h2").textContent, "Run history");
+  assert.equal(
+    dialog.querySelector(".scheduled-history-title").textContent,
+    "Review",
+  );
+  const rows = within(dialog).getAllByRole("listitem");
+  assert.equal(rows.length, 3);
+  assert.equal(
+    rows[0].querySelector("time").dateTime,
+    new Date(1_800_003_600_000).toISOString(),
+  );
+  assert.match(
+    rows[0].querySelector(".scheduled-history-state").textContent,
+    /Running/,
+  );
+  assert.match(rows[1].textContent, /Completed/);
+  assert.match(rows[2].textContent, /Original task unavailable/);
+  assert.equal(within(rows[2]).queryByRole("button"), null);
+  const result = within(rows[0]).getByRole("button", { name: "View run" });
+  assert.equal(result.textContent, "");
+  assert.ok(result.querySelector("svg"));
+  fireEvent.click(result);
+  assert.equal(opened, "3");
+  assert.equal(
+    within(dialog).getAllByRole("button", { name: "Close" }).length,
+    1,
+  );
 });
 
 test("list action failures stay visible without opening an editor", async () => {
@@ -231,10 +514,7 @@ test("list action failures stay visible without opening an editor", async () => 
     }),
   );
   const user = userEvent.setup({ document });
-  await user.click(
-    screen.getByRole("button", { name: "Schedule actions: Review" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "Run now" }));
+  await user.click(screen.getByRole("button", { name: "Run now" }));
   await waitFor(() =>
     assert.match(
       screen.getByRole("alert").textContent,
@@ -268,7 +548,7 @@ test("expired one-time edits use the shared clock picker and recalculate at subm
     ),
   );
   const user = userEvent.setup({ document });
-  await user.click(document.querySelector(".scheduled-row-main"));
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
   const time = screen.getByRole("group", { name: "Time" });
   assert.equal(time.getAttribute("aria-invalid"), "true");
   assert.equal(screen.queryByLabelText("Starts"), null);
@@ -299,9 +579,7 @@ test("unavailable history is distinct from failure and delay retains its planned
     ],
   });
   renderDom(scheduledElement(snapshot));
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Run history: Review" }));
   assert.match(document.body.textContent, /Original task unavailable/);
   assert.match(document.body.textContent, /Delayed from/);
   assert.doesNotMatch(document.body.textContent, /Run failed/);
@@ -347,14 +625,64 @@ test("Scheduled tasks is a truthful independent management page", () => {
   ];
   const html = render(snapshot);
   assert.match(html, /Scheduled tasks/);
-  assert.match(html, /Continues after the window closes/);
+  assert.match(
+    html,
+    /Run tasks on schedule, even with the window closed, and get notified when they finish/,
+  );
+  assert.doesNotMatch(html, /scheduled-background-state/);
   assert.match(html, /Search scheduled tasks/);
-  assert.match(html, /type="search"/);
-  assert.match(html, /1 schedule/);
-  assert.match(html, /Ongoing/);
+  assert.doesNotMatch(html, /type="search"|scheduled-toolbar|scheduled-count/);
+  assert.match(html, /Enabled/);
   assert.match(html, /Daily repository summary/);
   assert.match(html, /Schedule actions: Daily repository summary/);
   assert.doesNotMatch(html, /cron/i);
+});
+
+test("schedule search stays compact in the header and preserves and clears filters", async () => {
+  const snapshot = scheduleSnapshot();
+  snapshot.scheduledTasks.push({
+    ...structuredClone(snapshot.scheduledTasks[0]),
+    id: "9",
+    title: "Weekly report",
+    input: { kind: "text", text: "Summarize the budget", redacted: false },
+  });
+  renderDom(scheduledElement(snapshot));
+  const user = userEvent.setup({ document: dom.window.document });
+  const trigger = screen.getByRole("button", {
+    name: "Search scheduled tasks",
+  });
+  assert.ok(
+    trigger.parentElement.contains(screen.getByRole("button", { name: "New" })),
+  );
+  assert.equal(trigger.textContent, "");
+  assert.equal(screen.queryByRole("searchbox"), null);
+  await user.click(trigger);
+  const search = await screen.findByRole("searchbox", {
+    name: "Search scheduled tasks",
+  });
+  await waitFor(() => assert.ok(document.activeElement === search));
+  await user.type(search, "budget");
+  assert.equal(screen.queryByText("Review", { exact: true }), null);
+  assert.ok(screen.getByText("Weekly report", { exact: true }));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.ok(screen.queryByRole("searchbox") === null));
+  assert.equal(trigger.dataset.active, "true");
+  await waitFor(() => assert.ok(document.activeElement === trigger));
+  assert.equal(screen.queryByText("Review", { exact: true }), null);
+  await user.click(trigger);
+  const reopened = await screen.findByRole("searchbox");
+  assert.equal(reopened.value, "budget");
+  await user.click(screen.getByRole("button", { name: "Clear search" }));
+  assert.ok(screen.getByText("Review", { exact: true }));
+  assert.ok(screen.getByText("Weekly report", { exact: true }));
+  assert.equal(trigger.dataset.active, undefined);
+  assert.equal(document.activeElement, reopened);
+  await user.type(reopened, "no matching schedule");
+  assert.ok(screen.getByText("No matching schedules"));
+  await user.click(screen.getByRole("button", { name: "Clear search" }));
+  await user.type(reopened, "Weekly");
+  assert.ok(screen.getByText("Weekly report", { exact: true }));
+  assert.equal(screen.queryByText("Review", { exact: true }), null);
 });
 
 test("Empty scheduled tasks page keeps a single create entry without templates", () => {
@@ -643,6 +971,14 @@ test("schedule editor controls have explicit semantics and no native chrome", as
   assert.match(css, /::-webkit-search-cancel-button/);
   assert.match(css, /resize: none;/);
   assert.doesNotMatch(css, /\.scheduled-editor fieldset/);
+  const source = readFileSync(
+    join(
+      process.cwd(),
+      "frontend/src/features/scheduled-tasks/ScheduledTasksPage.tsx",
+    ),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /\bDrawer\b|ui\/drawer\.tsx|<Editor\./);
   assert.ok(within(dialog).getByRole("button", { name: "Confirm" }));
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
@@ -809,7 +1145,194 @@ function finishedOccurrence(overrides = {}) {
   };
 }
 
-test("plan state and latest outcome stay distinct, while identical completion is shown once", () => {
+test("schedule groups expose only enabled and disabled while retaining failure reasons", () => {
+  const snapshot = scheduleSnapshot();
+  snapshot.scheduledTasks[0].title = "Active schedule";
+  for (const [index, health] of [
+    "paused",
+    "needs_attention",
+    "completed",
+  ].entries()) {
+    snapshot.scheduledTasks.push({
+      ...structuredClone(snapshot.scheduledTasks[0]),
+      id: String(index + 9),
+      title: `${health} schedule`,
+      enabled: false,
+      health,
+      failureReason: health === "needs_attention" ? "execution_changed" : null,
+      nextRunAtUnixSeconds: null,
+    });
+  }
+  renderDom(scheduledElement(snapshot));
+  assert.deepEqual(
+    screen
+      .getAllByRole("heading", { level: 2 })
+      .map((heading) => heading.textContent),
+    ["Enabled", "Disabled"],
+  );
+  const enabled = screen.getByRole("list", { name: "Enabled" });
+  const disabled = screen.getByRole("list", { name: "Disabled" });
+  assert.equal(within(enabled).getAllByRole("listitem").length, 1);
+  assert.match(enabled.textContent, /Active schedule/);
+  assert.equal(within(disabled).getAllByRole("listitem").length, 3);
+  assert.match(disabled.textContent, /The model or connection changed/);
+  assert.equal(
+    screen
+      .getByRole("switch", {
+        name: "Enable schedule: needs_attention schedule",
+      })
+      .getAttribute("aria-disabled"),
+    "true",
+  );
+});
+
+test("the countdown shares the rule line while the description fills the space below", () => {
+  for (const recurrence of [
+    { kind: "once", atUnixSeconds: "1800000000" },
+    {
+      kind: "calendar",
+      frequency: "daily",
+      timezone: "Asia/Shanghai",
+      startAtUnixSeconds: "1800000000",
+    },
+  ]) {
+    renderDom(scheduledElement(scheduleSnapshot({ recurrence })));
+    const copy = document.querySelector(".scheduled-row-copy");
+    const schedule = copy.querySelector(".scheduled-row-schedule");
+    assert.equal(copy.querySelector("strong").nextElementSibling, schedule);
+    assert.equal(schedule.nextElementSibling.tagName, "SMALL");
+    assert.equal(
+      schedule.nextElementSibling.textContent,
+      "Review every line\nAnd explain the result",
+    );
+    assert.match(
+      schedule.querySelector(".scheduled-row-frequency").textContent,
+      recurrence.kind === "once" ? /^Once .+\d/ : /^Daily \d{2}:\d{2}$/,
+    );
+    const time = schedule.querySelector("time");
+    assert.ok(
+      time.previousElementSibling.classList.contains("scheduled-row-frequency"),
+    );
+    assert.match(time.textContent, /Next run/);
+    assert.equal(time.dateTime, new Date(1_800_000_000_000).toISOString());
+    assert.equal(document.querySelectorAll(".scheduled-list time").length, 1);
+    cleanup();
+  }
+});
+
+test("a stopped one-time schedule retains its planned time without claiming a next run", () => {
+  renderDom(
+    scheduledElement(
+      scheduleSnapshot({
+        enabled: false,
+        health: "completed",
+        recurrence: { kind: "once", atUnixSeconds: "1800000000" },
+        nextRunAtUnixSeconds: null,
+      }),
+    ),
+  );
+  const schedule = document.querySelector(".scheduled-row-schedule");
+  assert.match(schedule.textContent, /Once .+\d/);
+  assert.doesNotMatch(schedule.textContent, /Next run/);
+  assert.equal(schedule.querySelectorAll("time").length, 0);
+});
+
+test("calendar rules show their saved clock separately from the relative next run", (ctx) => {
+  const start = Date.parse("2026-11-07T00:00:00Z") / 1000;
+  const next = start + 86400;
+  ctx.mock.method(Date, "now", () => (next - 8 * 3600) * 1000);
+  for (const [frequency, days, expected] of [
+    ["daily", undefined, "每天 08:00"],
+    ["weekly", [6], "每周 周六 08:00"],
+    ["monthly", [7, 15], "每月 7日、15日 08:00"],
+  ]) {
+    renderDom(
+      scheduledElement(
+        scheduleSnapshot({
+          recurrence: {
+            kind: "calendar",
+            frequency,
+            days,
+            timezone: "Asia/Shanghai",
+            startAtUnixSeconds: String(start),
+          },
+          nextRunAtUnixSeconds: String(next),
+        }),
+        {},
+        "zh-CN",
+      ),
+    );
+    assert.equal(
+      document.querySelector(".scheduled-row-frequency").textContent,
+      expected,
+    );
+    const countdown = document.querySelector(".scheduled-row-next");
+    assert.match(countdown.textContent, /8小时后执行/);
+    assert.ok(countdown.title.includes("08:00"));
+    cleanup();
+  }
+});
+
+test("relative execution times handle minutes, hours, days and overdue admission", (ctx) => {
+  const now = 1_800_000_000_000;
+  ctx.mock.method(Date, "now", () => now);
+  for (const [seconds, expected] of [
+    [30, "Runs in 1 minute"],
+    [59 * 60, "Runs in 59 minutes"],
+    [3600, "Runs in 1 hour"],
+    [25 * 3600, "Runs in 1 day"],
+    [0, "Waiting to run"],
+    [-60, "Waiting to run"],
+  ]) {
+    renderDom(
+      scheduledElement(
+        scheduleSnapshot({
+          nextRunAtUnixSeconds: String(now / 1000 + seconds),
+        }),
+      ),
+    );
+    assert.ok(
+      document
+        .querySelector(".scheduled-row-next")
+        .textContent.endsWith(expected),
+    );
+    cleanup();
+  }
+});
+
+test("the display countdown updates without a snapshot and clears its timer on unmount", async (ctx) => {
+  let now = 1_800_000_000_000;
+  let tick;
+  let cleared = false;
+  ctx.mock.method(Date, "now", () => now);
+  ctx.mock.method(window, "setInterval", (callback, delay) => {
+    assert.equal(delay, 60_000);
+    tick = callback;
+    return 123;
+  });
+  ctx.mock.method(window, "clearInterval", (id) => {
+    cleared = id === 123;
+  });
+  const view = renderDom(
+    scheduledElement(
+      scheduleSnapshot({ nextRunAtUnixSeconds: String(now / 1000 + 5 * 60) }),
+    ),
+  );
+  assert.match(
+    document.querySelector(".scheduled-row-next").textContent,
+    /in 5 minutes/,
+  );
+  now += 60_000;
+  await act(() => tick());
+  assert.match(
+    document.querySelector(".scheduled-row-next").textContent,
+    /in 4 minutes/,
+  );
+  view.unmount();
+  assert.equal(cleared, true);
+});
+
+test("rows omit status badges and keep the latest real run result", () => {
   for (const health of ["paused", "needs_attention", "completed"]) {
     renderDom(
       scheduledElement(
@@ -824,21 +1347,14 @@ test("plan state and latest outcome stay distinct, while identical completion is
       ),
     );
     const row = document.querySelector(".scheduled-list > li");
-    const state = row.querySelector(".scheduled-row-next");
+    const state = row.querySelector(".scheduled-row-schedule");
     assert.doesNotMatch(state.textContent, /No next run|connection changed/);
-    assert.equal(
-      within(row).getAllByText("Completed", { exact: true }).length,
-      1,
+    assert.equal(row.querySelector(".scheduled-state"), null);
+    assert.match(
+      row.querySelector(".scheduled-row-result").textContent,
+      /Latest run.*Completed/,
     );
-    if (health === "completed") {
-      assert.equal(row.querySelector(".scheduled-row-result"), null);
-    } else {
-      assert.match(
-        row.querySelector(".scheduled-row-result").textContent,
-        /Latest run.*Completed/,
-      );
-      assert.doesNotMatch(state.textContent, /Completed/);
-    }
+    assert.doesNotMatch(state.textContent, /Completed/);
     if (health === "needs_attention") {
       assert.match(
         row.querySelector(".scheduled-row-reason").textContent,
@@ -869,9 +1385,7 @@ test("a skipped history entry explains the blocker and links to the previous rea
       },
     ),
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Run history: Review" }));
   const history = document.querySelector(".scheduled-history");
   assert.match(history.textContent, /Skipped/);
   assert.match(
@@ -893,9 +1407,7 @@ test("a changed item epoch keeps the draft and requires an explicit reload befor
     },
   };
   const view = renderDom(scheduledElement(snapshot, overrides));
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "My unsaved name" },
   });
@@ -914,49 +1426,60 @@ test("a changed item epoch keeps the draft and requires an explicit reload befor
   assert.equal(updated[2].title, "Changed elsewhere");
 });
 
-test("a confirmed local pause retains edits and adopts only the acknowledged epoch", async () => {
+test("run history stays current without duplicating the task definition", async () => {
   let updated;
-  let view;
   const overrides = {
     onUpdate: async (...args) => {
       updated = args;
     },
-    onSetEnabled: async (id, epoch, enabled) => {
-      assert.deepEqual([id, epoch, enabled], ["8", "1", false]);
-      view.rerender(
-        scheduledElement(
-          scheduleSnapshot({
-            epoch: "2",
-            health: "paused",
-            enabled: false,
-            nextRunAtUnixSeconds: null,
-          }),
-          overrides,
-        ),
-      );
-      return { epoch: "2" };
-    },
   };
-  view = renderDom(scheduledElement(scheduleSnapshot(), overrides));
-  fireEvent.click(
-    screen.getByRole("button", { name: /Review.*Review every line/ }),
-  );
-  fireEvent.change(screen.getByLabelText("Name"), {
-    target: { value: "Keep this name" },
+  const view = renderDom(scheduledElement(scheduleSnapshot(), overrides));
+  const user = userEvent.setup({ document });
+  const opener = screen.getByRole("button", {
+    name: "Run history: Review",
   });
-  fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-  await waitFor(() =>
-    assert.equal(
-      screen.getByRole("button", { name: "Confirm" }).disabled,
-      false,
-    ),
+  await user.click(opener);
+  assert.equal(screen.queryByRole("textbox"), null);
+  assert.equal(screen.queryByRole("button", { name: "Confirm" }), null);
+  const changed = scheduleSnapshot({
+    epoch: "2",
+    input: { kind: "text", text: "Updated instructions", redacted: false },
+    occurrences: [finishedOccurrence()],
+  });
+  view.rerender(scheduledElement(changed, overrides));
+  assert.equal(
+    within(
+      screen.getByRole("dialog", { name: "Run history: Review" }),
+    ).queryByText("Updated instructions"),
+    null,
+  );
+  assert.match(
+    document.querySelector(".scheduled-history").textContent,
+    /Completed/,
   );
   assert.equal(screen.queryByText(/schedule has changed/), null);
-  assert.equal(screen.getByLabelText("Name").value, "Keep this name");
-  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Edit", exact: true }),
+    null,
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  await waitFor(() => assert.ok(document.activeElement === opener));
+  const edit = screen.getByRole("button", { name: "Edit", exact: true });
+  await user.click(edit);
+  assert.ok(screen.getByRole("dialog", { name: "Editing schedule" }));
+  assert.equal(
+    screen.getByLabelText("Instruction").value,
+    "Updated instructions",
+  );
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "New name" },
+  });
+  await user.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(updated));
   assert.deepEqual(updated.slice(0, 2), ["8", "2"]);
-  assert.equal(updated[2].title, "Keep this name");
+  assert.equal(updated[2].title, "New name");
+  await waitFor(() => assert.ok(document.activeElement === edit));
 });
 
 test("new calendar choices submit their selected days and use one shared time picker", async (ctx) => {
@@ -1019,7 +1542,7 @@ test("calendar edits preserve the stored recurrence", async () => {
       },
     }),
   );
-  fireEvent.click(document.querySelector(".scheduled-row-main"));
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   fireEvent.change(screen.getByLabelText("Name"), {
     target: { value: "Renamed" },
   });
@@ -1039,7 +1562,7 @@ test("legacy fixed intervals stay editable without being reinterpreted as calend
       },
     }),
   );
-  fireEvent.click(document.querySelector(".scheduled-row-main"));
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   assert.match(
     screen.getByRole("button", { name: "Repeat", exact: true }).textContent,
     /Fixed interval/,
@@ -1227,7 +1750,7 @@ test("editing day selections and time preserves untouched rules and refills all 
       }),
     );
     const user = userEvent.setup({ document });
-    await user.click(document.querySelector(".scheduled-row-main"));
+    await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
     assert.equal(screen.queryByLabelText("Starts"), null);
     assert.ok(screen.getByRole("group", { name: "Time" }));
     if (days) {
@@ -1255,7 +1778,7 @@ test("editing day selections and time preserves untouched rules and refills all 
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() => assert.ok(saved));
     assert.deepEqual(saved.recurrence, recurrence);
-    await user.click(document.querySelector(".scheduled-row-main"));
+    await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
     await chooseTime(user, "09:45");
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     const expected =
@@ -1319,7 +1842,7 @@ test("editing a saved weekly rule keeps its local clock and selected weekdays", 
     }),
   );
   const user = userEvent.setup({ document });
-  await user.click(document.querySelector(".scheduled-row-main"));
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
   assert.match(
     within(screen.getByRole("group", { name: "Time" })).getByRole("button")
       .textContent,
