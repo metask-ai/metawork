@@ -1307,6 +1307,8 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 ### 16.5 Foundation 组件
 
+输入、搜索和选择控件的聚焦状态由 Foundation 统一使用 `--ui-control-focus-border`：以普通边框混入少量中性文字色，呈现轻微加深的细边框。基础 Input、Textarea、Select 与组合输入框复用该规则；页面不得改用主动作色或自行调配另一种聚焦边框。错误状态保留原语义色。不叠加外圈、光晕或扩散阴影，键盘焦点仍须明确可见。
+
 - `frontend/src/components/ui/` 只实现无业务语义的 Foundation primitive；业务 feature 通过公开 preset、slot 和 token 组合，不在产品 CSS 中重建 Button、Input、Dialog、Drawer、Popover 或状态体系；
 - 同一区域只允许一个紫色主动作。次级动作使用中性表面与边界，危险动作使用异常红，不使用紫色表达删除；
 - 按钮、输入、菜单、开关和弹层必须提供一致的 resting、hover、active、disabled 与 `focus-visible` 状态；操作名称、反馈和结果使用同一用户语言；

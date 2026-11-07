@@ -2,7 +2,7 @@ import { Select as BaseSelect } from "@base-ui/react/select";
 import type { ComponentProps, ReactNode } from "react";
 
 import { Icon } from "./Icon.tsx";
-import { cn, controlBase, focusRing } from "./utils.ts";
+import { cn, controlBase, controlFocus } from "./utils.ts";
 
 export type SelectOption = {
   value: string;
@@ -76,7 +76,7 @@ export const Select = {
       className={cn(
         "flex h-9 w-full items-center justify-between gap-2 rounded-[7px] px-3 text-sm",
         controlBase,
-        focusRing,
+        controlFocus,
         className,
       )}
       {...props}

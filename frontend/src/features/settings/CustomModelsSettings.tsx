@@ -10,6 +10,7 @@ import { Button } from "../../components/ui/button.tsx";
 import { Badge } from "../../components/ui/badge.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Input } from "../../components/ui/input.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
@@ -623,8 +624,8 @@ export function CustomModelsSettings({
                                 : "settings.custom_provider_endpoint",
                             )}
                           </span>
-                          <input
-                            className="settings-custom-provider-input focus-ring"
+                          <Input
+                            className="settings-custom-provider-input"
                             type="url"
                             autoComplete="off"
                             value={draft.baseUrl}
@@ -728,8 +729,8 @@ export function CustomModelsSettings({
                     {!provider && (
                       <label className="settings-model-form-field">
                         <span>{t("settings.api_key")}</span>
-                        <input
-                          className="settings-custom-provider-input focus-ring"
+                        <Input
+                          className="settings-custom-provider-input"
                           type="password"
                           autoComplete="off"
                           maxLength={8192}
@@ -761,8 +762,8 @@ export function CustomModelsSettings({
                           )}
                         <label className="settings-model-form-field">
                           <span>{t("settings.api_key")}</span>
-                          <input
-                            className="settings-custom-provider-input focus-ring"
+                          <Input
+                            className="settings-custom-provider-input"
                             type="password"
                             autoComplete="off"
                             value={draft.apiKey}
@@ -796,8 +797,8 @@ export function CustomModelsSettings({
                           }
                         />
                       ) : (
-                        <input
-                          className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                        <Input
+                          className="settings-custom-provider-input settings-custom-provider-input-mono"
                           maxLength={256}
                           autoComplete="off"
                           value={draft.modelId}

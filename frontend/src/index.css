@@ -105,6 +105,17 @@ summary::-webkit-details-marker {
   outline-offset: 2px;
 }
 
+.ui-control-focus:not([disabled]):not([aria-invalid="true"]):is(
+    :focus,
+    :focus-visible,
+    :focus-within,
+    [data-focused],
+    [data-popup-open]
+  ) {
+  border-color: var(--ui-control-focus-border);
+  outline: none;
+}
+
 .connection-failure-screen {
   display: grid;
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
@@ -1670,14 +1681,7 @@ summary::-webkit-details-marker {
 }
 
 .settings-custom-provider-input:hover:not(:disabled) {
-  border-color: var(--ui-action-primary);
-}
-
-.settings-custom-provider-input.focus-ring:focus-visible {
-  border-color: var(--ui-focus-ring);
-  outline: none;
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
+  border-color: var(--ui-control-focus-border);
 }
 
 .settings-custom-provider-input:disabled {
@@ -2019,10 +2023,8 @@ summary::-webkit-details-marker {
 .selection-trigger.settings-control:hover:not(:disabled),
 .selection-trigger.settings-control[data-state="open"],
 .selection-trigger.settings-control[data-popup-open] {
-  border-color: var(--ui-action-primary);
+  border-color: var(--ui-control-focus-border);
   background: var(--ui-surface-panel);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
 }
 
 .selection-trigger.settings-control:disabled,
@@ -2263,17 +2265,13 @@ summary::-webkit-details-marker {
 }
 
 .selection-trigger:hover:not(:disabled) {
-  border-color: color-mix(
-    in srgb,
-    var(--ui-action-primary) 48%,
-    var(--ui-border)
-  );
+  border-color: var(--ui-control-focus-border);
   background: var(--ui-action-hover-surface);
 }
 
 .selection-trigger[data-state="open"],
 .selection-trigger[data-popup-open] {
-  border-color: var(--ui-action-primary);
+  border-color: var(--ui-control-focus-border);
   background: var(--ui-action-selected-surface);
 }
 
@@ -5402,14 +5400,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background-repeat: no-repeat;
 }
 
-.mcp-add-form input:focus,
-.mcp-add-form select:focus,
-.mcp-rename-form input:focus {
-  border-color: var(--ui-action-primary);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
-}
-
 .mcp-add-form input[aria-invalid="true"] {
   border-color: color-mix(in srgb, var(--metask-state-error) 58%, transparent);
 }
@@ -7464,8 +7454,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .ai-intervention:focus-visible {
   border-radius: 8px;
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--ui-focus-ring) 16%, transparent);
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
 }
 
 .ai-intervention-header {
@@ -8569,14 +8559,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   stroke-width: 1.5;
 }
 
-.ai-composer:focus-within {
-  border-color: color-mix(
-    in srgb,
-    var(--ui-border),
-    var(--ui-content-muted) 25%
-  );
-}
-
 .ai-composer textarea {
   display: block;
   width: 100%;
@@ -8833,7 +8815,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: transparent;
 }
 
-.task-approval-trigger:hover:not(:disabled)::before {
+.task-approval-trigger:hover:not(:disabled)::before,
+.task-approval-trigger:focus-visible::before {
   background: var(--ui-action-hover-surface);
 }
 

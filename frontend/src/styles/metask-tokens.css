@@ -49,6 +49,11 @@
   --ui-content-primary: var(--metask-light-text);
   --ui-content-muted: var(--metask-light-text-muted);
   --ui-border: var(--metask-light-border);
+  --ui-control-focus-border: color-mix(
+    in srgb,
+    var(--ui-border),
+    var(--ui-content-muted) 25%
+  );
   --ui-action-primary: var(--metask-primary);
   --ui-action-primary-hover: var(--metask-primary-deep);
   --ui-action-primary-border: color-mix(
@@ -113,6 +118,11 @@
   --ui-content-primary: var(--metask-dark-text);
   --ui-content-muted: var(--metask-dark-text-muted);
   --ui-border: var(--metask-dark-border);
+  --ui-control-focus-border: color-mix(
+    in srgb,
+    var(--ui-border),
+    var(--ui-content-muted) 25%
+  );
   --ui-action-selected-surface: color-mix(
     in srgb,
     var(--ui-surface-panel) 70%,
