@@ -207,35 +207,11 @@ pub const RunActivity = union(enum) {
 
 const ModelActivity = enum { none, thinking, writing };
 
-const OpenOutputSegment = struct {
-    index: u32,
-    turn: u32,
-    group: u32,
-    bytes: u64 = 0,
-};
-
-/// Numeric state only. This is an owner-local observation, never raw text or
-/// an alternative outcome/termination ledger.
-pub const OutputProtocolObservation = struct {
-    next_index: u64,
-    open: ?OpenOutputSegment,
-    continued_group: ?u32,
-    retry_group: ?u32,
-    pending_segment_bytes: usize,
-    pending_continued_bytes: usize,
-    output_kind: ?AssistantOutputKind,
-    framing_seen: bool,
-
-    fn capture(run: *const RunRecord) OutputProtocolObservation {
-        return .{ .next_index = run.next_output_segment_index, .open = run.open_output_segment, .continued_group = run.output_continued_group, .retry_group = run.output_retry_group, .pending_segment_bytes = run.output_segment.list.items.len, .pending_continued_bytes = run.output_continued.list.items.len, .output_kind = run.assistant_output_kind, .framing_seen = run.output_segment_protocol_seen };
-    }
-};
-
+/// First local processing failure with bounded, payload-free event details.
 pub const EventRejection = struct {
     event: ?agent.CoreEventKind,
     failure: EventApplyError,
-    expected: OutputProtocolObservation,
-    observed_segment: ?OpenOutputSegment,
+    observed_segment: ?struct { index: u32, turn: u32, group: u32, bytes: u64 = 0 },
     text_bytes: ?usize,
     input_adoption: ?struct { id: u64, sequence: u32, turn: u32 },
 };
@@ -939,11 +915,8 @@ pub const RunRecord = struct {
     /// appended to `assistant` and becomes durable.
     output_segment: TrackedText = .{},
     output_continued: TrackedText = .{},
-    open_output_segment: ?OpenOutputSegment = null,
+    output_segment_open: bool = false,
     output_continued_group: ?u32 = null,
-    output_retry_group: ?u32 = null,
-    next_output_segment_index: u64 = 0,
-    output_segment_protocol_seen: bool = false,
     output_segment_redacted: bool = false,
     output_continued_redacted: bool = false,
     output_segment_incomplete: bool = false,
@@ -1028,7 +1001,7 @@ pub const RunRecord = struct {
         const tail = self.assistant_output_kind != null or
             self.output_continued.committed_len != 0 or
             self.output_segment.committed_len != 0 or self.provisionalRedacted() or
-            (self.open_output_segment == null and self.output_segment.list.items.len != 0);
+            (!self.output_segment_open and self.output_segment.list.items.len != 0);
         return @intCast(self.commentary_count + @intFromBool(tail));
     }
 };
@@ -1577,20 +1550,18 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         std.debug.assert(terminalPayload(run) != null);
         if (run.execution) |execution| if (!execution.terminal_receipts.isEmpty()) continue;
         run.terminal_event_drain_marked = false;
-        if (run.open_output_segment != null or
+        if (run.output_segment_open or
             run.output_continued_group != null or
             run.output_segment.list.items.len != 0 or
             run.output_continued.list.items.len != 0)
         {
-            run.open_output_segment = null;
+            run.output_segment_open = false;
             run.output_continued_group = null;
-            run.output_retry_group = null;
             clearTrackedText(&run.output_segment);
             clearTrackedText(&run.output_continued);
             run.output_segment_redacted = false;
             run.output_continued_redacted = false;
         }
-        run.output_retry_group = null;
         freezeRunElapsedMs(run, finished_at_ms);
         if (terminalPayload(run).?.exclude_on_product_terminal and run.coverage == .pending)
             run.coverage = .excluded;
@@ -1865,7 +1836,7 @@ fn commitPendingOutput(projection: EventProjection, run: *RunRecord, kind: enum 
 }
 
 pub fn finishRetainedOutput(run: *RunRecord, projection: EventProjection) EventProjectionError!void {
-    if (run.open_output_segment == null and run.output_segment.list.items.len != 0)
+    if (!run.output_segment_open and run.output_segment.list.items.len != 0)
         try commitPendingOutput(projection, run, .commentary, false);
     if (run.output_continued.list.items.len != 0 or run.output_segment.list.items.len != 0)
         try commitPendingOutput(projection, run, .partial, false);
@@ -1934,7 +1905,6 @@ pub fn applyEvent(
     const run = findRun(task.durable.runs, envelope.run_id) orelse
         return error.NoSuchRun;
     if (run.event_stream_finalized) return .late_terminal;
-    const expected_output = OutputProtocolObservation.capture(run);
     errdefer |failure| {
         if (failure != error.ProjectionCapacity and failure != error.ToolCapacity and
             run.first_event_rejection == null)
@@ -1946,7 +1916,6 @@ pub fn applyEvent(
             run.first_event_rejection = .{
                 .event = if (known) |event| std.meta.activeTag(event) else null,
                 .failure = failure,
-                .expected = expected_output,
                 .observed_segment = if (known) |event| switch (event) {
                     .output_segment_begin => |segment| .{ .index = segment.index, .turn = segment.turn, .group = segment.group },
                     .output_segment_end => |segment| .{ .index = segment.index, .turn = segment.turn, .group = segment.group, .bytes = segment.bytes },
@@ -2001,7 +1970,7 @@ pub fn applyEvent(
         },
         .thinking_chunk => |text| return if (text.len == 0) .unchanged else observeModelActivity(run, .thinking),
         .text_chunk => |text| {
-            if (run.open_output_segment != null) {
+            if (run.output_segment_open) {
                 if (!run.output_segment_incomplete and !run.output_continued_incomplete) {
                     const redacted = appendNewOutput(projection, run, &run.output_segment, text) catch |err| switch (err) {
                         error.ProjectionCapacity => lost: {
@@ -2166,22 +2135,17 @@ pub fn applyEvent(
                 };
         },
         .output_segment_begin => |segment| {
-            if (run.open_output_segment == null and run.output_segment.list.items.len != 0)
+            if (!run.output_segment_open and run.output_segment.list.items.len != 0)
                 try commitPendingOutput(projection, run, .commentary, false);
             if (run.output_continued_group != null and run.output_continued_group.? != segment.group)
                 try commitPendingOutput(projection, run, .commentary, true);
             if (run.output_segment_incomplete) _ = recordEventProjectionFailure(run);
             run.output_segment_incomplete = false;
-            run.output_segment_protocol_seen = true;
-            run.open_output_segment = .{
-                .index = segment.index,
-                .turn = segment.turn,
-                .group = segment.group,
-            };
+            run.output_segment_open = true;
             run.model_activity = .none;
         },
         .output_segment_end => |segment| {
-            if (run.open_output_segment == null) {
+            if (!run.output_segment_open) {
                 _ = recordEventProjectionFailure(run);
                 clearTrackedText(&run.output_segment);
                 run.output_segment_redacted = false;
@@ -2189,16 +2153,12 @@ pub fn applyEvent(
                 return .{ .applied = .{ .durable_boundary = true } };
             }
             var retention_failure: ?EventProjectionError = null;
-            defer {
-                run.open_output_segment = null;
-                run.next_output_segment_index = @as(u64, segment.index) + 1;
-            }
+            defer run.output_segment_open = false;
             switch (segment.disposition) {
                 .discarded => {
                     clearTrackedText(&run.output_segment);
                     run.output_segment_redacted = false;
                     run.output_segment_incomplete = false;
-                    run.output_retry_group = segment.group;
                 },
                 .continued => {
                     if (run.output_segment.list.items.len != 0 and !run.output_continued_incomplete) {
@@ -2224,7 +2184,6 @@ pub fn applyEvent(
                     run.output_continued_incomplete = run.output_continued_incomplete or run.output_segment_incomplete;
                     run.output_segment_incomplete = false;
                     run.output_continued_group = segment.group;
-                    run.output_retry_group = null;
                 },
                 .commentary, .final, .partial => {
                     const output_start = run.assistant.committed_len;
@@ -2238,7 +2197,6 @@ pub fn applyEvent(
                         clearTrackedText(&run.output_continued);
                         clearTrackedText(&run.output_segment);
                         run.output_continued_group = null;
-                        run.output_retry_group = null;
                         run.output_continued_redacted = false;
                         run.output_segment_redacted = false;
                         run.output_continued_incomplete = false;
@@ -2269,7 +2227,6 @@ pub fn applyEvent(
                     clearTrackedText(&run.output_continued);
                     clearTrackedText(&run.output_segment);
                     run.output_continued_group = null;
-                    run.output_retry_group = null;
                     run.output_continued_redacted = false;
                     run.output_segment_redacted = false;
                     switch (segment.disposition) {
@@ -2736,8 +2693,7 @@ test "event drain does not infer Core protocol faults from local retained state"
             .commentary_ends = &commentary_ends,
             .tools = &.{},
             .terminal_diagnostic = @constCast(""),
-            .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
-            .output_segment_protocol_seen = true,
+            .output_segment_open = true,
         }};
         var compacts: [0]?CompactRecord = .{};
         var ui_history: [0]?UiRecord = .{};

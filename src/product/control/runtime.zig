@@ -16686,9 +16686,8 @@ test "output segments commit commentary and a continued final while discarding r
         run.assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(usize, 11), run.assistant_output_start.?);
-    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(!run.output_segment_open);
     try std.testing.expect(run.output_continued_group == null);
-    try std.testing.expectEqual(@as(u64, 5), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
@@ -16727,7 +16726,7 @@ test "Product retains Agent-validated segment index gaps without retry group ass
     try std.testing.expect(run.first_event_rejection == null);
 }
 
-test "commentary capacity omits the group and closes protocol accounting" {
+test "commentary capacity omits the group and closes the retained segment" {
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_commentary_segments_per_run = 1;
@@ -16756,9 +16755,8 @@ test "commentary capacity omits the group and closes protocol accounting" {
     try std.testing.expectEqualStrings("first", run.assistant.list.items);
     try std.testing.expectEqualSlices(u64, &.{5}, run.commentary_ends[0..run.commentary_count]);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
-    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(!run.output_segment_open);
     try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
-    try std.testing.expectEqual(@as(u64, 2), run.next_output_segment_index);
 }
 
 test "output reserve capacity closes the segment and marks an incomplete response" {
@@ -16787,8 +16785,7 @@ test "output reserve capacity closes the segment and marks an incomplete respons
     );
     defer end.deinit();
     try control.applyEvent(&end);
-    try std.testing.expect(run.open_output_segment == null);
-    try std.testing.expectEqual(@as(u64, 1), run.next_output_segment_index);
+    try std.testing.expect(!run.output_segment_open);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
@@ -16819,14 +16816,14 @@ test "assistant output budget is aggregate across committed and open segments" {
     try control.applyEvent(&overflow);
     try std.testing.expectEqualStrings("four", run.assistant.list.items);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
-    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expect(run.output_segment_open);
     try std.testing.expect(run.output_segment_incomplete);
     var end = try testEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":5}}");
     defer end.deinit();
     try control.applyEvent(&end);
     try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
     try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
-    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(!run.output_segment_open);
 }
 
 test "discarded oversized provisional text does not mark a committed recording gap" {
@@ -17064,7 +17061,7 @@ test "unframed capacity gaps still open the next segment and retain its answer" 
         var begin = try testEnvelope(task.runtime.routeId(), run.id, "{\"output_segment_begin\":{\"index\":3,\"turn\":2,\"group\":9}}");
         defer begin.deinit();
         try control.applyEvent(&begin);
-        try std.testing.expect(run.open_output_segment != null);
+        try std.testing.expect(run.output_segment_open);
         control.limits.max_projection_bytes = budget;
         const rest = [_][]const u8{
             "{\"text_chunk\":\"answer\"}",

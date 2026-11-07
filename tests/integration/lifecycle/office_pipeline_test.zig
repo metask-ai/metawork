@@ -227,7 +227,7 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(run.event_stream_finalized);
                 try std.testing.expectEqual(state.EventProjectionFailure.consumer_rejected, run.event_projection_failure.?);
                 try std.testing.expect(run.first_event_rejection == null);
-                try std.testing.expect(run.open_output_segment == null);
+                try std.testing.expect(!run.output_segment_open);
                 try std.testing.expect(std.mem.endsWith(u8, run.assistant.list.items, "Long run completed."));
                 try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
                 return;
@@ -253,9 +253,8 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
             const expected_outcome: task_api.RunOutcome = if (std.mem.eql(u8, mode, "cancel")) .cancelled else if (std.mem.eql(u8, mode, "stream-interruption")) .failed else .completed;
             try std.testing.expectEqual(expected_outcome, terminal.outcome);
             try std.testing.expect(run.event_stream_finalized);
-            try std.testing.expect(run.output_segment_protocol_seen);
             try std.testing.expect(run.first_event_rejection == null);
-            try std.testing.expect(run.open_output_segment == null);
+            try std.testing.expect(!run.output_segment_open);
             if (std.mem.eql(u8, mode, "stream-interruption")) {
                 try std.testing.expect(run.assistant_output_kind != .final);
                 try std.testing.expect(terminal.cause != .dependency_contract_failure);
@@ -264,7 +263,6 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(answered != null);
                 try std.testing.expect(run.commentary_count > 0);
                 try std.testing.expect(run.assistant_output_kind == .final);
-                try std.testing.expect(run.next_output_segment_index >= 2);
                 const tool_failed = std.mem.eql(u8, mode, "nonzero") or std.mem.eql(u8, mode, "missing-environment") or
                     std.mem.eql(u8, mode, "stale-entry") or std.mem.eql(u8, mode, "unreachable-preparation") or std.mem.eql(u8, mode, "deny");
                 try std.testing.expectEqualStrings(if (tool_failed)
