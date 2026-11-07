@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-11-07
+
+### Added
+
+- 项目和 Task 行新增快捷操作，支持从项目菜单或 Task 信息直接在系统文件管理器中打开工作目录，并保留项目展开状态。
+- New task 在尚未选择工作目录时即可发现并选择已启用的内置或个人 Skill，首次发送后在新建的 Automatic Workspace 中执行。
+- MCP 设置支持导入严格的 `mcpServers` JSON 配置，逐项检查并复用现有添加流程，不采纳外部配置中的自动授权声明。
+- 用户在 Task 中提供 MCP 安装链接后，Agent 可发起结构化安装，由 Host 完成凭据或 OAuth、连接、工具发现和首次精确授权，并在 Task 与 MCP 页面展示真实进度。
+
+### Changed
+
+- 移除项目现在只移除左栏快捷入口，不再停止或隐藏已有 Task、撤销目录授权或删除本地文件；重新添加同一目录可恢复入口。
+- 自动审批扩展至 builtin、Host 和 MCP 权限，审批记录归入执行详情；同一 Run 连续第三次自动拒绝时仅将当前请求转交人工处理。
+- AgentCore 升级至官方 `0.14.0` / ABI revision 26，并刷新 Windows 与 macOS 的 x86_64/ARM64 bundles。
+
+### Fixed
+
+- 修复 MCP 跨平台路径和结构化参数保真、进程启动与关闭诊断，以及安装提议提示可能失真或残留的问题。
+
 ## [0.2.10] - 2026-11-04
 
 ### Added
@@ -515,7 +534,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.10...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/metask-ai/metawork/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/metask-ai/metawork/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/metask-ai/metawork/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/metask-ai/metawork/compare/v0.2.7...v0.2.8
