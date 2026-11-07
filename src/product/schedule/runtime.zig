@@ -237,8 +237,10 @@ const Claim = struct {
     source_generation: u64,
     protocol: Protocol,
     permission_profile: PermissionProfile,
+    completion: ?state.Store,
 
     pub fn deinit(self: *Claim) void {
+        if (self.completion) |*candidate| candidate.deinit();
         self.allocator.free(self.title);
         self.allocator.free(self.input);
         self.allocator.free(self.source_id);
@@ -548,8 +550,6 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity)
                 self.stopForOccurrenceCapacity(id, redaction);
-            if (err == error.ExecutionUnavailable or err == error.ExecutionInUse)
-                self.timer.cancelCurrent();
             return err;
         };
     }
@@ -571,6 +571,11 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
+            } else if (self.persistence_health == .ready and
+                self.store.find(due.id).?.preflight_blocked)
+            {
+                _ = self.rearmNoFail(binding, redaction);
+                return;
             } else {
                 // No claim may have been committed. Leave its cursor intact
                 // and wait for an authority/lifecycle wake, never arm the same
@@ -599,6 +604,9 @@ pub const Runtime = struct {
         binding: ExecutionBinding,
         redaction: Redaction,
     ) bool {
+        for (self.store.items) |*entry| {
+            if (entry.*) |*item| item.preflight_blocked = false;
+        }
         return self.reconcileBindingsNoFail(binding, redaction);
     }
 
@@ -701,6 +709,10 @@ pub const Runtime = struct {
             current_binding.model_ref.model_id,
         );
         errdefer self.allocator.free(model_id);
+        // Reserve the external-result state before committing the claim.
+        // No allocation failure may leave a claim that was never launched.
+        var completion = try candidate.clone(self.allocator);
+        errdefer completion.deinit();
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
@@ -716,6 +728,7 @@ pub const Runtime = struct {
             .source_generation = current_binding.source_generation,
             .protocol = current_binding.protocol,
             .permission_profile = candidate_item.permission_profile,
+            .completion = completion,
         } };
     }
 
@@ -756,8 +769,10 @@ pub const Runtime = struct {
         self: *Runtime,
         candidate: *state.Store,
         redaction: Redaction,
-    ) void {
+    ) bool {
+        var committed = true;
         self.commitCandidate(candidate, redaction) catch {
+            committed = false;
             // The Task effect has already happened and cannot be rolled back.
             // Retain its identity in memory while persistence health keeps all
             // further automatic triggers fail closed.
@@ -765,8 +780,10 @@ pub const Runtime = struct {
                 self.persistence_health = .write_failed;
                 self.changed = true;
             }
+            self.timer.cancelCurrent();
         };
         self.replace(candidate);
+        return committed;
     }
 
     /// Prevent a successor from replacing the terminal observed for this occurrence.
@@ -826,6 +843,7 @@ pub const Runtime = struct {
             candidate.find(pending.scheduled_task_id) orelse return false,
             pending.planned_at_unix_seconds,
             pending.source,
+            pending.task_id,
             resolution.outcome,
             if (resolution.permission_required) .permission_required else null,
         ) catch return false;
@@ -863,14 +881,20 @@ pub const Runtime = struct {
             const binding = item.bindingView();
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
-            try tasks.preflight_fn(tasks.context, .{
+            tasks.preflight_fn(tasks.context, .{
                 .title = item.title,
                 .input = item.input.borrowed(),
                 .model_ref = binding.model_ref,
                 .source_generation = binding.source_generation,
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
-            });
+            }) catch |err| {
+                if (err == error.ExecutionUnavailable or err == error.ExecutionInUse or
+                    err == error.ExecutionGenerationMismatch)
+                    item.preflight_blocked = true;
+                return err;
+            };
+            item.preflight_blocked = false;
         }
         const begin = try self.beginOccurrence(
             id,
@@ -885,11 +909,7 @@ pub const Runtime = struct {
             .claimed => |value| value,
         };
         defer claim.deinit();
-        // Allocate the completion candidate before crossing into Task. Once
-        // launch returns, the Task effect may no longer be reversible.
-        var completion = try self.store.clone(self.allocator);
-        var completion_owned = true;
-        defer if (completion_owned) completion.deinit();
+        const completion = &claim.completion.?;
         const launch = tasks.launch(.{
             .title = claim.title,
             .input = claim.input,
@@ -909,8 +929,8 @@ pub const Runtime = struct {
                     claim.source,
                     task_id,
                 ) catch unreachable;
-                self.retainExternalResult(&completion, redaction);
-                completion_owned = false;
+                _ = self.retainExternalResult(completion, redaction);
+                claim.completion = null;
                 return task_id;
             },
             .rejected => |failure| {
@@ -921,10 +941,11 @@ pub const Runtime = struct {
                     failure.reason,
                     failure.task_id,
                 ) catch unreachable;
-                self.retainExternalResult(&completion, redaction);
-                completion_owned = false;
-                _ = self.notifier.notify(.{
+                const committed = self.retainExternalResult(completion, redaction);
+                claim.completion = null;
+                if (committed) _ = self.notifier.notify(.{
                     .scheduled_task_id = claim.id,
+                    .task_id = failure.task_id,
                     .title = self.store.find(claim.id).?.title,
                     .kind = .needs_attention,
                 });
@@ -1037,7 +1058,7 @@ pub const Runtime = struct {
         var earliest: ?*state.Item = null;
         for (self.store.items) |*entry| {
             const item = if (entry.*) |*value| value else continue;
-            if (!item.enabled or item.health != .ready or item.next_run_at_unix_seconds == null or
+            if (!item.enabled or item.health != .ready or item.preflight_blocked or item.next_run_at_unix_seconds == null or
                 authority.status(item.bindingView()) != .ready) continue;
             if (earliest == null or item.next_run_at_unix_seconds.? < earliest.?.next_run_at_unix_seconds.?) earliest = item;
         }
@@ -1090,6 +1111,7 @@ pub const Runtime = struct {
         if (redaction.contains(bytes)) {
             self.persistence_health = .write_failed;
             self.changed = true;
+            self.timer.cancelCurrent();
             return error.ScheduledTaskPersistenceFailed;
         }
         switch (self.persistence.commit(bytes)) {
@@ -1097,11 +1119,13 @@ pub const Runtime = struct {
             .failed => {
                 self.persistence_health = .write_failed;
                 self.changed = true;
+                self.timer.cancelCurrent();
                 return error.ScheduledTaskPersistenceFailed;
             },
             .outcome_unknown => {
                 self.persistence_health = .outcome_unknown;
                 self.changed = true;
+                self.timer.cancelCurrent();
                 return error.ScheduledTaskPersistenceOutcomeUnknown;
             },
         }
@@ -1228,6 +1252,9 @@ const TestEffects = struct {
     notification_kind: ?NotificationKind = null,
     notification_task_id: u64 = 0,
     armed_at: ?u64 = null,
+    durable_storage: ?[]u8 = null,
+    durable_len: usize = 0,
+    unknown_landed: bool = false,
 
     fn clock(context: ?*anyopaque) ?u64 {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
@@ -1245,10 +1272,19 @@ const TestEffects = struct {
         self.armed_at = null;
     }
 
-    fn commit(context: ?*anyopaque, _: []const u8) PersistenceCommit {
+    fn commit(context: ?*anyopaque, bytes: []const u8) PersistenceCommit {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         if (self.fail_commit_at == self.commits) return .failed;
+        if (self.commit_result == .committed or
+            (self.commit_result == .outcome_unknown and self.unknown_landed))
+        {
+            if (self.durable_storage) |storage| {
+                std.debug.assert(bytes.len <= storage.len);
+                @memcpy(storage[0..bytes.len], bytes);
+                self.durable_len = bytes.len;
+            }
+        }
         return self.commit_result;
     }
 
@@ -1303,9 +1339,15 @@ const TestTasks = struct {
     terminal_task_id: u64 = 0,
     active_task_id: u64 = 0,
     preflight_error: ?anyerror = null,
+    preflight_blocked_title: ?[]const u8 = null,
+    rejection: ?TaskLaunchFailure = null,
+    launch_effects: ?*TestEffects = null,
+    launch_commit: PersistenceCommit = .committed,
 
-    fn preflight(context: *anyopaque, _: TaskLaunch) anyerror!void {
+    fn preflight(context: *anyopaque, input: TaskLaunch) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.preflight_blocked_title) |title|
+            if (std.mem.eql(u8, title, input.title)) return error.ExecutionUnavailable;
         if (self.preflight_error) |err| return err;
     }
 
@@ -1316,6 +1358,8 @@ const TestTasks = struct {
 
     fn launch(context: *anyopaque, input: TaskLaunch) TaskLaunchOutcome {
         const self: *TestTasks = @ptrCast(@alignCast(context));
+        if (self.launch_effects) |value| value.commit_result = self.launch_commit;
+        if (self.rejection) |failure| return .{ .rejected = failure };
         self.launched_profile = input.permission_profile;
         const task_id = self.next_task_id;
         self.next_task_id += 1;
@@ -2061,4 +2105,170 @@ test "old Schedule canonical is quarantined before bootstrap installs the empty 
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "preflight failure isolates one plan across lifecycle wakes and store replacements" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{ .preflight_blocked_title = "blocked" };
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 3, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const blocked = try runtime.create(testDefinition("blocked", "inspect"), testBinding(), redaction);
+    const valid = try runtime.create(testDefinition("valid", "inspect"), testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 200), effects.armed_at);
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(valid).?.occurrence_count);
+    try std.testing.expectEqual(@as(usize, 0), runtime.store.find(blocked).?.occurrence_count);
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    tasks.preflight_blocked_title = null;
+    _ = runtime.refreshBindingNoFail(testBinding(), redaction);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 44), tasks.next_task_id);
+}
+
+test "allocation failure before launch never strands a committed claim" {
+    var failures: usize = 0;
+    for (0..40) |index| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("allocation", "inspect"), testBinding(), redaction);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        runtime.allocator = failing.allocator();
+        const result = runtime.runNow(id, 1, redaction, tasks.effects());
+        runtime.allocator = std.testing.allocator;
+        if (result) |_| {} else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+        for (runtime.store.find(id).?.occurrences()) |occurrence|
+            try std.testing.expect(occurrence.result != .claimed);
+        if (tasks.next_task_id == 42) {
+            try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+            try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
+            _ = try runtime.runNow(id, 1, redaction, tasks.effects());
+        } else {
+            try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
+        }
+    }
+    try std.testing.expect(failures > 0);
+}
+
+test "rejected launch notification follows a confirmed Schedule commit" {
+    for ([_]PersistenceCommit{ .committed, .failed, .outcome_unknown }) |commit| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{ .rejection = .{ .cause = error.QueueFull, .reason = .capacity_reached, .task_id = 42 }, .launch_effects = &effects, .launch_commit = commit };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("rejected", "inspect"), testBinding(), redaction);
+        try std.testing.expectError(error.QueueFull, runtime.runNow(id, 1, redaction, tasks.effects()));
+        try std.testing.expectEqual(@as(usize, if (commit == .committed) 1 else 0), effects.notifications);
+        if (commit == .committed) try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
+        try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
+    }
+}
+
+test "same-second manual occurrences reconcile by their actual Task identity" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(testDefinition("manual", "inspect"), testBinding(), redaction);
+    const first = try runtime.runNow(id, 1, redaction, tasks.effects());
+    const second = try runtime.runNow(id, 1, redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal_task_id = first;
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(first));
+    try std.testing.expect(runtime.hasPendingSubmittedOccurrence(second));
+    try std.testing.expectEqual(@as(?TaskOutcome, null), runtime.store.find(id).?.occurrences()[1].task_outcome);
+    tasks.terminal_task_id = second;
+    tasks.terminal = .{ .outcome = .failed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(second));
+    try std.testing.expectEqual(TaskOutcome.completed, runtime.store.find(id).?.occurrences()[0].task_outcome.?);
+    try std.testing.expectEqual(TaskOutcome.failed, runtime.store.find(id).?.last_occurrence.?.task_outcome.?);
+}
+
+test "failed Schedule mutations cancel an existing timer without publishing their candidate" {
+    for ([_]PersistenceCommit{ .failed, .outcome_unknown }) |commit| {
+        var effects: TestEffects = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("retained", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        _ = runtime.takeChanged();
+        effects.commit_result = commit;
+        const result = runtime.setEnabled(id, 1, false, testBinding(), redaction);
+        if (commit == .failed) {
+            try std.testing.expectError(error.ScheduledTaskPersistenceFailed, result);
+        } else try std.testing.expectError(error.ScheduledTaskPersistenceOutcomeUnknown, result);
+        try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+        try std.testing.expect(runtime.takeChanged());
+        try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
+        try std.testing.expectEqual(@as(u64, 1), runtime.store.find(id).?.epoch);
+    }
+}
+
+test "restart never replays a launched occurrence after a failed or indeterminate result commit" {
+    const storage = try std.testing.allocator.alloc(u8, persistence.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    const Scenario = struct { commit: PersistenceCommit, landed: bool };
+    for ([_]Scenario{ .{ .commit = .failed, .landed = false }, .{ .commit = .outcome_unknown, .landed = false }, .{ .commit = .outcome_unknown, .landed = true } }) |scenario| {
+        var effects: TestEffects = .{ .durable_storage = storage, .unknown_landed = scenario.landed };
+        var tasks: TestTasks = .{ .launch_effects = &effects, .launch_commit = scenario.commit };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        const redaction = testRedaction(&effects);
+        const id = runtime.create(testDefinition("restart", "inspect"), testBinding(), redaction) catch |err| {
+            runtime.deinit();
+            return err;
+        };
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 200;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
+        try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+        runtime.deinit();
+        effects.restored_bytes = storage[0..effects.durable_len];
+        effects.commit_result = .committed;
+        var restored = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer restored.deinit();
+        _ = restored.recoverInterruptedNoFail(redaction);
+        _ = restored.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 400;
+        restored.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+        const occurrence = restored.store.find(id).?.occurrences()[0];
+        if (scenario.landed) {
+            try std.testing.expectEqual(state.OccurrenceResult.submitted, occurrence.result);
+            try std.testing.expectEqual(@as(u64, 42), occurrence.task_id);
+        } else {
+            try std.testing.expectEqual(state.OccurrenceResult.rejected, occurrence.result);
+            try std.testing.expectEqual(FailureReason.host_interrupted, occurrence.reason.?);
+        }
+    }
+}
+
+test "unrelated mutations retain in-process redaction facts" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const first = try runtime.create(testDefinition("[redacted]", "[redacted]"), testBinding(), redaction);
+    runtime.store.find(first).?.title_redacted = true;
+    runtime.store.find(first).?.input.redacted = true;
+    _ = try runtime.create(testDefinition("unrelated", "inspect"), testBinding(), redaction);
+    try std.testing.expect(runtime.store.find(first).?.title_redacted);
+    try std.testing.expect(runtime.store.find(first).?.input.redacted);
 }

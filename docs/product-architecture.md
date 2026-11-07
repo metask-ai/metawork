@@ -220,6 +220,8 @@ Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Produ
 
 Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Product Control 在每次 mutation 的明确改选及 occurrence 前按该项来源、模型、source generation、目录 membership、授权与 protocol 校验并 resolve；不比较起始偏好、不保存 Product execution generation。更新请求的 modelSelection 必填但可为 null，null 精确表示保留该 item epoch 下的原绑定；创建必须为非空目标。timer readiness与绑定reconciliation按每项计算，失效项不阻塞其他项。
 
+完整 resolve 的瞬态拒绝只暂停该定义的进程内 timer admission，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划；已提交的来源/授权事实刷新或用户明确编辑后重新检查。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。
+
 Schedule persistence recovery 由 Schedule owner 决策；旧格式自动 hard cut 时先保留 exact quarantine，再安装空当前 store。当前格式的显式恢复校验全局 snapshot revision，先stage并sync当前内存候选，再保留旧canonical并安装；中断证据不丢失，再次恢复收口精确pending artifacts。只有提交确认后重新开放mutation与timer；quarantine不进入decoder或自动迁移。
 
 Schedule store 保持 canonical `schema_version = 1`，严格保存 `ModelRef + source_generation + protocol`，删除 global selection revision。被替代旧格式先 exact quarantine 再原子安装空当前 store，无转换、双读或重放；失败保持真实错误。当前格式的提交、未知结果与显式恢复仍由 Schedule owner 处理，不用起始偏好作为恢复依据。

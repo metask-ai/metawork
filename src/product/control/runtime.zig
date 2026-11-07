@@ -8585,7 +8585,7 @@ pub const Runtime = struct {
     ) product_schedule.TaskObservation {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.task_runtime.findConst(task_id) == null) return .unavailable;
-        const terminal = self.task_runtime.lastTerminalSummary(task_id) orelse
+        const terminal = self.task_runtime.initialRunTerminalSummary(task_id) orelse
             return .pending;
         return .{ .terminal = .{
             .outcome = scheduledTaskOutcome(terminal.outcome),
@@ -14582,7 +14582,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
     try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
     vault.read_fails = false;
-    try std.testing.expect(control.custom_providers.clearDefault().accepted);
+    try std.testing.expect(control.clearCustomProviderDefault().accepted);
     try control.validateScheduledBinding(try control.schedule.bindingAt(id, 1));
     _ = control.schedule.rearmNoFail(control.scheduleExecutionBinding(), control.scheduleRedaction());
     try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);

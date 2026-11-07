@@ -826,7 +826,7 @@ test "scheduled task store round trips bounded occurrence history" {
     }, 1_000);
     const item = store.find(id).?;
     try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
-    try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed, null);
+    try store.finalizeOccurrenceTask(item, 2_000, .timer, 42, .completed, null);
     try store.markSkipped(item, 5_600, 5_601, 42);
     try store.markSkipped(item, 9_200, 9_201, 0);
     const default_id = try store.create(.{

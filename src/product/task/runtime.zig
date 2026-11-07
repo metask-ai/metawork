@@ -3895,9 +3895,16 @@ pub const Runtime = struct {
         return task_policy.hasActiveOperation(task);
     }
 
-    pub fn lastTerminalSummary(self: *const Runtime, task_id: u64) ?TerminalSummary {
+    /// A Schedule occurrence owns the initial Run of its newly created Task.
+    /// Later user Runs must not replace that result while Schedule commits it.
+    pub fn initialRunTerminalSummary(self: *const Runtime, task_id: u64) ?TerminalSummary {
         const task = self.findConst(task_id) orelse return null;
-        const terminal = task_policy.lastTerminalFacts(task.durable.runs) orelse return null;
+        var initial: ?*const task_state.RunRecord = null;
+        for (task.durable.runs) |*entry| {
+            const run = if (entry.*) |*value| value else continue;
+            if (initial == null or run.id < initial.?.id) initial = run;
+        }
+        const terminal = task_state.productTerminalFacts(initial orelse return null) orelse return null;
         return .{
             .outcome = terminal.outcome,
             .permission_required = terminal.cause == .permission_required,
@@ -11047,4 +11054,30 @@ test "Host search matches Unicode case variants and preserves raw UTF-8 through 
     }
     try std.testing.expect(pages > 0 and pages < 8);
     try std.testing.expectEqual(@as(usize, 1), hits);
+}
+
+test "Schedule terminal observation stays with the initial Run after later Runs start or finish" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(8, "later"), null, reviewHistoryTestRun(7, "scheduled") };
+    task.durable.runs = &runs;
+    const first = &runs[2].?;
+    first.event_stream_finalized = true;
+    first.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    first.terminal_publication.store(.published, .release);
+    first.terminal_observed = true;
+    try std.testing.expectEqual(task_state.RunOutcome.completed, runtime.initialRunTerminalSummary(1).?.outcome);
+    const later = &runs[0].?;
+    later.event_stream_finalized = true;
+    later.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .failed, .outcome = .failed, .cause = .permission_required, .session_disposition_at_completion = .reusable };
+    later.terminal_publication.store(.published, .release);
+    later.terminal_observed = true;
+    const summary = runtime.initialRunTerminalSummary(1).?;
+    try std.testing.expectEqual(task_state.RunOutcome.completed, summary.outcome);
+    try std.testing.expect(!summary.permission_required);
+    first.event_stream_finalized = false;
+    try std.testing.expect(runtime.initialRunTerminalSummary(1) == null);
 }

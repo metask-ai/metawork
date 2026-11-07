@@ -196,6 +196,10 @@ pub const Item = struct {
     occurrence_history: [max_occurrence_history]Occurrence = undefined,
     occurrence_count: usize = 0,
 
+    /// Transient resolve refusal, cleared by an authority refresh or edit.
+    /// Never persisted: it does not invalidate the captured definition.
+    preflight_blocked: bool = false,
+
     pub fn occurrences(self: *const Item) []const Occurrence {
         return self.occurrence_history[0..self.occurrence_count];
     }
@@ -291,6 +295,10 @@ pub const Store = struct {
                 .next_run_at_unix_seconds = item.next_run_at_unix_seconds,
                 .occurrences = item.occurrences(),
             });
+            const copied = result.find(item.id).?;
+            copied.preflight_blocked = item.preflight_blocked;
+            copied.title_redacted = item.title_redacted;
+            copied.input.redacted = item.input.redacted;
         }
         result.next_id = self.next_id;
         return result;
@@ -569,6 +577,7 @@ pub const Store = struct {
         item: *Item,
         planned_at_unix_seconds: u64,
         source: OccurrenceSource,
+        task_id: u64,
         outcome: OccurrenceTaskOutcome,
         reason: ?FailureReason,
     ) error{InvalidSchedule}!void {
@@ -579,7 +588,8 @@ pub const Store = struct {
             index -= 1;
             const occurrence = &item.occurrence_history[index];
             if (occurrence.planned_at_unix_seconds !=
-                planned_at_unix_seconds or occurrence.source != source)
+                planned_at_unix_seconds or occurrence.source != source or
+                occurrence.task_id != task_id or occurrence.result != .submitted)
                 continue;
             if (occurrence.task_outcome != null or occurrence.notification_sent)
                 return error.InvalidSchedule;
@@ -589,7 +599,8 @@ pub const Store = struct {
             if (item.last_occurrence != null and
                 item.last_occurrence.?.planned_at_unix_seconds ==
                     planned_at_unix_seconds and
-                item.last_occurrence.?.source == source)
+                item.last_occurrence.?.source == source and
+                item.last_occurrence.?.task_id == task_id)
             {
                 item.last_occurrence.?.task_outcome = outcome;
                 item.last_occurrence.?.reason = reason;
