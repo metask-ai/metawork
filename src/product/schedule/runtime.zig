@@ -395,6 +395,7 @@ pub const Runtime = struct {
         var candidate = self.store.clone(self.allocator) catch return .failed;
         var owned = true;
         defer if (owned) candidate.deinit();
+        _ = candidate.interruptClaimedOccurrences();
         _ = redactStore(&candidate, redaction, "");
         const output = self.allocator.alloc(u8, persistence.max_store_bytes) catch
             return .failed;
@@ -990,11 +991,29 @@ pub const Runtime = struct {
 
     pub fn recoverInterruptedNoFail(self: *Runtime, redaction: Redaction) bool {
         if (self.persistence_health != .ready) return false;
-        var candidate = self.store.clone(self.allocator) catch return false;
+        const interrupted = for (self.store.items) |entry| {
+            const item = entry orelse continue;
+            for (item.occurrences()) |occurrence| {
+                if (occurrence.result == .claimed) break;
+            } else continue;
+            break true;
+        } else false;
+        if (!interrupted) return false;
+        var candidate = self.store.clone(self.allocator) catch {
+            self.persistence_health = .write_failed;
+            self.changed = true;
+            return false;
+        };
         var owned = true;
         defer if (owned) candidate.deinit();
         if (!candidate.interruptClaimedOccurrences()) return false;
-        self.commitCandidate(&candidate, redaction) catch return false;
+        self.commitCandidate(&candidate, redaction) catch {
+            if (self.persistence_health == .ready) {
+                self.persistence_health = .write_failed;
+                self.changed = true;
+            }
+            return false;
+        };
         self.replace(&candidate);
         owned = false;
         return true;
@@ -2198,6 +2217,38 @@ test "same-second manual occurrences reconcile by their actual Task identity" {
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(second));
     try std.testing.expectEqual(TaskOutcome.completed, runtime.store.find(id).?.occurrences()[0].task_outcome.?);
     try std.testing.expectEqual(TaskOutcome.failed, runtime.store.find(id).?.last_occurrence.?.task_outcome.?);
+}
+
+test "startup claim recovery is fail closed on allocation failure and explicit recovery settles every claim" {
+    for (0..8) |index| {
+        var effects: TestEffects = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("interrupted", "inspect"), testBinding(), redaction);
+        const item = runtime.store.find(id).?;
+        try runtime.store.claim(item, 100, 100, .manual);
+        try runtime.store.claim(item, 101, 101, .manual);
+        // A later record must not hide an older interrupted claim.
+        try runtime.store.markSkipped(item, 200, 200, 0);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        runtime.allocator = failing.allocator();
+        const recovered = runtime.recoverInterruptedNoFail(redaction);
+        runtime.allocator = std.testing.allocator;
+        if (!recovered) {
+            try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth());
+            _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+            try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+            try std.testing.expectEqual(PersistenceRecoveryOutcome.recovered, runtime.recoverPersistence(redaction));
+        }
+        const restored = runtime.store.find(id).?;
+        try std.testing.expectEqual(Health.needs_attention, restored.health);
+        for (restored.occurrences()[0..2]) |occurrence| {
+            try std.testing.expectEqual(state.OccurrenceResult.rejected, occurrence.result);
+            try std.testing.expectEqual(FailureReason.host_interrupted, occurrence.reason.?);
+        }
+        try std.testing.expectEqual(state.OccurrenceResult.skipped, restored.last_occurrence.?.result);
+    }
 }
 
 test "failed Schedule mutations cancel an existing timer without publishing their candidate" {

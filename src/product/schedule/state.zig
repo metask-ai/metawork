@@ -560,14 +560,14 @@ pub const Store = struct {
         var changed = false;
         for (self.items) |*entry| {
             const item = &(entry.* orelse continue);
-            if (item.occurrence_count == 0) continue;
-            const occurrence = &item.occurrence_history[item.occurrence_count - 1];
-            if (occurrence.result != .claimed) continue;
-            occurrence.result = .rejected;
-            occurrence.reason = .host_interrupted;
-            item.last_occurrence = occurrence.*;
-            self.markNeedsAttention(item, .host_interrupted);
-            changed = true;
+            for (item.occurrence_history[0..item.occurrence_count], 0..) |*occurrence, index| {
+                if (occurrence.result != .claimed) continue;
+                occurrence.result = .rejected;
+                occurrence.reason = .host_interrupted;
+                if (index + 1 == item.occurrence_count) item.last_occurrence = occurrence.*;
+                self.markNeedsAttention(item, .host_interrupted);
+                changed = true;
+            }
         }
         return changed;
     }
@@ -801,6 +801,15 @@ fn advanceAfterTimer(
 
 fn validRestoredState(restored: RestoredItem) bool {
     if (restored.enabled) {
+        const next = restored.next_run_at_unix_seconds orelse return false;
+        switch (restored.definition.recurrence) {
+            .once => |once| if (next != once.at_unix_seconds) return false,
+            .interval => |interval| {
+                if (next < interval.start_at_unix_seconds or
+                    (next - interval.start_at_unix_seconds) % interval.every_seconds != 0)
+                    return false;
+            },
+        }
         return restored.health == .ready and
             restored.failure_reason == null and
             restored.next_run_at_unix_seconds != null;

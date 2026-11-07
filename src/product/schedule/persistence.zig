@@ -49,7 +49,9 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
 
 pub const RecoveryFault = enum {
     none,
+    stage_failed,
     install_failed,
+    restore_failed,
     interrupted_after_quarantine,
     interrupted_after_install,
 };
@@ -169,7 +171,7 @@ pub const FileStore = struct {
     ) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
-        try self.settleIncompleteRecoveries();
+        if (self.recovery_fault == .stage_failed) return error.WriteFailed;
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
         const random_hex = std.fmt.bytesToHex(random, .lower);
@@ -246,6 +248,10 @@ pub const FileStore = struct {
         pending.close(self.io);
         pending_open = false;
         if (!self.syncPath(pending_name)) return error.WriteFailed;
+        // A new durable marker must protect the store before older recovery
+        // evidence is settled. Any later failure remains visible on restart.
+        clean_pending = false;
+        try self.settleIncompleteRecoveries(&random_hex);
 
         var quarantined = true;
         self.dir.rename(
@@ -260,6 +266,7 @@ pub const FileStore = struct {
         if (quarantined and !self.syncPath(quarantine_name)) {
             if (!self.restoreCanonical(quarantine_name))
                 return error.PersistenceOutcomeUnknown;
+            clean_pending = true;
             return error.WriteFailed;
         }
 
@@ -268,9 +275,12 @@ pub const FileStore = struct {
             clean_pending = false;
             return error.PersistenceOutcomeUnknown;
         }
-        if (self.recovery_fault == .install_failed) {
-            if (quarantined and !self.restoreCanonical(quarantine_name))
-                return error.PersistenceOutcomeUnknown;
+        if (self.recovery_fault == .install_failed or self.recovery_fault == .restore_failed) {
+            if (quarantined) {
+                if (!self.restoreCanonical(quarantine_name))
+                    return error.PersistenceOutcomeUnknown;
+                clean_pending = true;
+            }
             return error.WriteFailed;
         }
         self.dir.rename(
@@ -279,8 +289,11 @@ pub const FileStore = struct {
             file_name,
             self.io,
         ) catch {
-            if (quarantined and !self.restoreCanonical(quarantine_name))
-                return error.PersistenceOutcomeUnknown;
+            if (quarantined) {
+                if (!self.restoreCanonical(quarantine_name))
+                    return error.PersistenceOutcomeUnknown;
+                clean_pending = true;
+            }
             return error.WriteFailed;
         };
         temp_exists = false;
@@ -316,6 +329,7 @@ pub const FileStore = struct {
     }
 
     fn restoreCanonical(self: *FileStore, quarantine_name: []const u8) bool {
+        if (self.recovery_fault == .restore_failed) return false;
         self.dir.rename(
             quarantine_name,
             self.dir,
@@ -329,10 +343,10 @@ pub const FileStore = struct {
     /// recovery transactions. Preserve every displaced canonical as a final
     /// quarantine, remove uninstalled candidates, and clear pending markers
     /// last so a crash during settlement remains fail closed.
-    fn settleIncompleteRecoveries(self: *FileStore) FileStoreError!void {
+    fn settleIncompleteRecoveries(self: *FileStore, current_id: []const u8) FileStoreError!void {
         var operations: usize = 0;
         var name_storage: [96]u8 = undefined;
-        while (try self.findRecoveryArtifact(".bak", &name_storage)) |name| {
+        while (try self.findRecoveryArtifact(".bak", &name_storage, current_id)) |name| {
             operations += 1;
             if (operations > max_recovery_artifacts)
                 return error.PersistenceOutcomeUnknown;
@@ -355,7 +369,7 @@ pub const FileStore = struct {
                 return error.PersistenceOutcomeUnknown;
         }
         var removed_temp = false;
-        while (try self.findRecoveryArtifact(".tmp", &name_storage)) |name| {
+        while (try self.findRecoveryArtifact(".tmp", &name_storage, current_id)) |name| {
             operations += 1;
             if (operations > max_recovery_artifacts)
                 return error.PersistenceOutcomeUnknown;
@@ -366,7 +380,7 @@ pub const FileStore = struct {
         if (removed_temp and !self.syncDirectory())
             return error.PersistenceOutcomeUnknown;
         var removed_pending = false;
-        while (try self.findRecoveryArtifact(".pending", &name_storage)) |name| {
+        while (try self.findRecoveryArtifact(".pending", &name_storage, current_id)) |name| {
             operations += 1;
             if (operations > max_recovery_artifacts)
                 return error.PersistenceOutcomeUnknown;
@@ -382,6 +396,7 @@ pub const FileStore = struct {
         self: *FileStore,
         suffix: []const u8,
         output: []u8,
+        excluded_id: ?[]const u8,
     ) FileStoreError!?[]const u8 {
         var iterable = self.dir.openDir(
             self.io,
@@ -391,8 +406,10 @@ pub const FileStore = struct {
         defer iterable.close(self.io);
         var iterator = iterable.iterate();
         while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
-            if (entry.kind != .file or
-                recoveryTransactionId(entry.name, suffix) == null) continue;
+            if (entry.kind != .file) continue;
+            const id = recoveryTransactionId(entry.name, suffix) orelse continue;
+            if (excluded_id) |excluded|
+                if (std.mem.eql(u8, id, excluded)) continue;
             if (entry.name.len > output.len)
                 return error.PersistenceOutcomeUnknown;
             @memcpy(output[0..entry.name.len], entry.name);
@@ -625,7 +642,7 @@ fn decodeCurrent(
                 null,
             .next_run_at_unix_seconds = wire.next_run_at_unix_seconds,
             .occurrences = occurrences[0..wire.occurrences.len],
-        }) catch return error.ScheduledTaskStoreCorrupt;
+        }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ScheduledTaskStoreCorrupt;
     }
     store.restoreNextId(parsed.value.next_id) catch
         return error.ScheduledTaskStoreCorrupt;
@@ -1139,4 +1156,75 @@ test "orphan recovery files without an exact pending marker do not block load" {
     const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings(canonical, restored);
+}
+
+test "recovery rollback failure keeps restart fail closed and preserves original bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    const previous = "original interrupted canonical";
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit(previous);
+    testing.setRecoveryFault(&file_store, .restore_failed);
+    try std.testing.expectError(error.PersistenceOutcomeUnknown, file_store.recover(replacement));
+    try std.testing.expectError(error.ReadFailed, file_store.loadAlloc(std.testing.allocator));
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+    var storage: [96]u8 = undefined;
+    const quarantine_name = (try file_store.findRecoveryArtifact(".quarantine", &storage, null)).?;
+    const original = try tmp.dir.readFileAlloc(std.testing.io, quarantine_name, std.testing.allocator, .limited(max_store_bytes));
+    defer std.testing.allocator.free(original);
+    try std.testing.expectEqualStrings(previous, original);
+}
+
+test "a failed recovery retry cannot erase the last interrupted recovery marker" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit("interrupted original");
+    testing.setRecoveryFault(&file_store, .interrupted_after_quarantine);
+    try std.testing.expectError(error.PersistenceOutcomeUnknown, file_store.recover(replacement));
+    testing.setRecoveryFault(&file_store, .stage_failed);
+    try std.testing.expectError(error.WriteFailed, file_store.recover(replacement));
+    try std.testing.expectError(error.ReadFailed, file_store.loadAlloc(std.testing.allocator));
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+}
+
+test "Schedule decoder rejects cursors outside the saved recurrence" {
+    var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer store.deinit();
+    const id = try store.create(.{
+        .title = "cursor",
+        .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+        .permission_profile = .approval_required,
+        .input = "inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
+    }, 100);
+    const item = store.find(id).?;
+    var output: [max_store_bytes]u8 = undefined;
+    item.next_run_at_unix_seconds = 100;
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    item.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    for ([_]u64{ 0, 100, 201, 259 }) |cursor| {
+        item.next_run_at_unix_seconds = cursor;
+        try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    }
+    item.next_run_at_unix_seconds = 260;
+    const bytes = try encode(&output, &store);
+    const Decode = struct {
+        fn check(allocator: std.mem.Allocator, input: []const u8) !void {
+            var restored = try decode(allocator, input, .{ .max_items = 1, .max_projection_bytes = 8192 });
+            defer restored.deinit();
+            try std.testing.expectEqual(@as(?u64, 260), restored.find(1).?.next_run_at_unix_seconds);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Decode.check, .{bytes});
 }
