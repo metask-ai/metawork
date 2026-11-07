@@ -36,6 +36,7 @@ import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runApprovalReadabilityVertical } from "./agentcore-approval-readability-vertical.mjs";
+import { runAgentBoundaryVertical } from "./agentcore-boundary-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import {
   runAutomaticFirstSkillVertical,
@@ -316,6 +317,19 @@ await writeFile(
   ].join("\n"),
   { mode: 0o600 },
 );
+if (process.env.METAWORK_AGENT_BOUNDARY_ONLY === "1") {
+  const directory = join(
+    canonicalWorkspace,
+    ".claude",
+    "skills",
+    "boundary-fork",
+  );
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "SKILL.md"),
+    "---\nname: Boundary fork\ndescription: Exercise public fork text\ncontext: fork\n---\nReply with the public fork result.\n",
+  );
+}
 await rm(automationDir, { recursive: true, force: true });
 
 const writtenPath = join(canonicalWorkspace, "agentcore-vertical-write.txt");
@@ -473,6 +487,7 @@ const attachmentCapacityOnly =
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
+const boundaryOnly = process.env.METAWORK_AGENT_BOUNDARY_ONLY === "1";
 const approvalReadabilityOnly =
   process.env.METAWORK_APPROVAL_READABILITY_ONLY === "1";
 const approvalOnly =
@@ -613,6 +628,7 @@ desktopVertical: try {
   if (
     !skillAutoRefreshOnly &&
     !activeInputOnly &&
+    !boundaryOnly &&
     !outputOnly &&
     !builtinOfficeOnly &&
     !approvalOnly &&
@@ -908,6 +924,61 @@ desktopVertical: try {
     await stopApplication("Output desktop verification complete");
     process.stdout.write(
       `Output Windows desktop vertical passed: real Core delivery, Renderer checks/edit draft, cold history and source preservation${process.env.METAWORK_OUTPUT_NATIVE === "1" ? ", native Save As/cancel/overwrite protection and exact Explorer selection" : ""}.\n`,
+    );
+    break desktopVertical;
+  }
+  if (boundaryOnly) {
+    const sources = afterChoose.skillManagement.sourceSettings;
+    assert.equal(
+      (
+        await invokeBridge("metawork.skills.setSourceEnabled", {
+          sourceId: "claude",
+          enabled: true,
+          expectedRevision: sources.revision,
+        })
+      ).applied,
+      true,
+    );
+    const catalog = await poll(
+      async () => {
+        const current = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return current?.availability === "ready" &&
+          current.skills.some(
+            (skill) => skill.invocationName === "boundary-fork",
+          )
+          ? current
+          : null;
+      },
+      commandTimeoutMs,
+      "model-invocable fork Skill catalog",
+    );
+    const verifyCold = await runAgentBoundaryVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      toolSse,
+      workspaceId,
+      workspaceRoot: canonicalWorkspace,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      catalog,
+      evidenceDirectory: join(
+        root,
+        ".zig-cache",
+        "agentcore-boundary-evidence",
+      ),
+    });
+    await stopApplication("Agent boundary restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    await verifyCold();
+    await stopApplication("Agent boundary verification complete");
+    process.stdout.write(
+      "Agent boundary canonical vertical passed: real fork, pending input anchor, continued abort/max_turns/provider failure, Session reuse and cold output.\n",
     );
     break desktopVertical;
   }

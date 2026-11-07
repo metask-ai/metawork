@@ -1204,6 +1204,23 @@ const EventContext = struct {
     runtime: *Runtime,
     effects: EventEffects,
 
+    fn projection(self: *EventContext) EventProjection {
+        return EventProjection{
+            .context = self,
+            .max_assistant_message_bytes = self.effects.max_assistant_message_bytes,
+            .max_commentary_segments_per_run = self.effects.max_commentary_segments_per_run,
+            .max_tool_field_bytes = self.effects.max_tool_field_bytes,
+            .append_assistant_fn = appendEventAssistant,
+            .append_group_fn = appendEventGroup,
+            .replace_text_fn = replaceEventText,
+            .find_or_create_tool_fn = findOrCreateEventTool,
+            .replace_file_references_fn = replaceEventFileReferences,
+            .record_output_fn = recordEventOutput,
+            .retain_generated_image_fn = retainEventGeneratedImage,
+            .record_file_changes_fn = recordEventFileChanges,
+        };
+    }
+
     fn secrets(self: *const EventContext, _: []const u8) []const []const u8 {
         return self.credential_views;
     }
@@ -4179,20 +4196,7 @@ pub const Runtime = struct {
         const task = self.findByRouteId(envelope.session_id) orelse
             return error.UnknownTask;
         var context = EventContext{ .runtime = self, .effects = effects, .credential_views = if (task_state.findRun(task.durable.runs, envelope.run_id)) |run| run.redactionSecrets() else &.{} };
-        const projection = EventProjection{
-            .context = &context,
-            .max_assistant_message_bytes = effects.max_assistant_message_bytes,
-            .max_commentary_segments_per_run = effects.max_commentary_segments_per_run,
-            .max_tool_field_bytes = effects.max_tool_field_bytes,
-            .append_assistant_fn = appendEventAssistant,
-            .append_group_fn = appendEventGroup,
-            .replace_text_fn = replaceEventText,
-            .find_or_create_tool_fn = findOrCreateEventTool,
-            .replace_file_references_fn = replaceEventFileReferences,
-            .record_output_fn = recordEventOutput,
-            .retain_generated_image_fn = retainEventGeneratedImage,
-            .record_file_changes_fn = recordEventFileChanges,
-        };
+        const projection = context.projection();
         const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
         if (versioned_run) |run| if (run.projection_content_version == 0 or run.projection_content_version == std.math.maxInt(u64)) return error.ViewVersionExhausted;
         const application_result = try task_state.applyEvent(task, envelope, projection);
@@ -4244,6 +4248,13 @@ pub const Runtime = struct {
             changed = true;
         };
         return changed;
+    }
+
+    pub fn finishRetainedOutput(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!void {
+        const task = self.findByRouteId(route_id) orelse return;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return;
+        var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
+        try task_state.finishRetainedOutput(run, context.projection());
     }
 
     pub fn completeFileChangeArtifact(

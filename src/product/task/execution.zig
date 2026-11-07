@@ -752,7 +752,10 @@ fn postprocessCheckpoint(
     switch (outcome) {
         .failure => |failure| {
             const attempt = policy.checkpointFailureAttempt(failure);
-            postprocess.session_disposition = failure.disposition;
+            postprocess.session_disposition = switch (failure.disposition) {
+                .reusable => .reusable,
+                .poisoned => .poisoned,
+            };
             outcome.deinit();
             publishCheckpointFailure(postprocess, attempt);
             return true;

@@ -715,6 +715,8 @@ pub const Session = struct {
     terminal_diagnostic_len: usize = 0,
     terminal_diagnostic_truncated: bool = false,
     model_error: ?ModelError = null,
+    output_segment: ?struct { index: u32, turn: u32, group: u32, bytes: u64 = 0 } = null,
+    last_output_index: ?u32 = null,
     terminal_phase: ?RunStatePhase = null,
     callback_fatal_observed: bool = false,
     termination_signal: ?TerminationSignal = null,
@@ -880,6 +882,8 @@ pub const Session = struct {
         self.terminal_diagnostic_len = 0;
         self.terminal_diagnostic_truncated = false;
         self.model_error = null;
+        self.output_segment = null;
+        self.last_output_index = null;
         self.terminal_phase = null;
         self.callback_fatal_observed = false;
         self.termination_signal = null;
@@ -2271,7 +2275,7 @@ pub const Session = struct {
             self.state = .poisoned;
         }
         if (!self.dependency_contract_failure and typed_status == .ok and
-            (self.callback_fatal_observed or self.terminal_phase == null or
+            (self.callback_fatal_observed or self.output_segment != null or self.terminal_phase == null or
                 self.terminal_phase == .poisoned or
                 (stop_reason == .aborted and self.terminal_phase != .aborted)))
         {
@@ -3124,11 +3128,35 @@ pub const Session = struct {
                     else => {},
                 }
             },
+            .output_segment_begin => |segment| {
+                if (self.output_segment != null or (self.last_output_index != null and segment.index <= self.last_output_index.?)) {
+                    input_event_valid = false;
+                } else {
+                    self.output_segment = .{ .index = segment.index, .turn = segment.turn, .group = segment.group };
+                    self.last_output_index = segment.index;
+                }
+            },
+            .text_chunk => |text| if (self.output_segment) |*open| {
+                open.bytes = std.math.add(u64, open.bytes, text.len) catch overflow: {
+                    input_event_valid = false;
+                    break :overflow open.bytes;
+                };
+            },
+            .output_segment_end => |segment| {
+                if (self.output_segment) |open| {
+                    input_event_valid = open.index == segment.index and open.turn == segment.turn and open.group == segment.group and open.bytes == segment.bytes;
+                    if (input_event_valid) self.output_segment = null;
+                } else input_event_valid = false;
+            },
             .input_adopted => |input| input_event_valid = self.submitted_inputs.adopt(input.input_id, input.sequence, input.turn),
             else => {},
         }
         if (!input_event_valid) {
-            self.recordCallbackRejectionLocked(.{ .boundary = .input_event, .reason = .invalid_input_transition, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len, .input_adoption = switch (parsed.value.known) {
+            const output_event = switch (parsed.value.known) {
+                .output_segment_begin, .output_segment_end, .text_chunk => true,
+                else => false,
+            };
+            self.recordCallbackRejectionLocked(.{ .boundary = if (output_event) .output_event else .input_event, .reason = if (output_event) .invalid_output_segment else .invalid_input_transition, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len, .input_adoption = switch (parsed.value.known) {
                 .input_adopted => |value| .{ .id = value.input_id, .sequence = value.sequence, .turn = value.turn },
                 else => null,
             }, .observed_run_id = switch (parsed.value.known) {

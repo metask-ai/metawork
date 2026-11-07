@@ -21,6 +21,52 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "Agent owns output pairing while accepting unframed text gaps and continued tails" {
+    const begin = "{\"output_segment_begin\":{\"index\":8,\"turn\":1,\"group\":3}}";
+    const text = "{\"text_chunk\":\"ok\"}";
+    const continued = "{\"output_segment_end\":{\"index\":8,\"turn\":1,\"group\":3,\"disposition\":\"continued\",\"bytes\":2}}";
+    const bad_end = "{\"output_segment_end\":{\"index\":8,\"turn\":1,\"group\":3,\"disposition\":\"final\",\"bytes\":1}}";
+    const jump = "{\"output_segment_begin\":{\"index\":99,\"turn\":2,\"group\":5}}";
+    const final = "{\"output_segment_end\":{\"index\":99,\"turn\":2,\"group\":5,\"disposition\":\"final\",\"bytes\":0}}";
+    for ([_]struct { events: []const []const u8, valid: bool }{
+        .{ .events = &.{ text, begin, text, continued }, .valid = true },
+        .{ .events = &.{ begin, text, continued, jump, final }, .valid = true },
+        .{ .events = &.{ begin, text, bad_end }, .valid = false },
+        .{ .events = &.{bad_end}, .valid = false },
+        .{ .events = &.{ begin, begin }, .valid = false },
+        .{ .events = &.{ begin, text, continued, begin }, .valid = false },
+    }) |case| {
+        fake_core.reset();
+        fake_core.setNextPlan(.controlled);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "output boundary" });
+        var work = ImageRunWork{ .session = session, .id = id };
+        {
+            const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+            defer thread.join();
+            defer fake_core.releaseControlled();
+            fake_core.waitRunEntered();
+            const identity = imageIdentity(session, id);
+            var reply: u32 = wire.EVENT_CONTINUE;
+            for (case.events) |event| {
+                reply = lifecycle.Session.onEvent(session, &identity, sdk.bytesView(event));
+                if (reply == wire.EVENT_FATAL) break;
+            }
+            try std.testing.expectEqual(if (case.valid) wire.EVENT_CONTINUE else wire.EVENT_FATAL, reply);
+        }
+        var terminal = work.result.?;
+        defer terminal.deinit();
+        try std.testing.expectEqual(if (case.valid) @as(?lifecycle.TerminalFailure, null) else .dependency_contract, terminal.failure);
+        try std.testing.expectEqual(if (case.valid) lifecycle.SessionDisposition.reusable else .poisoned, terminal.session_disposition_at_completion);
+        try session.close(.session_close);
+    }
+}
+
 test "Agent checks only the promised terminal and fatal return invariants" {
     for ([_]Plan{ .terminal_missing, .terminal_duplicate, .terminal_poisoned, .terminal_abort_mismatch, .fatal_returned_ok, .max_turns, .tool_loop }) |plan| {
         fake_core.reset();

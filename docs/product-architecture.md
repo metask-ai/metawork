@@ -477,7 +477,9 @@ canonical Task record 的 `presentation_format=1` 明确启用位置编码：`ne
 
 插话 `transferred` 只表示输入已交给同一 Task 内真实存在且顺序更后的目标 Run，不表示原轮采纳或目标执行成功；必须保留 receipt，且不能携带原轮采纳活动锚点。其他状态不得关联转入目标。旧记录缺少可空转入关联时仅解释为没有转入事实，不推测目标；等待接续、失败原因和原文均为运行时事实，不由恢复重新激活。
 
-追加消息的安全文本、identity、receipt sequence、采纳状态、真实采纳活动锚点及提交时的输出槽位锚点随所属 Run 持久化；不持久化可执行 payload。输出槽位锚点只数已闭合 commentary 及已分类回答或可安全投影的临时尾部（含脱敏占位），不把尚未提交的敏感后缀计入；它在同步提交前预留，接受或未知时保留，拒绝时释放，不随采纳状态变化。临时尾部可能被丢弃，因此锚点允许超过剩余输出段数，不能按当前正文长度拒绝。旧历史缺少消息数组解释为空；有追加消息的记录必须包含合法锚点，不兼容未部署的缺锚点记录，不引入迁移或位置推测。恢复将仍为 pending 的消息降为 unknown，仅供阅读，不提交给新 Session。Task 安全接收记录及 Run 输入保留逐条 operation 关联，用于响应丢失对账；不发布单槽结果，也不建立持久 ACK 或跨重启 exactly-once 承诺。重载、断连和导航不撤销 Core 已接受的输入，也不触发重发。
+段外过程内容在下一次 frame begin 前或 terminal drain 时完成脱敏并原子提交 commentary；closed continued 尾部作为 partial 回复保留，不改变真实 Run outcome。输出协议由 Agent 校验，Product 的保留不足、记录关联和统计表示失败属于本地处理，不能据此宣称 Core 违约。
+
+追加消息的安全文本、identity、receipt sequence、采纳状态、真实采纳活动锚点及提交时的输出槽位锚点随所属 Run 持久化；不持久化可执行 payload。输出槽位锚点计入已闭合 commentary、已分类回答及临时尾部（含脱敏占位）；合法段外过程内容从首个 chunk 起占用一个槽位，即使敏感后缀尚不能公开也保留位置，不暴露其原文；它在同步提交前预留，接受或未知时保留，拒绝时释放，不随采纳状态变化。临时尾部可能被丢弃，因此锚点允许超过剩余输出段数，不能按当前正文长度拒绝。旧历史缺少消息数组解释为空；有追加消息的记录必须包含合法锚点，不兼容未部署的缺锚点记录，不引入迁移或位置推测。恢复将仍为 pending 的消息降为 unknown，仅供阅读，不提交给新 Session。Task 安全接收记录及 Run 输入保留逐条 operation 关联，用于响应丢失对账；不发布单槽结果，也不建立持久 ACK 或跨重启 exactly-once 承诺。重载、断连和导航不撤销 Core 已接受的输入，也不触发重发。
 
 Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、File Changes metadata/artifact reference、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
 

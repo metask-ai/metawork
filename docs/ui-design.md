@@ -669,13 +669,15 @@ Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk
 
 | Host output 状态                              | Renderer 行为                                                  |
 | --------------------------------------------- | -------------------------------------------------------------- |
-| open/continued segment 有安全 committed bytes | 作为 commentary 后的惰性交互 Markdown provisional 原位显示     |
+| open/continued 或段外过程内容有安全 committed bytes | 作为 commentary 后的惰性交互 Markdown provisional 原位显示     |
 | segment 关闭为 commentary                     | 同一尾部 part 原位定性为稳定 commentary                        |
 | segment 关闭为 final/partial                  | 同一尾部 part 原位定性为 final/partial response                |
 | segment 关闭为 discarded                      | provisional 从下一 Snapshot 消失，不保留撤回占位               |
 | closed commentary 已持久化                    | terminal、reload 后仍按原 group 顺序恢复                       |
 | response 已定性但 terminal 尚未发布           | response 可以显示，同时 active process surface 保持 finalizing |
 | formal terminal 已发布                        | activity 必须为 null；未决 provisional 必须为空                |
+
+段外过程内容从首个 chunk 起占用既有输出序号并呈现安全 provisional；提交 commentary 后沿用同一位置，追加输入锚点不得跳到它前面。terminal 时未完成续写的 closed continued 作为 partial 回复显示；段外过程内容单独提交 commentary，不并入最终回答。
 
 Renderer 从 `Run identity + output ordinal` 纯派生每个 part 的 identity；provisional 定性只改变 disposition，不改变所属 Assistant 阅读块、React key 或 part DOM 根。只有 discarded、空内容或整个 Run 卸载才移除对应节点。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
 
