@@ -208,10 +208,11 @@ pub fn classifyAgentTerminal(
         .permission_required => return decisionForSignal(signal),
         else => {},
     };
+    const effective_signal = effectiveTerminationSignal(result);
     if (result.failure == .abi_status) return .{
         .phase = .failed,
         .outcome = .failed,
-        .cause = if (result.termination_signal) |signal|
+        .cause = if (effective_signal) |signal|
             causeForSignal(signal)
         else if (result.abi_status) |status|
             switch (status) {
@@ -235,7 +236,7 @@ pub fn classifyAgentTerminal(
         .tool_error => .{
             .phase = .failed,
             .outcome = .failed,
-            .cause = if (result.termination_signal) |signal|
+            .cause = if (effective_signal) |signal|
                 causeForSignal(signal)
             else
                 .tool_failure,
@@ -243,7 +244,7 @@ pub fn classifyAgentTerminal(
         .api_error => .{
             .phase = .failed,
             .outcome = .failed,
-            .cause = if (result.termination_signal) |signal|
+            .cause = if (effective_signal) |signal|
                 causeForSignal(signal)
             else
                 .provider_failure,
@@ -260,6 +261,16 @@ pub fn classifyAgentTerminal(
         .phase = .failed,
         .outcome = .dependency_contract_failure,
         .cause = .dependency_contract_failure,
+    };
+}
+
+fn effectiveTerminationSignal(result: *const agent.TerminalResult) ?agent.TerminationSignal {
+    if (result.first_host_failure) |failure| return failure.asSignal();
+    if (result.controlled_ui_close) |interruption|
+        return .{ .interrupted = interruption };
+    return switch (result.terminationEffect()) {
+        .prevented_core_call, .aborted => result.termination_signal,
+        .not_requested, .controlled_close, .not_aborted, .unknown => null,
     };
 }
 
@@ -697,11 +708,13 @@ test "Agent terminal facts map into Product Task outcomes" {
     terminal.raw_stop_reason_code = null;
     terminal.failure = .abi_status;
     terminal.termination_signal = .{ .event_pump_failure = .event_too_large };
+    terminal.first_host_failure = .{ .event_pump_failure = .event_too_large };
     try std.testing.expectEqual(
         TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .event_payload_too_large },
         classifyAgentTerminal(&terminal),
     );
     terminal.termination_signal = .{ .event_pump_failure = .capacity };
+    terminal.first_host_failure = .{ .event_pump_failure = .capacity };
     try std.testing.expectEqual(
         TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .queue_capacity_failure },
         classifyAgentTerminal(&terminal),
@@ -716,6 +729,7 @@ test "Agent terminal facts map into Product Task outcomes" {
         classifyAgentTerminal(&terminal),
     );
     terminal.termination_signal = null;
+    terminal.first_host_failure = null;
 
     terminal.abi_status = .checkpoint_budget_required;
     terminal.raw_status_code = @intFromEnum(agent.Status.checkpoint_budget_required);
@@ -771,6 +785,7 @@ test "Agent terminal facts map into Product Task outcomes" {
     terminal.raw_status_code = @intFromEnum(agent.Status.callback_failed);
     terminal.failure = .abi_status;
     terminal.termination_signal = .{ .callback_failure = .ui };
+    terminal.first_host_failure = .{ .callback_failure = .ui };
     try std.testing.expectEqual(
         TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .ui_pipeline_failure },
         classifyAgentTerminal(&terminal),
@@ -787,6 +802,9 @@ test "Agent terminal facts map into Product Task outcomes" {
     );
 
     terminal.failure = null;
+    terminal.first_host_failure = null;
+    terminal.abi_status = .ok;
+    terminal.raw_status_code = @intFromEnum(agent.Status.ok);
     terminal.stop_reason = .api_error;
     terminal.raw_stop_reason_code = @intFromEnum(agent.StopReason.api_error);
     terminal.termination_signal = null;
@@ -797,7 +815,7 @@ test "Agent terminal facts map into Product Task outcomes" {
 
     terminal.termination_signal = .{ .interrupted = .timeout };
     try std.testing.expectEqual(
-        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .timeout },
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .provider_failure },
         classifyAgentTerminal(&terminal),
     );
 
@@ -808,6 +826,39 @@ test "Agent terminal facts map into Product Task outcomes" {
         TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .tool_failure },
         classifyAgentTerminal(&terminal),
     );
+}
+
+test "Host failure and controlled close stay attributable after an earlier Stop" {
+    var terminal = agent.TerminalResult{
+        .allocator = std.testing.allocator,
+        .diagnostic_storage = &.{},
+        .diagnostic_len = 0,
+        .diagnostic_truncated = false,
+        .abi_status = .callback_failed,
+        .raw_status_code = @intFromEnum(agent.Status.callback_failed),
+        .stop_reason = null,
+        .raw_stop_reason_code = null,
+        .abort_status = .too_late,
+        .raw_abort_status_code = @intFromEnum(agent.Status.too_late),
+        .termination_signal = .{ .interrupted = .user_cancel },
+        .failure = .abi_status,
+        .session_disposition_at_completion = .poisoned,
+        .first_host_failure = .{ .event_pump_failure = .allocation },
+    };
+    try std.testing.expectEqual(@as(?task_state.RunCause, .event_pipeline_failure), classifyAgentTerminal(&terminal).cause);
+    terminal.first_host_failure = null;
+    terminal.controlled_ui_close = .session_close;
+    try std.testing.expectEqual(@as(?task_state.RunCause, .session_close), classifyAgentTerminal(&terminal).cause);
+    terminal.controlled_ui_close = null;
+    terminal.abi_status = .ok;
+    terminal.raw_status_code = @intFromEnum(agent.Status.ok);
+    terminal.stop_reason = .api_error;
+    terminal.failure = null;
+    try std.testing.expectEqual(@as(?task_state.RunCause, .provider_failure), classifyAgentTerminal(&terminal).cause);
+    terminal.first_host_failure = .{ .credential_update_failure = .rejected };
+    try std.testing.expectEqual(@as(?task_state.RunCause, .agent_failure), classifyAgentTerminal(&terminal).cause);
+    terminal.first_host_failure = .{ .credential_update_failure = .resource_limit };
+    try std.testing.expectEqual(@as(?task_state.RunCause, .resource_limit), classifyAgentTerminal(&terminal).cause);
 }
 
 test "Compact terminal and interruption facts map into Product Task outcomes" {

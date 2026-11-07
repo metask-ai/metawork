@@ -21,6 +21,108 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "Stop and close deliver once at admission after stale or preflight refusal" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        id: u64,
+        result: ?lifecycle.TerminalResult = null,
+        fn execute(self: *@This()) void {
+            var run = self.session.beginRun(self.id) catch unreachable;
+            self.result = run.execute();
+            run.deinit();
+        }
+        fn close(session: *lifecycle.Session) void {
+            session.close(.session_close) catch unreachable;
+        }
+    };
+    for ([_]u32{ wire.STATUS_STALE_RUN, wire.STATUS_INVALID_STATE }) |status| {
+        for ([_]bool{ false, true }) |closing| {
+            fake_core.reset();
+            fake_core.setNextPlan(.controlled);
+            var gate = fixture.CallbackSignal{};
+            gate.arm();
+            fake_core.admission_gate = &gate;
+            fake_core.forced_abort_status = status;
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer {
+                runtime.shutdown() catch unreachable;
+                runtime.deinit();
+            }
+            const session = try openSession(runtime);
+            const id = try session.prepareRun(.{ .text = "Stop before Core admission" });
+            var work = Work{ .session = session, .id = id };
+            {
+                const thread = try std.Thread.spawn(.{}, Work.execute, .{&work});
+                defer thread.join();
+                defer gate.markFinished();
+                gate.waitUntilEntered();
+                if (closing) {
+                    const close_thread = try std.Thread.spawn(.{}, Work.close, .{session});
+                    defer close_thread.join();
+                    defer gate.markFinished();
+                    try session.waitForState(.closing);
+                } else {
+                    try session.requestTermination(id, .{ .interrupted = .user_cancel });
+                }
+            }
+            var terminal = work.result.?;
+            defer terminal.deinit();
+            try std.testing.expect(terminal.failure == null);
+            try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+            try std.testing.expectEqual(.ok, terminal.abort_status.?);
+            try std.testing.expectEqual(.aborted, terminal.terminationEffect());
+            try std.testing.expect(terminal.first_host_failure == null);
+            try std.testing.expectEqual(closing, terminal.event_delivery_lost);
+            fake_core.lock();
+            const calls = fake_core.abort_calls;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 2), calls);
+            try session.close(.session_close);
+        }
+    }
+}
+
+test "Host failure remains independent when Stop occupied the control slot first" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        id: u64,
+        result: ?lifecycle.TerminalResult = null,
+        fn execute(self: *@This()) void {
+            var run = self.session.beginRun(self.id) catch unreachable;
+            self.result = run.execute();
+            run.deinit();
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled_callback_failed);
+    var gate = fixture.CallbackSignal{};
+    gate.arm();
+    fake_core.admission_gate = &gate;
+    fake_core.forced_abort_status = wire.STATUS_INVALID_STATE;
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "Host failure after Stop" });
+    var work = Work{ .session = session, .id = id };
+    {
+        const thread = try std.Thread.spawn(.{}, Work.execute, .{&work});
+        defer thread.join();
+        defer gate.markFinished();
+        gate.waitUntilEntered();
+        try session.requestTermination(id, .{ .interrupted = .user_cancel });
+        try session.requestTermination(id, .{ .event_pump_failure = .allocation });
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(.callback_failed, terminal.abi_status.?);
+    try std.testing.expectEqual(lifecycle.TerminationSignal{ .interrupted = .user_cancel }, terminal.termination_signal.?);
+    try std.testing.expectEqual(lifecycle.HostFailure{ .event_pump_failure = .allocation }, terminal.first_host_failure.?);
+    try session.close(.session_close);
+}
+
 fn expectModelError(terminal: *const lifecycle.TerminalResult, run_id: u64) !void {
     const detail = &(terminal.model_error orelse return error.ExpectedModelError);
     const value = detail.view();
@@ -3880,6 +3982,7 @@ test "ordinary Stop leaves the saturated event callback waiting for consumption"
         defer first_terminal.deinit();
         const second_run = try submitSession(session, "stop while consumer is active");
         try session.waitForState(.running);
+        fake_core.waitRunEntered();
         try cancelSession(session, second_run, .user_cancel);
         var first = runtime.takeEvent().?;
         first.deinit();

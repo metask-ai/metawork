@@ -45,6 +45,8 @@ pub const EventConsumerNotificationFailure = enum {
     unavailable,
 };
 
+pub const CredentialUpdateFailure = enum { rejected, resource_limit, dependency_contract };
+
 /// The single mutable, first-writer-wins termination latch for an active Run.
 /// This is execution control state, not a durable outcome.
 pub const TerminationSignal = union(enum) {
@@ -53,7 +55,43 @@ pub const TerminationSignal = union(enum) {
     callback_failure: CallbackFailure,
     event_pump_failure: EventPumpFailure,
     event_consumer_notification_failure: EventConsumerNotificationFailure,
-    credential_update_failure: enum { rejected, resource_limit, dependency_contract },
+    credential_update_failure: CredentialUpdateFailure,
+};
+
+/// A real Host failure, independent of the first control request.
+pub const HostFailure = union(enum) {
+    callback_failure: CallbackFailure,
+    event_pump_failure: EventPumpFailure,
+    event_consumer_notification_failure: EventConsumerNotificationFailure,
+    credential_update_failure: CredentialUpdateFailure,
+
+    pub fn fromSignal(signal: TerminationSignal) ?HostFailure {
+        return switch (signal) {
+            .interrupted, .permission_required => null,
+            .callback_failure => |reason| .{ .callback_failure = reason },
+            .event_pump_failure => |reason| .{ .event_pump_failure = reason },
+            .event_consumer_notification_failure => |reason| .{ .event_consumer_notification_failure = reason },
+            .credential_update_failure => |reason| .{ .credential_update_failure = reason },
+        };
+    }
+
+    pub fn asSignal(self: HostFailure) TerminationSignal {
+        return switch (self) {
+            .callback_failure => |reason| .{ .callback_failure = reason },
+            .event_pump_failure => |reason| .{ .event_pump_failure = reason },
+            .event_consumer_notification_failure => |reason| .{ .event_consumer_notification_failure = reason },
+            .credential_update_failure => |reason| .{ .credential_update_failure = reason },
+        };
+    }
+};
+
+pub const TerminationEffect = enum {
+    not_requested,
+    prevented_core_call,
+    aborted,
+    controlled_close,
+    not_aborted,
+    unknown,
 };
 
 pub const TerminalFailure = enum {
@@ -250,9 +288,21 @@ pub const TerminalResult = struct {
     durable_budget: ?DurableBudgetObservation = null,
     input_counts: ?InputCounts = null,
     first_callback_rejection: ?CallbackRejection = null,
+    first_host_failure: ?HostFailure = null,
+    controlled_ui_close: ?ExternalInterruption = null,
     /// Validated supplemental observation; only OK + api_error makes it the
     /// explanation of the Run's model failure. Dependency failures suppress it.
     model_error: ?ModelError = null,
+
+    pub fn terminationEffect(self: *const TerminalResult) TerminationEffect {
+        if (self.failure == .dependency_contract) return .unknown;
+        if (self.controlled_ui_close != null) return .controlled_close;
+        if (self.termination_signal == null) return .not_requested;
+        if (self.raw_status_code == null) return .prevented_core_call;
+        if (self.abi_status == .ok and self.stop_reason == .aborted) return .aborted;
+        if (self.abi_status == .ok) return .not_aborted;
+        return .unknown;
+    }
 
     pub fn diagnostic(self: *const TerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];

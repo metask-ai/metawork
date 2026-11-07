@@ -77,6 +77,8 @@ pub const MultimodalInputLimits = multimodal.InputLimits;
 pub const multimodal_input_limits = multimodal.input_limits;
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
+pub const HostFailure = session_control.HostFailure;
+pub const TerminationEffect = session_control.TerminationEffect;
 const UiRequest = sdk.UiRequest;
 pub const PermissionChoice = sdk.protocol.PermissionChoice;
 pub const PermissionDecision = sdk.protocol.PermissionDecision;
@@ -716,8 +718,13 @@ pub const Session = struct {
     terminal_run_state_seen: bool = false,
     termination_signal: ?TerminationSignal = null,
     first_callback_rejection: ?CallbackRejection = null,
+    first_host_failure: ?HostFailure = null,
+    controlled_ui_close: ?ExternalInterruption = null,
+    close_interruption: ExternalInterruption = .session_close,
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
+    abort_retry_pending: bool = false,
+    abort_retried_after_start: bool = false,
     dependency_contract_failure: bool = false,
     file_changes_lost: std.atomic.Value(bool) = .init(false),
     event_delivery_stopped: std.atomic.Value(bool) = .init(false),
@@ -875,8 +882,12 @@ pub const Session = struct {
         self.terminal_run_state_seen = false;
         self.termination_signal = null;
         self.first_callback_rejection = null;
+        self.first_host_failure = null;
+        self.controlled_ui_close = null;
         self.abort_status = null;
         self.raw_abort_status_code = null;
+        self.abort_retry_pending = false;
+        self.abort_retried_after_start = false;
         self.dependency_contract_failure = false;
         self.file_changes_lost.store(false, .release);
         self.event_delivery_stopped.store(false, .release);
@@ -1493,6 +1504,7 @@ pub const Session = struct {
             self.unlock();
             return error.NoSuchRun;
         }
+        if (!self.run_done) recordHostFailureLocked(self, signal);
         if (self.cancel_requested) {
             self.unlock();
             return;
@@ -1505,8 +1517,7 @@ pub const Session = struct {
         setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
         const was_queued = self.state == .queued;
-        const should_abort = !was_queued and self.core_call_in_progress and !self.run_done;
-        if (should_abort) self.abort_calls_in_progress += 1;
+        const should_abort = !was_queued and self.registerRunAbortLocked(false);
         self.unlock();
 
         if (was_queued) {
@@ -1541,10 +1552,8 @@ pub const Session = struct {
         setTerminationSignalLocked(self, .{ .callback_failure = .ui });
         wakeUiLocked(self);
         const was_queued = self.state == .queued;
-        const should_abort = !self.cancel_requested and !was_queued and
-            self.core_call_in_progress;
+        const should_abort = !was_queued and self.registerRunAbortLocked(false);
         self.cancel_requested = true;
-        if (should_abort) self.abort_calls_in_progress += 1;
         self.unlock();
 
         if (was_queued) {
@@ -1662,6 +1671,7 @@ pub const Session = struct {
             self.unlock();
             return .already_terminal;
         }
+        recordHostFailureLocked(self, signal);
         if (self.state == .closing or self.state == .closed) {
             self.unlock();
             return .session_closing;
@@ -1673,8 +1683,7 @@ pub const Session = struct {
         self.cancel_requested = true;
         setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
-        const should_abort = self.core_call_in_progress;
-        if (should_abort) self.abort_calls_in_progress += 1;
+        const should_abort = self.registerRunAbortLocked(false);
         self.unlock();
         if (should_abort) self.abortRun(run_id, signal);
         return .requested;
@@ -1988,15 +1997,13 @@ pub const Session = struct {
         self.control_block.disableNewLeases();
         const compact_active = self.state == .compact_queued or self.state == .compacting;
         const operation_done = if (compact_active) self.compact_done else self.run_done;
-        const should_abort_now = self.core_call_in_progress and !operation_done and
+        var should_abort_now = compact_active and self.core_call_in_progress and !operation_done and
             self.abort_calls_in_progress == 0 and
-            (if (compact_active)
-                self.raw_compact_abort_status_code == null
-            else
-                self.raw_abort_status_code == null);
+            self.raw_compact_abort_status_code == null;
         if (should_abort_now) self.abort_calls_in_progress += 1;
         const run_id = self.active_run_id;
         const compact_id = self.active_compact_id;
+        self.close_interruption = interruption;
         self.state = .closing;
         self.event_delivery_stopped.store(true, .release);
         const signal: TerminationSignal = .{ .interrupted = interruption };
@@ -2010,8 +2017,10 @@ pub const Session = struct {
                 self.finishPreparedCompactLocked();
         } else {
             if (!self.run_done) setTerminationSignalLocked(self, signal);
+            if (self.ui_active) self.controlled_ui_close = interruption;
             wakeUiLocked(self);
             if (!self.run_done and !self.run_started) self.finishPreparedRunLocked();
+            should_abort_now = self.registerRunAbortLocked(false);
         }
         self.broadcast();
         self.unlock();
@@ -2029,14 +2038,13 @@ pub const Session = struct {
             (!self.compact_done and !self.compact_started)
         else
             (!self.run_done and !self.run_started)) self.wait();
-        const should_abort_late = !should_abort_now and self.core_call_in_progress and
-            !(if (compact_active) self.compact_done else self.run_done) and
-            self.abort_calls_in_progress == 0 and
-            (if (compact_active)
-                self.raw_compact_abort_status_code == null
-            else
-                self.raw_abort_status_code == null);
-        if (should_abort_late) self.abort_calls_in_progress += 1;
+        const should_abort_late = if (!compact_active)
+            !should_abort_now and self.registerRunAbortLocked(false)
+        else
+            !should_abort_now and self.core_call_in_progress and !self.compact_done and
+                self.abort_calls_in_progress == 0 and
+                self.raw_compact_abort_status_code == null;
+        if (compact_active and should_abort_late) self.abort_calls_in_progress += 1;
         self.unlock();
         if (should_abort_late) {
             if (compact_active) self.abortCompact(compact_id) else self.abortRun(run_id, signal);
@@ -2251,8 +2259,6 @@ pub const Session = struct {
                         .durable_usage_bytes = result.durable_usage_bytes,
                         .required_checkpoint_bytes = result.required_checkpoint_bytes,
                     };
-                    if (known_status == .callback_failed and self.termination_signal == null)
-                        setTerminationSignalLocked(self, .{ .callback_failure = .event });
                     failure = .abi_status;
                     if (disposition.? == .poisoned) self.state = .poisoned;
                 }
@@ -2313,26 +2319,56 @@ pub const Session = struct {
         return terminal;
     }
 
-    fn abortRun(self: *Session, run_id: u64, signal: TerminationSignal) void {
-        var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.session().abort()(
-            self.raw,
-            run_id,
-            abortReason(signal),
-            &diagnostic,
-        );
-        releaseOwned(self.agent_runtime.api, &diagnostic);
-        self.lock();
-        std.debug.assert(self.abort_calls_in_progress != 0);
-        if (self.active_run_id == run_id) {
-            self.raw_abort_status_code = status;
-            self.abort_status = sdk.Status.fromCode(status) catch null;
-            if (self.abort_status == null or !isAbortStatus(self.abort_status.?))
-                self.dependency_contract_failure = true;
+    /// Register the first delivery, or one retry at the Core admission edge.
+    /// Core calls and queue waits must happen after releasing the Session lock.
+    fn registerRunAbortLocked(self: *Session, after_start: bool) bool {
+        if (self.run_done or !self.core_call_in_progress or
+            self.termination_signal == null or self.abort_status == .ok) return false;
+        if (after_start) {
+            if (self.abort_retried_after_start) return false;
+            if (self.abort_calls_in_progress != 0) {
+                self.abort_retry_pending = true;
+                return false;
+            }
+            self.abort_retried_after_start = true;
+            self.abort_retry_pending = false;
+        } else if (self.abort_calls_in_progress != 0 or self.raw_abort_status_code != null) {
+            return false;
         }
-        self.abort_calls_in_progress -= 1;
-        self.broadcast();
-        self.unlock();
+        self.abort_calls_in_progress += 1;
+        return true;
+    }
+
+    fn abortRun(self: *Session, run_id: u64, signal: TerminationSignal) void {
+        while (true) {
+            var diagnostic = emptyOwnedBytes();
+            const status = self.agent_runtime.api.session().abort()(
+                self.raw,
+                run_id,
+                abortReason(signal),
+                &diagnostic,
+            );
+            releaseOwned(self.agent_runtime.api, &diagnostic);
+            self.lock();
+            std.debug.assert(self.abort_calls_in_progress != 0);
+            if (self.active_run_id == run_id) {
+                const known = sdk.Status.fromCode(status) catch null;
+                if (known == null or !isAbortStatus(known.?))
+                    self.dependency_contract_failure = true;
+                // Acceptance is monotonic, even if another path reports late.
+                if (self.abort_status != .ok) {
+                    self.raw_abort_status_code = status;
+                    self.abort_status = known;
+                }
+            }
+            self.abort_calls_in_progress -= 1;
+            const retry = self.active_run_id == run_id and
+                self.abort_retry_pending and self.input_window_started and
+                self.registerRunAbortLocked(true);
+            self.broadcast();
+            self.unlock();
+            if (!retry) return;
+        }
     }
 
     fn finishPreparedRunLocked(self: *Session) void {
@@ -2489,6 +2525,8 @@ pub const Session = struct {
             .raw_abort_status_code = self.raw_abort_status_code,
             .termination_signal = self.termination_signal,
             .first_callback_rejection = self.first_callback_rejection,
+            .first_host_failure = self.first_host_failure,
+            .controlled_ui_close = self.controlled_ui_close,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
             .event_delivery_lost = self.event_delivery_lost.load(.acquire),
             .receipts = self.takeTerminalReceiptsLocked(),
@@ -2987,6 +3025,8 @@ pub const Session = struct {
         }
         self.lock();
         var input_event_valid = true;
+        var abort_after_start = false;
+        var abort_signal: ?TerminationSignal = null;
         switch (parsed.value.known) {
             .run_state => |state| {
                 if (state.run_id != run_id) {
@@ -2998,6 +3038,8 @@ pub const Session = struct {
                         } else {
                             self.input_window_started = true;
                             self.input_ready = self.run_input != null and self.run_input.? != .skill;
+                            abort_after_start = self.registerRunAbortLocked(true);
+                            abort_signal = self.termination_signal;
                         }
                     },
                     .finalizing => self.input_ready = false,
@@ -3026,6 +3068,9 @@ pub const Session = struct {
             parsed.deinit();
             return wire.EVENT_FATAL;
         }
+        // Close can stop the queue before starting arrives. Deliver cancellation
+        // before enqueueWaiting can return ConsumerStopped.
+        if (abort_after_start) self.abortRun(run_id, abort_signal.?);
         const is_file_changes = switch (parsed.value) {
             .unknown => false,
             .known => |known| std.meta.activeTag(known) == .file_changes,
@@ -3113,8 +3158,13 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        const callback_run_id = self.retainCoreCallback(raw_run, false) orelse return wire.UI_FATAL;
+        const callback_run_id = self.retainCoreCallback(raw_run, true) orelse return wire.UI_FATAL;
         defer self.releaseCoreCallback();
+        self.lock();
+        const closing = self.state == .closing;
+        if (closing) self.controlled_ui_close = self.close_interruption;
+        self.unlock();
+        if (closing) return wire.UI_FATAL;
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
             self.recordCallbackRejection(.{ .boundary = .ui_decode, .reason = .invalid_bytes });
@@ -3147,6 +3197,12 @@ pub const Session = struct {
             null;
 
         self.lock();
+        if (self.state == .closing) {
+            self.controlled_ui_close = self.close_interruption;
+            self.unlock();
+            if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
+            return wire.UI_FATAL;
+        }
         if (!self.coreIdentityHealthyLocked() or
             !self.uiRequestIdentityMatchesLocked(parsed.value, callback_run_id))
         {
@@ -3415,7 +3471,13 @@ pub const Session = struct {
     }
 };
 
+fn recordHostFailureLocked(self: *Session, signal: TerminationSignal) void {
+    if (self.first_host_failure == null)
+        self.first_host_failure = HostFailure.fromSignal(signal);
+}
+
 fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
+    recordHostFailureLocked(self, signal);
     if (self.termination_signal == null) self.termination_signal = signal;
     for (self.image_calls) |call| if (call) |active| active.cancellation.request();
     for (self.delivery_calls) |call| if (call) |active| active.store(true, .release);

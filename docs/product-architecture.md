@@ -433,6 +433,8 @@ Run 准入时预留固定容量的独立 owned 错误存储，Product 在 Agent 
 
 来源类别在执行准入时从 Models 的真实来源冻结为 Metask 或 Custom Provider；历史缺失时保留未知，不从模型名、协议或当前绑定猜测。Product 纯策略根据 category、来源和主终态生成恢复建议，Renderer 只显示对应入口；鉴权/支付对 Metask 提供 Account 设置入口，对其他或未知来源提供模型设置入口。建议不改 Account 状态、余额、Models 可用性或当前 generation，不执行登录、支付、模型测试或整轮重放；`retryable` 只描述上游请求层。非 provider_failure 的补充观察不提供恢复动作，历史观察也不授予当前操作资格；准备重试仍由当前 Task 的既有 gate 决定，且只把可恢复文本填回 Composer。
 
+产品终态映射消费 Agent 的实际终止效果和独立首个 Host 故障，不因 `termination_signal` 非空就覆盖 Core 已发生的失败。无独立 Host 故障时，模型鉴权失败后 Stop 得到 `too_late` 仍为 failed/provider_failure，保留模型详情与适用恢复入口；工具失败同样保留 tool_failure。调用前阻止、实际 aborted 和受控关闭分别按相应控制事实处理；finalizing 中接受并实际生效的 Stop 可合法收口为 aborted，不补造已被 Core 省略的模型错误。Stop 后真实 callback/事件故障仍有确定的 Host cause，关闭导致的合法 UI callback 结束保留 session_close。permission_required 继续具有显式产品优先级；已确认凭据更新故障分别以 dependency_contract_failure、resource_limit 或 agent_failure 解释，合法模型观察仅作补充且不提供恢复动作，合同违约仍抑制其公开交付。
+
 Product aggregate 独占产品事实、局部事务和执行资格。Product Control 投影只读取已经提交的事实，生成用于展示的摘要、页面上下文、当前 Task 和有界历史，不接纳 Run、不推进 lifecycle、不提交历史。Bridge 可达的版本、Workspace、Task、catalog、permission 与视图查询适用同一约束。Application 按明确 command、Agent event、worker completion 和 lifecycle wake 安排业务推进；有无 Renderer、读频率、分块和重试不得改变必要的推进路径。
 
 投影按稳定产品 identity 和内容版本维护有界编码缓存。无关 Task 的正文不参与局部展示更新；terminal Run 的脱敏、coverage 或关联事实变化仍须使对应块失效。缓存只保存可重建的产品视图，不成为产品事实或持久化的第二 owner。容量不足时淘汰可重建块，不能缩小产品限制、丢失历史访问能力或把合格数据永久变成不可显示。

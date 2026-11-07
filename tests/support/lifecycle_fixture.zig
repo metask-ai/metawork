@@ -442,6 +442,8 @@ pub const FakeCore = struct {
     forced_mcp_apply_status: ?u32 = null,
     forced_mcp_apply_disposition: ?u32 = null,
     forced_abort_status: ?u32 = null,
+    /// Stops the Host/Core handoff before admission, without timing assumptions.
+    admission_gate: ?*CallbackSignal = null,
     forced_compact_status: ?u32 = null,
     forced_compact_abort_status: ?u32 = null,
     forced_compact_outcome: ?u32 = null,
@@ -2132,7 +2134,12 @@ pub fn sessionRunInput(
     fake_core.lock();
     fake_core.run_calls += 1;
     const rejected_credential = fake_core.rejected_credential_digest;
+    const admission_gate = fake_core.admission_gate;
     fake_core.unlock();
+    if (admission_gate) |gate| {
+        _ = CallbackSignal.notify(gate);
+        gate.waitUntilFinished();
+    }
     session.lock();
     if (session.compacting) {
         session.unlock();
@@ -2152,7 +2159,7 @@ pub fn sessionRunInput(
     session.broadcast();
     session.unlock();
 
-    if (fake_core.input_enabled) {
+    if (fake_core.input_enabled or admission_gate != null) {
         var buffer: [256]u8 = undefined;
         const json = std.fmt.bufPrint(
             &buffer,
@@ -2164,7 +2171,7 @@ pub fn sessionRunInput(
 
     const model_failure = credential_rejected or modelErrorPlan(plan);
     if (model_failure) {
-        var accepted = fake_core.input_enabled or emitModelRunState(session, handle, run_id, "starting", 1);
+        var accepted = fake_core.input_enabled or admission_gate != null or emitModelRunState(session, handle, run_id, "starting", 1);
         if (accepted) accepted = emitModelRunState(session, handle, run_id, "finalizing", 2);
         if (accepted and plan == .model_error_after_terminal)
             accepted = emitModelRunState(session, handle, run_id, "failed", 3);
