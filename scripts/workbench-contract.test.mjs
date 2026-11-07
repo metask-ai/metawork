@@ -1497,14 +1497,23 @@ test("Host Schedule projection fixture keeps the current Renderer contract", () 
   });
   scheduled.scheduledTasks = JSON.parse(
     readFileSync(
-      new URL("../src/product/schedule/renderer_projection.fixture", import.meta.url),
+      new URL(
+        "../src/product/schedule/renderer_projection.fixture",
+        import.meta.url,
+      ),
       "utf8",
     ),
   );
   const decoded = decodeWorkbenchSnapshot(scheduled);
   assert.deepEqual(decoded.scheduledTasks, scheduled.scheduledTasks);
-  assert.deepEqual(decoded.scheduledTasks.map((task) => task.id), ["2", "4"]);
-  assert.deepEqual(decoded.scheduledTasks.map((task) => task.recurrence.kind), ["once", "interval"]);
+  assert.deepEqual(
+    decoded.scheduledTasks.map((task) => task.id),
+    ["1", "2", "3", "4", "5"],
+  );
+  assert.deepEqual(
+    decoded.scheduledTasks.map((task) => task.recurrence.kind),
+    ["calendar", "once", "calendar", "interval", "calendar"],
+  );
 });
 
 test("Scheduled Task projection decodes recurrence and occurrence without secrets", () => {
@@ -4093,4 +4102,43 @@ test("rejection-limit handoff keeps the model reason and no new approval mode", 
     reason: "Not a model reason",
   };
   assert.throws(() => decodeWorkbenchSnapshot(value));
+});
+
+test("calendar Schedule projection strictly validates frequency, zone and timestamp", () => {
+  const snapshot = clone(fixture);
+  Object.assign(snapshot.capabilities, {
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  const entries = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/schedule/renderer_projection.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  snapshot.scheduledTasks = [entries[0]];
+  for (const frequency of ["hourly", "daily", "weekly", "monthly", "yearly"]) {
+    snapshot.scheduledTasks[0].recurrence.frequency = frequency;
+    assert.equal(
+      decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.frequency,
+      frequency,
+    );
+  }
+  for (const patch of [
+    { frequency: "unknown" },
+    { timezone: "Unknown/Zone" },
+    { timezone: "" },
+    { startAtUnixSeconds: "253402300800" },
+    { startAtUnixSeconds: "01" },
+    { everySeconds: "86400" },
+  ]) {
+    const invalid = clone(snapshot);
+    Object.assign(invalid.scheduledTasks[0].recurrence, patch);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
 });

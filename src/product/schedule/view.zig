@@ -8,10 +8,6 @@ const state = @import("product_schedule_state");
 
 pub const Error = error{SnapshotTooLarge};
 
-pub fn rendererExposes(recurrence: state.Recurrence) bool {
-    return recurrence != .calendar;
-}
-
 pub const TextProjection = struct {
     context: *const anyopaque,
     write_json_fn: *const fn (
@@ -38,9 +34,6 @@ pub fn writeProjection(
     var count: usize = 0;
     for (store.items) |*entry| {
         const item = &(entry.* orelse continue);
-        // Calendar definitions are a Host-only capability until the Renderer
-        // contract and editor support them. Preserve them in the Host store.
-        if (!rendererExposes(item.recurrence)) continue;
         if (count != 0) writer.writeByte(',') catch
             return error.SnapshotTooLarge;
         count += 1;
@@ -88,7 +81,10 @@ fn writeItem(
         return error.SnapshotTooLarge;
     writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
     switch (item.recurrence) {
-        .calendar => unreachable, // Excluded by writeProjection.
+        .calendar => |rule| writer.print(
+            "{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"{d}\",\"timezone\":\"{s}\",\"frequency\":\"{s}\"}}",
+            .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) },
+        ) catch return error.SnapshotTooLarge,
         .once => |once| writer.print(
             "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
             .{once.at_unix_seconds},
@@ -140,7 +136,7 @@ fn writeItem(
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
 
-test "Renderer projection keeps Host-only calendar definitions out of the current wire" {
+test "Renderer projection includes calendar and legacy recurrence definitions" {
     var store = try state.Store.init(std.testing.allocator, .{ .max_items = 5, .max_projection_bytes = 8192 });
     defer store.deinit();
     for (0..5) |index| {
@@ -152,7 +148,11 @@ test "Renderer projection keeps Host-only calendar definitions out of the curren
             .recurrence = switch (index) {
                 1 => .{ .once = .{ .at_unix_seconds = 2000 } },
                 3 => .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
-                else => .{ .calendar = .{ .start_at_unix_seconds = 2000, .timezone = .@"Asia/Shanghai", .frequency = .daily } },
+                else => .{ .calendar = .{ .start_at_unix_seconds = 2000, .timezone = .@"Asia/Shanghai", .frequency = switch (index) {
+                    0 => .monthly,
+                    2 => .yearly,
+                    else => .daily,
+                } } },
             },
         }, 1000);
     }
@@ -175,5 +175,5 @@ test "Renderer projection keeps Host-only calendar definitions out of the curren
     try store.delete(4, 1);
     writer = std.Io.Writer.fixed(&buffer);
     try writeProjection(&writer, &store, text);
-    try std.testing.expectEqualStrings("[]", writer.buffered());
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"kind\":\"calendar\"") != null);
 }

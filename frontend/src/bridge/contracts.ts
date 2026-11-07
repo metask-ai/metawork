@@ -534,7 +534,15 @@ export type AttachmentReceiveResult =
       status: "rejected";
       reason: "invalid_transfer" | "stale_transfer";
     };
+export type ScheduledTaskCalendarFrequency =
+  "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 export type ScheduledTaskRecurrence =
+  | {
+      kind: "calendar";
+      startAtUnixSeconds: string;
+      timezone: string;
+      frequency: ScheduledTaskCalendarFrequency;
+    }
   | {
       kind: "once";
       atUnixSeconds: string;

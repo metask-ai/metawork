@@ -6744,8 +6744,8 @@ fn testScheduledSourceAuthority(recurrence: product_control.ScheduledTaskRecurre
     if (recurrence == .calendar) {
         var snapshot_storage: [512 * 1024]u8 = undefined;
         const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
-        try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"scheduledTasks\":[]") != null);
-        try std.testing.expectError(error.UnknownScheduledTask, workbench.rendererScheduledTaskEpoch(id));
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"calendar\"") != null);
+        try std.testing.expectEqual(@as(u64, 2), try workbench.scheduledTaskEpoch(id));
         try std.testing.expectEqual(@as(u64, 2), try workbench.scheduledTaskEpoch(id));
     }
     schedule.now = 2_000;

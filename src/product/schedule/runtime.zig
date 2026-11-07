@@ -623,12 +623,6 @@ pub const Runtime = struct {
         return (self.store.find(id) orelse return error.UnknownScheduledTask).epoch;
     }
 
-    pub fn rendererEpoch(self: *Runtime, id: u64) Error!u64 {
-        const item = self.store.find(id) orelse return error.UnknownScheduledTask;
-        if (!view.rendererExposes(item.recurrence)) return error.UnknownScheduledTask;
-        return item.epoch;
-    }
-
     fn validateManual(self: *Runtime, id: u64, expected_epoch: u64) Error!void {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
         if (expected_epoch == 0 or item.epoch != expected_epoch)
@@ -2460,7 +2454,7 @@ test "calendar edits and resume respect the consumed absolute boundary" {
     var definition = testDefinition("calendar", "inspect");
     definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .UTC, .frequency = .daily } };
     const id = try runtime.create(definition, testBinding(), redaction);
-    try std.testing.expectError(error.UnknownScheduledTask, runtime.rendererEpoch(id));
+    try std.testing.expectEqual(@as(u64, 1), try runtime.epoch(id));
     try std.testing.expectEqual(@as(u64, 1), try runtime.epoch(id));
     _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
     effects.now = 200;
@@ -2480,5 +2474,5 @@ test "calendar edits and resume respect the consumed absolute boundary" {
     effects.now = 150;
     try runtime.update(id, 4, definition, testBinding(), redaction);
     try std.testing.expectEqual(@as(?u64, 259), effects.armed_at);
-    try std.testing.expectEqual(@as(u64, 5), try runtime.rendererEpoch(id));
+    try std.testing.expectEqual(@as(u64, 5), try runtime.epoch(id));
 }

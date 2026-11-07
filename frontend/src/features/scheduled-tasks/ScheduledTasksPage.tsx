@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type {
   PermissionProfile,
+  ScheduledTaskCalendarFrequency,
   ScheduledTaskMutation,
   ScheduledTaskView,
   WorkbenchSnapshot,
@@ -11,12 +12,17 @@ import {
   readyModelOptions,
 } from "../../app/new-task-model-selection.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { BrandIcon } from "../../components/ui/BrandIcon.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { Menu } from "../../components/ui/menu.tsx";
 import { Input } from "../../components/ui/input.tsx";
-import { SelectField, type SelectOption } from "../../components/ui/select.tsx";
+import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
+import { TimePicker } from "../../components/ui/time-picker.tsx";
+import { cn, controlFocus } from "../../components/ui/utils.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { persistenceRecoveryErrorMessageId } from "../../i18n/persistence-recovery.ts";
 import { BridgeCommandTimeoutError } from "../../bridge/client.ts";
@@ -27,56 +33,18 @@ type Draft = {
   title: string;
   text: string;
   permissionProfile: PermissionProfile;
-  recurrenceKind: "once" | "interval";
+  recurrenceKind: "once" | "interval" | ScheduledTaskCalendarFrequency;
+  timezone: string;
+  originalStart: { text: string; unixSeconds: number } | null;
   start: string;
   every: string;
   unit: "minutes" | "hours" | "days";
 };
 
-type SuggestionKind = "daily" | "weekly" | "followup";
-
-function ScheduledSelect({
-  value,
-  options,
-  onValueChange,
-  ariaLabel,
-}: {
-  value: string;
-  options: SelectOption[];
-  onValueChange: (value: string) => void;
-  ariaLabel: string;
-}) {
-  return (
-    <span className="scheduled-select">
-      <SelectField
-        value={value}
-        options={options}
-        onValueChange={onValueChange}
-        aria-label={ariaLabel}
-      />
-    </span>
-  );
-}
-
 function localDateTime(unixSeconds: number) {
   const date = new Date(unixSeconds * 1000);
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
-}
-
-function nextLocalOccurrence(hour: number, minute: number, weekday?: number) {
-  const now = new Date();
-  const next = new Date(now);
-  next.setSeconds(0, 0);
-  next.setHours(hour, minute, 0, 0);
-  if (weekday === undefined) {
-    if (next <= now) next.setDate(next.getDate() + 1);
-  } else {
-    const days = (weekday - next.getDay() + 7) % 7;
-    next.setDate(next.getDate() + days);
-    if (next <= now) next.setDate(next.getDate() + 7);
-  }
-  return localDateTime(Math.floor(next.getTime() / 1000));
 }
 
 function defaultDraft(permissionProfile: PermissionProfile): Draft {
@@ -87,6 +55,8 @@ function defaultDraft(permissionProfile: PermissionProfile): Draft {
     text: "",
     permissionProfile,
     recurrenceKind: "once",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    originalStart: null,
     start: localDateTime(Math.floor(Date.now() / 1000) + 3600),
     every: "1",
     unit: "hours",
@@ -98,6 +68,11 @@ function draftFromTask(task: ScheduledTaskView): Draft {
     task.recurrence.kind === "once"
       ? task.recurrence.atUnixSeconds
       : task.recurrence.startAtUnixSeconds;
+  const timezone =
+    task.recurrence.kind === "calendar"
+      ? task.recurrence.timezone
+      : Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const startText = localDateTime(Number(start));
   const everySeconds =
     task.recurrence.kind === "interval"
       ? Number(task.recurrence.everySeconds)
@@ -115,8 +90,13 @@ function draftFromTask(task: ScheduledTaskView): Draft {
     title: task.title,
     text: task.input.text,
     permissionProfile: task.permissionProfile,
-    recurrenceKind: task.recurrence.kind,
-    start: localDateTime(Number(start)),
+    recurrenceKind:
+      task.recurrence.kind === "calendar"
+        ? task.recurrence.frequency
+        : task.recurrence.kind,
+    timezone,
+    originalStart: { text: startText, unixSeconds: Number(start) },
+    start: startText,
     every: String(everySeconds / divisor),
     unit,
   };
@@ -129,13 +109,36 @@ function modelOptions(snapshot: WorkbenchSnapshot) {
   ].flatMap((provider) => readyModelOptions(snapshot.models, provider.id));
 }
 
+function draftUnixSeconds(draft: Draft, timeOnly = false): number | null {
+  if (timeOnly) {
+    const time = draft.start.slice(11);
+    if (!/^\d{2}:\d{2}$/.test(time)) return null;
+    const [hour, minute] = time.split(":").map(Number);
+    if (hour > 23 || minute > 59) return null;
+    const now = Date.now();
+    const next = new Date(now);
+    next.setHours(hour, minute, 0, 0);
+    if (next.getTime() <= now) {
+      next.setDate(next.getDate() + 1);
+      next.setHours(hour, minute, 0, 0);
+    }
+    return Math.floor(next.getTime() / 1000);
+  }
+  if (draft.originalStart && draft.start === draft.originalStart.text)
+    return draft.originalStart.unixSeconds;
+  const start = Math.floor(new Date(draft.start).getTime() / 1000);
+  return Number.isSafeInteger(start) && start > 0 && start <= 253402300799
+    ? start
+    : null;
+}
+
 function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
+  timeOnly = false,
 ): ScheduledTaskMutation | null {
-  const start = Math.floor(new Date(draft.start).getTime() / 1000);
-  if (!draft.title.trim() || !Number.isSafeInteger(start) || start <= 0)
-    return null;
+  const start = draftUnixSeconds(draft, timeOnly);
+  if (!draft.title.trim() || start === null) return null;
   if (draft.recurrenceKind === "once" && start <= Math.floor(Date.now() / 1000))
     return null;
   if (!draft.text.trim()) return null;
@@ -174,11 +177,18 @@ function toMutation(
     recurrence:
       draft.recurrenceKind === "once"
         ? { kind: "once", atUnixSeconds: String(start) }
-        : {
-            kind: "interval",
-            startAtUnixSeconds: String(start),
-            everySeconds: String(every * unitSeconds),
-          },
+        : draft.recurrenceKind === "interval"
+          ? {
+              kind: "interval",
+              startAtUnixSeconds: String(start),
+              everySeconds: String(every * unitSeconds),
+            }
+          : {
+              kind: "calendar",
+              startAtUnixSeconds: String(start),
+              timezone: draft.timezone,
+              frequency: draft.recurrenceKind,
+            },
   };
 }
 
@@ -195,15 +205,6 @@ function formatTime(
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(Number(unixSeconds) * 1000));
-}
-
-function formatDraftTime(value: string, locale: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
 }
 
 export function ScheduledTasksPage({
@@ -231,7 +232,7 @@ export function ScheduledTasksPage({
     id: string,
     epoch: string,
     enabled: boolean,
-  ) => Promise<unknown>;
+  ) => Promise<{ epoch: string }>;
   onRunNow: (id: string, epoch: string) => Promise<{ taskId: string }>;
   onDelete: (id: string, epoch: string) => Promise<void>;
   onRecover: () => Promise<{
@@ -242,6 +243,7 @@ export function ScheduledTasksPage({
   const { locale, t } = useI18n();
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editingEpoch, setEditingEpoch] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState(() =>
     defaultDraft(snapshot.permissions.defaultProfile),
@@ -250,15 +252,25 @@ export function ScheduledTasksPage({
   const [error, setError] = useState<string | null>(null);
   const editorTrigger = useRef<HTMLElement | null>(null);
   const editorHeading = useRef<HTMLHeadingElement | null>(null);
+  const editorName = useRef<HTMLInputElement | null>(null);
   const selected =
     snapshot.scheduledTasks.find((task) => task.id === selectedId) ?? null;
   const editorOpen = creating || selected !== null;
+  const Editor = creating ? Dialog : Drawer;
+  const editorStale =
+    selected !== null && selected.epoch !== editingEpoch && !busy;
   const hasScheduledTasks = snapshot.scheduledTasks.length > 0;
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const mutation = toMutation(snapshot, draft);
+  const timeOnly =
+    creating &&
+    (draft.recurrenceKind === "once" || draft.recurrenceKind === "daily");
+  const timeLabel = t(timeOnly ? "scheduled.time" : "scheduled.starts");
+  const mutation = toMutation(snapshot, draft, timeOnly);
+  const draftStart = draftUnixSeconds(draft, timeOnly);
+  const invalidStart = draftStart === null;
   const expiredOnce =
     draft.recurrenceKind === "once" &&
-    new Date(draft.start).getTime() <= Date.now();
+    draftStart !== null &&
+    draftStart <= Math.floor(Date.now() / 1000);
   const availableModels = modelOptions(snapshot);
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
@@ -320,6 +332,7 @@ export function ScheduledTasksPage({
     const trigger = editorTrigger.current;
     setCreating(false);
     setSelectedId(null);
+    setEditingEpoch(null);
     setError(null);
     if (restoreFocus)
       window.requestAnimationFrame(() => {
@@ -327,53 +340,24 @@ export function ScheduledTasksPage({
       });
   }
 
-  function beginCreate(seed?: Partial<Draft>) {
+  function beginCreate() {
     rememberEditorTrigger();
     setCreating(true);
     setSelectedId(null);
+    setEditingEpoch(null);
     setDraft({
       ...defaultDraft(snapshot.permissions.defaultProfile),
       modelId: snapshot.models.defaultSelection
         ? modelOptionId(snapshot.models.defaultSelection)
         : "",
-      ...seed,
     });
     setError(null);
-  }
-
-  function beginSuggestion(kind: SuggestionKind) {
-    const presets: Record<SuggestionKind, Partial<Draft>> = {
-      daily: {
-        title: t("scheduled.suggestion.daily.title"),
-        text: t("scheduled.suggestion.daily.prompt"),
-        recurrenceKind: "interval",
-        start: nextLocalOccurrence(8, 0),
-        every: "1",
-        unit: "days",
-      },
-      weekly: {
-        title: t("scheduled.suggestion.weekly.title"),
-        text: t("scheduled.suggestion.weekly.prompt"),
-        recurrenceKind: "interval",
-        start: nextLocalOccurrence(16, 0, 5),
-        every: "7",
-        unit: "days",
-      },
-      followup: {
-        title: t("scheduled.suggestion.followup.title"),
-        text: t("scheduled.suggestion.followup.prompt"),
-        recurrenceKind: "interval",
-        start: nextLocalOccurrence(9, 0),
-        every: "1",
-        unit: "days",
-      },
-    };
-    beginCreate(presets[kind]);
   }
 
   function edit(task: ScheduledTaskView) {
     rememberEditorTrigger();
     setSelectedId(task.id);
+    setEditingEpoch(task.epoch);
     setCreating(false);
     setDraft(draftFromTask(task));
     setError(null);
@@ -381,7 +365,11 @@ export function ScheduledTasksPage({
 
   async function submit() {
     if (busy) return;
-    const mutation = toMutation(snapshot, draft);
+    if (editorStale) {
+      setError(t("scheduled.changed"));
+      return;
+    }
+    const mutation = toMutation(snapshot, draft, timeOnly);
     if (!mutation) {
       setError(t(expiredOnce ? "scheduled.expired_once" : "scheduled.error"));
       return;
@@ -389,7 +377,7 @@ export function ScheduledTasksPage({
     setBusy(true);
     setError(null);
     try {
-      if (selected) await onUpdate(selected.id, selected.epoch, mutation);
+      if (selected) await onUpdate(selected.id, editingEpoch!, mutation);
       else await onCreate(mutation);
       closeEditor();
       setQuery("");
@@ -431,6 +419,8 @@ export function ScheduledTasksPage({
         locale,
         t("scheduled.no_next_run"),
       );
+    if (task.recurrence.kind === "calendar")
+      return t(`scheduled.recurrence.${task.recurrence.frequency}`);
     const seconds = Number(task.recurrence.everySeconds);
     if (seconds === 3600) return t("scheduled.repeat.hourly");
     if (seconds === 86_400) return t("scheduled.repeat.daily");
@@ -464,43 +454,16 @@ export function ScheduledTasksPage({
     return t("scheduled.occurrence.starting");
   }
 
-  const suggestions = [
-    {
-      kind: "daily" as const,
-      icon: "sunrise" as const,
-      title: t("scheduled.suggestion.daily.title"),
-      schedule: t("scheduled.suggestion.daily.schedule"),
-      body: t("scheduled.suggestion.daily.body"),
-    },
-    {
-      kind: "weekly" as const,
-      icon: "calendar-days" as const,
-      title: t("scheduled.suggestion.weekly.title"),
-      schedule: t("scheduled.suggestion.weekly.schedule"),
-      body: t("scheduled.suggestion.weekly.body"),
-    },
-    {
-      kind: "followup" as const,
-      icon: "radar" as const,
-      title: t("scheduled.suggestion.followup.title"),
-      schedule: t("scheduled.suggestion.followup.schedule"),
-      body: t("scheduled.suggestion.followup.body"),
-    },
-  ];
-  const confirmationTitle =
-    draft.title.trim() || t("scheduled.confirmation.untitled");
-  const confirmation =
-    draft.recurrenceKind === "once"
-      ? t("scheduled.confirmation.once", {
-          title: confirmationTitle,
-          time: formatDraftTime(draft.start, locale),
-        })
-      : t("scheduled.confirmation.interval", {
-          title: confirmationTitle,
-          time: formatDraftTime(draft.start, locale),
-          every: draft.every || "—",
-          unit: t(`scheduled.unit.${draft.unit}`),
-        });
+  function occurrenceLinkLabel(
+    occurrence: ScheduledTaskView["occurrences"][number],
+  ) {
+    return t(
+      occurrence.result === "skipped" &&
+        occurrence.reason === "previous_task_running"
+        ? "scheduled.open_previous_task"
+        : "scheduled.open_task",
+    );
+  }
 
   return (
     <section className="scheduled-page" aria-labelledby="scheduled-title">
@@ -562,46 +525,11 @@ export function ScheduledTasksPage({
         )}
 
         {!hasScheduledTasks ? (
-          <div className="scheduled-empty-state">
-            <div className="scheduled-starter">
-              <div className="scheduled-section-heading">
-                <div>
-                  <h2>{t("scheduled.suggestions")}</h2>
-                  <p>{t("scheduled.suggestions_help")}</p>
-                </div>
-              </div>
-              <div className="scheduled-suggestion-list">
-                {suggestions.map((suggestion) => (
-                  <button
-                    key={suggestion.kind}
-                    type="button"
-                    className="scheduled-suggestion focus-ring"
-                    disabled={disabled}
-                    onClick={() => beginSuggestion(suggestion.kind)}
-                  >
-                    <span
-                      className="scheduled-suggestion-mark"
-                      aria-hidden="true"
-                    >
-                      <Icon name={suggestion.icon} />
-                    </span>
-                    <span>
-                      <strong>{suggestion.title}</strong>
-                      <span>{suggestion.body}</span>
-                    </span>
-                    <span className="scheduled-suggestion-time">
-                      <small>{suggestion.schedule}</small>
-                      <Icon name="chevron" />
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+          <p className="scheduled-empty-state">{t("scheduled.empty")}</p>
         ) : (
           <>
             <div className="scheduled-toolbar">
-              <label className="scheduled-search">
+              <label className={cn("scheduled-search", controlFocus)}>
                 <Icon name="search" />
                 <span className="sr-only">
                   {t("scheduled.search_placeholder")}
@@ -654,6 +582,12 @@ export function ScheduledTasksPage({
                     <ul className="scheduled-list" aria-label={group.label}>
                       {group.tasks.map((task) => {
                         const latestOccurrence = task.occurrences.at(-1);
+                        const showLatestResult =
+                          latestOccurrence &&
+                          !(
+                            task.health === "completed" &&
+                            latestOccurrence.taskOutcome === "completed"
+                          );
                         return (
                           <li key={task.id} data-health={task.health}>
                             <button
@@ -672,96 +606,114 @@ export function ScheduledTasksPage({
                                   <span aria-hidden="true"> · </span>
                                   {task.input.text}
                                 </small>
-                              </span>
-                              <span className="scheduled-row-next">
-                                <small>
-                                  {t(`scheduled.health.${task.health}`)}
-                                </small>
-                                <time>
-                                  {formatTime(
-                                    task.nextRunAtUnixSeconds,
-                                    locale,
-                                    latestOccurrence
-                                      ? occurrenceLabel(latestOccurrence)
-                                      : t("scheduled.no_next_run"),
-                                  )}
-                                </time>
-                                {latestOccurrence &&
-                                  task.nextRunAtUnixSeconds && (
-                                    <small>
+                                {showLatestResult && (
+                                  <span className="scheduled-row-result">
+                                    <span>{t("scheduled.latest_run")}</span>
+                                    <span>
                                       {occurrenceLabel(latestOccurrence)}
-                                    </small>
-                                  )}
+                                    </span>
+                                  </span>
+                                )}
                                 {task.failureReason && (
-                                  <small>
+                                  <span className="scheduled-row-reason">
                                     {t(
                                       `scheduled.reason.${task.failureReason}`,
                                     )}
-                                  </small>
+                                  </span>
+                                )}
+                              </span>
+                              <span className="scheduled-row-next">
+                                <span
+                                  className="scheduled-state"
+                                  data-health={task.health}
+                                >
+                                  {t(`scheduled.health.${task.health}`)}
+                                </span>
+                                {task.nextRunAtUnixSeconds && (
+                                  <time>
+                                    <span className="sr-only">
+                                      {t("scheduled.next_run")}{" "}
+                                    </span>
+                                    {formatTime(
+                                      task.nextRunAtUnixSeconds,
+                                      locale,
+                                      "",
+                                    )}
+                                  </time>
                                 )}
                               </span>
                               <Icon name="chevron" />
                             </button>
-                            <div className="scheduled-row-actions">
-                              {latestOccurrence?.taskId &&
-                                latestOccurrence.taskOutcome !==
-                                  "unavailable" && (
-                                  <button
-                                    type="button"
-                                    className="text-button focus-ring"
-                                    onClick={() =>
-                                      onOpenTask(latestOccurrence.taskId!)
-                                    }
-                                  >
-                                    {t("scheduled.open_task")}
-                                  </button>
-                                )}
-                              <button
-                                type="button"
-                                className="text-button focus-ring"
-                                disabled={
-                                  disabled ||
-                                  busy ||
-                                  task.health === "needs_attention"
-                                }
-                                onClick={() =>
-                                  void action(async () => {
-                                    const result = await onRunNow(
-                                      task.id,
-                                      task.epoch,
-                                    );
-                                    onOpenTask(result.taskId);
-                                  })
-                                }
+                            <Menu.Root>
+                              <Menu.Trigger
+                                className="scheduled-row-actions icon-button"
+                                aria-label={t("scheduled.actions", {
+                                  title: task.title,
+                                })}
                               >
-                                {t("scheduled.run_now")}
-                              </button>
-                              <button
-                                type="button"
-                                className="text-button focus-ring"
-                                disabled={
-                                  disabled ||
-                                  busy ||
-                                  task.health === "completed" ||
-                                  task.health === "needs_attention"
-                                }
-                                onClick={() =>
-                                  void action(() =>
-                                    onSetEnabled(
-                                      task.id,
-                                      task.epoch,
-                                      !task.enabled,
-                                    ),
-                                  )
-                                }
-                              >
-                                {t(
-                                  task.enabled
-                                    ? "scheduled.pause"
-                                    : "scheduled.resume",
-                                )}
-                              </button>
-                            </div>
+                                <Icon name="more" />
+                              </Menu.Trigger>
+                              <Menu.Portal>
+                                <Menu.Positioner align="end">
+                                  <Menu.Popup>
+                                    {latestOccurrence?.taskId &&
+                                      latestOccurrence.taskOutcome !==
+                                        "unavailable" && (
+                                        <Menu.Item
+                                          onClick={() =>
+                                            onOpenTask(latestOccurrence.taskId!)
+                                          }
+                                        >
+                                          {occurrenceLinkLabel(
+                                            latestOccurrence,
+                                          )}
+                                        </Menu.Item>
+                                      )}
+                                    <Menu.Item
+                                      disabled={
+                                        disabled ||
+                                        busy ||
+                                        task.health === "needs_attention"
+                                      }
+                                      onClick={() =>
+                                        void action(async () => {
+                                          const result = await onRunNow(
+                                            task.id,
+                                            task.epoch,
+                                          );
+                                          onOpenTask(result.taskId);
+                                        })
+                                      }
+                                    >
+                                      {t("scheduled.run_now")}
+                                    </Menu.Item>
+                                    <Menu.Item
+                                      disabled={
+                                        disabled ||
+                                        busy ||
+                                        task.health === "completed" ||
+                                        task.health === "needs_attention"
+                                      }
+                                      onClick={() =>
+                                        void action(() =>
+                                          onSetEnabled(
+                                            task.id,
+                                            task.epoch,
+                                            !task.enabled,
+                                          ),
+                                        )
+                                      }
+                                    >
+                                      {t(
+                                        task.enabled
+                                          ? "scheduled.pause"
+                                          : "scheduled.resume",
+                                      )}
+                                    </Menu.Item>
+                                  </Menu.Popup>
+                                </Menu.Positioner>
+                              </Menu.Portal>
+                            </Menu.Root>
                           </li>
                         );
                       })}
@@ -774,35 +726,38 @@ export function ScheduledTasksPage({
         )}
       </div>
 
-      <Drawer.Root
+      <Editor.Root
+        key={creating ? "create" : "detail"}
         open={editorOpen}
         onOpenChange={(open) => {
           if (!open && !busy) closeEditor();
         }}
       >
-        <Drawer.Portal>
-          <Drawer.Backdrop className="scheduled-editor-backdrop" />
-          <Drawer.Popup
-            className="scheduled-editor w-[min(472px,calc(100vw-28px))] max-[920px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
-            aria-label={t("scheduled.editor")}
+        <Editor.Portal>
+          <Editor.Backdrop />
+          <Editor.Popup
+            className={
+              creating
+                ? "scheduled-editor scheduled-editor-neutral w-[min(640px,calc(100vw-32px))] gap-0 overflow-hidden bg-(--ui-surface-panel) p-0"
+                : "scheduled-editor scheduled-editor-neutral w-[min(472px,calc(100vw-28px))] max-[920px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
+            }
+            initialFocus={creating ? () => editorName.current : undefined}
           >
             <header>
               <div>
-                <small>
-                  {selected ? t("scheduled.editing") : t("scheduled.creating")}
-                </small>
-                <h2
+                {selected && <small>{t("scheduled.editing")}</small>}
+                <Editor.Title
                   id="scheduled-editor-title"
                   ref={editorHeading}
                   tabIndex={-1}
                 >
-                  {selected?.title || t("scheduled.new")}
-                </h2>
+                  {selected?.title || t("scheduled.creating")}
+                </Editor.Title>
               </div>
               <button
                 type="button"
                 className="icon-button focus-ring"
-                aria-label={t("common.cancel")}
+                aria-label={t("common.close")}
                 onClick={() => closeEditor()}
               >
                 <Icon name="close" />
@@ -810,10 +765,28 @@ export function ScheduledTasksPage({
             </header>
 
             <div className="scheduled-editor-scroll">
+              {editorStale && (
+                <div className="scheduled-stale" role="alert">
+                  <p>{t("scheduled.changed")}</p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      setDraft(draftFromTask(selected!));
+                      setEditingEpoch(selected!.epoch);
+                      setError(null);
+                    }}
+                  >
+                    {t("scheduled.reload")}
+                  </Button>
+                </div>
+              )}
               <label className="scheduled-editor-name">
-                <span>{t("scheduled.name")}</span>
+                <span className="sr-only">{t("scheduled.name")}</span>
                 <Input
-                  autoFocus={creating}
+                  ref={editorName}
+                  placeholder={t("scheduled.name")}
+
                   value={draft.title}
                   maxLength={120}
                   onChange={(event) =>
@@ -841,47 +814,139 @@ export function ScheduledTasksPage({
                     <span>{t("scheduled.status")}</span>
                     <strong>{t(`scheduled.health.${selected.health}`)}</strong>
                   </div>
+                  {selected.occurrences.at(-1) && (
+                    <div className="scheduled-detail-latest">
+                      <span>{t("scheduled.latest_run")}</span>
+                      <strong>
+                        {occurrenceLabel(selected.occurrences.at(-1)!)}
+                      </strong>
+                      <time>
+                        {formatTime(
+                          selected.occurrences.at(-1)!.triggeredAtUnixSeconds,
+                          locale,
+                          "",
+                        )}
+                      </time>
+                    </div>
+                  )}
                 </section>
               )}
 
               {selected?.failureReason && (
-                <p className="scheduled-error" role="status">
+                <p className="scheduled-attention" role="status">
                   {t(`scheduled.reason.${selected.failureReason}`)}
                 </p>
               )}
-              <label className="scheduled-editor-name">
-                <span>{t("account.model")}</span>
-                <ScheduledSelect
-                  value={draft.modelId}
-                  ariaLabel={t("account.model")}
-                  options={[
-                    { value: "", label: t("account.choose_model") },
-                    ...(!draft.modelChanged &&
-                    selected &&
-                    !availableModels.some(
-                      (option) => option.selectionId === draft.modelId,
-                    )
-                      ? [
-                          {
-                            value: draft.modelId,
-                            label: selected.binding.modelRef.modelId,
-                          },
-                        ]
-                      : []),
-                    ...availableModels.map((option) => ({
-                      value: option.selectionId,
-                      label: option.displayName,
-                    })),
-                  ]}
-                  onValueChange={(modelId) =>
+              <section
+                className={cn("scheduled-composer", controlFocus)}
+                aria-label={t("scheduled.what")}
+              >
+                <Textarea
+                  aria-label={t("scheduled.instruction")}
+                  rows={3}
+                  value={draft.text}
+                  placeholder={t("scheduled.instruction_placeholder")}
+                  onChange={(event) =>
                     setDraft((value) => ({
                       ...value,
-                      modelId,
-                      modelChanged: true,
+                      text: event.target.value,
                     }))
                   }
                 />
-              </label>
+                <div className="ai-composer-toolbar">
+                  <div className="composer-context-actions">
+                    <SelectionMenu
+                      ariaLabel={t("scheduled.permission")}
+                      placeholder={t("scheduled.permission")}
+                      value={draft.permissionProfile}
+                      disabled={false}
+                      leading={
+                        <Icon
+                          name={
+                            draft.permissionProfile === "full_access"
+                              ? "shield-alert"
+                              : "account"
+                          }
+                        />
+                      }
+                      triggerClassName="task-approval-trigger w-auto"
+                      contentClassName="scheduled-editor-neutral permission-profile-menu task-approval-menu"
+                      options={snapshot.permissions.availableProfiles.map(
+                        (permissionProfile) => ({
+                          value: permissionProfile,
+                          label: t(`permission.profile.${permissionProfile}`),
+                          leading: (
+                            <Icon
+                              name={
+                                permissionProfile === "full_access"
+                                  ? "shield-alert"
+                                  : "account"
+                              }
+                            />
+                          ),
+                          description: t(
+                            `scheduled.permission.${permissionProfile}.help`,
+                          ),
+                          descriptionKind: "text",
+                        }),
+                      )}
+                      onValueChange={(permissionProfile) =>
+                        setDraft((value) => ({
+                          ...value,
+                          permissionProfile:
+                            permissionProfile as PermissionProfile,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="composer-model-actions">
+                    <SelectionMenu
+                      value={draft.modelId}
+                      ariaLabel={t("account.model")}
+                      placeholder={t("account.choose_model")}
+                      disabled={false}
+                      leading={
+                        <BrandIcon
+                          brand={
+                            availableModels.find(
+                              (option) => option.selectionId === draft.modelId,
+                            )?.vendor
+                          }
+                        />
+                      }
+                      triggerClassName="composer-model-trigger w-auto"
+                      compact
+                      contentClassName="scheduled-editor-neutral composer-model-menu"
+                      options={[
+                        ...(!draft.modelChanged &&
+                        selected &&
+                        !availableModels.some(
+                          (option) => option.selectionId === draft.modelId,
+                        )
+                          ? [
+                              {
+                                value: draft.modelId,
+                                label: selected.binding.modelRef.modelId,
+                              },
+                            ]
+                          : []),
+                        ...availableModels.map((option) => ({
+                          value: option.selectionId,
+                          label: option.displayName,
+                          leading: <BrandIcon brand={option.vendor} />,
+                        })),
+                      ]}
+                      onValueChange={(modelId) =>
+                        setDraft((value) => ({
+                          ...value,
+                          modelId,
+                          modelChanged: true,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+              </section>
               {selected && draft.modelChanged && (
                 <p className="scheduled-reconfirm" role="status">
                   {t("scheduled.reconfirm", {
@@ -895,114 +960,98 @@ export function ScheduledTasksPage({
 
               <section
                 className="scheduled-editor-section"
-                aria-labelledby="scheduled-editor-content-title"
-              >
-                <h3 id="scheduled-editor-content-title">
-                  {t("scheduled.what")}
-                </h3>
-                <Textarea
-                  aria-label={t("scheduled.instruction")}
-                  rows={6}
-                  value={draft.text}
-                  placeholder={t("scheduled.instruction_placeholder")}
-                  onChange={(event) =>
-                    setDraft((value) => ({
-                      ...value,
-                      text: event.target.value,
-                    }))
-                  }
-                />
-                <small>{t("scheduled.instruction_help")}</small>
-              </section>
-
-              <section
-                className="scheduled-editor-section"
-                aria-labelledby="scheduled-editor-permission-title"
-              >
-                <h3 id="scheduled-editor-permission-title">
-                  {t("scheduled.permission")}
-                </h3>
-                <ScheduledSelect
-                  ariaLabel={t("scheduled.permission")}
-                  value={draft.permissionProfile}
-                  onValueChange={(permissionProfile) =>
-                    setDraft((value) => ({
-                      ...value,
-                      permissionProfile: permissionProfile as PermissionProfile,
-                    }))
-                  }
-                  options={snapshot.permissions.availableProfiles.map(
-                    (permissionProfile) => ({
-                      value: permissionProfile,
-                      label: t(`permission.profile.${permissionProfile}`),
-                    }),
-                  )}
-                />
-                <small
-                  className="scheduled-permission-help"
-                  data-profile={draft.permissionProfile}
-                >
-                  <Icon
-                    name={
-                      draft.permissionProfile === "full_access"
-                        ? "warning"
-                        : "info"
-                    }
-                  />
-                  {t(`scheduled.permission.${draft.permissionProfile}.help`)}
-                </small>
-              </section>
-
-              <section
-                className="scheduled-editor-section"
                 aria-labelledby="scheduled-editor-time-title"
               >
-                <h3 id="scheduled-editor-time-title">{t("scheduled.when")}</h3>
-                <div className="scheduled-segments">
-                  {(["once", "interval"] as const).map((kind) => (
-                    <button
-                      key={kind}
-                      type="button"
-                      data-active={draft.recurrenceKind === kind}
-                      aria-pressed={draft.recurrenceKind === kind}
-                      onClick={() =>
-                        setDraft((value) => ({
-                          ...value,
-                          recurrenceKind: kind,
-                        }))
-                      }
-                    >
-                      {t(`scheduled.recurrence.${kind}`)}
-                    </button>
-                  ))}
-                </div>
-                <label>
-                  <span>{t("scheduled.starts")}</span>
-                  <Input
-                    type="datetime-local"
-                    aria-label={t("scheduled.starts")}
-                    aria-invalid={expiredOnce}
-                    aria-describedby={
-                      expiredOnce ? "scheduled-time-error" : undefined
-                    }
-                    value={draft.start}
-                    onChange={(event) =>
+                <h3 id="scheduled-editor-time-title" className="sr-only">
+                  {t("scheduled.when")}
+                </h3>
+                <div className="scheduled-time-fields">
+                  <SelectionMenu
+                    value={draft.recurrenceKind}
+                    ariaLabel={t("scheduled.repeat")}
+                    placeholder={t("scheduled.repeat")}
+                    leading={<span>{t("scheduled.repeat")}:</span>}
+                    triggerClassName="scheduled-time-select h-10 px-3 text-sm"
+                    contentClassName="scheduled-editor-neutral"
+                    disabled={false}
+                    options={[
+                      ...([
+                        "once",
+                        "daily",
+                        "weekly",
+                        "monthly",
+                        "yearly",
+                      ] as const),
+                      ...(selected?.recurrence.kind === "interval"
+                        ? ["interval" as const]
+                        : []),
+                      ...(selected?.recurrence.kind === "calendar" &&
+                      selected.recurrence.frequency === "hourly"
+                        ? ["hourly" as const]
+                        : []),
+                    ].map((kind) => ({
+                      value: kind,
+                      label: t(`scheduled.recurrence.${kind}`),
+                    }))}
+                    onValueChange={(recurrenceKind) =>
                       setDraft((value) => ({
                         ...value,
-                        start: event.target.value,
+                        recurrenceKind:
+                          recurrenceKind as Draft["recurrenceKind"],
                       }))
                     }
                   />
-                  {expiredOnce && (
-                    <small id="scheduled-time-error" role="alert">
-                      {t("scheduled.expired_once")}
-                    </small>
-                  )}
-                </label>
-                {draft.recurrenceKind === "interval" && (
-                  <label>
-                    <span>{t("scheduled.every")}</span>
-                    <div className="scheduled-interval">
+                  <div
+                    className={cn(
+                      "scheduled-inline-input scheduled-start",
+                      controlFocus,
+                    )}
+                  >
+                    <span>{timeLabel}:</span>
+                    {timeOnly ? (
+                      <TimePicker
+                        aria-label={timeLabel}
+                        value={draft.start.slice(11)}
+                        hourLabel={t("scheduled.hours")}
+                        minuteLabel={t("scheduled.minutes")}
+                        className="flex-1 border-0 bg-transparent px-0"
+                        onValueChange={(time) =>
+                          setDraft((value) => ({
+                            ...value,
+                            start: `${value.start.slice(0, 11)}${time}`,
+                          }))
+                        }
+                      />
+                    ) : (
+                      <Input
+                        type="datetime-local"
+                        aria-label={timeLabel}
+                        aria-invalid={expiredOnce || invalidStart}
+                        aria-describedby={
+                          expiredOnce || invalidStart
+                            ? "scheduled-time-error"
+                            : undefined
+                        }
+                        value={draft.start}
+                        onChange={(event) =>
+                          setDraft((value) => ({
+                            ...value,
+                            start: event.target.value,
+                          }))
+                        }
+                      />
+                    )}
+                  </div>
+                  {draft.recurrenceKind === "interval" && (
+                    <div
+                      className={cn(
+                        "scheduled-inline-input scheduled-interval",
+                        controlFocus,
+                      )}
+                      role="group"
+                      aria-label={t("scheduled.recurrence.interval")}
+                    >
+                      <span>{t("scheduled.every")}:</span>
                       <Input
                         type="number"
                         aria-label={t("scheduled.every")}
@@ -1016,8 +1065,12 @@ export function ScheduledTasksPage({
                           }))
                         }
                       />
-                      <ScheduledSelect
+                      <SelectionMenu
                         ariaLabel={t("scheduled.interval_unit")}
+                        placeholder={t("scheduled.interval_unit")}
+                        disabled={false}
+                        triggerClassName="scheduled-unit-select h-9 w-auto flex-1 px-0 text-sm"
+                        contentClassName="scheduled-editor-neutral"
                         value={draft.unit}
                         onValueChange={(unit) =>
                           setDraft((value) => ({
@@ -1032,7 +1085,16 @@ export function ScheduledTasksPage({
                         ]}
                       />
                     </div>
-                  </label>
+                  )}
+                </div>
+                {(expiredOnce || invalidStart) && (
+                  <small id="scheduled-time-error" role="alert">
+                    {t(
+                      invalidStart
+                        ? "scheduled.invalid_time"
+                        : "scheduled.expired_once",
+                    )}
+                  </small>
                 )}
               </section>
 
@@ -1045,7 +1107,7 @@ export function ScheduledTasksPage({
                     <ol>
                       {[...selected.occurrences].reverse().map((occurrence) => (
                         <li
-                          key={`${occurrence.source}:${occurrence.plannedAtUnixSeconds}:${occurrence.triggeredAtUnixSeconds}`}
+                          key={`${occurrence.source}:${occurrence.plannedAtUnixSeconds}:${occurrence.triggeredAtUnixSeconds}:${occurrence.taskId ?? "pending"}`}
                           data-result={
                             occurrence.taskOutcome ?? occurrence.result
                           }
@@ -1060,6 +1122,11 @@ export function ScheduledTasksPage({
                                 t("scheduled.no_next_run"),
                               )}
                             </time>
+                            {occurrence.reason && (
+                              <small className="scheduled-history-reason">
+                                {t(`scheduled.reason.${occurrence.reason}`)}
+                              </small>
+                            )}
                             {occurrence.source === "timer" &&
                               BigInt(occurrence.triggeredAtUnixSeconds) >
                                 BigInt(occurrence.plannedAtUnixSeconds) && (
@@ -1081,7 +1148,7 @@ export function ScheduledTasksPage({
                                 className="text-button focus-ring"
                                 onClick={() => onOpenTask(occurrence.taskId!)}
                               >
-                                {t("scheduled.open_task")}
+                                {occurrenceLinkLabel(occurrence)}
                               </button>
                             )}
                         </li>
@@ -1090,15 +1157,6 @@ export function ScheduledTasksPage({
                   )}
                 </section>
               )}
-
-              <section className="scheduled-confirmation" aria-live="polite">
-                <Icon name="clock" />
-                <div>
-                  <strong>{t("scheduled.confirmation.title")}</strong>
-                  <p>{confirmation}</p>
-                  <small>{t("scheduled.timezone", { timezone })}</small>
-                </div>
-              </section>
 
               {error && (
                 <p className="scheduled-error" role="alert">
@@ -1113,7 +1171,7 @@ export function ScheduledTasksPage({
                   <button
                     type="button"
                     className="danger-text-button focus-ring"
-                    disabled={disabled || busy}
+                    disabled={disabled || busy || editorStale}
                     onClick={() =>
                       void action(async () => {
                         await onDelete(selected.id, selected.epoch);
@@ -1129,17 +1187,19 @@ export function ScheduledTasksPage({
                     disabled={
                       disabled ||
                       busy ||
+                      editorStale ||
                       selected.health === "completed" ||
                       selected.health === "needs_attention"
                     }
                     onClick={() =>
-                      void action(() =>
-                        onSetEnabled(
+                      void action(async () => {
+                        const result = await onSetEnabled(
                           selected.id,
                           selected.epoch,
                           !selected.enabled,
-                        ),
-                      )
+                        );
+                        if (result?.epoch) setEditingEpoch(result.epoch);
+                      })
                     }
                   >
                     {t(
@@ -1150,7 +1210,10 @@ export function ScheduledTasksPage({
                     type="button"
                     className="text-button focus-ring"
                     disabled={
-                      disabled || busy || selected.health === "needs_attention"
+                      disabled ||
+                      busy ||
+                      editorStale ||
+                      selected.health === "needs_attention"
                     }
                     onClick={() =>
                       void action(async () => {
@@ -1168,17 +1231,28 @@ export function ScheduledTasksPage({
               )}
               <Button
                 type="button"
+                variant="secondary"
+                size="sm"
+                className="min-w-24"
+                disabled={busy}
+                onClick={() => closeEditor()}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                type="button"
                 variant="primary"
                 size="sm"
-                disabled={disabled || busy || mutation === null}
+                className="min-w-24"
+                disabled={disabled || busy || editorStale || mutation === null}
                 onClick={() => void submit()}
               >
-                {t(busy ? "scheduled.saving" : "common.save")}
+                {t(busy ? "scheduled.saving" : "scheduled.confirm")}
               </Button>
             </footer>
-          </Drawer.Popup>
-        </Drawer.Portal>
-      </Drawer.Root>
+          </Editor.Popup>
+        </Editor.Portal>
+      </Editor.Root>
     </section>
   );
 }

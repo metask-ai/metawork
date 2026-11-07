@@ -5159,7 +5159,7 @@ pub const Dispatcher = struct {
         );
         const workbench = try self.requireProductControl();
         const scheduled_task_id = try workbench.createScheduledTask(definition);
-        const epoch = try workbench.rendererScheduledTaskEpoch(scheduled_task_id);
+        const epoch = try workbench.scheduledTaskEpoch(scheduled_task_id);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -5197,13 +5197,13 @@ pub const Dispatcher = struct {
             parsed.value.recurrence,
         );
         const workbench = try self.requireProductControl();
-        _ = try workbench.rendererScheduledTaskEpoch(scheduled_task_id);
+        _ = try workbench.scheduledTaskEpoch(scheduled_task_id);
         try workbench.updateScheduledTask(
             scheduled_task_id,
             expected_epoch,
             definition,
         );
-        const epoch = try workbench.rendererScheduledTaskEpoch(scheduled_task_id);
+        const epoch = try workbench.scheduledTaskEpoch(scheduled_task_id);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -5229,9 +5229,9 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        _ = try workbench.rendererScheduledTaskEpoch(id);
+        _ = try workbench.scheduledTaskEpoch(id);
         const enabled = try workbench.setScheduledTaskEnabled(id, epoch, parsed.value.enabled);
-        const next_epoch = try workbench.rendererScheduledTaskEpoch(id);
+        const next_epoch = try workbench.scheduledTaskEpoch(id);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -5257,7 +5257,7 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        _ = try workbench.rendererScheduledTaskEpoch(id);
+        _ = try workbench.scheduledTaskEpoch(id);
         const task_id = try workbench.runScheduledTaskNow(
             id,
             epoch,
@@ -5287,7 +5287,7 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        _ = try workbench.rendererScheduledTaskEpoch(id);
+        _ = try workbench.scheduledTaskEpoch(id);
         try workbench.deleteScheduledTask(id, epoch);
         self.notifyCommitted();
         return std.fmt.bufPrint(
@@ -8453,7 +8453,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
     try std.testing.expect(task.durable.runs[1] == null);
 }
 
-test "Scheduled Task Bridge refuses Host-only calendar definitions without changing them" {
+test "Scheduled Task Bridge admits calendars and preserves epoch protection" {
     const Host = struct {
         fn wake(_: ?*anyopaque) !void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
@@ -8465,6 +8465,16 @@ test "Scheduled Task Bridge refuses Host-only calendar definitions without chang
         fn now(_: ?*anyopaque) u64 {
             return 1;
         }
+        fn scheduleNow(_: ?*anyopaque) ?u64 {
+            return 1000;
+        }
+        fn arm(_: ?*anyopaque, _: u64) bool {
+            return true;
+        }
+        fn cancelSchedule(_: ?*anyopaque) void {}
+        fn commit(_: ?*anyopaque, _: []const u8) product_control.SchedulePersistenceCommit {
+            return .committed;
+        }
         fn random(_: ?*anyopaque, out: []u8) bool {
             @memset(out, 7);
             return true;
@@ -8474,6 +8484,9 @@ test "Scheduled Task Bridge refuses Host-only calendar definitions without chang
     defer std.testing.allocator.destroy(control);
     try product_control.TestSupport.maximumSmallFixture(control);
     defer control.deinit();
+    control.schedule.timer = .{ .enabled = true, .now_unix_seconds = Host.scheduleNow, .arm = Host.arm, .cancel = Host.cancelSchedule };
+    control.schedule.persistence = .{ .enabled = true, .commit_fn = Host.commit };
+    control.schedule.persistence_health = .ready;
     const id = try control.schedule.store.create(.{
         .title = "Host calendar",
         .binding = .{ .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" }, .source_generation = 1, .protocol = .openai_chat_completions },
@@ -8500,7 +8513,9 @@ test "Scheduled Task Bridge refuses Host-only calendar definitions without chang
     const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
     var output: [8192]u8 = undefined;
     _ = native.dispatch("{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &output);
+    control.syncLifecycle();
     const revision = control.revision;
+    const initial_enabled = control.schedule.store.find(id).?.enabled;
     const tasks = control.task_runtime.taskCount();
     for ([_][]const u8{
         commands.update_scheduled_task,
@@ -8515,16 +8530,22 @@ test "Scheduled Task Bridge refuses Host-only calendar definitions without chang
         else
             "";
         var request_buffer: [2048]u8 = undefined;
-        const request = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"blocked\",\"command\":\"{s}\",\"payload\":{{\"scheduledTaskId\":\"{d}\",\"expectedEpoch\":\"1\"{s}}}}}", .{ command, id, fields });
+        const request = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"blocked\",\"command\":\"{s}\",\"payload\":{{\"scheduledTaskId\":\"{d}\",\"expectedEpoch\":\"2\"{s}}}}}", .{ command, id, fields });
         const response = native.dispatch(request, source, &output);
         try std.testing.expect(std.mem.indexOf(u8, response, "handler_failed") != null);
         try std.testing.expectEqual(revision, control.revision);
         try std.testing.expectEqual(tasks, control.task_runtime.taskCount());
         const item = control.schedule.store.find(id).?;
         try std.testing.expectEqual(@as(u64, 1), item.epoch);
-        try std.testing.expect(item.enabled);
+        try std.testing.expectEqual(initial_enabled, item.enabled);
         try std.testing.expectEqual(product_control.ScheduledTaskTimeZone.@"Asia/Shanghai", item.recurrence.calendar.timezone);
     }
+    var request_buffer: [512]u8 = undefined;
+    const deletion = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"delete-calendar\",\"command\":\"{s}\",\"payload\":{{\"scheduledTaskId\":\"{d}\",\"expectedEpoch\":\"1\"}}}}", .{ commands.delete_scheduled_task, id });
+    const deleted = native.dispatch(deletion, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, deleted, "\"deleted\":true") != null);
+    try std.testing.expect(control.schedule.store.find(id) == null);
+    try std.testing.expectEqual(tasks, control.task_runtime.taskCount());
 }
 
 test "Product view Dispatcher freezes and transports a complete multi-chunk snapshot through the native registry" {

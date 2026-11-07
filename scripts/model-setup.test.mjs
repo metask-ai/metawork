@@ -286,15 +286,21 @@ test("schedule timeout refreshes canonical state once without replaying the muta
     return productStateFixture(snapshot, scope);
   });
   fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
-  fireEvent.click(await screen.findByRole("button", { name: /Daily brief/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "New" }));
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Work summary" },
+  });
+  fireEvent.change(screen.getByLabelText("Instruction"), {
+    target: { value: "Summarize work" },
+  });
   const before = reads;
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() =>
     assert.match(document.body.textContent, /result is unconfirmed/),
   );
   assert.ok(reads > before);
   assert.equal(mutations, 1);
-  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
+  assert.ok(screen.getByRole("dialog", { name: "New schedule" }));
 });
 
 test("notification selects a real Task after canonical refresh and ignores old generations", async (ctx) => {
@@ -307,7 +313,7 @@ test("notification selects a real Task after canonical refresh and ignores old g
   snapshot.scheduledTasks = [];
   const app = await renderApp(ctx, snapshot, { generation: "2" });
   fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
-  await screen.findByRole("button", { name: /Daily brief/ });
+  await screen.findByRole("button", { name: "New" });
   let reads = 0;
   ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
     reads++;
@@ -315,7 +321,7 @@ test("notification selects a real Task after canonical refresh and ignores old g
   });
   await app.notification({ generation: "2", taskId: fixture.tasks[0].id });
   await waitFor(() =>
-    assert.equal(screen.queryByRole("button", { name: /Daily brief/ }), null),
+    assert.equal(screen.queryByRole("button", { name: "New" }), null),
   );
   await waitFor(() =>
     assert.ok(
@@ -328,10 +334,10 @@ test("notification selects a real Task after canonical refresh and ignores old g
   assert.equal(app.calls.create, 0);
   assert.equal(app.calls.input, 0);
   fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
-  await screen.findByRole("button", { name: /Daily brief/ });
+  await screen.findByRole("button", { name: "New" });
   const before = reads;
   await app.notification({ generation: "1", taskId: fixture.tasks[0].id });
-  assert.ok(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.ok(screen.getByRole("button", { name: "New" }));
   assert.equal(reads, before);
 });
 

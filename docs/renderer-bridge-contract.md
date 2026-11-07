@@ -321,7 +321,7 @@ Renderer 在发送及等待 Snapshot 时锁定同 Task 的重复选择；模式�
 
 Scheduled Task create/update mutation 的模型字段精确为 `modelSelection: { targetModelRef: { sourceId, modelId }, expectedSourceGeneration, expectedCatalogGeneration }`。Host 精确解析并保存 `ModelRef + source_generation + protocol`；Renderer 不提供 protocol，不携带 selectionRevision 或 execution generation。更新的 modelSelection 必填但可为 null，精确表示保留该 item epoch 下的原绑定；创建只接受非空目标。编辑已有定义须由 item epoch 防并发；非模型编辑保留既有固定绑定，明确改选才采用新的目标证明。每次 occurrence 按该计划自身来源、模型、source generation、当前目录 membership、授权与 protocol 校验；起始偏好不参与校验或 timer。occurrence taskOutcome 接受 `completed | stopped | cancelled | interrupted | failed | dependency_contract_failure | unavailable | null`。
 
-当前 Renderer 的 Scheduled Task recurrence 只开放 `once | interval`。Host-only calendar 定义继续由 Host 保存和执行，不进入 schedules management projection；Bridge 按 id 更新、暂停/恢复、立即运行或删除同样拒绝这些定义，不得通过旧编辑请求将其改存为固定间隔。后续开放日历必须同时接通 typed wire、严格客户端解码与安全编辑。
+Scheduled Task recurrence 精确接受 `once: { kind, atUnixSeconds }`、`interval: { kind, startAtUnixSeconds, everySeconds }` 或 `calendar: { kind, startAtUnixSeconds, timezone, frequency }`；时间字段均为正 canonical decimal Unix seconds，calendar 上限为 Gregorian 9999 年末。timezone 为 Host 支持的显式 IANA identity，frequency 为 `hourly | daily | weekly | monthly | yearly`。日历定义与其他定义一起进入 management projection，并接受相同的 id/epoch mutation。非时间编辑必须保留原日历频率、时区及绝对起点，不得借旧表单静默转换成固定间隔；更改频率或时间必须来自明确编辑。旧 interval 定义继续按原秒数解释，不自动迁移成日历规则。
 
 系统通知通过 SDK 普通 notification command 请求定位真实 Task。Bridge 的 `metawork:open-task` event 精确为 `{ generation, taskId }`，均为非零 canonical decimal u64，只是当前连接的导航意图，不授予 Task/Run mutation authority。Renderer 先刷新 canonical snapshot，再从真实 Task index 定位；旧 connection generation、未知 Task 或 malformed event 不得定位其他 Task或启动 Run。未连接时 Host 只保留最新一个进程内定位意图，连接后交付；它不进入产品历史或 Schedule store，不承诺跨进程通知重放。
 

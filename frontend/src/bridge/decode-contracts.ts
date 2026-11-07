@@ -4403,7 +4403,46 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
               ),
             };
           })()
-        : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");
+        : recurrenceKind === "calendar"
+          ? (() => {
+              const rule = object(item.recurrence, `${path}.recurrence`, [
+                "kind",
+                "startAtUnixSeconds",
+                "timezone",
+                "frequency",
+              ]);
+              const timezone = stringValue(
+                rule.timezone,
+                `${path}.recurrence.timezone`,
+              );
+              if (!/^[A-Za-z0-9_+./-]{1,128}$/.test(timezone))
+                fail(`${path}.recurrence.timezone`, "expected IANA timezone");
+              try {
+                new Intl.DateTimeFormat("en", { timeZone: timezone });
+              } catch {
+                fail(`${path}.recurrence.timezone`, "unknown IANA timezone");
+              }
+              const start = positiveWireId(
+                rule.startAtUnixSeconds,
+                `${path}.recurrence.startAtUnixSeconds`,
+              );
+              if (BigInt(start) > 253402300799n)
+                fail(
+                  `${path}.recurrence.startAtUnixSeconds`,
+                  "out of calendar range",
+                );
+              return {
+                kind: "calendar" as const,
+                startAtUnixSeconds: start,
+                timezone,
+                frequency: enumValue(
+                  rule.frequency,
+                  `${path}.recurrence.frequency`,
+                  ["hourly", "daily", "weekly", "monthly", "yearly"] as const,
+                ),
+              };
+            })()
+          : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");
   const occurrences = arrayValue(
     item.occurrences,
     `${path}.occurrences`,

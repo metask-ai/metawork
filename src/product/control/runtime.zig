@@ -5510,10 +5510,6 @@ pub const Runtime = struct {
         return self.schedule.epoch(id);
     }
 
-    pub fn rendererScheduledTaskEpoch(self: *Runtime, id: u64) Error!u64 {
-        return self.schedule.rendererEpoch(id);
-    }
-
     pub fn runScheduledTaskNow(
         self: *Runtime,
         id: u64,

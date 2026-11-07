@@ -38,6 +38,7 @@ const {
   render: renderDom,
   screen,
   waitFor,
+  within,
 } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
@@ -97,6 +98,24 @@ function scheduledElement(snapshot, overrides = {}) {
 
 function render(snapshot) {
   return renderToStaticMarkup(scheduledElement(snapshot));
+}
+
+async function chooseTime(user, value) {
+  const picker = screen.getByRole("group", { name: "Time" });
+  await user.click(within(picker).getByRole("button"));
+  for (const [index, label] of ["Hours", "Minutes"].entries()) {
+    const column = await screen.findByRole("radiogroup", { name: label });
+    await user.click(
+      within(column).getByRole("radio", {
+        name: value.split(":")[index],
+        exact: true,
+      }),
+    );
+  }
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("radiogroup", { name: "Hours" }) === null),
+  );
 }
 
 function scheduleSnapshot(overrides = {}) {
@@ -177,7 +196,7 @@ test("attention explains its cause and requires confirmation while deletion stay
     false,
   );
   assert.equal(screen.getByRole("combobox", { name: "Model" }) != null, true);
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(updated));
   assert.equal(updated[2].modelSelection, null);
   fireEvent.click(
@@ -195,7 +214,11 @@ test("list action failures stay visible without opening an editor", async () => 
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: "Schedule actions: Review" }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name: "Run now" }));
   await waitFor(() =>
     assert.match(
       screen.getByRole("alert").textContent,
@@ -231,13 +254,13 @@ test("expired one-time schedules require a future time and validate again at sub
   );
   const time = screen.getByLabelText("Starts");
   assert.equal(time.getAttribute("aria-invalid"), "true");
-  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
   fireEvent.change(time, { target: { value: "2099-01-01T12:00" } });
-  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, false);
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, false);
   const now = Date.now;
   try {
     Date.now = () => new Date("2100-01-01T12:00").getTime();
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     assert.equal(saves, 0);
     assert.equal(time.getAttribute("aria-invalid"), "true");
   } finally {
@@ -314,11 +337,11 @@ test("Scheduled tasks is a truthful independent management page", () => {
   assert.match(html, /1 schedule/);
   assert.match(html, /Ongoing/);
   assert.match(html, /Daily repository summary/);
-  assert.match(html, /Run now/);
+  assert.match(html, /Schedule actions: Daily repository summary/);
   assert.doesNotMatch(html, /cron/i);
 });
 
-test("Empty scheduled tasks page offers actionable starter templates", () => {
+test("Empty scheduled tasks page keeps a single create entry without templates", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -326,14 +349,13 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
   snapshot.capabilities.backgroundScheduleWake = true;
   const html = render(snapshot);
-  assert.match(html, /Suggestions/);
-  assert.match(html, /Daily brief/);
-  assert.match(html, /Weekly review/);
-  assert.match(html, /Follow-up check/);
-  assert.match(html, /New schedule/);
-  assert.doesNotMatch(html, /What should happen automatically/);
+  assert.match(html, /No scheduled tasks yet/);
+  assert.equal((html.match(/New<\/button>/g) ?? []).length, 1);
+  assert.doesNotMatch(
+    html,
+    /Suggestions|Daily brief|Weekly review|Follow-up check/,
+  );
   assert.doesNotMatch(html, /Search scheduled tasks/);
-  assert.doesNotMatch(html, /Nothing is scheduled/);
 });
 
 test("Schedule store recovery stays available when normal scheduling is blocked and requires confirmation", async () => {
@@ -376,32 +398,6 @@ test("Schedule store recovery stays available when normal scheduling is blocked 
   await waitFor(() => assert.equal(recoveries, 1));
 });
 
-test("starter templates hide Workspace configuration and submit target-free automatic execution", async () => {
-  const snapshot = structuredClone(fixture);
-  snapshot.capabilities.automaticWorkspaces = true;
-  snapshot.capabilities.scheduledTasks = true;
-  snapshot.capabilities.scheduledTaskPersistence = true;
-  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
-  let created = null;
-  renderDom(
-    scheduledElement(snapshot, {
-      onCreate: async (input) => {
-        created = input;
-      },
-    }),
-  );
-
-  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
-  assert.doesNotMatch(dialog.textContent, /workspace/i);
-  assert.equal(screen.queryByLabelText("Workspace mode"), null);
-  assert.equal(screen.queryByLabelText("Manual workspace"), null);
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
-  await waitFor(() => assert.ok(created));
-  assert.equal("target" in created, false);
-  assert.equal(created.permissionProfile, "approval_required");
-});
-
 test("Text schedules use an Automatic Workspace without requiring a Manual Workspace", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const snapshot = structuredClone(fixture);
@@ -421,22 +417,10 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
     }),
   );
 
-  const template = screen.getByRole("button", { name: /Daily brief/ });
-  assert.equal(template.disabled, false);
-  fireEvent.click(template);
-  const templateDialog = screen.getByRole("dialog", {
-    name: "Schedule editor",
-  });
-  assert.doesNotMatch(templateDialog.textContent, /workspace/i);
-  fireEvent.keyDown(templateDialog, {
-    key: "Escape",
-  });
-  assert.equal(screen.queryByRole("dialog"), null);
-
-  const newSchedule = screen.getByRole("button", { name: "New schedule" });
+  const newSchedule = screen.getByRole("button", { name: "New" });
   newSchedule.focus();
   fireEvent.click(newSchedule);
-  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
+  const dialog = screen.getByRole("dialog", { name: "New schedule" });
   assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
   assert.doesNotMatch(dialog.textContent, /workspace/i);
   fireEvent.change(screen.getByLabelText("Name"), {
@@ -447,17 +431,16 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
     { target: { value: "Summarize current work" } },
   );
   await user.click(screen.getByRole("combobox", { name: "Permissions" }));
-  await user.click(
-    await screen.findByRole("option", {
-      name: "Full access",
-      exact: true,
-    }),
-  );
+  const fullAccess = await screen.findByRole("option", {
+    name: /^Full access/,
+  });
   assert.match(
-    dialog.textContent,
-    /skips routine MetaWork approval.*still stop the run and require attention/,
+    fullAccess.textContent,
+    /Skips routine approval; system protections still apply/,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  assert.ok(fullAccess.querySelector(".selection-menu-item-leading svg"));
+  await user.click(fullAccess);
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(created));
   assert.equal("target" in created, false);
   assert.equal("workspaceId" in created, false);
@@ -507,8 +490,14 @@ test("schedule selection submits exact source proof independently of generic New
           },
         }),
       );
-      fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-      const save = screen.getByRole("button", { name: "Save" });
+      fireEvent.click(screen.getByRole("button", { name: "New" }));
+      fireEvent.change(screen.getByLabelText("Name"), {
+        target: { value: "Work summary" },
+      });
+      fireEvent.change(screen.getByLabelText("Instruction"), {
+        target: { value: "Summarize current work" },
+      });
+      const save = screen.getByRole("button", { name: "Confirm" });
       assert.equal(save.disabled, false);
       fireEvent.click(save);
       await waitFor(() => assert.ok(created));
@@ -528,8 +517,14 @@ test("schedule selection submits exact source proof independently of generic New
     reason: "workspace_unavailable",
   };
   renderDom(scheduledElement(stale));
-  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, false);
+  fireEvent.click(screen.getByRole("button", { name: "New" }));
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Work summary" },
+  });
+  fireEvent.change(screen.getByLabelText("Instruction"), {
+    target: { value: "Summarize current work" },
+  });
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, false);
 });
 
 test("schedule instructions have no separate Skill or Workspace configuration", () => {
@@ -540,18 +535,14 @@ test("schedule instructions have no separate Skill or Workspace configuration", 
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
   renderDom(scheduledElement(snapshot));
 
-  fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
+  fireEvent.click(screen.getByRole("button", { name: "New" }));
   assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
   assert.equal(screen.queryByLabelText(/Choose a skill/), null);
-  assert.match(
-    screen.getByText(/describe that in the instruction/).textContent,
-    /global Skill/,
-  );
-  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
+  const dialog = screen.getByRole("dialog", { name: "New schedule" });
   assert.doesNotMatch(dialog.textContent, /workspace/i);
 });
 
-test("schedule editor controls have explicit semantics and no native chrome", () => {
+test("schedule editor controls have explicit semantics and no native chrome", async () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -559,24 +550,51 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
   renderDom(scheduledElement(snapshot));
 
-  fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
-  const dialog = screen.getByRole("dialog", { name: "Schedule editor" });
+  const trigger = screen.getByRole("button", { name: "New" });
+  trigger.focus();
+  fireEvent.click(trigger);
+  const dialog = screen.getByRole("dialog", { name: "New schedule" });
   const name = screen.getByLabelText("Name");
+  await waitFor(() => assert.ok(document.activeElement === name));
+  assert.equal(dialog.querySelectorAll("h2").length, 1);
+  assert.doesNotMatch(dialog.textContent, /Untitled task|Times use/);
   const instruction = screen.getByLabelText("Instruction");
+  const model = screen.getByRole("combobox", { name: "Model" });
   assert.ok(
     name.compareDocumentPosition(instruction) &
       Node.DOCUMENT_POSITION_FOLLOWING,
   );
-  assert.ok(screen.getByRole("heading", { level: 3, name: "What to run" }));
-  assert.ok(screen.getByRole("heading", { level: 3, name: "Permissions" }));
+  assert.ok(
+    instruction.compareDocumentPosition(model) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  const composer = within(dialog).getByRole("region", { name: "What to run" });
+  assert.ok(composer.contains(instruction));
+  assert.ok(composer.contains(model));
+  const permission = screen.getByRole("combobox", { name: "Permissions" });
+  assert.ok(
+    permission.compareDocumentPosition(model) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    composer.contains(screen.getByRole("combobox", { name: "Permissions" })),
+  );
   assert.equal(
     screen.getByRole("combobox", { name: "Permissions" }).textContent,
     "Request approval",
   );
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("combobox", { name: "Permissions" }));
+  const approval = await screen.findByRole("option", {
+    name: /^Request approval/,
+  });
   assert.match(
-    dialog.textContent,
-    /needs approval stops the run.*does not wait for remote approval/,
+    approval.textContent,
+    /Stops and needs attention when approval is required/,
   );
+  assert.ok(approval.querySelector(".selection-menu-item-leading svg"));
+  await user.keyboard("{Escape}");
+  assert.ok(screen.getByRole("dialog", { name: "New schedule" }));
   assert.ok(screen.getByRole("heading", { level: 3, name: "When" }));
   assert.equal(dialog.querySelectorAll("fieldset, legend").length, 0);
   assert.ok(
@@ -586,9 +604,22 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   );
   assert.equal(screen.queryByRole("button", { name: "Skill" }), null);
 
-  fireEvent.click(screen.getByRole("button", { name: "Repeat" }));
-  assert.ok(screen.getByLabelText("Every"));
-  assert.ok(screen.getByLabelText("Interval unit"));
+  await user.click(screen.getByRole("combobox", { name: "Repeat" }));
+  assert.deepEqual(
+    (await screen.findAllByRole("option")).map(
+      (option) =>
+        option.querySelector(".selection-menu-item-label").textContent,
+    ),
+    ["Once", "Daily", "Weekly", "Monthly", "Yearly"],
+  );
+  await user.click(
+    await screen.findByRole("option", { name: "Daily", exact: true }),
+  );
+  assert.equal(screen.queryByRole("spinbutton", { name: "Every" }), null);
+  await user.click(screen.getByRole("combobox", { name: "Repeat" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Once", exact: true }),
+  );
   assert.equal(dialog.querySelectorAll("select").length, 0);
   assert.ok(dialog.querySelector('[role="combobox"]'));
 
@@ -596,13 +627,14 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
   );
-  assert.match(css, /\.scheduled-select \{[\s\S]*?position: relative;/);
-  assert.match(css, /\.scheduled-select \[data-popup-open\]/);
   assert.match(css, /input\[type="number"\][\s\S]*?appearance: textfield;/);
   assert.match(css, /::-webkit-search-cancel-button/);
   assert.match(css, /resize: none;/);
-  assert.match(css, /\.scheduled-editor-section > h3 \{/);
   assert.doesNotMatch(css, /\.scheduled-editor fieldset/);
+  assert.ok(within(dialog).getByRole("button", { name: "Confirm" }));
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  await waitFor(() => assert.ok(document.activeElement === trigger));
 });
 
 test("New task, Skills, MCP, and Scheduled tasks share one compact peer menu", async () => {
@@ -722,22 +754,382 @@ test("an invalid starting preference can be replaced without default admission",
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "New" }));
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Work summary" },
+  });
+  fireEvent.change(screen.getByLabelText("Instruction"), {
+    target: { value: "Summarize current work" },
+  });
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
   const user = userEvent.setup({ document: dom.window.document });
   await user.click(screen.getByRole("combobox", { name: "Model" }));
   const candidate = snapshot.models.providers[0].models[0];
+  assert.equal(
+    screen.queryByRole("option", { name: "Choose a model", exact: true }),
+    null,
+  );
   await user.click(
     await screen.findByRole("option", {
       name: candidate.displayName,
       exact: true,
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(created));
   assert.deepEqual(created.modelSelection.targetModelRef, {
     sourceId: "metask",
     modelId: candidate.id,
   });
   assert.equal("protocol" in created.modelSelection, false);
+});
+
+function finishedOccurrence(overrides = {}) {
+  return {
+    plannedAtUnixSeconds: "1800000000",
+    triggeredAtUnixSeconds: "1800000000",
+    source: "timer",
+    result: "submitted",
+    taskId: "3",
+    reason: null,
+    taskOutcome: "completed",
+    ...overrides,
+  };
+}
+
+test("plan state and latest outcome stay distinct, while identical completion is shown once", () => {
+  for (const health of ["paused", "needs_attention", "completed"]) {
+    renderDom(
+      scheduledElement(
+        scheduleSnapshot({
+          enabled: false,
+          health,
+          failureReason:
+            health === "needs_attention" ? "execution_changed" : null,
+          nextRunAtUnixSeconds: null,
+          occurrences: [finishedOccurrence()],
+        }),
+      ),
+    );
+    const row = document.querySelector(".scheduled-list > li");
+    const state = row.querySelector(".scheduled-row-next");
+    assert.doesNotMatch(state.textContent, /No next run|connection changed/);
+    assert.equal(
+      within(row).getAllByText("Completed", { exact: true }).length,
+      1,
+    );
+    if (health === "completed") {
+      assert.equal(row.querySelector(".scheduled-row-result"), null);
+    } else {
+      assert.match(
+        row.querySelector(".scheduled-row-result").textContent,
+        /Latest run.*Completed/,
+      );
+      assert.doesNotMatch(state.textContent, /Completed/);
+    }
+    if (health === "needs_attention") {
+      assert.match(
+        row.querySelector(".scheduled-row-reason").textContent,
+        /connection changed/,
+      );
+    }
+    cleanup();
+  }
+});
+
+test("a skipped history entry explains the blocker and links to the previous real Task", async () => {
+  let opened;
+  renderDom(
+    scheduledElement(
+      scheduleSnapshot({
+        occurrences: [
+          finishedOccurrence({
+            result: "skipped",
+            taskOutcome: null,
+            reason: "previous_task_running",
+          }),
+        ],
+      }),
+      {
+        onOpenTask: (id) => {
+          opened = id;
+        },
+      },
+    ),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  const history = document.querySelector(".scheduled-history");
+  assert.match(history.textContent, /Skipped/);
+  assert.match(
+    history.querySelector(".scheduled-history-reason").textContent,
+    /previous task is still running/i,
+  );
+  fireEvent.click(
+    within(history).getByRole("button", { name: "View previous run" }),
+  );
+  assert.equal(opened, "3");
+});
+
+test("a changed item epoch keeps the draft and requires an explicit reload before saving", async () => {
+  let updated;
+  const snapshot = scheduleSnapshot();
+  const overrides = {
+    onUpdate: async (...args) => {
+      updated = args;
+    },
+  };
+  const view = renderDom(scheduledElement(snapshot, overrides));
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "My unsaved name" },
+  });
+  const changed = scheduleSnapshot({ epoch: "2", title: "Changed elsewhere" });
+  view.rerender(scheduledElement(changed, overrides));
+  assert.match(screen.getByRole("alert").textContent, /schedule has changed/);
+  assert.equal(screen.getByLabelText("Name").value, "My unsaved name");
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  assert.equal(updated, undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Reload schedule" }));
+  assert.equal(screen.getByLabelText("Name").value, "Changed elsewhere");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(updated));
+  assert.deepEqual(updated.slice(0, 2), ["8", "2"]);
+  assert.equal(updated[2].title, "Changed elsewhere");
+});
+
+test("a confirmed local pause retains edits and adopts only the acknowledged epoch", async () => {
+  let updated;
+  let view;
+  const overrides = {
+    onUpdate: async (...args) => {
+      updated = args;
+    },
+    onSetEnabled: async (id, epoch, enabled) => {
+      assert.deepEqual([id, epoch, enabled], ["8", "1", false]);
+      view.rerender(
+        scheduledElement(
+          scheduleSnapshot({
+            epoch: "2",
+            health: "paused",
+            enabled: false,
+            nextRunAtUnixSeconds: null,
+          }),
+          overrides,
+        ),
+      );
+      return { epoch: "2" };
+    },
+  };
+  view = renderDom(scheduledElement(scheduleSnapshot(), overrides));
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Keep this name" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Confirm" }).disabled,
+      false,
+    ),
+  );
+  assert.equal(screen.queryByText(/schedule has changed/), null);
+  assert.equal(screen.getByLabelText("Name").value, "Keep this name");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(updated));
+  assert.deepEqual(updated.slice(0, 2), ["8", "2"]);
+  assert.equal(updated[2].title, "Keep this name");
+});
+
+test("new calendar choices submit explicit frequencies and the local IANA zone", async () => {
+  for (const frequency of ["daily", "weekly", "monthly", "yearly"]) {
+    const snapshot = scheduleSnapshot();
+    snapshot.scheduledTasks = [];
+    let created;
+    renderDom(
+      scheduledElement(snapshot, {
+        onCreate: async (input) => {
+          created = input;
+        },
+      }),
+    );
+    const user = userEvent.setup({ document: dom.window.document });
+    await user.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Calendar report" },
+    });
+    fireEvent.change(screen.getByLabelText("Instruction"), {
+      target: { value: "Summarize work" },
+    });
+    await user.click(screen.getByRole("combobox", { name: "Repeat" }));
+    await user.click(
+      await screen.findByRole("option", {
+        name: frequency[0].toUpperCase() + frequency.slice(1),
+        exact: true,
+      }),
+    );
+    const timeOnly = frequency === "daily";
+    if (timeOnly) {
+      await chooseTime(user, "09:30");
+    } else {
+      const time = screen.getByLabelText("Starts");
+      assert.equal(time.type, "datetime-local");
+      fireEvent.change(time, { target: { value: "2032-01-31T09:30" } });
+    }
+    const expected = timeOnly
+      ? new Date(Date.now())
+      : new Date("2032-01-31T09:30");
+    if (timeOnly) {
+      expected.setHours(9, 30, 0, 0);
+      if (expected.getTime() <= Date.now())
+        expected.setDate(expected.getDate() + 1);
+    }
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => assert.ok(created));
+    assert.deepEqual(created.recurrence, {
+      kind: "calendar",
+      frequency,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      startAtUnixSeconds: String(expected.getTime() / 1000),
+    });
+    cleanup();
+  }
+});
+
+test("calendar edits preserve the stored recurrence", async () => {
+  const recurrence = {
+    kind: "calendar",
+    frequency: "monthly",
+    timezone: "America/New_York",
+    startAtUnixSeconds: "1793514637",
+  };
+  let saved;
+  renderDom(
+    scheduledElement(scheduleSnapshot({ recurrence }), {
+      onUpdate: async (_id, _epoch, input) => {
+        saved = input;
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Review.*Monthly/ }));
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Renamed" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(saved));
+  assert.deepEqual(saved.recurrence, recurrence);
+  assert.equal(saved.modelSelection, null);
+});
+
+test("legacy fixed intervals stay editable without being reinterpreted as calendar rules", async () => {
+  const snapshot = scheduleSnapshot();
+  let saved;
+  renderDom(
+    scheduledElement(snapshot, {
+      onUpdate: async (_id, _epoch, input) => {
+        saved = input;
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /^Review / }));
+  assert.match(
+    screen.getByRole("combobox", { name: "Repeat" }).textContent,
+    /Fixed interval/,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() => assert.ok(saved));
+  assert.deepEqual(saved.recurrence, snapshot.scheduledTasks[0].recurrence);
+});
+
+test("new one-time schedules choose the next local time at submission", async (ctx) => {
+  let now = new Date("2032-01-31T12:00").getTime();
+  ctx.mock.method(Date, "now", () => now);
+  for (const [time, submitAt, expected] of [
+    ["13:00", "2032-01-31T12:00", "2032-01-31T13:00"],
+    ["11:00", "2032-01-31T12:00", "2032-02-01T11:00"],
+    ["11:00", "2032-02-02T12:00", "2032-02-03T11:00"],
+  ]) {
+    now = new Date("2032-01-31T12:00").getTime();
+    const snapshot = scheduleSnapshot();
+    snapshot.scheduledTasks = [];
+    let created;
+    renderDom(
+      scheduledElement(snapshot, {
+        onCreate: async (input) => {
+          created = input;
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Reminder" },
+    });
+    fireEvent.change(screen.getByLabelText("Instruction"), {
+      target: { value: "Summarize work" },
+    });
+    const clock = screen.getByRole("group", { name: "Time" });
+    assert.equal(within(clock).queryByRole("textbox"), null);
+    assert.equal(screen.queryByLabelText("Starts"), null);
+    const user = userEvent.setup({ document: dom.window.document });
+    await chooseTime(user, time);
+    now = new Date(submitAt).getTime();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => assert.ok(created));
+    assert.deepEqual(created.recurrence, {
+      kind: "once",
+      atUnixSeconds: String(new Date(expected).getTime() / 1000),
+    });
+    cleanup();
+  }
+});
+
+test("one time panel contains both columns and supports keyboard navigation", async () => {
+  const snapshot = scheduleSnapshot();
+  snapshot.scheduledTasks = [];
+  renderDom(scheduledElement(snapshot));
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("button", { name: "New" }));
+  const picker = screen.getByRole("group", { name: "Time" });
+  const trigger = within(picker).getByRole("button");
+  assert.match(trigger.textContent, /^\d{2}:\d{2}/);
+  assert.equal(within(picker).queryByRole("combobox"), null);
+  await user.click(trigger);
+  const panel = await screen.findByRole("dialog", { name: "Time" });
+  const hours = within(panel).getByRole("radiogroup", { name: "Hours" });
+  const minutes = within(panel).getByRole("radiogroup", { name: "Minutes" });
+  assert.equal(within(hours).getAllByRole("radio").length, 24);
+  assert.equal(within(minutes).getAllByRole("radio").length, 60);
+  const selectedHour = within(hours).getByRole("radio", { checked: true });
+  const nextHour = String((Number(selectedHour.textContent) + 1) % 24).padStart(
+    2,
+    "0",
+  );
+  await user.click(selectedHour);
+  await user.keyboard("{ArrowDown}");
+  assert.ok(
+    within(hours).getByRole("radio", { name: nextHour, checked: true }),
+  );
+  const selectedMinute = within(minutes).getByRole("radio", { checked: true });
+  const nextMinute = String(
+    (Number(selectedMinute.textContent) + 1) % 60,
+  ).padStart(2, "0");
+  await user.click(selectedMinute);
+  await user.keyboard("{ArrowDown}");
+  assert.ok(
+    within(minutes).getByRole("radio", { name: nextMinute, checked: true }),
+  );
+  assert.match(trigger.textContent, new RegExp(`${nextHour}:${nextMinute}`));
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("dialog", { name: "Time" }) === null),
+  );
+  assert.ok(screen.getByRole("dialog", { name: "New schedule" }));
+  await waitFor(() => assert.ok(document.activeElement === trigger));
+  assert.equal(within(picker).queryByRole("textbox"), null);
 });

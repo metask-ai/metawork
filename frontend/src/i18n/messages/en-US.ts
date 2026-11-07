@@ -1387,7 +1387,8 @@ export const enUS = {
     "The command is unavailable. View operation details.",
   "approval.full_request": "View operation details",
   "approval.hide_request": "Hide operation details",
-  "approval.handoff.rejection_limit": "Repeated review denials require your decision for this operation. Automatic review resumes afterward.",
+  "approval.handoff.rejection_limit":
+    "Repeated review denials require your decision for this operation. Automatic review resumes afterward.",
   "approval.handoff.unavailable":
     "Automatic review could not finish. Please confirm.",
   "approval.handoff.reviewer_concern":
@@ -1818,7 +1819,7 @@ export const enUS = {
   "scheduled.title": "Scheduled tasks",
   "scheduled.subtitle":
     "Let MetaWork start work at the right time and notify you when it is done.",
-  "scheduled.new": "New schedule",
+  "scheduled.new": "New",
   "scheduled.no_next_run": "No next run",
   "scheduled.health.ready": "Scheduled",
   "scheduled.health.paused": "Paused",
@@ -1827,7 +1828,6 @@ export const enUS = {
   "scheduled.pause": "Pause",
   "scheduled.resume": "Resume",
   "scheduled.run_now": "Run now",
-  "scheduled.editor": "Schedule editor",
   "scheduled.editing": "Editing schedule",
   "scheduled.creating": "New schedule",
   "scheduled.error": "MetaWork could not complete this schedule change.",
@@ -1835,16 +1835,23 @@ export const enUS = {
   "scheduled.what": "What to run",
   "scheduled.instruction_placeholder": "Describe what MetaWork should do…",
   "scheduled.instruction": "Instruction",
-  "scheduled.instruction_help":
-    "If a global Skill should be used, describe that in the instruction.",
   "scheduled.permission": "Permissions",
   "scheduled.permission.approval_required.help":
-    "Runs unattended. An operation that needs approval stops the run and marks it as needing attention; it does not wait for remote approval.",
+    "Stops and needs attention when approval is required.",
   "scheduled.permission.full_access.help":
-    "Runs unattended and skips routine MetaWork approval. AgentCore protections or system and service restrictions can still stop the run and require attention.",
+    "Skips routine approval; system protections still apply.",
   "scheduled.when": "When",
+  "scheduled.repeat": "Repeat",
   "scheduled.recurrence.once": "Once",
-  "scheduled.recurrence.interval": "Repeat",
+  "scheduled.recurrence.hourly": "Hourly",
+  "scheduled.recurrence.daily": "Daily",
+  "scheduled.recurrence.weekly": "Weekly",
+  "scheduled.recurrence.monthly": "Monthly",
+  "scheduled.recurrence.yearly": "Yearly",
+  "scheduled.invalid_time":
+    "This time does not exist or is invalid. Choose another time.",
+  "scheduled.recurrence.interval": "Fixed interval",
+  "scheduled.time": "Time",
   "scheduled.starts": "Starts",
   "scheduled.every": "Every",
   "scheduled.interval_unit": "Interval unit",
@@ -1852,29 +1859,11 @@ export const enUS = {
   "scheduled.hours": "Hours",
   "scheduled.days": "Days",
   "scheduled.delete": "Delete schedule",
+  "scheduled.confirm": "Confirm",
   "scheduled.saving": "Saving…",
   "scheduled.background_ready": "Continues after the window closes",
   "scheduled.search_placeholder": "Search scheduled tasks",
-  "scheduled.suggestions": "Suggestions",
-  "scheduled.suggestions_help": "Start with a useful rhythm.",
-  "scheduled.suggestion.daily.title": "Daily brief",
-  "scheduled.suggestion.daily.schedule": "Every day at 8:00 AM",
-  "scheduled.suggestion.daily.body":
-    "Summarize recent project progress, open work, and what needs attention today.",
-  "scheduled.suggestion.daily.prompt":
-    "Summarize recent project progress, open work, and what needs attention today in a concise daily brief.",
-  "scheduled.suggestion.weekly.title": "Weekly review",
-  "scheduled.suggestion.weekly.schedule": "Friday at 4:00 PM",
-  "scheduled.suggestion.weekly.body":
-    "Turn this week's completed work, open issues, and next steps into a status update.",
-  "scheduled.suggestion.weekly.prompt":
-    "Review this week's completed work, open issues, and next steps, then produce a clear status update.",
-  "scheduled.suggestion.followup.title": "Follow-up check",
-  "scheduled.suggestion.followup.schedule": "Every day at 9:00 AM",
-  "scheduled.suggestion.followup.body":
-    "Check the workspace for open items, blockers, and recent changes that need follow-up.",
-  "scheduled.suggestion.followup.prompt":
-    "Check the workspace for open items, blockers, and recent changes, then list what needs follow-up today.",
+  "scheduled.empty": "No scheduled tasks yet.",
   "scheduled.section.ongoing": "Ongoing",
   "scheduled.section.needs_attention": "Needs attention",
   "scheduled.section.paused": "Paused",
@@ -1888,15 +1877,12 @@ export const enUS = {
   "scheduled.repeat.weekly": "Every week",
   "scheduled.next_run": "Next run",
   "scheduled.status": "Status",
-  "scheduled.confirmation.title": "Run summary",
-  "scheduled.confirmation.untitled": "Untitled task",
-  "scheduled.confirmation.once": "Run “{title}” on {time}.",
-  "scheduled.confirmation.interval":
-    "Run “{title}” every {every} {unit}, starting {time}.",
-  "scheduled.timezone": "Times use {timezone}",
-  "scheduled.unit.minutes": "minutes",
-  "scheduled.unit.hours": "hours",
-  "scheduled.unit.days": "days",
+  "scheduled.latest_run": "Latest run",
+  "scheduled.actions": "Schedule actions: {title}",
+  "scheduled.open_previous_task": "View previous run",
+  "scheduled.changed":
+    "This schedule has changed. Reloading will replace your unsaved edits.",
+  "scheduled.reload": "Reload schedule",
   "scheduled.history": "Run history",
   "scheduled.history_empty": "Results will appear here after the first run.",
   "scheduled.open_task": "View result",
