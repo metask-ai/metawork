@@ -1281,7 +1281,7 @@ test "calendar definition and cursor round trip without changing fixed interval 
     try std.testing.expectEqual(@as(?u64, 1_793_597_400), try fixed.firstStrictlyAfter(1_793_511_000));
     try std.testing.expectEqual(@as(?u64, 1_793_601_000), try item.recurrence.firstStrictlyAfter(1_793_511_000));
     try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "daily", .timezone = "Unknown/Zone" }));
-    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "monthly", .timezone = "UTC" }));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "unknown", .timezone = "UTC" }));
     try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .every_seconds = 86400, .frequency = "daily", .timezone = "UTC" }));
 }
 
@@ -1357,5 +1357,24 @@ test "legacy timer facts repair a rewound cursor without discarding definitions"
         item.enabled = false;
         item.health = .paused;
         try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    }
+}
+
+test "all calendar frequencies preserve their rule through persistence" {
+    for (std.enums.values(scheduled.CalendarFrequency)) |frequency| {
+        var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer store.deinit();
+        const id = try store.create(.{
+            .title = "calendar",
+            .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+            .permission_profile = .approval_required,
+            .input = "inspect",
+            .recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1769860800, .timezone = .@"Asia/Shanghai", .frequency = frequency } },
+        }, 1769860801);
+        var buffer: [max_store_bytes]u8 = undefined;
+        var restored = try decode(std.testing.allocator, try encode(&buffer, &store), .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer restored.deinit();
+        try std.testing.expectEqual(frequency, restored.find(id).?.recurrence.calendar.frequency);
+        try std.testing.expectEqual(store.find(id).?.next_run_at_unix_seconds, restored.find(id).?.next_run_at_unix_seconds);
     }
 }

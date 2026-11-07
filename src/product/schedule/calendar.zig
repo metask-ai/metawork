@@ -3,7 +3,8 @@ const tempora = @import("tempora");
 const data = @import("schedule_timezones");
 
 pub const Zone = data.Zone;
-pub const Frequency = enum { hourly, daily, weekly };
+pub const Frequency = enum { hourly, daily, weekly, monthly, yearly };
+const Direction = enum { forward, backward };
 pub const max_timestamp: u64 = 253_402_300_799; // End of Gregorian year 9999.
 
 pub const Rule = struct {
@@ -29,16 +30,11 @@ pub const Rule = struct {
         return (try self.aligned(@min(query, max_timestamp), .backward)) orelse self.start_at_unix_seconds;
     }
 
-    fn aligned(self: Rule, query: u64, direction: enum { forward, backward }) error{InvalidSchedule}!?u64 {
+    fn aligned(self: Rule, query: u64, direction: Direction) error{InvalidSchedule}!?u64 {
         if (query > max_timestamp) return error.InvalidSchedule;
         const start: i64 = @intCast(self.start_at_unix_seconds);
         const current: i64 = @intCast(query);
         const anchor = start + offsetAt(self.timezone, start);
-        const period: i64 = switch (self.frequency) {
-            .hourly => 3600,
-            .daily => 86400,
-            .weekly => 604800,
-        };
         const zone = data.entries[@intFromEnum(self.timezone)];
         var minimum: i64 = zone.initial_offset;
         var maximum = minimum;
@@ -50,6 +46,14 @@ pub const Rule = struct {
         // every possible offset so a previously elapsed wall point is not
         // missed when the clock has moved back before its local time.
         const local_bound = current + if (direction == .forward) minimum else maximum;
+        if (self.frequency == .monthly or self.frequency == .yearly)
+            return self.alignedMonths(anchor, current, local_bound, direction);
+        const period: i64 = switch (self.frequency) {
+            .hourly => 3600,
+            .daily => 86400,
+            .weekly => 604800,
+            .monthly, .yearly => unreachable,
+        };
         var wall = anchor + @divFloor(local_bound - anchor, period) * period;
         // Cover both the conservative starting bound and the largest possible
         // wall-time gap, plus the adjacent grid points. This includes full-day
@@ -67,7 +71,39 @@ pub const Rule = struct {
         }
         return error.InvalidSchedule;
     }
+
+    fn alignedMonths(self: Rule, anchor: i64, current: i64, local_bound: i64, direction: Direction) ?u64 {
+        const anchor_date = wallDate(anchor).ymd();
+        const bound_date = wallDate(local_bound).ymd();
+        const anchor_month = anchor_date.year.as_number() * 12 + anchor_date.month.as_number() - 1;
+        const bound_month = bound_date.year.as_number() * 12 + bound_date.month.as_number() - 1;
+        const step: i32 = if (self.frequency == .monthly) 1 else 12;
+        var index = anchor_month + @divFloor(bound_month - anchor_month, step) * step;
+        while (index <= 10000 * 12 + 11) : (index += if (direction == .forward) step else -step) {
+            if (index < anchor_month) {
+                if (direction == .backward) return null;
+                continue;
+            }
+            const month = @mod(index, 12) + 1;
+            const date = tempora.Date.from_ymd_numbers(@divFloor(index, 12), month, anchor_date.day.as_number());
+            // The date constructor normalizes missing days. Never turn a
+            // monthly 31st or February 29th into a different calendar date.
+            if (date.month().as_number() != month) continue;
+            const days: i64 = @intFromEnum(date) - @intFromEnum(tempora.Date.unix_epoch);
+            const wall = days * 86400 + @mod(anchor, 86400);
+            if (resolveWall(self.timezone, wall)) |instant| {
+                if (instant >= self.start_at_unix_seconds and instant <= max_timestamp and
+                    ((direction == .forward and instant >= current) or
+                        (direction == .backward and instant <= current))) return @intCast(instant);
+            }
+        }
+        return null;
+    }
 };
+
+fn wallDate(wall: i64) tempora.Date {
+    return tempora.Date.unix_epoch.plus_days(@intCast(@divFloor(wall, 86400)));
+}
 
 pub fn offsetAt(zone: Zone, timestamp: i64) i64 {
     const value = data.entries[@intFromEnum(zone)];

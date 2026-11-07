@@ -1097,3 +1097,22 @@ test "calendar boundaries and round trips hold across every supported IANA zone"
         }
     }
 }
+
+test "monthly and yearly calendars skip missing dates and retain the anchor" {
+    // January 31st keeps the 31st, skipping February and April.
+    const monthly: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1769860800, .timezone = .UTC, .frequency = .monthly } };
+    try std.testing.expectEqual(@as(?u64, 1774958400), try monthly.firstStrictlyAfter(1769860800));
+    try std.testing.expectEqual(@as(?u64, 1780228800), try monthly.firstStrictlyAfter(1774958400));
+    try std.testing.expectEqual(@as(?u64, 1774958400), try monthly.lastAtOrBefore(1777636800));
+    const yearly: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1709208000, .timezone = .UTC, .frequency = .yearly } };
+    try std.testing.expectEqual(@as(?u64, 1835438400), try yearly.firstStrictlyAfter(1709208000));
+    try std.testing.expectEqual(@as(?u64, 4233729600), try yearly.firstStrictlyAfter(3981355200));
+    try std.testing.expectEqual(@as(?u64, 3981355200), try yearly.lastAtOrBefore(4133980800));
+}
+
+test "monthly calendar skips a DST gap and resumes at the original local time" {
+    // New York, the 8th at 02:30: March 8, 2026 does not exist.
+    const rule: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1767857400, .timezone = .@"America/New_York", .frequency = .monthly } };
+    try std.testing.expectEqual(@as(?u64, 1775629800), try rule.firstStrictlyAfter(1770535800));
+    try std.testing.expectEqual(@as(?u64, 1770535800), try rule.lastAtOrBefore(1775001600));
+}
