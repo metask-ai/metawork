@@ -2,6 +2,9 @@
 
 const std = @import("std");
 const models_contract = @import("metawork_product_models_contract");
+const calendar = @import("product_schedule_calendar");
+pub const TimeZone = calendar.Zone;
+pub const CalendarFrequency = calendar.Frequency;
 
 pub const minimum_interval_seconds: u64 = 60;
 pub const max_occurrence_history: usize = 16;
@@ -26,6 +29,7 @@ pub const PermissionProfile = enum {
 };
 
 pub const Recurrence = union(enum) {
+    calendar: calendar.Rule,
     once: struct {
         at_unix_seconds: u64,
     },
@@ -36,6 +40,7 @@ pub const Recurrence = union(enum) {
 
     pub fn validate(self: Recurrence) error{InvalidSchedule}!void {
         switch (self) {
+            .calendar => |rule| try rule.validate(),
             .once => |once| {
                 if (once.at_unix_seconds == 0) return error.InvalidSchedule;
             },
@@ -53,6 +58,7 @@ pub const Recurrence = union(enum) {
     ) error{InvalidSchedule}!?u64 {
         try self.validate();
         return switch (self) {
+            .calendar => |rule| try rule.firstAtOrAfter(unix_seconds),
             .once => |once| if (once.at_unix_seconds >= unix_seconds)
                 once.at_unix_seconds
             else
@@ -90,9 +96,18 @@ pub const Recurrence = union(enum) {
         if (unix_seconds == std.math.maxInt(u64))
             return switch (self) {
                 .once => null,
-                .interval => error.InvalidSchedule,
+                .interval, .calendar => error.InvalidSchedule,
             };
         return self.firstAtOrAfter(unix_seconds + 1);
+    }
+
+    pub fn lastAtOrBefore(self: Recurrence, unix_seconds: u64) error{InvalidSchedule}!?u64 {
+        try self.validate();
+        return switch (self) {
+            .once => |once| if (unix_seconds >= once.at_unix_seconds) once.at_unix_seconds else null,
+            .interval => |interval| if (unix_seconds < interval.start_at_unix_seconds) null else interval.start_at_unix_seconds + ((unix_seconds - interval.start_at_unix_seconds) / interval.every_seconds) * interval.every_seconds,
+            .calendar => |rule| try rule.lastAtOrBefore(unix_seconds),
+        };
     }
 };
 
@@ -164,6 +179,7 @@ pub const Definition = struct {
     permission_profile: PermissionProfile,
     input: []const u8,
     recurrence: Recurrence,
+    timezone: ?TimeZone = null,
 };
 
 pub const Binding = struct {
@@ -188,6 +204,7 @@ pub const Item = struct {
     permission_profile: PermissionProfile,
     input: OwnedInput,
     recurrence: Recurrence,
+    created_timezone: ?TimeZone = null,
     enabled: bool = true,
     health: Health = .ready,
     failure_reason: ?FailureReason = null,
@@ -230,6 +247,7 @@ pub const RestoredItem = struct {
     failure_reason: ?FailureReason,
     next_run_at_unix_seconds: ?u64,
     occurrences: []const Occurrence,
+    created_timezone: ?TimeZone = null,
     last_timer_planned_at_unix_seconds: ?u64 = null,
 };
 
@@ -296,6 +314,7 @@ pub const Store = struct {
                 .failure_reason = item.failure_reason,
                 .next_run_at_unix_seconds = item.next_run_at_unix_seconds,
                 .occurrences = item.occurrences(),
+                .created_timezone = item.created_timezone,
                 .last_timer_planned_at_unix_seconds = item.last_timer_planned_at_unix_seconds,
             });
             const copied = result.find(item.id).?;
@@ -363,6 +382,7 @@ pub const Store = struct {
         item.enabled = snapshot.enabled;
         item.health = snapshot.health;
         item.failure_reason = restored.failure_reason;
+        item.created_timezone = restored.created_timezone;
         item.last_timer_planned_at_unix_seconds = snapshot.last_timer_planned_at_unix_seconds;
         for (restored.occurrences, 0..) |occurrence, index| {
             item.occurrence_history[index] = occurrence;
@@ -405,6 +425,10 @@ pub const Store = struct {
         );
         errdefer self.deinitItem(&item);
         const id = self.next_id;
+        item.created_timezone = definition.timezone orelse switch (definition.recurrence) {
+            .calendar => |rule| rule.timezone,
+            else => null,
+        };
         self.next_id += 1;
         self.items[slot] = item;
         return id;
@@ -433,6 +457,7 @@ pub const Store = struct {
         );
         errdefer self.deinitItem(&replacement);
         replacement.last_occurrence = current.last_occurrence;
+        replacement.created_timezone = current.created_timezone;
         replacement.last_timer_planned_at_unix_seconds = current.last_timer_planned_at_unix_seconds;
         replacement.occurrence_count = current.occurrence_count;
         @memcpy(
@@ -856,6 +881,10 @@ fn validRestoredState(restored: RestoredItem) bool {
         if (restored.last_timer_planned_at_unix_seconds) |last|
             if (next <= last) return false;
         switch (restored.definition.recurrence) {
+            .calendar => |rule| {
+                const aligned = rule.firstAtOrAfter(next) catch return false;
+                if (aligned == null or aligned.? != next) return false;
+            },
             .once => |once| if (next != once.at_unix_seconds) return false,
             .interval => |interval| {
                 if (next < interval.start_at_unix_seconds or
@@ -1014,4 +1043,57 @@ test "updating a paused schedule preserves its paused state" {
     try std.testing.expectEqual(@as(?FailureReason, null), item.failure_reason);
     try std.testing.expectEqual(@as(?u64, null), item.next_run_at_unix_seconds);
     try std.testing.expectEqualStrings("Updated daily summary", item.title);
+}
+
+test "daily calendar recurrence skips DST gaps and selects the first fold instant once" {
+    const spring: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_772_868_600, .timezone = .@"America/New_York", .frequency = .daily } };
+    try std.testing.expectEqual(@as(?u64, 1_773_037_800), try spring.firstStrictlyAfter(1_772_868_600));
+    try std.testing.expectEqual(@as(?u64, 1_772_868_600), try spring.lastAtOrBefore(1_772_955_000));
+    const autumn: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_793_424_600, .timezone = .@"America/New_York", .frequency = .daily } };
+    try std.testing.expectEqual(@as(?u64, 1_793_511_000), try autumn.firstStrictlyAfter(1_793_424_600));
+    try std.testing.expectEqual(@as(?u64, 1_793_601_000), try autumn.firstStrictlyAfter(1_793_511_000));
+    try std.testing.expectEqual(@as(?u64, 1_793_511_000), try autumn.lastAtOrBefore(1_793_514_600));
+    // During the second 01:10, today's first 01:30 is already in the past.
+    try std.testing.expectEqual(@as(?u64, 1_793_511_000), try autumn.lastAtOrBefore(1_793_513_400));
+}
+
+test "calendar rules survive date-line gaps and use future POSIX transitions" {
+    const apia: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_325_181_600, .timezone = .@"Pacific/Apia", .frequency = .daily } };
+    try std.testing.expectEqual(@as(?u64, 1_325_268_000), try apia.firstStrictlyAfter(1_325_181_600));
+    const future: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 2_530_683_000, .timezone = .@"America/New_York", .frequency = .daily } };
+    try std.testing.expectEqual(@as(?u64, 2_530_852_200), try future.firstStrictlyAfter(2_530_683_000));
+}
+
+test "hourly and weekly calendar rules preserve local components across DST" {
+    const hourly: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_793_511_000, .timezone = .@"America/New_York", .frequency = .hourly } };
+    try std.testing.expectEqual(@as(?u64, 1_793_518_200), try hourly.firstStrictlyAfter(1_793_511_000));
+    const weekly: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_793_424_600, .timezone = .@"America/New_York", .frequency = .weekly } };
+    try std.testing.expectEqual(@as(?u64, 1_794_033_000), try weekly.firstStrictlyAfter(1_793_424_600));
+}
+
+test "calendar handles southern hemisphere half-hour DST changes" {
+    const spring: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_790_955_900, .timezone = .@"Australia/Lord_Howe", .frequency = .daily } };
+    try std.testing.expectEqual(@as(?u64, 1_791_126_900), try spring.firstStrictlyAfter(1_790_955_900));
+    const autumn: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_775_227_500, .timezone = .@"Australia/Lord_Howe", .frequency = .daily } };
+    try std.testing.expectEqual(@as(?u64, 1_775_313_900), try autumn.firstStrictlyAfter(1_775_227_500));
+    try std.testing.expectEqual(@as(?u64, 1_775_402_100), try autumn.firstStrictlyAfter(1_775_313_900));
+}
+
+test "calendar boundaries and round trips hold across every supported IANA zone" {
+    for (std.enums.values(TimeZone)) |zone| {
+        for (std.enums.values(CalendarFrequency)) |frequency| {
+            for ([_]u64{ 1, 1_793_424_600, 2_530_683_000, calendar.max_timestamp - 86400 }) |start| {
+                const recurrence: Recurrence = .{ .calendar = .{ .start_at_unix_seconds = start, .timezone = zone, .frequency = frequency } };
+                try std.testing.expectEqual(@as(?u64, start), try recurrence.firstAtOrAfter(start));
+                try std.testing.expectEqual(@as(?u64, start), try recurrence.lastAtOrBefore(start));
+                if (try recurrence.firstStrictlyAfter(start)) |next| {
+                    try std.testing.expect(next > start);
+                    try std.testing.expectEqual(@as(?u64, next), try recurrence.lastAtOrBefore(next));
+                    try std.testing.expectEqual(@as(?u64, next), try recurrence.firstAtOrAfter(next));
+                }
+                try std.testing.expectEqual(@as(?u64, null), try recurrence.firstStrictlyAfter(calendar.max_timestamp));
+                try std.testing.expect((try recurrence.lastAtOrBefore(std.math.maxInt(u64))).? <= calendar.max_timestamp);
+            }
+        }
+    }
 }

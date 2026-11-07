@@ -8,6 +8,10 @@ const state = @import("product_schedule_state");
 
 pub const Error = error{SnapshotTooLarge};
 
+pub fn rendererExposes(recurrence: state.Recurrence) bool {
+    return recurrence != .calendar;
+}
+
 pub const TextProjection = struct {
     context: *const anyopaque,
     write_json_fn: *const fn (
@@ -34,6 +38,9 @@ pub fn writeProjection(
     var count: usize = 0;
     for (store.items) |*entry| {
         const item = &(entry.* orelse continue);
+        // Calendar definitions are a Host-only capability until the Renderer
+        // contract and editor support them. Preserve them in the Host store.
+        if (!rendererExposes(item.recurrence)) continue;
         if (count != 0) writer.writeByte(',') catch
             return error.SnapshotTooLarge;
         count += 1;
@@ -81,6 +88,7 @@ fn writeItem(
         return error.SnapshotTooLarge;
     writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
     switch (item.recurrence) {
+        .calendar => unreachable, // Excluded by writeProjection.
         .once => |once| writer.print(
             "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
             .{once.at_unix_seconds},
@@ -130,4 +138,42 @@ fn writeItem(
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
+}
+
+test "Renderer projection keeps Host-only calendar definitions out of the current wire" {
+    var store = try state.Store.init(std.testing.allocator, .{ .max_items = 5, .max_projection_bytes = 8192 });
+    defer store.deinit();
+    for (0..5) |index| {
+        _ = try store.create(.{
+            .title = "Schedule",
+            .binding = .{ .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" }, .source_generation = 1, .protocol = .openai_chat_completions },
+            .permission_profile = .approval_required,
+            .input = "Inspect",
+            .recurrence = switch (index) {
+                1 => .{ .once = .{ .at_unix_seconds = 2000 } },
+                3 => .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
+                else => .{ .calendar = .{ .start_at_unix_seconds = 2000, .timezone = .@"Asia/Shanghai", .frequency = .daily } },
+            },
+        }, 1000);
+    }
+    const Text = struct {
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var context: u8 = 0;
+    const text: TextProjection = .{ .context = &context, .write_json_fn = Text.write };
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeProjection(&writer, &store, text);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @embedFile("renderer_projection.fixture"), "\r\n"), writer.buffered());
+    for ([_]u64{ 1, 3, 5 }) |id| {
+        try std.testing.expectEqual(state.TimeZone.@"Asia/Shanghai", store.find(id).?.recurrence.calendar.timezone);
+        try std.testing.expectEqual(@as(?u64, 2000), store.find(id).?.next_run_at_unix_seconds);
+    }
+    try store.delete(2, 1);
+    try store.delete(4, 1);
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeProjection(&writer, &store, text);
+    try std.testing.expectEqualStrings("[]", writer.buffered());
 }

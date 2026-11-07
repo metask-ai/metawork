@@ -321,6 +321,8 @@ Renderer 在发送及等待 Snapshot 时锁定同 Task 的重复选择；模式�
 
 Scheduled Task create/update mutation 的模型字段精确为 `modelSelection: { targetModelRef: { sourceId, modelId }, expectedSourceGeneration, expectedCatalogGeneration }`。Host 精确解析并保存 `ModelRef + source_generation + protocol`；Renderer 不提供 protocol，不携带 selectionRevision 或 execution generation。更新的 modelSelection 必填但可为 null，精确表示保留该 item epoch 下的原绑定；创建只接受非空目标。编辑已有定义须由 item epoch 防并发；非模型编辑保留既有固定绑定，明确改选才采用新的目标证明。每次 occurrence 按该计划自身来源、模型、source generation、当前目录 membership、授权与 protocol 校验；起始偏好不参与校验或 timer。occurrence taskOutcome 接受 `completed | stopped | cancelled | interrupted | failed | dependency_contract_failure | unavailable | null`。
 
+当前 Renderer 的 Scheduled Task recurrence 只开放 `once | interval`。Host-only calendar 定义继续由 Host 保存和执行，不进入 schedules management projection；Bridge 按 id 更新、暂停/恢复、立即运行或删除同样拒绝这些定义，不得通过旧编辑请求将其改存为固定间隔。后续开放日历必须同时接通 typed wire、严格客户端解码与安全编辑。
+
 系统通知通过 SDK 普通 notification command 请求定位真实 Task。Bridge 的 `metawork:open-task` event 精确为 `{ generation, taskId }`，均为非零 canonical decimal u64，只是当前连接的导航意图，不授予 Task/Run mutation authority。Renderer 先刷新 canonical snapshot，再从真实 Task index 定位；旧 connection generation、未知 Task 或 malformed event 不得定位其他 Task或启动 Run。未连接时 Host 只保留最新一个进程内定位意图，连接后交付；它不进入产品历史或 Schedule store，不承诺跨进程通知重放。
 
 Scheduled Task setEnabled response 的 `enabled` 表示本次提交并完成 timer reconciliation 后的实际状态；恢复时发现 binding 已变化或 timer 不可用，可以返回 false。Renderer 必须刷新 canonical snapshot 解释当前状态，不能把请求值当作恢复成功的证据。

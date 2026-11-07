@@ -1487,6 +1487,26 @@ test("Skill catalogs and typed Skill history decode without exposing loader inte
   );
 });
 
+test("Host Schedule projection fixture keeps the current Renderer contract", () => {
+  const scheduled = clone(fixture);
+  Object.assign(scheduled.capabilities, {
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  scheduled.scheduledTasks = JSON.parse(
+    readFileSync(
+      new URL("../src/product/schedule/renderer_projection.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const decoded = decodeWorkbenchSnapshot(scheduled);
+  assert.deepEqual(decoded.scheduledTasks, scheduled.scheduledTasks);
+  assert.deepEqual(decoded.scheduledTasks.map((task) => task.id), ["2", "4"]);
+  assert.deepEqual(decoded.scheduledTasks.map((task) => task.recurrence.kind), ["once", "interval"]);
+});
+
 test("Scheduled Task projection decodes recurrence and occurrence without secrets", () => {
   const scheduled = clone(fixture);
   scheduled.capabilities.scheduledTasks = true;

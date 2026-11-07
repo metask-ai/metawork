@@ -12,6 +12,8 @@ const persistence = @import("product_schedule_persistence");
 const view = @import("product_schedule_view");
 
 pub const Recurrence = state.Recurrence;
+pub const TimeZone = state.TimeZone;
+pub const CalendarFrequency = state.CalendarFrequency;
 pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;
 pub const Definition = state.Definition;
@@ -621,6 +623,12 @@ pub const Runtime = struct {
         return (self.store.find(id) orelse return error.UnknownScheduledTask).epoch;
     }
 
+    pub fn rendererEpoch(self: *Runtime, id: u64) Error!u64 {
+        const item = self.store.find(id) orelse return error.UnknownScheduledTask;
+        if (!view.rendererExposes(item.recurrence)) return error.UnknownScheduledTask;
+        return item.epoch;
+    }
+
     fn validateManual(self: *Runtime, id: u64, expected_epoch: u64) Error!void {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
         if (expected_epoch == 0 or item.epoch != expected_epoch)
@@ -648,11 +656,7 @@ pub const Runtime = struct {
         return .{
             .id = item.id,
             .epoch = item.epoch,
-            .planned_at_unix_seconds = switch (item.recurrence) {
-                .once => planned,
-                .interval => |interval| interval.start_at_unix_seconds +
-                    ((current - interval.start_at_unix_seconds) / interval.every_seconds) * interval.every_seconds,
-            },
+            .planned_at_unix_seconds = (item.recurrence.lastAtOrBefore(current) catch return null) orelse return null,
             .triggered_at_unix_seconds = current,
         };
     }
@@ -2345,6 +2349,42 @@ test "unrelated mutations retain in-process redaction facts" {
     try std.testing.expect(runtime.store.find(first).?.input.redacted);
 }
 
+test "late calendar wake selects one latest local occurrence and advances past the DST fold" {
+    var effects: TestEffects = .{ .now = 1_793_424_600 };
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("calendar", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = effects.now, .timezone = .@"America/New_York", .frequency = .daily } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 1_793_513_400; // Second 01:10, after the first 01:30 has passed.
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    const occurrence = runtime.store.find(id).?.occurrences()[0];
+    try std.testing.expectEqual(@as(u64, 1_793_511_000), occurrence.planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 1_793_601_000), effects.armed_at);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "creation timezone is captured once and survives edits and restart" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("zone", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .@"Asia/Shanghai", .frequency = .daily } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    definition.recurrence.calendar.timezone = .@"Europe/Berlin";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    var bytes: [persistence.max_store_bytes]u8 = undefined;
+    const encoded = try persistence.encode(&bytes, &runtime.store);
+    var restored = try persistence.decode(std.testing.allocator, encoded, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer restored.deinit();
+    try std.testing.expectEqual(TimeZone.@"Asia/Shanghai", restored.find(id).?.created_timezone.?);
+}
+
 test "title-only edit must not replay a consumed timer occurrence" {
     var effects: TestEffects = .{};
     var tasks: TestTasks = .{};
@@ -2409,4 +2449,36 @@ test "consumed one-time schedules stay completed after editing and enabling" {
     effects.now = 200;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "calendar edits and resume respect the consumed absolute boundary" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("calendar", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .UTC, .frequency = .daily } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    try std.testing.expectError(error.UnknownScheduledTask, runtime.rendererEpoch(id));
+    try std.testing.expectEqual(@as(u64, 1), try runtime.epoch(id));
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    definition.title = "renamed";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 86600), effects.armed_at);
+    _ = try runtime.setEnabled(id, 2, false, testBinding(), redaction);
+    effects.now = 150;
+    _ = try runtime.setEnabled(id, 3, true, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 86600), effects.armed_at);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    // An explicit rule change also cannot reuse an already consumed identity.
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 199, .every_seconds = 60 } };
+    effects.now = 150;
+    try runtime.update(id, 4, definition, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 259), effects.armed_at);
+    try std.testing.expectEqual(@as(u64, 5), try runtime.rendererEpoch(id));
 }

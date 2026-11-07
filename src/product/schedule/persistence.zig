@@ -513,6 +513,7 @@ const ItemWire = struct {
     failure_reason: ?[]const u8,
     next_run_at_unix_seconds: ?u64,
     occurrences: []OccurrenceWire,
+    created_timezone: ?[]const u8 = null,
     last_timer_planned_at_unix_seconds: ?u64 = null,
 };
 
@@ -537,6 +538,8 @@ const RecurrenceWire = struct {
     at_unix_seconds: ?u64 = null,
     start_at_unix_seconds: ?u64 = null,
     every_seconds: ?u64 = null,
+    timezone: ?[]const u8 = null,
+    frequency: ?[]const u8 = null,
 };
 
 const OccurrenceWire = struct {
@@ -644,6 +647,10 @@ fn decodeCurrent(
             .next_run_at_unix_seconds = wire.next_run_at_unix_seconds,
             .last_timer_planned_at_unix_seconds = wire.last_timer_planned_at_unix_seconds,
             .occurrences = occurrences[0..wire.occurrences.len],
+            .created_timezone = if (wire.created_timezone) |name|
+                parseEnum(scheduled.TimeZone, name) orelse return error.ScheduledTaskStoreCorrupt
+            else
+                null,
         }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ScheduledTaskStoreCorrupt;
     }
     store.restoreNextId(parsed.value.next_id) catch
@@ -677,6 +684,10 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
     try encodeInput(writer, item.input.borrowed());
     try writer.writeAll(",\"recurrence\":");
     try encodeRecurrence(writer, item.recurrence);
+    if (item.created_timezone) |zone| {
+        try writer.writeAll(",\"created_timezone\":");
+        try jsonString(writer, @tagName(zone));
+    }
     if (item.last_timer_planned_at_unix_seconds) |last|
         try writer.print(",\"last_timer_planned_at_unix_seconds\":{d}", .{last});
     try writer.print(
@@ -741,6 +752,10 @@ fn encodeInput(writer: *std.Io.Writer, input: []const u8) !void {
 
 fn encodeRecurrence(writer: *std.Io.Writer, recurrence: scheduled.Recurrence) !void {
     switch (recurrence) {
+        .calendar => |rule| try writer.print(
+            "{{\"kind\":\"calendar\",\"start_at_unix_seconds\":{d},\"timezone\":\"{s}\",\"frequency\":\"{s}\"}}",
+            .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) },
+        ),
         .once => |once| try writer.print(
             "{{\"kind\":\"once\",\"at_unix_seconds\":{d}}}",
             .{once.at_unix_seconds},
@@ -761,6 +776,17 @@ fn decodeInput(wire: InputWire) Error![]const u8 {
 }
 
 fn decodeRecurrence(wire: RecurrenceWire) Error!scheduled.Recurrence {
+    if (std.mem.eql(u8, wire.kind, "calendar")) {
+        if (wire.at_unix_seconds != null or wire.every_seconds != null) return error.ScheduledTaskStoreCorrupt;
+        const result: scheduled.Recurrence = .{ .calendar = .{
+            .start_at_unix_seconds = wire.start_at_unix_seconds orelse return error.ScheduledTaskStoreCorrupt,
+            .timezone = parseEnum(scheduled.TimeZone, wire.timezone orelse return error.ScheduledTaskStoreCorrupt) orelse return error.ScheduledTaskStoreCorrupt,
+            .frequency = parseEnum(scheduled.CalendarFrequency, wire.frequency orelse return error.ScheduledTaskStoreCorrupt) orelse return error.ScheduledTaskStoreCorrupt,
+        } };
+        result.validate() catch return error.ScheduledTaskStoreCorrupt;
+        return result;
+    }
+    if (wire.timezone != null or wire.frequency != null) return error.ScheduledTaskStoreCorrupt;
     if (std.mem.eql(u8, wire.kind, "once")) {
         if (wire.start_at_unix_seconds != null or wire.every_seconds != null)
             return error.ScheduledTaskStoreCorrupt;
@@ -1233,9 +1259,36 @@ test "Schedule decoder rejects cursors outside the saved recurrence" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Decode.check, .{bytes});
 }
 
+test "calendar definition and cursor round trip without changing fixed interval semantics" {
+    var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer store.deinit();
+    const id = try store.create(.{
+        .title = "calendar",
+        .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+        .permission_profile = .approval_required,
+        .input = "inspect",
+        .recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_793_424_600, .timezone = .@"America/New_York", .frequency = .daily } },
+    }, 1_793_424_601);
+    var buffer: [max_store_bytes]u8 = undefined;
+    const bytes = try encode(&buffer, &store);
+    var restored = try decode(std.testing.allocator, bytes, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer restored.deinit();
+    const item = restored.find(id).?;
+    try std.testing.expectEqual(scheduled.TimeZone.@"America/New_York", item.recurrence.calendar.timezone);
+    try std.testing.expectEqual(scheduled.CalendarFrequency.daily, item.recurrence.calendar.frequency);
+    try std.testing.expectEqual(@as(?u64, 1_793_511_000), item.next_run_at_unix_seconds);
+    const fixed: scheduled.Recurrence = .{ .interval = .{ .start_at_unix_seconds = 1_793_424_600, .every_seconds = 86400 } };
+    try std.testing.expectEqual(@as(?u64, 1_793_597_400), try fixed.firstStrictlyAfter(1_793_511_000));
+    try std.testing.expectEqual(@as(?u64, 1_793_601_000), try item.recurrence.firstStrictlyAfter(1_793_511_000));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "daily", .timezone = "Unknown/Zone" }));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "monthly", .timezone = "UTC" }));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .every_seconds = 86400, .frequency = "daily", .timezone = "UTC" }));
+}
+
 test "timer consumption survives history eviction and a paused-store restart" {
     for ([_]scheduled.Recurrence{
         .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } },
+        .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .UTC, .frequency = .daily } },
     }) |recurrence| {
         var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
         defer store.deinit();

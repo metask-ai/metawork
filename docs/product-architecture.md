@@ -222,7 +222,7 @@ Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Pr
 
 完整 resolve 的瞬态拒绝只暂停该定义的进程内 timer admission，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划；已提交的来源/授权事实刷新或用户明确编辑后重新检查。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。中断恢复必须处理全部未收口 claim；恢复准备失败也不得重新开放 timer。
 
-自动 occurrence 的消费边界必须独立于有界历史持久化并保持单调；编辑、规则变更、暂停恢复及重启不得让未来游标回到已消费边界以内，已消费的单次计划不能因改名或恢复再次计时。旧记录缺少独立边界时，只依据仍保留的 timer occurrence 恢复边界，并纠正旧编辑/恢复路径回退的游标，不能据此丢弃定义。平台相对 timer 必须定期复核 wall clock。
+日历时间的产品语义以[产品需求](requirements.md#511-定时任务)为准。Schedule 以 Gregorian 本地时间计算，支持 Unix seconds `1..253402300799`（截至 9999 年）；各平台使用同一 checksum-pinned IANA 数据和时间库，不读取系统规则计算计划，也不从系统时区推断或伪造创建 identity。canonical schema 1 以可选创建时区和独立 calendar recurrence 扩展，原有 once/interval 的字段及语义保持有效。自动 occurrence 的消费边界必须独立于有界历史持久化并保持单调；编辑、规则变更、暂停恢复及重启不得让未来游标回到已消费边界以内，已消费的单次计划不能因改名或恢复再次计时。旧记录缺少独立边界时，只依据仍保留的 timer occurrence 恢复边界，并纠正旧编辑/恢复路径回退的游标，不能据此丢弃定义。平台相对 timer 必须定期复核 wall clock。
 
 Schedule persistence recovery 由 Schedule owner 决策；旧格式自动 hard cut 时先保留 exact quarantine，再安装空当前 store。当前格式的显式恢复校验全局 snapshot revision，先stage并sync当前内存候选，再保留旧canonical并安装；中断证据不丢失，再次恢复收口精确pending artifacts。只有提交确认后重新开放mutation与timer；quarantine不进入decoder或自动迁移。
 

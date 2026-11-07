@@ -13,6 +13,14 @@
             .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
             .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
         },
+        .tzdata = .{
+            .url = "https://files.pythonhosted.org/packages/7a/29/6a1391d31cd00ff9e927215a224a880e1e84e826b64ba80a499e51c074d8/tzdata-2026.6.tar.gz",
+            .hash = "N-V-__8AAEB9CQC-FKMOOeyime_ctIqr5O1qK1U_w7HjLvwp",
+        },
+        .tempora = .{
+            .url = "https://codeload.github.com/bcrist/tempora/tar.gz/7a7fa70922b8207680b926569f3e6e220ab96551",
+            .hash = "tempora-0.6.5-GTyeDYMTFwCVQGXswAbgF3wadFxGpL2x5TrHQb3uAguH",
+        },
     },
     .paths = .{
         "build.zig",

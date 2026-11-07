@@ -340,6 +340,8 @@ pub const NewTaskModelSelectionInput = struct {
 };
 
 pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
+pub const ScheduledTaskTimeZone = product_schedule.TimeZone;
+pub const ScheduledTaskCalendarFrequency = product_schedule.CalendarFrequency;
 
 pub const ScheduledTaskBindingInput = product_schedule.ModelBinding;
 
@@ -349,6 +351,7 @@ pub const ScheduledTaskDefinitionInput = struct {
     input: []const u8,
     recurrence: ScheduledTaskRecurrence,
     permission_profile: PermissionProfile,
+    timezone: ?ScheduledTaskTimeZone = null,
 };
 
 pub const WorkspaceAuthorization = product_workspace.Authorization;
@@ -5507,6 +5510,10 @@ pub const Runtime = struct {
         return self.schedule.epoch(id);
     }
 
+    pub fn rendererScheduledTaskEpoch(self: *Runtime, id: u64) Error!u64 {
+        return self.schedule.rendererEpoch(id);
+    }
+
     pub fn runScheduledTaskNow(
         self: *Runtime,
         id: u64,
@@ -8663,7 +8670,7 @@ pub const Runtime = struct {
         try input.recurrence.validate();
         const instruction = std.mem.trim(u8, input.input, " \t\r\n");
         if (instruction.len == 0 or instruction.len > self.limits.max_user_message_bytes or !std.unicode.utf8ValidateSlice(instruction)) return error.InvalidScheduledTaskInput;
-        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = input.recurrence };
+        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = input.recurrence, .timezone = input.timezone };
     }
 
     fn validateScheduledBinding(self: *Runtime, expected: ScheduledTaskBindingInput) Error!void {

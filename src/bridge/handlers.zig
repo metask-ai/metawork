@@ -1060,6 +1060,11 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
         error.InvalidBridgePayload,
         parseScheduledTaskRecurrence(extra.value),
     );
+    var host_only = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"calendar","startAtUnixSeconds":"1700000000","timezone":"Asia/Shanghai","frequency":"daily"}
+    , .{});
+    defer host_only.deinit();
+    try std.testing.expectError(error.InvalidBridgePayload, parseScheduledTaskRecurrence(host_only.value));
 }
 
 test "Scheduled Task payload rejects Workspace and Skill configuration" {
