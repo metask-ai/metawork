@@ -21,6 +21,58 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "canonical Core accepts Agent abort from its starting callback" {
+    const Consumer = struct {
+        runtime: *lifecycle.Runtime = undefined,
+        session: *lifecycle.Session = undefined,
+        starting: bool = false,
+        fn notify(context: ?*anyopaque) lifecycle.EventReadyNotification {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            while (self.runtime.takeEvent()) |value| {
+                var event = value;
+                defer event.deinit();
+                if (event.event.value == .known and event.event.value.known == .run_state and
+                    event.event.value.known.run_state.phase == .starting)
+                {
+                    self.starting = true;
+                    self.session.requestTermination(event.run_id, .{ .interrupted = .user_cancel }) catch unreachable;
+                }
+            }
+            return .scheduled;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var consumer: Consumer = .{};
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .event_ready_notifier = .{ .context = &consumer, .notify_fn = Consumer.notify } });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    consumer.runtime = runtime;
+    const session = try runtime.createSession(.{
+        .model_binding = .{ .target = .{ .provider_id = "canonical-fixture", .protocol = .anthropic_messages, .base_url = "http://127.0.0.1:1/v1/messages", .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-unused-key" },
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+    });
+    consumer.session = session;
+    const id = try session.prepareRun(.{ .text = "Cancel at admission before any provider request." });
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    run.deinit();
+    defer terminal.deinit();
+    try std.testing.expect(consumer.starting);
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(.ok, terminal.abort_status.?);
+    try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+    try std.testing.expectEqual(.reusable, terminal.session_disposition_at_completion);
+    try session.close(.session_close);
+}
+
 test "Agent owns output pairing while accepting unframed text gaps and continued tails" {
     const begin = "{\"output_segment_begin\":{\"index\":8,\"turn\":1,\"group\":3}}";
     const text = "{\"text_chunk\":\"ok\"}";
@@ -180,6 +232,95 @@ test "Stop and close deliver once at admission after stale or preflight refusal"
             try session.close(.session_close);
         }
     }
+}
+
+test "starting defers its single abort retry until the first abort returns" {
+    const Stop = struct {
+        fn request(session: *lifecycle.Session, id: u64) void {
+            session.requestTermination(id, .{ .interrupted = .user_cancel }) catch unreachable;
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    var admission = fixture.CallbackSignal{};
+    var abort_gate = fixture.CallbackSignal{};
+    admission.arm();
+    abort_gate.arm();
+    fake_core.admission_gate = &admission;
+    fake_core.abort_gate = &abort_gate;
+    fake_core.forced_abort_status = wire.STATUS_INVALID_STATE;
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "serialized admission cancellation" });
+    var work = ImageRunWork{ .session = session, .id = id };
+    {
+        const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+        defer worker.join();
+        defer admission.markFinished();
+        admission.waitUntilEntered();
+        const stopper = try std.Thread.spawn(.{}, Stop.request, .{ session, id });
+        defer stopper.join();
+        defer abort_gate.markFinished();
+        abort_gate.waitUntilEntered();
+        admission.markFinished();
+        var pending = false;
+        for (0..5000) |_| {
+            session.mutex.lockUncancelable(std.testing.io);
+            pending = session.abort_retry_pending;
+            session.mutex.unlock(std.testing.io);
+            if (pending) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(pending);
+        fake_core.lock();
+        const calls = fake_core.abort_calls;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 1), calls);
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(.ok, terminal.abort_status.?);
+    try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+    try std.testing.expectEqual(@as(usize, 2), fake_core.abort_calls);
+    try session.close(.session_close);
+}
+
+test "closing validates UI payloads and retains real faults without undoing close" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "validate even during close" });
+    var work = ImageRunWork{ .session = session, .id = id };
+    {
+        const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+        defer worker.join();
+        defer fake_core.releaseControlled();
+        fake_core.waitRunEntered();
+        const closer = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+        defer closer.join();
+        defer fake_core.releaseControlled();
+        try session.waitForState(.closing);
+        const identity = imageIdentity(session, id);
+        var response: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
+        try std.testing.expectEqual(wire.UI_FATAL, lifecycle.Session.onUiRequest(session, &identity, sdk.bytesView("{}"), &response));
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(lifecycle.HostFailure{ .callback_failure = .ui }, terminal.first_host_failure.?);
+    try std.testing.expect(terminal.controlled_ui_close == null);
+    try std.testing.expectEqual(.closing, terminal.session_disposition_at_completion);
+    try std.testing.expectEqual(.closed, session.snapshot().state);
 }
 
 test "Host failure remains independent when Stop occupied the control slot first" {

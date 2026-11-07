@@ -38,6 +38,74 @@ const Provider = struct {
     }
 };
 
+test "canonical finalizing Stop can abort while terminal Stop preserves authentication failure" {
+    const Consumer = struct {
+        runtime: *agent.Runtime = undefined,
+        session: *agent.Session = undefined,
+        phase: agent.RunStatePhase,
+        requested: bool = false,
+        fn notify(context: ?*anyopaque) agent.EventReadyNotification {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            while (self.runtime.takeEvent()) |value| {
+                var event = value;
+                defer event.deinit();
+                if (!self.requested and event.event.value == .known and event.event.value.known == .run_state and
+                    event.event.value.known.run_state.phase == self.phase)
+                {
+                    self.requested = true;
+                    self.session.requestTermination(event.run_id, .{ .interrupted = .user_cancel }) catch unreachable;
+                }
+            }
+            return .scheduled;
+        }
+    };
+    for ([_]agent.RunStatePhase{ .finalizing, .failed }) |phase| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(root);
+        var provider = try Provider.start(root, "boundary-auth");
+        defer provider.deinit();
+        var consumer: Consumer = .{ .phase = phase };
+        const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .event_ready_notifier = .{ .context = &consumer, .notify_fn = Consumer.notify } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        consumer.runtime = runtime;
+        const session = try runtime.createSession(.{
+            .model_binding = .{ .target = .{ .provider_id = "boundary-fixture", .protocol = .anthropic_messages, .base_url = provider.endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-boundary-key" },
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
+            .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+            .canonical_user_home = root,
+        });
+        consumer.session = session;
+        const id = try session.prepareRun(.{ .text = "Exercise authentication failure and Stop ordering." });
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        try std.testing.expect(consumer.requested);
+        try std.testing.expect(terminal.failure == null);
+        const decision = task_api.testing.policy_module.classifyAgentTerminal(&terminal);
+        if (phase == .finalizing) {
+            try std.testing.expectEqual(.ok, terminal.abort_status.?);
+            try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+            try std.testing.expect(terminal.model_error == null);
+            try std.testing.expectEqual(.cancelled, decision.outcome);
+        } else {
+            try std.testing.expectEqual(.too_late, terminal.abort_status.?);
+            try std.testing.expectEqual(.api_error, terminal.stop_reason.?);
+            try std.testing.expectEqual(.authentication, terminal.model_error.?.category);
+            try std.testing.expectEqual(.failed, decision.outcome);
+            try std.testing.expectEqual(.provider_failure, decision.cause.?);
+        }
+        try std.testing.expectEqual(.reusable, terminal.session_disposition_at_completion);
+        try session.close(.session_close);
+    }
+}
+
 const Vault = struct {
     key: [64]u8 = @splat(0),
     len: usize = 0,
@@ -149,7 +217,6 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
                 try std.testing.expect(run.event_stream_finalized);
                 try std.testing.expect(run.first_event_rejection == null);
-                try std.testing.expect(run.terminal_drain_rejection == null);
                 try std.testing.expectEqual(@as(usize, 256), std.mem.count(u8, run.assistant.list.items, "Synthetic stream chunk. "));
                 try std.testing.expectEqual(state.AssistantOutputKind.final, run.assistant_output_kind.?);
                 try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
@@ -160,7 +227,6 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(run.event_stream_finalized);
                 try std.testing.expectEqual(state.EventProjectionFailure.consumer_rejected, run.event_projection_failure.?);
                 try std.testing.expect(run.first_event_rejection == null);
-                try std.testing.expect(run.terminal_drain_rejection == null);
                 try std.testing.expect(run.open_output_segment == null);
                 try std.testing.expect(std.mem.endsWith(u8, run.assistant.list.items, "Long run completed."));
                 try std.testing.expectEqual(agent.SessionDisposition.reusable, state.terminalPayload(run).?.session_disposition_at_completion);
@@ -179,18 +245,16 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(terminal.cause == .provider_failure);
                 try std.testing.expect(run.event_stream_finalized);
                 try std.testing.expect(run.first_event_rejection == null);
-                try std.testing.expect(run.terminal_drain_rejection == null);
                 return;
             }
-            if (run.first_event_rejection != null or run.terminal_drain_rejection != null) {
-                std.debug.print("Office pipeline mode={s} first={any} drain={any} terminal={any}\n", .{ mode, run.first_event_rejection, run.terminal_drain_rejection, terminal });
+            if (run.first_event_rejection != null) {
+                std.debug.print("Office pipeline mode={s} first={any} terminal={any}\n", .{ mode, run.first_event_rejection, terminal });
             }
             const expected_outcome: task_api.RunOutcome = if (std.mem.eql(u8, mode, "cancel")) .cancelled else if (std.mem.eql(u8, mode, "stream-interruption")) .failed else .completed;
             try std.testing.expectEqual(expected_outcome, terminal.outcome);
             try std.testing.expect(run.event_stream_finalized);
             try std.testing.expect(run.output_segment_protocol_seen);
             try std.testing.expect(run.first_event_rejection == null);
-            try std.testing.expect(run.terminal_drain_rejection == null);
             try std.testing.expect(run.open_output_segment == null);
             if (std.mem.eql(u8, mode, "stream-interruption")) {
                 try std.testing.expect(run.assistant_output_kind != .final);

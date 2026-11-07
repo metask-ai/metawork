@@ -1,6 +1,6 @@
 # AgentCore 集成边界完善方案
 
-日期：2026-11-07。状态：评审通过，待实施。当前仅完成方案整理，代码修改和运行验收尚未开始。
+日期：2026-11-07。状态：A–D 已实施并分阶段提交；相关回归、正式 Native 图、strict check 和当前 Windows canonical 专项已验证。全仓库 Node 的范围外失败单独列于文末，不计为通过。
 
 Agent 是 MetaWork 对 Metask AgentCore 的封装与集成边界。本次先修复 Stop 投递与归因、Session 技术状态收口，再拆开输出协议接受与 Product 内容保留。Product 继续拥有产品终态和恢复策略；SDK 类型继续复用，不建立平行执行模型。
 
@@ -407,3 +407,13 @@ fork 场景必须使用实际可被模型调用、声明 context fork 的 Skill�
 - 用量四字段原子更新，InvalidUsage 按 Host 失败分类；工具 digest 和 receipt 保持原机制，没有新迁移层。
 - Run 和 compact 都退出以 raw status 存在性驱动本方案涉及的业务分支。
 - 当前平台 canonical 场景、最小充分回归、正式验证和对应真源一起完成；静态审查与运行证据分别记录。
+
+## 14 实施与验证记录
+
+实施分支为 `feat/agentcore-integration-boundary`。A1（`80a1fcdd`）完成取消投递与真实 Host 故障归因；A2（`ec3db70d`）完成有限终态与健康交付；B（`4bcc144f`）完成 Agent 输出校验和 Product 合法内容保留；C（`4950dab5`）完成用量原子累计与本地错误分类。未升级 SDK/bundle、ABI、wire、schema 或 checkpoint 格式，没有工具 key 搬迁。
+
+当前 Windows canonical Core 已通过实际 fork、pending 输入锚点、continued 后取消/下一流失败/max_turns、Session 复用和冷历史；实际 starting callback 中 abort、finalizing 接受 Stop 与 terminal TOO_LATE 分别验证。checkpoint 失效覆盖终态与后处理两种通知顺序。最终自查补齐 closing 中先校验 UI 再受控拒绝、Run 收尾不覆盖已开始的 closing，以及 callback lease 覆盖 fatal 记录。移除失去写入方的 Product terminal-drain 协议诊断链，保留历史格式中的旧分类。模型错误专项驱动已对齐现有菜单/诊断对话框，未修改 Renderer 产品实现。
+
+运行日志保留于 `.zig-cache/agentcore-boundary-*.log`，边界场景快照位于 `.zig-cache/agentcore-boundary-evidence/agent-boundary.json`。这些可重现的自动化记录不进入长期平台证据账本。
+
+正式 `npm test` 的 Node 阶段出现四项范围外失败：两个 dev 用例受既有 5173 端口占用影响；另两项为未修改的 Renderer 依赖方向和 Task MCP 建议按钮用例。后两项独立重跑仍失败，相关 frontend 与测试相对实施前 revision 没有差异；未修改其 guard、实现或既有开发进程。首轮 Native 暴露的两处旧 Product 状态预期已按本方案修正。最终正式 Native 图通过（253/253 steps，1840 passed / 10 skipped），`npm run check` 通过；Windows 输出交付、Agent 边界、模型错误三个专项及 Agent/Office 针对回归通过。`npm test` 整体仍因上述四项 Node 失败不通过，不绕过或弱化 guard。

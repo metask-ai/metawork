@@ -240,12 +240,6 @@ pub const EventRejection = struct {
     input_adoption: ?struct { id: u64, sequence: u32, turn: u32 },
 };
 
-pub const DrainRejectionDiagnostic = struct {
-    task_id: u64,
-    run_id: u64,
-    observed: OutputProtocolObservation,
-};
-
 /// A bounded, redaction-safe permission decision summary. It contains no raw
 /// arguments or response and may be attached to Run and UI occurrence history.
 pub const PermissionSummary = struct {
@@ -993,8 +987,6 @@ pub const RunRecord = struct {
     event_pipeline_failed: bool = false,
     first_event_rejection: ?EventRejection = null,
     event_rejection_reported: bool = false,
-    terminal_drain_rejection: ?OutputProtocolObservation = null,
-    drain_rejection_reported: bool = false,
     terminal_diagnostic: []u8,
     /// Reserved before execution; publication only copies into this owned value.
     /// Restored history allocates it only when a model error is present.
@@ -1030,7 +1022,8 @@ pub const RunRecord = struct {
     }
 
     /// Counts canonical output slots, including empty classified slots and
-    /// redaction placeholders, but never a credential-sensitive held suffix.
+    /// redaction placeholders. Pending unframed text reserves its slot even
+    /// while a credential-sensitive suffix is withheld.
     pub fn outputPartCount(self: *const RunRecord) u32 {
         const tail = self.assistant_output_kind != null or
             self.output_continued.committed_len != 0 or
@@ -1628,13 +1621,6 @@ pub fn recordEventProjectionFailure(run: *RunRecord) bool {
     if (run.event_projection_failure != null) return false;
     run.noteProjectionChange();
     run.event_projection_failure = .consumer_rejected;
-    return true;
-}
-
-pub fn recordDependencyContractFailure(run: *RunRecord) bool {
-    if (run.event_projection_failure == .dependency_contract_failure) return false;
-    run.noteProjectionChange();
-    run.event_projection_failure = .dependency_contract_failure;
     return true;
 }
 
@@ -2455,7 +2441,7 @@ test "compact projection withholds worker terminal until main-thread observation
     try std.testing.expectEqual(@as(u64, 120), observed.terminal.?.before_context_tokens);
 }
 
-test "input reading anchors count safe output slots without exposing held suffixes" {
+test "input reading anchors reserve unframed slots without exposing held suffixes" {
     var ends = [_]u64{ 0, 0 };
     var run: RunRecord = .{
         .id = 1,
@@ -2472,9 +2458,9 @@ test "input reading anchors count safe output slots without exposing held suffix
     };
     defer run.output_segment.list.deinit(std.testing.allocator);
     try run.output_segment.list.appendSlice(std.testing.allocator, "held credential prefix");
-    try std.testing.expectEqual(@as(u32, 0), run.outputPartCount());
+    try std.testing.expectEqual(@as(u32, 1), run.outputPartCount());
     run.commentary_count = 2; // Sanitized empty groups still own their slots.
-    try std.testing.expectEqual(@as(u32, 2), run.outputPartCount());
+    try std.testing.expectEqual(@as(u32, 3), run.outputPartCount());
     run.output_segment.committed_len = 4;
     try std.testing.expectEqual(@as(u32, 3), run.outputPartCount());
     run.output_segment.committed_len = 0;
@@ -2710,7 +2696,7 @@ test "event drain advances the final commentary boundary with the committed suff
     );
 }
 
-test "event drain distinguishes local missing events from genuine unresolved segments" {
+test "event drain does not infer Core protocol faults from local retained state" {
     for ([_]bool{ false, true }) |local_gap| {
         var commentary_ends: [0]u64 = .{};
         var runs = [_]?RunRecord{.{
@@ -2767,18 +2753,9 @@ test "event drain distinguishes local missing events from genuine unresolved seg
             null,
             null,
         ));
-        try std.testing.expectEqual(
-            if (local_gap) EventProjectionFailure.consumer_rejected else EventProjectionFailure.dependency_contract_failure,
-            run.event_projection_failure.?,
-        );
-        try std.testing.expectEqual(
-            if (local_gap) RunOutcome.completed else RunOutcome.dependency_contract_failure,
-            productTerminalFacts(run).?.outcome,
-        );
+        try std.testing.expectEqual(if (local_gap) @as(?EventProjectionFailure, .consumer_rejected) else null, run.event_projection_failure);
+        try std.testing.expectEqual(RunOutcome.completed, productTerminalFacts(run).?.outcome);
         try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
-        if (local_gap) {
-            try std.testing.expect(run.terminal_drain_rejection == null);
-        } else try std.testing.expectEqual(@as(u64, 5), run.terminal_drain_rejection.?.open.?.bytes);
         try std.testing.expect(run.first_event_rejection == null);
     }
 }

@@ -215,7 +215,7 @@ export async function runModelErrorVertical({
     if(skip){skip.click();return false;}
     const row=[...document.querySelectorAll('.task-list-item')].find(item=>item.dataset.taskId===${JSON.stringify(selectedTaskId)});
     if(!row)return false; if(row.getAttribute('aria-current')!=='page'){row.click();return false;}
-    return !!document.querySelector('.run-diagnostics');
+    return !!document.querySelector('button.run-options');
   })()`),
       timeout,
       "Renderer displays the selected real failed Run",
@@ -233,6 +233,24 @@ export async function runModelErrorVertical({
           : {}),
       });
   };
+  const openRunMenu = async () => {
+    await webview.evaluate(
+      "document.querySelector('button.run-options').scrollIntoView({block:'center'});document.querySelector('button.run-options').focus()",
+    );
+    await key("Enter", "Enter", 13);
+    await poll(
+      () => webview.evaluate("!!document.querySelector('[role=menuitem]')"),
+      timeout,
+      "keyboard opens Run actions",
+    );
+  };
+  const chooseRunAction = async (pattern) => {
+    await openRunMenu();
+    await webview.evaluate(
+      `(() => {const item=[...document.querySelectorAll('[role=menuitem]')].find(item=>new RegExp(${JSON.stringify(pattern)}).test(item.textContent));if(!item)throw new Error('Run action missing');item.focus();})()`,
+    );
+    await key("Enter", "Enter", 13);
+  };
   try {
     await webview.send("Page.bringToFront");
     await webview.send("Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -243,14 +261,11 @@ export async function runModelErrorVertical({
       ),
       true,
     );
-    await webview.evaluate(
-      "document.querySelector('.run-diagnostics>summary').scrollIntoView({block:'center'});document.querySelector('.run-diagnostics>summary').focus()",
-    );
-    await key("Enter", "Enter", 13);
+    await chooseRunAction("错误详情|View run details");
     console.log(
       "Model-error keyboard observation:",
       await webview.evaluate(
-        `(() => ({focus:document.activeElement?.tagName, open:document.querySelector('.run-diagnostics')?.open, mounted:!!document.querySelector('.model-error-message')}))()`,
+        `(() => ({focus:document.activeElement?.tagName, open:!!document.querySelector('.run-diagnostics[role=dialog]'), mounted:!!document.querySelector('.model-error-message')}))()`,
       ),
     );
     await poll(
@@ -278,7 +293,7 @@ export async function runModelErrorVertical({
         );
         assert.equal(
           await webview.evaluate(
-            "(() => {const el=document.querySelector('.run-diagnostics'),r=el.getBoundingClientRect();return el.scrollWidth<=el.clientWidth+1 && r.left>=0 && r.right<=innerWidth+1 && el.querySelector('summary').getBoundingClientRect().height>=44;})()",
+            "(() => {const el=document.querySelector('.run-diagnostics'),r=el.getBoundingClientRect();return el.scrollWidth<=el.clientWidth+1 && r.left>=0 && r.right<=innerWidth+1 && el.querySelector('button').getBoundingClientRect().height>=32;})()",
           ),
           true,
         );
@@ -292,14 +307,11 @@ export async function runModelErrorVertical({
         );
       }
     }
-    await webview.evaluate(
-      "document.querySelector('.run-diagnostics>summary').focus()",
-    );
-    await key("Enter", "Enter", 13);
+    await key("Escape", "Escape", 27);
     await poll(
       () => webview.evaluate("!document.querySelector('.model-error-message')"),
       timeout,
-      "keyboard collapse unmounts detail",
+      "keyboard closes dialog and unmounts detail",
     );
     await webview.evaluate(`(() => {
       const button=[...document.querySelectorAll('.run-terminal-actions button')].find(item=>/打开模型设置|Open model settings/.test(item.textContent));
@@ -307,10 +319,7 @@ export async function runModelErrorVertical({
     })()`);
     assert.equal(provider.served, servedBefore + 1);
     await key("Escape", "Escape", 27);
-    await webview.evaluate(`(() => {
-      const button=[...document.querySelectorAll('.run-terminal-actions button')].find(item=>/填回输入框|Copy to input box/.test(item.textContent));
-      if(!button || button.disabled)throw new Error('prepare retry missing');button.click();
-    })()`);
+    await chooseRunAction("填回输入框|Copy to input box");
     await poll(
       () =>
         webview.evaluate(
@@ -377,9 +386,7 @@ export async function runModelErrorVertical({
   webview = await connect();
   try {
     await selectTask();
-    await webview.evaluate(
-      "document.querySelector('.run-diagnostics>summary').click()",
-    );
+    await chooseRunAction("错误详情|View run details");
     await poll(
       () =>
         webview.evaluate(
@@ -388,6 +395,7 @@ export async function runModelErrorVertical({
       timeout,
       "cold history details remain visible",
     );
+    await key("Escape", "Escape", 27);
   } finally {
     webview.close();
   }
@@ -473,6 +481,15 @@ export async function runModelErrorVertical({
   webview = await connect();
   try {
     await selectTask(paymentTaskId);
+    await openRunMenu();
+    assert.equal(
+      await webview.evaluate(
+        "[...document.querySelectorAll('[role=menuitem]')].some(item=>/填回输入框|Copy to input box/.test(item.textContent))",
+      ),
+      true,
+    );
+    await key("Escape", "Escape", 27);
+
     for (const width of [1320, 390]) {
       await resize(width, 900);
       for (const theme of ["light", "dark"]) {
@@ -485,10 +502,10 @@ export async function runModelErrorVertical({
         const observation = await webview.evaluate(`(() => {
           const notice=document.querySelector('.run-terminal-activity'), r=notice.getBoundingClientRect();
           const settings=notice.querySelector('button[data-primary="true"]');
-          const retry=notice.querySelector('button[data-primary="false"]');
+          const retry=document.querySelector('button.run-options');
           return {text:notice.textContent, notices:document.querySelectorAll('.run-terminal-activity').length,
             fits:notice.scrollWidth<=notice.clientWidth+1 && r.left>=0 && r.right<=innerWidth+1,
-            controls:!!settings && !!retry && [settings,retry].every(item=>item.getBoundingClientRect().height>=44),
+            controls:!!settings && !!retry && settings.getBoundingClientRect().height>=44 && retry.getBoundingClientRect().height>=32,
             detailMounted:!!document.querySelector('.model-error-message'),
             fileWarning:[...document.querySelectorAll('[role=status]')].some(item=>/未能完整确认|could not fully verify/i.test(item.textContent))};
         })()`);

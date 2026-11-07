@@ -6991,16 +6991,9 @@ pub const Runtime = struct {
             finished_at_unix_ms,
         );
         if (changed) {
-            self.task_runtime.visitTerminalDrainRejections(self, logTerminalDrainRejection);
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
-    }
-
-    fn logTerminalDrainRejection(_: *anyopaque, diagnostic: product_task.DrainRejectionDiagnostic) void {
-        std.log.warn("task.terminal_drain_rejection task_id={d} run_id={d} core_manifest_sha256={s} facts={any}", .{
-            diagnostic.task_id, diagnostic.run_id, lifecycle.core_manifest_sha256, diagnostic.observed,
-        });
     }
 
     // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.

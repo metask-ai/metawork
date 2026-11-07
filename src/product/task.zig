@@ -40,7 +40,6 @@ pub const OwnedImageExecution = state.OwnedImageExecution;
 pub const OwnedFileDelivery = state.OwnedFileDelivery;
 pub const RunError = runtime.RunError;
 pub const EventRejection = state.EventRejection;
-pub const DrainRejectionDiagnostic = state.DrainRejectionDiagnostic;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const PermissionChoice = runtime.PermissionChoice;
 pub const UiResponse = runtime.UiResponse;

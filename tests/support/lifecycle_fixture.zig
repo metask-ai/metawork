@@ -449,6 +449,7 @@ pub const FakeCore = struct {
     forced_abort_status: ?u32 = null,
     /// Stops the Host/Core handoff before admission, without timing assumptions.
     admission_gate: ?*CallbackSignal = null,
+    abort_gate: ?*CallbackSignal = null,
     forced_compact_status: ?u32 = null,
     forced_compact_abort_status: ?u32 = null,
     forced_compact_outcome: ?u32 = null,
@@ -2607,7 +2608,13 @@ pub fn sessionAbort(
     fake_core.last_abort_reason = reason;
     const forced_status = fake_core.forced_abort_status;
     fake_core.forced_abort_status = null;
+    const gate = fake_core.abort_gate;
+    fake_core.abort_gate = null;
     fake_core.unlock();
+    if (gate) |value| {
+        _ = CallbackSignal.notify(value);
+        value.waitUntilFinished();
+    }
     if (forced_status) |status| {
         diagnostic(out_error);
         return status;

@@ -4390,19 +4390,6 @@ pub const Runtime = struct {
         return rejection;
     }
 
-    pub fn visitTerminalDrainRejections(self: *Runtime, context: *anyopaque, visit: *const fn (*anyopaque, task_state.DrainRejectionDiagnostic) void) void {
-        for (self.tasks) |entry| {
-            const task = entry orelse continue;
-            for (task.durable.runs) |*slot| {
-                const run = &(slot.* orelse continue);
-                if (run.drain_rejection_reported) continue;
-                const observed = run.terminal_drain_rejection orelse continue;
-                run.drain_rejection_reported = true;
-                visit(context, .{ .task_id = task.durable.id, .run_id = run.id, .observed = observed });
-            }
-        }
-    }
-
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {

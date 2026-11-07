@@ -2198,6 +2198,7 @@ pub const Session = struct {
             while (self.active_callback_refs != 0) self.wait();
         }
         while (self.abort_calls_in_progress != 0) self.wait();
+        const closing = self.state == .closing;
         var completed_input = self.run_input.?;
         self.run_input = null;
         completed_input.deinit(self.agent_runtime.allocator);
@@ -2311,6 +2312,7 @@ pub const Session = struct {
         } else {
             self.input_counts = .{ .accepted = result.input_accepted_count, .adopted = result.input_adopted_count };
         }
+        if (closing) self.state = .closing;
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
@@ -2573,7 +2575,10 @@ pub const Session = struct {
         var diagnostic = emptyOwnedBytes();
         defer releaseOwned(self.agent_runtime.api, &diagnostic);
         const code = self.agent_runtime.api.sessionControl().describe()(self.raw, &encoded, &diagnostic);
-        if (code == wire.STATUS_BUSY and encoded.ptr == null and encoded.len == 0) return;
+        if (code == wire.STATUS_BUSY and encoded.ptr == null and encoded.len == 0) {
+            std.log.debug("agent.run_health_confirmation session_id={d} run_id={d} result=busy_unconfirmed", .{ self.id, self.active_run_id });
+            return;
+        }
         if (code != wire.STATUS_OK) {
             self.state = .poisoned;
             return;
@@ -3034,13 +3039,26 @@ pub const Session = struct {
     }
 
     pub fn onEvent(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, event_json: wire.BytesViewV1) callconv(.c) u32 {
-        const reply = handleEvent(context, raw_run, event_json);
+        const self: *Session = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
+        const run_id = self.retainCoreCallback(raw_run, true) orelse {
+            recordFatalReply(context);
+            return wire.EVENT_FATAL;
+        };
+        defer self.releaseCoreCallback();
+        const reply = self.handleEvent(run_id, event_json);
         if (reply == wire.EVENT_FATAL) recordFatalReply(context);
         return reply;
     }
 
     pub fn onUiRequest(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, request_json: wire.BytesViewV1, out_response: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-        const reply = handleUiRequest(context, raw_run, request_json, out_response);
+        if (out_response) |out| out.* = emptyOwnedBytes();
+        const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
+        const run_id = self.retainCoreCallback(raw_run, true) orelse {
+            recordFatalReply(context);
+            return wire.UI_FATAL;
+        };
+        defer self.releaseCoreCallback();
+        const reply = self.handleUiRequest(run_id, request_json, out_response);
         if (reply == wire.UI_FATAL) recordFatalReply(context);
         return reply;
     }
@@ -3052,14 +3070,7 @@ pub const Session = struct {
         if (!self.run_done) self.callback_fatal_observed = true;
     }
 
-    fn handleEvent(
-        context: ?*anyopaque,
-        raw_run: ?*const wire.RunContextV1,
-        event_json: wire.BytesViewV1,
-    ) callconv(.c) u32 {
-        const self: *Session = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
-        const run_id = self.retainCoreCallback(raw_run, true) orelse return wire.EVENT_FATAL;
-        defer self.releaseCoreCallback();
+    fn handleEvent(self: *Session, run_id: u64, event_json: wire.BytesViewV1) u32 {
         const encoded = sdk.borrowedBytes(event_json) catch {
             self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .invalid_bytes });
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
@@ -3247,27 +3258,12 @@ pub const Session = struct {
         return wire.EVENT_CONTINUE;
     }
 
-    fn handleUiRequest(
-        context: ?*anyopaque,
-        raw_run: ?*const wire.RunContextV1,
-        request_json: wire.BytesViewV1,
-        out_response: ?*wire.OwnedBytesV1,
-    ) callconv(.c) u32 {
-        if (out_response) |out| out.* = emptyOwnedBytes();
-        const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
+    fn handleUiRequest(self: *Session, callback_run_id: u64, request_json: wire.BytesViewV1, out_response: ?*wire.OwnedBytesV1) u32 {
         const output = out_response orelse {
             self.recordCallbackRejection(.{ .boundary = .ui_response, .reason = .invalid_response });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        const callback_run_id = self.retainCoreCallback(raw_run, true) orelse return wire.UI_FATAL;
-        defer self.releaseCoreCallback();
-        self.lock();
-        const closing = self.state == .closing;
-        if (closing) self.controlled_ui_close = self.close_interruption;
-        self.unlock();
-        if (closing) return wire.UI_FATAL;
-
         const encoded_request = sdk.borrowedBytes(request_json) catch {
             self.recordCallbackRejection(.{ .boundary = .ui_decode, .reason = .invalid_bytes });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
@@ -3299,17 +3295,17 @@ pub const Session = struct {
             null;
 
         self.lock();
-        if (self.state == .closing) {
-            self.controlled_ui_close = self.close_interruption;
-            self.unlock();
-            if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
-            return wire.UI_FATAL;
-        }
         if (!self.coreIdentityHealthyLocked() or
             !self.uiRequestIdentityMatchesLocked(parsed.value, callback_run_id))
         {
             self.recordCallbackRejectionLocked(.{ .boundary = .ui_admission, .reason = .identity_mismatch, .encoded_bytes = encoded_request.len });
             self.failCoreIdentityLocked();
+            self.unlock();
+            if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
+            return wire.UI_FATAL;
+        }
+        if (self.state == .closing) {
+            self.controlled_ui_close = self.close_interruption;
             self.unlock();
             if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
             return wire.UI_FATAL;
