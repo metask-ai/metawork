@@ -124,8 +124,8 @@ test "ordinary Task creation does not retry MCP errors on null Selection or gene
     }
 }
 
-test "recording gaps continue execution while later protocol or Host failures remain fatal" {
-    const Failure = enum { none, protocol, receipt, allocation };
+test "recording gaps continue execution while later retention or Host failures remain fatal" {
+    const Failure = enum { none, retention, receipt, allocation, usage, input_record };
     inline for (std.meta.tags(Failure)) |failure| {
         const scenario = try ReviewScenario.initForInput(.controlled);
         defer scenario.deinit();
@@ -146,10 +146,21 @@ test "recording gaps continue execution while later protocol or Host failures re
         try std.testing.expect(task_state.productTerminalFacts(run) == null);
         switch (failure) {
             .none => {},
-            .protocol => {
+            .retention => {
                 try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":999,\"turn\":999,\"group\":999,\"disposition\":\"final\",\"bytes\":1}}"));
-                try std.testing.expectError(error.InvalidOutputSegment, control.drainAgentEvents());
-                try std.testing.expectEqual(error.InvalidOutputSegment, run.first_event_rejection.?.failure);
+                try control.drainAgentEvents();
+                try std.testing.expect(run.first_event_rejection == null);
+            },
+            .usage => {
+                run.usage = .{ .input_tokens = 10, .output_tokens = 20, .cache_read_input_tokens = 30, .cache_creation_input_tokens = std.math.maxInt(u64) };
+                const before = run.usage;
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":1,\"cache_creation_input_tokens\":1}}"));
+                try std.testing.expectError(error.InvalidUsage, control.drainAgentEvents());
+                try std.testing.expectEqualDeep(before, run.usage);
+            },
+            .input_record => {
+                try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"input_adopted\":{\"input_id\":999,\"sequence\":1,\"turn\":1}}"));
+                try std.testing.expectError(error.InvalidInputRecord, control.drainAgentEvents());
             },
             .receipt => {
                 var envelope = try fixture.pumpEnvelope(route, run.id, "{\"tool_progress\":{\"id\":\"retained-0\",\"text\":\"not a delivery\"}}");
@@ -173,12 +184,13 @@ test "recording gaps continue execution while later protocol or Host failures re
         const terminal = task_state.productTerminalFacts(run).?;
         switch (failure) {
             .none => try std.testing.expectEqual(.completed, terminal.outcome),
-            .protocol => {
-                try std.testing.expectEqual(.dependency_contract_failure, terminal.outcome);
-                try std.testing.expectEqual(.dependency_contract_failure, run.event_projection_failure.?);
+            .retention => {
+                try std.testing.expectEqual(.completed, terminal.outcome);
+                try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+                try std.testing.expect(!run.event_pipeline_failed);
                 try std.testing.expect(!task_state.recordEventProjectionFailure(run));
             },
-            .receipt, .allocation => {
+            .receipt, .allocation, .usage, .input_record => {
                 try std.testing.expect(run.event_pipeline_failed);
                 try std.testing.expectEqual(.failed, terminal.outcome);
                 try std.testing.expectEqual(.event_pipeline_failure, terminal.cause.?);
@@ -10949,6 +10961,51 @@ test "active input ordinary continuation ignores unrelated Schedule persistence 
     try settleInputScenario(scenario);
     try std.testing.expectEqual(.transferred, task.durable.runs[0].?.additional_inputs[0].?.state);
     try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
+}
+
+test "checkpoint health follows execution terminal in either completion order" {
+    for ([_]bool{ false, true }) |terminal_first| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer store.deinit();
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &store };
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const run = &task.durable.runs[0].?;
+        fake_core.forceNextCheckpointExportStatus(wire.STATUS_CORE_ERROR);
+        fake_core.controlNextCheckpointExport();
+        defer fake_core.releaseCheckpointExport();
+        fake_core.releaseControlled();
+        fake_core.waitCheckpointExportEntered();
+        if (terminal_first) {
+            try scenario.control.drainAgentEvents();
+            try std.testing.expect(run.terminal_observed);
+            try std.testing.expectEqual(.available, task.runtime.attached().?.health);
+        }
+        fake_core.releaseCheckpointExport();
+        if (!terminal_first) {
+            for (0..5000) |_| {
+                if (run.checkpoint.state.load(.acquire) == .failure_ready) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(.failure_ready, run.checkpoint.state.load(.acquire));
+            try std.testing.expect(!run.terminal_observed);
+        }
+        try settleInputScenario(scenario);
+        try std.testing.expectEqual(.completed, task_state.productTerminalFacts(run).?.outcome);
+        try std.testing.expectEqual(.reusable, task_state.productTerminalFacts(run).?.session_disposition_at_completion);
+        try std.testing.expectEqual(.settled, run.checkpoint.state.load(.acquire));
+        if (task.runtime.attached()) |attached| {
+            try std.testing.expectEqual(.session_poisoned, attached.health);
+        } else try std.testing.expect(task.runtime.attachment == .detached or task.runtime.attachment == .closing);
+    }
 }
 
 test "active input checkpoint export failure ends continuation without retry" {

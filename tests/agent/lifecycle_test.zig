@@ -21,6 +21,432 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "canonical Core accepts Agent abort from its starting callback" {
+    const Consumer = struct {
+        runtime: *lifecycle.Runtime = undefined,
+        session: *lifecycle.Session = undefined,
+        starting: bool = false,
+        fn notify(context: ?*anyopaque) lifecycle.EventReadyNotification {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            while (self.runtime.takeEvent()) |value| {
+                var event = value;
+                defer event.deinit();
+                if (event.event.value == .known and event.event.value.known == .run_state and
+                    event.event.value.known.run_state.phase == .starting)
+                {
+                    self.starting = true;
+                    self.session.requestTermination(event.run_id, .{ .interrupted = .user_cancel }) catch unreachable;
+                }
+            }
+            return .scheduled;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var consumer: Consumer = .{};
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .event_ready_notifier = .{ .context = &consumer, .notify_fn = Consumer.notify } });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    consumer.runtime = runtime;
+    const session = try runtime.createSession(.{
+        .model_binding = .{ .target = .{ .provider_id = "canonical-fixture", .protocol = .anthropic_messages, .base_url = "http://127.0.0.1:1/v1/messages", .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-unused-key" },
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+    });
+    consumer.session = session;
+    const id = try session.prepareRun(.{ .text = "Cancel at admission before any provider request." });
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    run.deinit();
+    defer terminal.deinit();
+    try std.testing.expect(consumer.starting);
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(.ok, terminal.abort_status.?);
+    try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+    try std.testing.expectEqual(.reusable, terminal.session_disposition_at_completion);
+    try session.close(.session_close);
+}
+
+test "Agent owns output pairing while accepting unframed text gaps and continued tails" {
+    const begin = "{\"output_segment_begin\":{\"index\":8,\"turn\":1,\"group\":3}}";
+    const text = "{\"text_chunk\":\"ok\"}";
+    const continued = "{\"output_segment_end\":{\"index\":8,\"turn\":1,\"group\":3,\"disposition\":\"continued\",\"bytes\":2}}";
+    const bad_end = "{\"output_segment_end\":{\"index\":8,\"turn\":1,\"group\":3,\"disposition\":\"final\",\"bytes\":1}}";
+    const jump = "{\"output_segment_begin\":{\"index\":99,\"turn\":2,\"group\":5}}";
+    const final = "{\"output_segment_end\":{\"index\":99,\"turn\":2,\"group\":5,\"disposition\":\"final\",\"bytes\":0}}";
+    for ([_]struct { events: []const []const u8, valid: bool }{
+        .{ .events = &.{ text, begin, text, continued }, .valid = true },
+        .{ .events = &.{ begin, text, continued, jump, final }, .valid = true },
+        .{ .events = &.{ begin, text, bad_end }, .valid = false },
+        .{ .events = &.{bad_end}, .valid = false },
+        .{ .events = &.{ begin, begin }, .valid = false },
+        .{ .events = &.{ begin, text, continued, begin }, .valid = false },
+    }) |case| {
+        fake_core.reset();
+        fake_core.setNextPlan(.controlled);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "output boundary" });
+        var work = ImageRunWork{ .session = session, .id = id };
+        {
+            const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+            defer thread.join();
+            defer fake_core.releaseControlled();
+            fake_core.waitRunEntered();
+            const identity = imageIdentity(session, id);
+            var reply: u32 = wire.EVENT_CONTINUE;
+            for (case.events) |event| {
+                reply = lifecycle.Session.onEvent(session, &identity, sdk.bytesView(event));
+                if (reply == wire.EVENT_FATAL) break;
+            }
+            try std.testing.expectEqual(if (case.valid) wire.EVENT_CONTINUE else wire.EVENT_FATAL, reply);
+        }
+        var terminal = work.result.?;
+        defer terminal.deinit();
+        try std.testing.expectEqual(if (case.valid) @as(?lifecycle.TerminalFailure, null) else .dependency_contract, terminal.failure);
+        try std.testing.expectEqual(if (case.valid) lifecycle.SessionDisposition.reusable else .poisoned, terminal.session_disposition_at_completion);
+        try session.close(.session_close);
+    }
+}
+
+test "Agent checks only the promised terminal and fatal return invariants" {
+    for ([_]Plan{ .terminal_missing, .terminal_duplicate, .terminal_poisoned, .terminal_abort_mismatch, .fatal_returned_ok, .max_turns, .tool_loop }) |plan| {
+        fake_core.reset();
+        fake_core.setNextPlan(plan);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "finite terminal checks" });
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        const valid = plan == .max_turns or plan == .tool_loop;
+        try std.testing.expect(terminal.coreWasInvoked());
+        try std.testing.expectEqual(if (valid) @as(?lifecycle.TerminalFailure, null) else .dependency_contract, terminal.failure);
+        try std.testing.expectEqual(if (valid) lifecycle.SessionDisposition.reusable else .poisoned, terminal.session_disposition_at_completion);
+        try session.close(.session_close);
+    }
+}
+
+test "admitted reusable errors confirm Session health once and BUSY stays reusable" {
+    for ([_]u32{ wire.STATUS_OK, wire.STATUS_BUSY, wire.STATUS_RESOURCE_LIMIT }) |status| {
+        for ([_]bool{ false, true }) |poisoned| {
+            fake_core.reset();
+            fake_core.setNextPlan(.resource_limit);
+            var gate = fixture.CallbackSignal{};
+            gate.markFinished();
+            fake_core.admission_gate = &gate;
+            fake_core.description_poisoned = poisoned;
+            fake_core.forced_checkpoint_describe_status = if (status == wire.STATUS_OK) null else status;
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer {
+                runtime.shutdown() catch unreachable;
+                runtime.deinit();
+            }
+            const session = try openSession(runtime);
+            const before = fake_core.checkpoint_descriptions;
+            const id = try session.prepareRun(.{ .text = "ambiguous admitted failure" });
+            var run = try session.beginRun(id);
+            var terminal = run.execute();
+            run.deinit();
+            defer terminal.deinit();
+            try std.testing.expectEqual(.abi_status, terminal.failure.?);
+            const reusable = status == wire.STATUS_BUSY or (status == wire.STATUS_OK and !poisoned);
+            try std.testing.expectEqual(if (reusable) lifecycle.SessionDisposition.reusable else .poisoned, terminal.session_disposition_at_completion);
+            try std.testing.expectEqual(before + 1, fake_core.checkpoint_descriptions);
+            try session.close(.session_close);
+        }
+    }
+}
+
+test "Stop and close deliver once at admission after stale or preflight refusal" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        id: u64,
+        result: ?lifecycle.TerminalResult = null,
+        fn execute(self: *@This()) void {
+            var run = self.session.beginRun(self.id) catch unreachable;
+            self.result = run.execute();
+            run.deinit();
+        }
+        fn close(session: *lifecycle.Session) void {
+            session.close(.session_close) catch unreachable;
+        }
+    };
+    for ([_]u32{ wire.STATUS_STALE_RUN, wire.STATUS_INVALID_STATE }) |status| {
+        for ([_]bool{ false, true }) |closing| {
+            fake_core.reset();
+            fake_core.setNextPlan(.controlled);
+            var gate = fixture.CallbackSignal{};
+            gate.arm();
+            fake_core.admission_gate = &gate;
+            fake_core.forced_abort_status = status;
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer {
+                runtime.shutdown() catch unreachable;
+                runtime.deinit();
+            }
+            const session = try openSession(runtime);
+            const id = try session.prepareRun(.{ .text = "Stop before Core admission" });
+            var work = Work{ .session = session, .id = id };
+            {
+                const thread = try std.Thread.spawn(.{}, Work.execute, .{&work});
+                defer thread.join();
+                defer gate.markFinished();
+                gate.waitUntilEntered();
+                if (closing) {
+                    const close_thread = try std.Thread.spawn(.{}, Work.close, .{session});
+                    defer close_thread.join();
+                    defer gate.markFinished();
+                    try session.waitForState(.closing);
+                } else {
+                    try session.requestTermination(id, .{ .interrupted = .user_cancel });
+                }
+            }
+            var terminal = work.result.?;
+            defer terminal.deinit();
+            try std.testing.expect(terminal.failure == null);
+            try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+            try std.testing.expectEqual(.ok, terminal.abort_status.?);
+            try std.testing.expectEqual(.aborted, terminal.terminationEffect());
+            try std.testing.expect(terminal.first_host_failure == null);
+            try std.testing.expectEqual(closing, terminal.event_delivery_lost);
+            fake_core.lock();
+            const calls = fake_core.abort_calls;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 2), calls);
+            try session.close(.session_close);
+        }
+    }
+}
+
+test "starting defers its single abort retry until the first abort returns" {
+    const Stop = struct {
+        fn request(session: *lifecycle.Session, id: u64) void {
+            session.requestTermination(id, .{ .interrupted = .user_cancel }) catch unreachable;
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    var admission = fixture.CallbackSignal{};
+    var abort_gate = fixture.CallbackSignal{};
+    admission.arm();
+    abort_gate.arm();
+    fake_core.admission_gate = &admission;
+    fake_core.abort_gate = &abort_gate;
+    fake_core.forced_abort_status = wire.STATUS_INVALID_STATE;
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "serialized admission cancellation" });
+    var work = ImageRunWork{ .session = session, .id = id };
+    {
+        const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+        defer worker.join();
+        defer admission.markFinished();
+        admission.waitUntilEntered();
+        const stopper = try std.Thread.spawn(.{}, Stop.request, .{ session, id });
+        defer stopper.join();
+        defer abort_gate.markFinished();
+        abort_gate.waitUntilEntered();
+        admission.markFinished();
+        var pending = false;
+        for (0..5000) |_| {
+            session.mutex.lockUncancelable(std.testing.io);
+            pending = session.abort_retry_pending;
+            session.mutex.unlock(std.testing.io);
+            if (pending) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(pending);
+        fake_core.lock();
+        const calls = fake_core.abort_calls;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 1), calls);
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(.ok, terminal.abort_status.?);
+    try std.testing.expectEqual(.aborted, terminal.stop_reason.?);
+    try std.testing.expectEqual(@as(usize, 2), fake_core.abort_calls);
+    try session.close(.session_close);
+}
+
+test "closing validates UI payloads and retains real faults without undoing close" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "validate even during close" });
+    var work = ImageRunWork{ .session = session, .id = id };
+    {
+        const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+        defer worker.join();
+        defer fake_core.releaseControlled();
+        fake_core.waitRunEntered();
+        const closer = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+        defer closer.join();
+        defer fake_core.releaseControlled();
+        try session.waitForState(.closing);
+        const identity = imageIdentity(session, id);
+        var response: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
+        try std.testing.expectEqual(wire.UI_FATAL, lifecycle.Session.onUiRequest(session, &identity, sdk.bytesView("{}"), &response));
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(lifecycle.HostFailure{ .callback_failure = .ui }, terminal.first_host_failure.?);
+    try std.testing.expect(terminal.controlled_callback_close == null);
+    try std.testing.expectEqual(.closing, terminal.session_disposition_at_completion);
+    try std.testing.expectEqual(.closed, session.snapshot().state);
+}
+
+test "Host tool fatal replies retain failure facts and reject a successful Core return" {
+    for ([_]wire.HostExecuteFnV1{ lifecycle.Session.executeImage, lifecycle.Session.executeDelivery, lifecycle.Session.executeMcpInstallation }) |execute| {
+        for ([_]bool{ false, true }) |core_ok| {
+            fake_core.reset();
+            fake_core.setNextPlan(if (core_ok) .controlled else .controlled_callback_failed);
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer {
+                runtime.shutdown() catch unreachable;
+                runtime.deinit();
+            }
+            const session = try openSession(runtime);
+            const id = try session.prepareRun(.{ .text = "fatal Host callback" });
+            var work = ImageRunWork{ .session = session, .id = id };
+            {
+                const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+                defer worker.join();
+                defer fake_core.releaseControlled();
+                fake_core.waitRunEntered();
+                const identity = imageIdentity(session, id);
+                try std.testing.expectEqual(wire.HOST_FATAL, execute(runtime, &identity, sdk.bytesView("{}"), null));
+            }
+            var terminal = work.result.?;
+            defer terminal.deinit();
+            try std.testing.expectEqual(lifecycle.HostFailure{ .callback_failure = .event }, terminal.first_host_failure.?);
+            try std.testing.expectEqual(if (core_ok) lifecycle.TerminalFailure.dependency_contract else .abi_status, terminal.failure.?);
+            const decision = fixture.product_task.testing.policy_module.classifyAgentTerminal(&terminal);
+            try std.testing.expectEqual(if (core_ok) fixture.product_task.testing.state_module.RunCause.dependency_contract_failure else .event_pipeline_failure, decision.cause.?);
+            try session.close(.session_close);
+        }
+    }
+}
+
+test "closing Host tool fatal is controlled while unexplained callback failure has a cause" {
+    for ([_]wire.HostExecuteFnV1{ lifecycle.Session.executeImage, lifecycle.Session.executeDelivery, lifecycle.Session.executeMcpInstallation }) |execute| {
+        fake_core.reset();
+        fake_core.setNextPlan(.controlled_callback_failed);
+        fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "Host callback meets close" });
+        var work = ImageRunWork{ .session = session, .id = id };
+        {
+            const worker = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+            defer worker.join();
+            defer fake_core.releaseControlled();
+            fake_core.waitRunEntered();
+            const closer = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+            defer closer.join();
+            defer fake_core.releaseControlled();
+            try session.waitForState(.closing);
+            const identity = imageIdentity(session, id);
+            var result: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
+            try std.testing.expectEqual(wire.HOST_FATAL, execute(runtime, &identity, sdk.bytesView("{}"), &result));
+        }
+        var terminal = work.result.?;
+        defer terminal.deinit();
+        try std.testing.expect(terminal.first_host_failure == null);
+        try std.testing.expectEqual(.controlled_close, terminal.terminationEffect());
+        const decision = fixture.product_task.testing.policy_module.classifyAgentTerminal(&terminal);
+        try std.testing.expectEqual(.session_close, decision.cause.?);
+    }
+    fake_core.reset();
+    fake_core.setNextPlan(.callback_failed);
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "Core callback failure without a captured boundary" });
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    run.deinit();
+    defer terminal.deinit();
+    const decision = fixture.product_task.testing.policy_module.classifyAgentTerminal(&terminal);
+    try std.testing.expectEqual(.event_pipeline_failure, decision.cause.?);
+    try session.close(.session_close);
+}
+
+test "Host failure remains independent when Stop occupied the control slot first" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        id: u64,
+        result: ?lifecycle.TerminalResult = null,
+        fn execute(self: *@This()) void {
+            var run = self.session.beginRun(self.id) catch unreachable;
+            self.result = run.execute();
+            run.deinit();
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled_callback_failed);
+    var gate = fixture.CallbackSignal{};
+    gate.arm();
+    fake_core.admission_gate = &gate;
+    fake_core.forced_abort_status = wire.STATUS_INVALID_STATE;
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "Host failure after Stop" });
+    var work = Work{ .session = session, .id = id };
+    {
+        const thread = try std.Thread.spawn(.{}, Work.execute, .{&work});
+        defer thread.join();
+        defer gate.markFinished();
+        gate.waitUntilEntered();
+        try session.requestTermination(id, .{ .interrupted = .user_cancel });
+        try session.requestTermination(id, .{ .event_pump_failure = .allocation });
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(.callback_failed, terminal.abi_status.?);
+    try std.testing.expectEqual(lifecycle.TerminationSignal{ .interrupted = .user_cancel }, terminal.termination_signal.?);
+    try std.testing.expectEqual(lifecycle.HostFailure{ .event_pump_failure = .allocation }, terminal.first_host_failure.?);
+    try session.close(.session_close);
+}
+
 fn expectModelError(terminal: *const lifecycle.TerminalResult, run_id: u64) !void {
     const detail = &(terminal.model_error orelse return error.ExpectedModelError);
     const value = detail.view();
@@ -3443,7 +3869,7 @@ test "oversized file changes degrade without terminating the Run" {
         .worker_count = 1,
         .queue_capacity = 1,
         .max_sessions = 1,
-        .max_event_bytes = 64,
+        .max_event_bytes = 256,
     });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
@@ -3459,6 +3885,8 @@ test "oversized file changes degrade without terminating the Run" {
     try std.testing.expect(terminal.termination_signal == null);
     try std.testing.expect(terminal.file_changes_lost);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    var terminal_event = runtime.takeEvent().?;
+    terminal_event.deinit();
     try std.testing.expect(runtime.takeEvent() == null);
 
     fake_core.setSessionPlan(.event_callback);
@@ -3648,6 +4076,9 @@ test "valid unknown observations are ignored without consuming pump capacity" {
     try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
     try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), terminal.stop_reason);
     try std.testing.expectEqual(lifecycle.SessionState.idle, snapshot.state);
+    var terminal_event = runtime.takeEvent().?;
+    defer terminal_event.deinit();
+    try std.testing.expectEqual(lifecycle.CoreEventKind.run_state, std.meta.activeTag(terminal_event.event.value.known));
     try std.testing.expect(runtime.takeEvent() == null);
     try closeSession(session, .session_close);
 }
@@ -3659,8 +4090,8 @@ test "typed Core events are deep-copied into a bounded routed sink" {
         .worker_count = 1,
         .queue_capacity = 1,
         .max_sessions = 1,
-        .event_capacity = 2,
-        .per_session_event_capacity = 2,
+        .event_capacity = 4,
+        .per_session_event_capacity = 4,
         .control_reserved_capacity = 0,
         .per_session_control_reserved_capacity = 0,
     });
@@ -3689,6 +4120,8 @@ test "typed Core events are deep-copied into a bounded routed sink" {
     try std.testing.expectEqual(first_run, envelope.run_id);
     try std.testing.expectEqualStrings("{\"text_chunk\":\"typed event\"}", envelope.json);
     try std.testing.expectEqualStrings("typed event", try textChunk(envelope.event.value));
+    var first_end = runtime.takeEvent().?;
+    first_end.deinit();
     var second = runtime.takeEvent().?;
     try std.testing.expectEqual(second_run, second.run_id);
     second.deinit();
@@ -3703,8 +4136,8 @@ test "saturated event queue waits beyond the old deadline and resumes without po
             .worker_count = 1,
             .queue_capacity = 1,
             .max_sessions = 1,
-            .event_capacity = 1,
-            .per_session_event_capacity = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
             .control_reserved_capacity = 0,
             .per_session_control_reserved_capacity = 0,
         });
@@ -3723,6 +4156,8 @@ test "saturated event queue waits beyond the old deadline and resumes without po
         try std.testing.expectEqual(lifecycle.SessionState.running, session.snapshot().state);
         var first = runtime.takeEvent().?;
         first.deinit();
+        var first_end = runtime.takeEvent().?;
+        first_end.deinit();
         try session.waitRun(second_run);
         var terminal = takeTestTerminal(session, second_run);
         defer terminal.deinit();
@@ -3746,8 +4181,8 @@ test "close wakes a saturated event callback without fatal or poison" {
             .worker_count = 1,
             .queue_capacity = 1,
             .max_sessions = 1,
-            .event_capacity = 1,
-            .per_session_event_capacity = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
             .control_reserved_capacity = 0,
             .per_session_control_reserved_capacity = 0,
         });
@@ -3773,6 +4208,8 @@ test "close wakes a saturated event callback without fatal or poison" {
         var retained = runtime.takeEvent().?;
         defer retained.deinit();
         try std.testing.expectEqual(first_run, retained.run_id);
+        var first_end = runtime.takeEvent().?;
+        first_end.deinit();
         try std.testing.expect(runtime.takeEvent() == null);
     }
 }
@@ -3864,8 +4301,8 @@ test "ordinary Stop leaves the saturated event callback waiting for consumption"
             .worker_count = 1,
             .queue_capacity = 1,
             .max_sessions = 1,
-            .event_capacity = 1,
-            .per_session_event_capacity = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
             .control_reserved_capacity = 0,
             .per_session_control_reserved_capacity = 0,
         });
@@ -3880,9 +4317,12 @@ test "ordinary Stop leaves the saturated event callback waiting for consumption"
         defer first_terminal.deinit();
         const second_run = try submitSession(session, "stop while consumer is active");
         try session.waitForState(.running);
+        fake_core.waitRunEntered();
         try cancelSession(session, second_run, .user_cancel);
         var first = runtime.takeEvent().?;
         first.deinit();
+        var first_end = runtime.takeEvent().?;
+        first_end.deinit();
         try session.waitRun(second_run);
         var terminal = takeTestTerminal(session, second_run);
         defer terminal.deinit();
@@ -3922,6 +4362,8 @@ test "file changes that cannot fit the entire queue degrade without waiting" {
     try std.testing.expect(terminal.file_changes_lost);
     try std.testing.expect(terminal.first_callback_rejection == null);
     try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, terminal.session_disposition_at_completion);
+    var terminal_event = runtime.takeEvent().?;
+    terminal_event.deinit();
     try std.testing.expect(runtime.takeEvent() == null);
     try session.close(.session_close);
 }

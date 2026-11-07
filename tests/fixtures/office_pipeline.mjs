@@ -185,6 +185,10 @@ const server = createServer(async (request, response) => {
       ? last.content.filter((part) => part.type === "tool_result")
       : [];
     trace({ kind: "request", requests, results });
+    if (mode === "boundary-auth") {
+      response.writeHead(401, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ error: { type: "authentication_error", message: "Boundary fixture authentication failure" } }));
+    }
     if (mode === "fixture-error") throw Error("Controlled fixture assertion");
     if (skillResources) {
       const body = skillResponse(payload, results);

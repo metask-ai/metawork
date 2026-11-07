@@ -1204,6 +1204,23 @@ const EventContext = struct {
     runtime: *Runtime,
     effects: EventEffects,
 
+    fn projection(self: *EventContext) EventProjection {
+        return EventProjection{
+            .context = self,
+            .max_assistant_message_bytes = self.effects.max_assistant_message_bytes,
+            .max_commentary_segments_per_run = self.effects.max_commentary_segments_per_run,
+            .max_tool_field_bytes = self.effects.max_tool_field_bytes,
+            .append_assistant_fn = appendEventAssistant,
+            .append_group_fn = appendEventGroup,
+            .replace_text_fn = replaceEventText,
+            .find_or_create_tool_fn = findOrCreateEventTool,
+            .replace_file_references_fn = replaceEventFileReferences,
+            .record_output_fn = recordEventOutput,
+            .retain_generated_image_fn = retainEventGeneratedImage,
+            .record_file_changes_fn = recordEventFileChanges,
+        };
+    }
+
     fn secrets(self: *const EventContext, _: []const u8) []const []const u8 {
         return self.credential_views;
     }
@@ -4179,20 +4196,7 @@ pub const Runtime = struct {
         const task = self.findByRouteId(envelope.session_id) orelse
             return error.UnknownTask;
         var context = EventContext{ .runtime = self, .effects = effects, .credential_views = if (task_state.findRun(task.durable.runs, envelope.run_id)) |run| run.redactionSecrets() else &.{} };
-        const projection = EventProjection{
-            .context = &context,
-            .max_assistant_message_bytes = effects.max_assistant_message_bytes,
-            .max_commentary_segments_per_run = effects.max_commentary_segments_per_run,
-            .max_tool_field_bytes = effects.max_tool_field_bytes,
-            .append_assistant_fn = appendEventAssistant,
-            .append_group_fn = appendEventGroup,
-            .replace_text_fn = replaceEventText,
-            .find_or_create_tool_fn = findOrCreateEventTool,
-            .replace_file_references_fn = replaceEventFileReferences,
-            .record_output_fn = recordEventOutput,
-            .retain_generated_image_fn = retainEventGeneratedImage,
-            .record_file_changes_fn = recordEventFileChanges,
-        };
+        const projection = context.projection();
         const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
         if (versioned_run) |run| if (run.projection_content_version == 0 or run.projection_content_version == std.math.maxInt(u64)) return error.ViewVersionExhausted;
         const application_result = try task_state.applyEvent(task, envelope, projection);
@@ -4244,6 +4248,13 @@ pub const Runtime = struct {
             changed = true;
         };
         return changed;
+    }
+
+    pub fn finishRetainedOutput(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!void {
+        const task = self.findByRouteId(route_id) orelse return;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return;
+        var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
+        try task_state.finishRetainedOutput(run, context.projection());
     }
 
     pub fn completeFileChangeArtifact(
@@ -4368,18 +4379,6 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn recordDependencyContractFailure(
-        self: *Runtime,
-        route_id: u64,
-        run_id: u64,
-    ) bool {
-        const task = self.findByRouteId(route_id) orelse return false;
-        const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
-        if (!task_state.recordDependencyContractFailure(run)) return false;
-        task.durable.recent_order = self.takeRecentOrder();
-        return true;
-    }
-
     /// Main-loop-only diagnostic consumption. The first owner-local fact is
     /// retained; this only marks that its safe outlet has been attempted.
     pub fn takeEventRejectionDiagnostic(self: *Runtime, route_id: u64, run_id: u64) ?task_state.EventRejection {
@@ -4389,19 +4388,6 @@ pub const Runtime = struct {
         const rejection = run.first_event_rejection orelse return null;
         run.event_rejection_reported = true;
         return rejection;
-    }
-
-    pub fn visitTerminalDrainRejections(self: *Runtime, context: *anyopaque, visit: *const fn (*anyopaque, task_state.DrainRejectionDiagnostic) void) void {
-        for (self.tasks) |entry| {
-            const task = entry orelse continue;
-            for (task.durable.runs) |*slot| {
-                const run = &(slot.* orelse continue);
-                if (run.drain_rejection_reported) continue;
-                const observed = run.terminal_drain_rejection orelse continue;
-                run.drain_rejection_reported = true;
-                visit(context, .{ .task_id = task.durable.id, .run_id = run.id, .observed = observed });
-            }
-        }
     }
 
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
@@ -4570,7 +4556,7 @@ pub const Runtime = struct {
             const task = entry.* orelse continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (!run.event_stream_finalized) continue;
+                if (!run.event_stream_finalized or !run.terminal_observed) continue;
                 if (!self.syncCheckpointPostprocess(task, &run.checkpoint, effects))
                     continue;
                 changed = true;
@@ -4695,7 +4681,14 @@ pub const Runtime = struct {
         postprocess: *task_state.CheckpointPostprocess,
         effects: CheckpointEffects,
     ) bool {
-        switch (postprocess.state.load(.acquire)) {
+        const ready = postprocess.state.load(.acquire);
+        if ((ready == .failure_ready or ready == .candidate_ready) and
+            postprocess.binding_epoch == task.durable.binding_epoch)
+        {
+            if (postprocess.session_disposition) |disposition|
+                task_policy.foldTerminalDisposition(task, disposition);
+        }
+        switch (ready) {
             .none, .exporting, .settled => return false,
             .failure_ready => {
                 const attempt = postprocess.payload.failure;

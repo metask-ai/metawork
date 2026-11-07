@@ -320,6 +320,10 @@ Windows 桌面模型切换由 `node scripts/run-agentcore-vertical-windows.mjs` 
 
 Automatic Workspace root 设置的最小充分证据必须覆盖：schema 1 strict codec、缺失初始化、read/corrupt/write/outcome-unknown 分类、exact quarantine 与显式 recovery；choose/reset/retry 的 generation CAS、picker cancel、路径长度与 Manual/Automatic registry 冲突；A→B 后旧 Task 保持 A、新 Task 使用 B，restart/reset/retry 和 Scheduled occurrence 使用当前 root；旧 Automatic exact root 始终不能转为 Manual；`workbench-history.store`、checkpoint 与 file-change store schema/bytes 不因设置交易改写。Bridge 要证明 Renderer 无自由 path payload、Snapshot 严格解码且 `automaticWorkspaces` 不替代配置 health；Renderer 要覆盖常规设置行、原生 picker 等待、局部错误、重试和焦点恢复。当前完成 Gate 包含 macOS 原生 picker smoke；Windows 只在当前平台运行 table-driven 的大小写不敏感纯路径语义测试，真实 Windows picker、权限和文件系统运行证据是后续平台验证，不是本次完成标准，也不得用 macOS 结果声称 Windows 已验收。
 
+Agent 集成边界的验证按责任拆分：Agent 验证准入前终止意图、starting 上一次串行补发及 abort 成功单调性、首个真实 Host 故障、有限 terminal/fatal 约束和歧义失败的一次 describe（含 BUSY）；Product 验证实际终止效果的归因、checkpoint 后健康在两种通知顺序下优先于旧快照、段外文本的脱敏提交/输出槽位与 continued 尾部保留，以及四字段用量的原子更新和 Host 错误分类。协议规则不得由旧 Product 预期反向扩大。
+
+真实 Core 回归必须覆盖 starting callback 内 abort，以及 finalizing 接受 Stop 与 terminal 后 TOO_LATE 的不同结果；canonical 输出边界还需实际可由模型调用的 fork Skill、pending 追加输入锚点、continued 后取消/下一流失败/回合上限、后续 Session 复用和冷历史。桌面入口复用现有 vertical：Windows 在独立进程设置 `METAWORK_AGENT_BOUNDARY_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；输出交付和模型错误各自保持原专项入口。这些本地 Provider 证据不代表远程模型质量或其他平台验收。
+
 当前 Run 插话的最小充分证据必须覆盖：SDK receipt/event 先后竞争、定义内非 OK 终态的权威计数、采纳前缀、合同失败未知、未就绪/过期/停止/typed Skill 拒绝，以及登记提交调用与 Run 返回、checkpoint、destroy 的 barrier。Product 验证安全投影、有界原文预留与清零、真实采纳锚点、无锚点计数收口、历史持久化和 pending 恢复 unknown。接续覆盖正常终态的未采纳后缀一次合并、分隔符容量及整批拒绝、原文缺失/计数未知不执行、worker/checkpoint 收尾门禁、关联 Schedule 的结果写盘先于下一轮及分配/编码/写盘失败不复活、来源已 terminal 的 Stop 与其他有效取消、普通准入回滚及 enqueue 失败后的真实转入目标。停止、异常终态、重连和恢复不重发。审批测试覆盖 request 创建时的完整采纳前缀、prepare 与 allow_once 接纳两处阻止未采纳约束、deny 和人工回答不被插话替代。既有 executor queued Run、worker wake、shutdown 与其他 owner 的生命周期回归继续保留。
 
 Task 接收与执行必须分别验收：Task owner 覆盖 FIFO、容量、owned payload、安全投影、真实失败与 stop 的批次边界；Control lifecycle 覆盖标题/worker/checkpoint、Run 启动、compact/restore 和合法配置准备期间的接收，释放后按序推进且 Session 不重叠。具体失败原因不写安全历史；重启后的等待项中断且无原文，不重放。审批 prepare 和 allow_once 两处检查尚未交给 Core 的等待输入。

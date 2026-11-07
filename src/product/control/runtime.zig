@@ -66,8 +66,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     CompactCapacity,
     ToolCapacity,
     InvalidDeliveryReceipt,
-    InvalidOutputSegment,
-    InvalidInputAdoption,
+    InvalidInputRecord,
     InvalidUsage,
     SnapshotTooLarge,
     CloseInProgress,
@@ -6156,7 +6155,6 @@ pub const Runtime = struct {
                         self.recordEventProjectionFailure(envelope.session_id, envelope.run_id);
                         continue;
                     },
-                    error.InvalidOutputSegment, error.InvalidInputAdoption, error.InvalidUsage => self.recordDependencyContractFailure(envelope.session_id, envelope.run_id),
                     else => self.recordEventPipelineFailure(envelope.session_id, envelope.run_id),
                 }
                 if (first_projection_error.* == null) first_projection_error.* = err;
@@ -6243,16 +6241,6 @@ pub const Runtime = struct {
 
     fn recordEventPipelineFailure(self: *Runtime, route_id: u64, run_id: u64) void {
         if (!self.task_runtime.recordEventPipelineFailure(route_id, run_id)) return;
-        self.commitTaskStateNoFail();
-        self.bumpRevision();
-    }
-
-    fn recordDependencyContractFailure(
-        self: *Runtime,
-        route_id: u64,
-        run_id: u64,
-    ) void {
-        if (!self.task_runtime.recordDependencyContractFailure(route_id, run_id)) return;
         self.commitTaskStateNoFail();
         self.bumpRevision();
     }
@@ -6973,6 +6961,12 @@ pub const Runtime = struct {
             if (events.pending(task.runtime.routeId()) != 0) continue;
             for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
                 if (!run.terminal_event_drain_marked) continue;
+                self.task_runtime.finishRetainedOutput(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| {
+                    switch (err) {
+                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
+                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
+                    }
+                };
                 const execution = run.execution orelse continue;
                 if (execution.terminal_receipts.isEmpty()) continue;
                 const changed = self.task_runtime.adoptTerminalReceipts(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| failed: {
@@ -6996,16 +6990,9 @@ pub const Runtime = struct {
             finished_at_unix_ms,
         );
         if (changed) {
-            self.task_runtime.visitTerminalDrainRejections(self, logTerminalDrainRejection);
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
-    }
-
-    fn logTerminalDrainRejection(_: *anyopaque, diagnostic: product_task.DrainRejectionDiagnostic) void {
-        std.log.warn("task.terminal_drain_rejection task_id={d} run_id={d} core_manifest_sha256={s} facts={any}", .{
-            diagnostic.task_id, diagnostic.run_id, lifecycle.core_manifest_sha256, diagnostic.observed,
-        });
     }
 
     // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.
@@ -16540,7 +16527,7 @@ test "product Task identity is independent from Agent Session route identity" {
     try std.testing.expectEqual(@as(u64, 3), control.task_runtime.tasks[0].?.durable.id);
     try std.testing.expectEqualStrings(
         "routed",
-        control.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items,
+        control.task_runtime.tasks[0].?.durable.runs[0].?.output_segment.list.items,
     );
 
     var product_id_is_not_route = try testEnvelope(3, 7, "{\"text_chunk\":\"wrong\"}");
@@ -16626,7 +16613,7 @@ test "thinking is private and content chunks do not establish an activity phase"
     );
     defer thinking.deinit();
     try control.applyEvent(&thinking);
-    try std.testing.expectEqualStrings("", run.assistant.list.items);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expectEqual(task_test_state.RunActivity.starting, task_test_state.currentActivity(run).?);
     try std.testing.expectEqual(revision_before_thinking, control.revision);
 
@@ -16647,7 +16634,7 @@ test "thinking is private and content chunks do not establish an activity phase"
     );
     defer assistant.deinit();
     try control.applyEvent(&assistant);
-    try std.testing.expectEqualStrings("public response", run.assistant.list.items);
+    try std.testing.expectEqualStrings("public response", run.output_segment.list.items);
     try std.testing.expectEqual(
         task_test_state.RunActivity.starting,
         task_test_state.currentActivity(run).?,
@@ -16699,9 +16686,8 @@ test "output segments commit commentary and a continued final while discarding r
         run.assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(usize, 11), run.assistant_output_start.?);
-    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(!run.output_segment_open);
     try std.testing.expect(run.output_continued_group == null);
-    try std.testing.expectEqual(@as(u64, 5), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
@@ -16717,52 +16703,30 @@ test "output segments commit commentary and a continued final while discarding r
     ) != null);
 }
 
-test "output segment byte mismatch fails the dependency protocol" {
+test "Product retains Agent-validated segment index gaps without retry group assumptions" {
     var control = try testRuntime();
     defer control.deinit();
-    defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
     const task = control.task_runtime.tasks[0].?;
-    const route = task.runtime.routeId();
-
-    var begin = try testEnvelope(
-        route,
-        7,
-        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
-    );
-    defer begin.deinit();
-    try control.applyEvent(&begin);
-    var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"ok\"}");
-    defer text_event.deinit();
-    try control.applyEvent(&text_event);
-    var invalid_end = try testEnvelope(
-        route,
-        7,
-        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":1}}",
-    );
-    defer invalid_end.deinit();
-    try std.testing.expectError(
-        error.InvalidOutputSegment,
-        control.applyEvent(&invalid_end),
-    );
     const run = &task.durable.runs[0].?;
-    const first = run.first_event_rejection orelse return error.ExpectedRejection;
-    try std.testing.expectEqual(@as(u64, 2), first.expected.open.?.bytes);
-    try std.testing.expectEqual(@as(u64, 1), first.observed_segment.?.bytes);
-    var later_end = try testEnvelope(route, 7, "{\"output_segment_end\":{\"index\":0,\"turn\":99,\"group\":0,\"disposition\":\"final\",\"bytes\":2}}");
-    defer later_end.deinit();
-    try std.testing.expectError(error.InvalidOutputSegment, control.applyEvent(&later_end));
-    try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
-    try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
-    control.markTerminalRunsBeforeEventDrain();
-    finalizeTestTerminalDrain(&control);
-    try std.testing.expectEqual(@as(u64, 2), run.terminal_drain_rejection.?.open.?.bytes);
-    try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
-    try std.testing.expectEqual(RunOutcome.dependency_contract_failure, productTerminalFacts(run).?.outcome);
-    try std.testing.expect(run.open_output_segment == null);
-    try std.testing.expect(run.event_rejection_reported and run.drain_rejection_reported);
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":8,\"turn\":1,\"group\":3}}",
+        "{\"text_chunk\":\"rolled back\"}",
+        "{\"output_segment_end\":{\"index\":8,\"turn\":1,\"group\":3,\"disposition\":\"discarded\",\"bytes\":11}}",
+        "{\"output_segment_begin\":{\"index\":99,\"turn\":2,\"group\":5}}",
+        "{\"text_chunk\":\"answer\"}",
+        "{\"output_segment_end\":{\"index\":99,\"turn\":2,\"group\":5,\"disposition\":\"final\",\"bytes\":6}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("answer", run.assistant.list.items);
+    try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+    try std.testing.expect(run.first_event_rejection == null);
 }
 
-test "commentary capacity omits the group and closes protocol accounting" {
+test "commentary capacity omits the group and closes the retained segment" {
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_commentary_segments_per_run = 1;
@@ -16791,9 +16755,8 @@ test "commentary capacity omits the group and closes protocol accounting" {
     try std.testing.expectEqualStrings("first", run.assistant.list.items);
     try std.testing.expectEqualSlices(u64, &.{5}, run.commentary_ends[0..run.commentary_count]);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
-    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(!run.output_segment_open);
     try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
-    try std.testing.expectEqual(@as(u64, 2), run.next_output_segment_index);
 }
 
 test "output reserve capacity closes the segment and marks an incomplete response" {
@@ -16822,8 +16785,7 @@ test "output reserve capacity closes the segment and marks an incomplete respons
     );
     defer end.deinit();
     try control.applyEvent(&end);
-    try std.testing.expect(run.open_output_segment == null);
-    try std.testing.expectEqual(@as(u64, 1), run.next_output_segment_index);
+    try std.testing.expect(!run.output_segment_open);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
@@ -16854,14 +16816,14 @@ test "assistant output budget is aggregate across committed and open segments" {
     try control.applyEvent(&overflow);
     try std.testing.expectEqualStrings("four", run.assistant.list.items);
     try std.testing.expectEqualStrings("", run.output_segment.list.items);
-    try std.testing.expect(run.open_output_segment != null);
-    try std.testing.expectEqual(@as(u64, 5), run.open_output_segment.?.bytes);
+    try std.testing.expect(run.output_segment_open);
+    try std.testing.expect(run.output_segment_incomplete);
     var end = try testEnvelope(route, run.id, "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":5}}");
     defer end.deinit();
     try control.applyEvent(&end);
     try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
     try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
-    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(!run.output_segment_open);
 }
 
 test "discarded oversized provisional text does not mark a committed recording gap" {
@@ -17046,7 +17008,148 @@ test "event projection preserves commentary groups split by its credential suffi
     ) != null);
 }
 
-test "discarded output requires an in-group retry without committing bytes" {
+test "unframed output counts and projects before committing separately from the final answer" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    var first = try testEnvelope(route, run.id, "{\"text_chunk\":\"SECRET-\"}");
+    defer first.deinit();
+    try control.applyEvent(&first);
+    try std.testing.expectEqual(@as(u32, 1), run.outputPartCount());
+    try std.testing.expectEqual(@as(usize, 0), run.output_segment.committed_len);
+    var storage: [96 * 1024]u8 = undefined;
+    const pending = try control.writeAggregateFixture(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "SECRET-") == null);
+    const rest = [_][]const u8{
+        "{\"text_chunk\":\"KEY fork\"}",
+        "{\"output_segment_begin\":{\"index\":5,\"turn\":2,\"group\":9}}",
+        "{\"text_chunk\":\"answer\"}",
+        "{\"output_segment_end\":{\"index\":5,\"turn\":2,\"group\":9,\"disposition\":\"final\",\"bytes\":6}}",
+    };
+    for (rest, 0..) |encoded, index| {
+        var event = try testEnvelope(route, run.id, encoded);
+        defer event.deinit();
+        try control.applyEvent(&event);
+        if (index < 2) try std.testing.expectEqual(@as(u32, 1), run.outputPartCount());
+    }
+    try std.testing.expectEqual(@as(u32, 2), run.outputPartCount());
+    try std.testing.expectEqualStrings("*** forkanswer", run.assistant.list.items);
+    try std.testing.expectEqualSlices(u64, &.{8}, run.commentary_ends[0..run.commentary_count]);
+    try std.testing.expectEqual(@as(?usize, 8), run.assistant_output_start);
+    try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+}
+
+test "unframed capacity gaps still open the next segment and retain its answer" {
+    for ([_]bool{ false, true }) |empty_pending| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        const budget = control.limits.max_projection_bytes;
+        if (empty_pending) control.limits.max_projection_bytes = control.projection_bytes;
+        var text = try testEnvelope(task.runtime.routeId(), run.id, "{\"text_chunk\":\"fork text\"}");
+        defer text.deinit();
+        if (empty_pending) {
+            try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&text));
+            control.limits.max_projection_bytes = budget;
+        } else {
+            try control.applyEvent(&text);
+            control.limits.max_projection_bytes = control.projection_bytes;
+        }
+        var begin = try testEnvelope(task.runtime.routeId(), run.id, "{\"output_segment_begin\":{\"index\":3,\"turn\":2,\"group\":9}}");
+        defer begin.deinit();
+        try control.applyEvent(&begin);
+        try std.testing.expect(run.output_segment_open);
+        control.limits.max_projection_bytes = budget;
+        const rest = [_][]const u8{
+            "{\"text_chunk\":\"answer\"}",
+            "{\"output_segment_end\":{\"index\":3,\"turn\":2,\"group\":9,\"disposition\":\"final\",\"bytes\":6}}",
+        };
+        for (rest) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        try std.testing.expectEqualStrings("answer", run.assistant.list.items);
+        try std.testing.expectEqual(.final, run.assistant_output_kind.?);
+        try std.testing.expectEqual(@as(usize, 0), run.commentary_count);
+        try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        try std.testing.expect(!run.event_pipeline_failed);
+    }
+}
+
+test "output after a classified answer is a retention gap with restorable history" {
+    for ([_][]const u8{ "final", "partial" }) |kind| {
+        var control = try testRuntime();
+        defer control.deinit();
+        defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        var end_storage: [256]u8 = undefined;
+        const end = try std.fmt.bufPrint(&end_storage, "{{\"output_segment_end\":{{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"{s}\",\"bytes\":6}}}}", .{kind});
+        const events = [_][]const u8{
+            "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+            "{\"text_chunk\":\"answer\"}",
+            end,
+            "{\"text_chunk\":\"late unframed\"}",
+            "{\"output_segment_begin\":{\"index\":8,\"turn\":2,\"group\":4}}",
+            "{\"text_chunk\":\"late commentary\"}",
+            "{\"output_segment_end\":{\"index\":8,\"turn\":2,\"group\":4,\"disposition\":\"commentary\",\"bytes\":15}}",
+        };
+        for (events) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        try std.testing.expectEqualStrings("answer", run.assistant.list.items);
+        try std.testing.expectEqualStrings(kind, @tagName(run.assistant_output_kind.?));
+        try std.testing.expectEqual(@as(?usize, 0), run.assistant_output_start);
+        try std.testing.expectEqual(@as(usize, 0), run.commentary_count);
+        try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+        try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+        control.markTerminalRunsBeforeEventDrain();
+        finalizeTestTerminalDrain(&control);
+        var storage: [96 * 1024]u8 = undefined;
+        _ = try control.writeAggregateFixture(&storage);
+        var wire = try control.buildTaskStateWire();
+        defer wire.deinit();
+        try task_persistence.validateRestorableTask(std.testing.allocator, wire.state.tasks[0], control.taskPersistenceLimits());
+        try std.testing.expectEqual(.completed, productTerminalFacts(run).?.outcome);
+    }
+}
+
+test "terminal drain retains unframed commentary and closed continued text" {
+    for ([_]bool{ false, true }) |continued| {
+        var control = try testRuntime();
+        defer control.deinit();
+        defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        const events: []const []const u8 = if (continued) &.{
+            "{\"output_segment_begin\":{\"index\":7,\"turn\":1,\"group\":3}}",
+            "{\"text_chunk\":\"retained\"}",
+            "{\"output_segment_end\":{\"index\":7,\"turn\":1,\"group\":3,\"disposition\":\"continued\",\"bytes\":8}}",
+        } else &.{"{\"text_chunk\":\"retained\"}"};
+        for (events) |encoded| {
+            var event = try testEnvelope(task.runtime.routeId(), run.id, encoded);
+            defer event.deinit();
+            try control.applyEvent(&event);
+        }
+        try std.testing.expect(commitTerminal(run, .stopped, .stopped, .resource_limit, .reusable, "", false));
+        control.markTerminalRunsBeforeEventDrain();
+        finalizeTestTerminalDrain(&control);
+        try std.testing.expectEqualStrings("retained", run.assistant.list.items);
+        try std.testing.expectEqual(.stopped, productTerminalFacts(run).?.outcome);
+        try std.testing.expect(run.event_projection_failure == null);
+        if (continued) {
+            try std.testing.expectEqual(.partial, run.assistant_output_kind.?);
+        } else try std.testing.expectEqual(@as(usize, 1), run.commentary_count);
+    }
+}
+
+test "discarded output permits a new group without committing discarded bytes" {
     var control = try testRuntime();
     defer control.deinit();
     const task = control.task_runtime.tasks[0].?;
@@ -17072,10 +17175,8 @@ test "discarded output requires an in-group retry without committing bytes" {
         "{\"output_segment_begin\":{\"index\":1,\"turn\":1,\"group\":5}}",
     );
     defer wrong_group.deinit();
-    try std.testing.expectError(
-        error.InvalidOutputSegment,
-        control.applyEvent(&wrong_group),
-    );
+    try control.applyEvent(&wrong_group);
+    try std.testing.expectEqualStrings("", run.assistant.list.items);
 }
 
 test "AgentCore RunState refines typed activity without owning RunPhase and rejects stale transitions" {
@@ -18171,13 +18272,13 @@ test "Runtime projection preserves text bytes with bounded geometric growth" {
         try control.applyEvent(&envelope);
     }
     const run = findRun(control.task_runtime.tasks[0].?.durable.runs, 7).?;
-    try std.testing.expectEqual(@as(usize, chunk.len * 2048), run.assistant.list.items.len);
+    try std.testing.expectEqual(@as(usize, chunk.len * 2048), run.output_segment.list.items.len);
     for (0..2048) |index|
-        try std.testing.expectEqualStrings(chunk, run.assistant.list.items[index * chunk.len ..][0..chunk.len]);
+        try std.testing.expectEqualStrings(chunk, run.output_segment.list.items[index * chunk.len ..][0..chunk.len]);
     var overflow = try testEnvelope(3, 7, "{\"text_chunk\":\"x\"}");
     defer overflow.deinit();
     try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
-    try std.testing.expect(run.assistant.list.capacity <= control.limits.max_assistant_message_bytes);
+    try std.testing.expect(run.output_segment.list.capacity <= control.limits.max_assistant_message_bytes);
     try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
 }
 
@@ -20150,7 +20251,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"redacted\":true,\"provisionalRedacted\":false",
+        "\"redacted\":false,\"provisionalRedacted\":true",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
 }

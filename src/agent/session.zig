@@ -77,6 +77,8 @@ pub const MultimodalInputLimits = multimodal.InputLimits;
 pub const multimodal_input_limits = multimodal.input_limits;
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
+pub const HostFailure = session_control.HostFailure;
+pub const TerminationEffect = session_control.TerminationEffect;
 const UiRequest = sdk.UiRequest;
 pub const PermissionChoice = sdk.protocol.PermissionChoice;
 pub const PermissionDecision = sdk.protocol.PermissionDecision;
@@ -713,11 +715,19 @@ pub const Session = struct {
     terminal_diagnostic_len: usize = 0,
     terminal_diagnostic_truncated: bool = false,
     model_error: ?ModelError = null,
-    terminal_run_state_seen: bool = false,
+    output_segment: ?struct { index: u32, turn: u32, group: u32, bytes: u64 = 0 } = null,
+    last_output_index: ?u32 = null,
+    terminal_phase: ?RunStatePhase = null,
+    callback_fatal_observed: bool = false,
     termination_signal: ?TerminationSignal = null,
     first_callback_rejection: ?CallbackRejection = null,
+    first_host_failure: ?HostFailure = null,
+    controlled_callback_close: ?ExternalInterruption = null,
+    close_interruption: ExternalInterruption = .session_close,
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
+    abort_retry_pending: bool = false,
+    abort_retried_after_start: bool = false,
     dependency_contract_failure: bool = false,
     file_changes_lost: std.atomic.Value(bool) = .init(false),
     event_delivery_stopped: std.atomic.Value(bool) = .init(false),
@@ -872,11 +882,18 @@ pub const Session = struct {
         self.terminal_diagnostic_len = 0;
         self.terminal_diagnostic_truncated = false;
         self.model_error = null;
-        self.terminal_run_state_seen = false;
+        self.output_segment = null;
+        self.last_output_index = null;
+        self.terminal_phase = null;
+        self.callback_fatal_observed = false;
         self.termination_signal = null;
         self.first_callback_rejection = null;
+        self.first_host_failure = null;
+        self.controlled_callback_close = null;
         self.abort_status = null;
         self.raw_abort_status_code = null;
+        self.abort_retry_pending = false;
+        self.abort_retried_after_start = false;
         self.dependency_contract_failure = false;
         self.file_changes_lost.store(false, .release);
         self.event_delivery_stopped.store(false, .release);
@@ -1493,6 +1510,7 @@ pub const Session = struct {
             self.unlock();
             return error.NoSuchRun;
         }
+        if (!self.run_done) recordHostFailureLocked(self, signal);
         if (self.cancel_requested) {
             self.unlock();
             return;
@@ -1505,8 +1523,7 @@ pub const Session = struct {
         setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
         const was_queued = self.state == .queued;
-        const should_abort = !was_queued and self.core_call_in_progress and !self.run_done;
-        if (should_abort) self.abort_calls_in_progress += 1;
+        const should_abort = !was_queued and self.registerRunAbortLocked(false);
         self.unlock();
 
         if (was_queued) {
@@ -1541,10 +1558,8 @@ pub const Session = struct {
         setTerminationSignalLocked(self, .{ .callback_failure = .ui });
         wakeUiLocked(self);
         const was_queued = self.state == .queued;
-        const should_abort = !self.cancel_requested and !was_queued and
-            self.core_call_in_progress;
+        const should_abort = !was_queued and self.registerRunAbortLocked(false);
         self.cancel_requested = true;
-        if (should_abort) self.abort_calls_in_progress += 1;
         self.unlock();
 
         if (was_queued) {
@@ -1662,6 +1677,7 @@ pub const Session = struct {
             self.unlock();
             return .already_terminal;
         }
+        recordHostFailureLocked(self, signal);
         if (self.state == .closing or self.state == .closed) {
             self.unlock();
             return .session_closing;
@@ -1673,8 +1689,7 @@ pub const Session = struct {
         self.cancel_requested = true;
         setTerminationSignalLocked(self, signal);
         wakeUiLocked(self);
-        const should_abort = self.core_call_in_progress;
-        if (should_abort) self.abort_calls_in_progress += 1;
+        const should_abort = self.registerRunAbortLocked(false);
         self.unlock();
         if (should_abort) self.abortRun(run_id, signal);
         return .requested;
@@ -1988,15 +2003,13 @@ pub const Session = struct {
         self.control_block.disableNewLeases();
         const compact_active = self.state == .compact_queued or self.state == .compacting;
         const operation_done = if (compact_active) self.compact_done else self.run_done;
-        const should_abort_now = self.core_call_in_progress and !operation_done and
+        var should_abort_now = compact_active and self.core_call_in_progress and !operation_done and
             self.abort_calls_in_progress == 0 and
-            (if (compact_active)
-                self.raw_compact_abort_status_code == null
-            else
-                self.raw_abort_status_code == null);
+            self.raw_compact_abort_status_code == null;
         if (should_abort_now) self.abort_calls_in_progress += 1;
         const run_id = self.active_run_id;
         const compact_id = self.active_compact_id;
+        self.close_interruption = interruption;
         self.state = .closing;
         self.event_delivery_stopped.store(true, .release);
         const signal: TerminationSignal = .{ .interrupted = interruption };
@@ -2010,8 +2023,10 @@ pub const Session = struct {
                 self.finishPreparedCompactLocked();
         } else {
             if (!self.run_done) setTerminationSignalLocked(self, signal);
+            if (self.ui_active) self.controlled_callback_close = interruption;
             wakeUiLocked(self);
             if (!self.run_done and !self.run_started) self.finishPreparedRunLocked();
+            should_abort_now = self.registerRunAbortLocked(false);
         }
         self.broadcast();
         self.unlock();
@@ -2029,14 +2044,13 @@ pub const Session = struct {
             (!self.compact_done and !self.compact_started)
         else
             (!self.run_done and !self.run_started)) self.wait();
-        const should_abort_late = !should_abort_now and self.core_call_in_progress and
-            !(if (compact_active) self.compact_done else self.run_done) and
-            self.abort_calls_in_progress == 0 and
-            (if (compact_active)
-                self.raw_compact_abort_status_code == null
-            else
-                self.raw_abort_status_code == null);
-        if (should_abort_late) self.abort_calls_in_progress += 1;
+        const should_abort_late = if (!compact_active)
+            !should_abort_now and self.registerRunAbortLocked(false)
+        else
+            !should_abort_now and self.core_call_in_progress and !self.compact_done and
+                self.abort_calls_in_progress == 0 and
+                self.raw_compact_abort_status_code == null;
+        if (compact_active and should_abort_late) self.abort_calls_in_progress += 1;
         self.unlock();
         if (should_abort_late) {
             if (compact_active) self.abortCompact(compact_id) else self.abortRun(run_id, signal);
@@ -2184,6 +2198,7 @@ pub const Session = struct {
             while (self.active_callback_refs != 0) self.wait();
         }
         while (self.abort_calls_in_progress != 0) self.wait();
+        const closing = self.state == .closing;
         var completed_input = self.run_input.?;
         self.run_input = null;
         completed_input.deinit(self.agent_runtime.allocator);
@@ -2197,6 +2212,12 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
+            // Core reports a callback failure, but the failed boundary may be
+            // unrouteable (for example an invalid Host tool context).
+            if (known_status == .callback_failed and !self.dependency_contract_failure and
+                self.first_host_failure == null and self.controlled_callback_close == null)
+                setTerminationSignalLocked(self, .{ .callback_failure = .event });
+
             // Counts are defined on every known status, including failed Runs.
             if (!self.submitted_inputs.reconcile(result.input_accepted_count, result.input_adopted_count)) {
                 self.dependency_contract_failure = true;
@@ -2251,8 +2272,6 @@ pub const Session = struct {
                         .durable_usage_bytes = result.durable_usage_bytes,
                         .required_checkpoint_bytes = result.required_checkpoint_bytes,
                     };
-                    if (known_status == .callback_failed and self.termination_signal == null)
-                        setTerminationSignalLocked(self, .{ .callback_failure = .event });
                     failure = .abi_status;
                     if (disposition.? == .poisoned) self.state = .poisoned;
                 }
@@ -2261,6 +2280,25 @@ pub const Session = struct {
             self.dependency_contract_failure = true;
             failure = .dependency_contract;
             self.state = .poisoned;
+        }
+        if (!self.dependency_contract_failure and typed_status == .ok and
+            (self.callback_fatal_observed or self.output_segment != null or self.terminal_phase == null or
+                self.terminal_phase == .poisoned or
+                (stop_reason == .aborted and self.terminal_phase != .aborted)))
+        {
+            self.recordCallbackRejectionLocked(.{ .boundary = .core_return, .reason = if (self.callback_fatal_observed) .fatal_returned_ok else .invalid_terminal });
+            self.failCoreIdentityLocked();
+        }
+        if (!self.dependency_contract_failure and self.state != .closing) {
+            if (self.terminal_phase == .poisoned or
+                (self.input_window_started and typed_status != .ok and self.terminal_phase == null))
+            {
+                self.state = .poisoned;
+            } else if (self.input_window_started and self.terminal_phase == .failed and typed_status != .ok and
+                self.state != .poisoned)
+            {
+                self.confirmRunDispositionLocked();
+            }
         }
         // Reconcile while this Run still owns admission, before the common
         // dependency-failure/disposition epilogue can return the Session idle.
@@ -2280,6 +2318,7 @@ pub const Session = struct {
         } else {
             self.input_counts = .{ .accepted = result.input_accepted_count, .adopted = result.input_adopted_count };
         }
+        if (closing) self.state = .closing;
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
@@ -2313,26 +2352,56 @@ pub const Session = struct {
         return terminal;
     }
 
-    fn abortRun(self: *Session, run_id: u64, signal: TerminationSignal) void {
-        var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.session().abort()(
-            self.raw,
-            run_id,
-            abortReason(signal),
-            &diagnostic,
-        );
-        releaseOwned(self.agent_runtime.api, &diagnostic);
-        self.lock();
-        std.debug.assert(self.abort_calls_in_progress != 0);
-        if (self.active_run_id == run_id) {
-            self.raw_abort_status_code = status;
-            self.abort_status = sdk.Status.fromCode(status) catch null;
-            if (self.abort_status == null or !isAbortStatus(self.abort_status.?))
-                self.dependency_contract_failure = true;
+    /// Register the first delivery, or one retry at the Core admission edge.
+    /// Core calls and queue waits must happen after releasing the Session lock.
+    fn registerRunAbortLocked(self: *Session, after_start: bool) bool {
+        if (self.run_done or !self.core_call_in_progress or
+            self.termination_signal == null or self.abort_status == .ok) return false;
+        if (after_start) {
+            if (self.abort_retried_after_start) return false;
+            if (self.abort_calls_in_progress != 0) {
+                self.abort_retry_pending = true;
+                return false;
+            }
+            self.abort_retried_after_start = true;
+            self.abort_retry_pending = false;
+        } else if (self.abort_calls_in_progress != 0 or self.raw_abort_status_code != null) {
+            return false;
         }
-        self.abort_calls_in_progress -= 1;
-        self.broadcast();
-        self.unlock();
+        self.abort_calls_in_progress += 1;
+        return true;
+    }
+
+    fn abortRun(self: *Session, run_id: u64, signal: TerminationSignal) void {
+        while (true) {
+            var diagnostic = emptyOwnedBytes();
+            const status = self.agent_runtime.api.session().abort()(
+                self.raw,
+                run_id,
+                abortReason(signal),
+                &diagnostic,
+            );
+            releaseOwned(self.agent_runtime.api, &diagnostic);
+            self.lock();
+            std.debug.assert(self.abort_calls_in_progress != 0);
+            if (self.active_run_id == run_id) {
+                const known = sdk.Status.fromCode(status) catch null;
+                if (known == null or !isAbortStatus(known.?))
+                    self.dependency_contract_failure = true;
+                // Acceptance is monotonic, even if another path reports late.
+                if (self.abort_status != .ok) {
+                    self.raw_abort_status_code = status;
+                    self.abort_status = known;
+                }
+            }
+            self.abort_calls_in_progress -= 1;
+            const retry = self.active_run_id == run_id and
+                self.abort_retry_pending and self.input_window_started and
+                self.registerRunAbortLocked(true);
+            self.broadcast();
+            self.unlock();
+            if (!retry) return;
+        }
     }
 
     fn finishPreparedRunLocked(self: *Session) void {
@@ -2347,7 +2416,8 @@ pub const Session = struct {
             self.terminal_diagnostic = null;
         }
         self.model_error = null;
-        self.terminal_run_state_seen = false;
+        self.terminal_phase = null;
+        self.callback_fatal_observed = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
@@ -2475,7 +2545,8 @@ pub const Session = struct {
         const final_failure: ?TerminalFailure = if (self.dependency_contract_failure) .dependency_contract else failure;
         const observed_model_error = self.model_error;
         self.model_error = null;
-        self.terminal_run_state_seen = false;
+        self.terminal_phase = null;
+        self.callback_fatal_observed = false;
         return .{
             .allocator = self.agent_runtime.allocator,
             .diagnostic_storage = storage,
@@ -2489,6 +2560,8 @@ pub const Session = struct {
             .raw_abort_status_code = self.raw_abort_status_code,
             .termination_signal = self.termination_signal,
             .first_callback_rejection = self.first_callback_rejection,
+            .first_host_failure = self.first_host_failure,
+            .controlled_callback_close = self.controlled_callback_close,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
             .event_delivery_lost = self.event_delivery_lost.load(.acquire),
             .receipts = self.takeTerminalReceiptsLocked(),
@@ -2498,6 +2571,42 @@ pub const Session = struct {
             .durable_budget = durable_budget,
             .input_counts = if (self.dependency_contract_failure) null else self.input_counts,
         };
+    }
+
+    /// Only admitted + failed + statically reusable errors need confirmation.
+    /// Background jobs can make describe BUSY; retain the static disposition.
+    // Deliberate read-only exception to unlocked Core effects: describe does
+    // not invoke Host callbacks. The Run still owns its operation slot; keeping
+    // the mutex here excludes credential mutation and close through confirmation.
+    fn confirmRunDispositionLocked(self: *Session) void {
+        var encoded = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &encoded);
+        var diagnostic = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &diagnostic);
+        const code = self.agent_runtime.api.sessionControl().describe()(self.raw, &encoded, &diagnostic);
+        if (code == wire.STATUS_BUSY and encoded.ptr == null and encoded.len == 0) {
+            std.log.debug("agent.run_health_confirmation session_id={d} run_id={d} result=busy_unconfirmed", .{ self.id, self.active_run_id });
+            return;
+        }
+        if (code != wire.STATUS_OK) {
+            self.state = .poisoned;
+            return;
+        }
+        const bytes = sdk.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }) catch {
+            self.state = .poisoned;
+            return;
+        };
+        var parsed = sdk.decodeSessionDescription(self.agent_runtime.allocator, bytes) catch {
+            self.state = .poisoned;
+            return;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        const matches = switch (self.core_session_identity) {
+            .bound => |identity| std.mem.eql(u8, identity.bytes[0..identity.len], value.session_id),
+            .unbound, .failed => false,
+        };
+        if (!value.registered or !matches or value.lifecycle != .idle) self.state = .poisoned;
     }
 
     fn dispositionLocked(self: *const Session) SessionDisposition {
@@ -2569,7 +2678,7 @@ pub const Session = struct {
             const matches = candidate.raw != null and candidate.raw.? == identity.session;
             candidate.unlock();
             if (matches) {
-                if (candidate.retainCoreCallback(raw_run, false) != null) retained = candidate;
+                if (candidate.retainCoreCallback(raw_run, true) != null) retained = candidate;
                 break;
             }
         }
@@ -2577,12 +2686,31 @@ pub const Session = struct {
         return retained;
     }
 
+    fn rejectClosingHostCallback(self: *Session) bool {
+        self.lock();
+        defer self.unlock();
+        if (self.state != .closing) return false;
+        self.callback_fatal_observed = true;
+        self.controlled_callback_close = self.close_interruption;
+        return true;
+    }
+
+    fn failHostCallback(self: *Session) u32 {
+        self.lock();
+        defer self.unlock();
+        self.callback_fatal_observed = true;
+        self.recordCallbackRejectionLocked(.{ .boundary = .host_tool, .reason = .invalid_response });
+        setTerminationSignalLocked(self, .{ .callback_failure = .event });
+        return wire.HOST_FATAL;
+    }
+
     pub fn executeImage(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
         const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
         // Keep working and result capacity in one reservation through publication.
         // Allocate the owned result before sending or committing anything.
         const limits = self.imageLimits();
@@ -2693,10 +2821,11 @@ pub const Session = struct {
     const mcp_busy_result = "{\"status\":\"busy\"}";
     pub fn executeMcpInstallation(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
         const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
         const previous = runtime.mcp_results_outstanding.fetchAdd(1, .acq_rel);
         if (previous >= runtime.sessions.len * 8) {
             _ = runtime.mcp_results_outstanding.fetchSub(1, .acq_rel);
@@ -2713,7 +2842,7 @@ pub const Session = struct {
         };
         defer if (!transferred) runtime.allocator.free(allocation);
         const outcome = self.performMcpInstallation(arguments);
-        const encoded = mcp_install.result(allocation[@sizeOf(McpResultHeader)..], outcome) catch return wire.HOST_FATAL;
+        const encoded = mcp_install.result(allocation[@sizeOf(McpResultHeader)..], outcome) catch return self.failHostCallback();
         std.mem.bytesAsValue(McpResultHeader, allocation[0..@sizeOf(McpResultHeader)]).* = .{ .allocation_len = allocation.len };
         result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         transferred = true;
@@ -2763,10 +2892,11 @@ pub const Session = struct {
 
     pub fn executeDelivery(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
         const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
         const previous = runtime.delivery_results_outstanding.fetchAdd(1, .acq_rel);
         if (previous >= runtime.sessions.len * deliver_file.max_receipts_per_run) {
             _ = runtime.delivery_results_outstanding.fetchSub(1, .acq_rel);
@@ -2784,7 +2914,7 @@ pub const Session = struct {
         };
         defer if (!transferred) runtime.allocator.free(allocation);
         const outcome = self.performDelivery(arguments);
-        const encoded = deliver_file.result(allocation[@sizeOf(DeliveryResultHeader)..], outcome) catch return wire.HOST_FATAL;
+        const encoded = deliver_file.result(allocation[@sizeOf(DeliveryResultHeader)..], outcome) catch return self.failHostCallback();
         std.mem.bytesAsValue(DeliveryResultHeader, allocation[0..@sizeOf(DeliveryResultHeader)]).* = .{ .allocation_len = allocation_len };
         result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         transferred = true;
@@ -2938,14 +3068,39 @@ pub const Session = struct {
         return receipts;
     }
 
-    pub fn onEvent(
-        context: ?*anyopaque,
-        raw_run: ?*const wire.RunContextV1,
-        event_json: wire.BytesViewV1,
-    ) callconv(.c) u32 {
+    pub fn onEvent(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, event_json: wire.BytesViewV1) callconv(.c) u32 {
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
-        const run_id = self.retainCoreCallback(raw_run, true) orelse return wire.EVENT_FATAL;
+        const run_id = self.retainCoreCallback(raw_run, true) orelse {
+            recordFatalReply(context);
+            return wire.EVENT_FATAL;
+        };
         defer self.releaseCoreCallback();
+        const reply = self.handleEvent(run_id, event_json);
+        if (reply == wire.EVENT_FATAL) recordFatalReply(context);
+        return reply;
+    }
+
+    pub fn onUiRequest(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, request_json: wire.BytesViewV1, out_response: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        if (out_response) |out| out.* = emptyOwnedBytes();
+        const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
+        const run_id = self.retainCoreCallback(raw_run, true) orelse {
+            recordFatalReply(context);
+            return wire.UI_FATAL;
+        };
+        defer self.releaseCoreCallback();
+        const reply = self.handleUiRequest(run_id, request_json, out_response);
+        if (reply == wire.UI_FATAL) recordFatalReply(context);
+        return reply;
+    }
+
+    fn recordFatalReply(context: ?*anyopaque) void {
+        const self: *Session = @ptrCast(@alignCast(context orelse return));
+        self.lock();
+        defer self.unlock();
+        if (!self.run_done) self.callback_fatal_observed = true;
+    }
+
+    fn handleEvent(self: *Session, run_id: u64, event_json: wire.BytesViewV1) u32 {
         const encoded = sdk.borrowedBytes(event_json) catch {
             self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .invalid_bytes });
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
@@ -2987,6 +3142,8 @@ pub const Session = struct {
         }
         self.lock();
         var input_event_valid = true;
+        var abort_after_start = false;
+        var abort_signal: ?TerminationSignal = null;
         switch (parsed.value.known) {
             .run_state => |state| {
                 if (state.run_id != run_id) {
@@ -2998,21 +3155,49 @@ pub const Session = struct {
                         } else {
                             self.input_window_started = true;
                             self.input_ready = self.run_input != null and self.run_input.? != .skill;
+                            abort_after_start = self.registerRunAbortLocked(true);
+                            abort_signal = self.termination_signal;
                         }
                     },
                     .finalizing => self.input_ready = false,
                     .completed, .failed, .aborted, .poisoned => {
                         self.input_ready = false;
-                        self.terminal_run_state_seen = true;
+                        if (self.terminal_phase != null) {
+                            input_event_valid = false;
+                        } else self.terminal_phase = state.phase;
                     },
                     else => {},
                 }
+            },
+            .output_segment_begin => |segment| {
+                if (self.output_segment != null or (self.last_output_index != null and segment.index <= self.last_output_index.?)) {
+                    input_event_valid = false;
+                } else {
+                    self.output_segment = .{ .index = segment.index, .turn = segment.turn, .group = segment.group };
+                    self.last_output_index = segment.index;
+                }
+            },
+            .text_chunk => |text| if (self.output_segment) |*open| {
+                open.bytes = std.math.add(u64, open.bytes, text.len) catch overflow: {
+                    input_event_valid = false;
+                    break :overflow open.bytes;
+                };
+            },
+            .output_segment_end => |segment| {
+                if (self.output_segment) |open| {
+                    input_event_valid = open.index == segment.index and open.turn == segment.turn and open.group == segment.group and open.bytes == segment.bytes;
+                    if (input_event_valid) self.output_segment = null;
+                } else input_event_valid = false;
             },
             .input_adopted => |input| input_event_valid = self.submitted_inputs.adopt(input.input_id, input.sequence, input.turn),
             else => {},
         }
         if (!input_event_valid) {
-            self.recordCallbackRejectionLocked(.{ .boundary = .input_event, .reason = .invalid_input_transition, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len, .input_adoption = switch (parsed.value.known) {
+            const output_event = switch (parsed.value.known) {
+                .output_segment_begin, .output_segment_end, .text_chunk => true,
+                else => false,
+            };
+            self.recordCallbackRejectionLocked(.{ .boundary = if (output_event) .output_event else .input_event, .reason = if (output_event) .invalid_output_segment else .invalid_input_transition, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len, .input_adoption = switch (parsed.value.known) {
                 .input_adopted => |value| .{ .id = value.input_id, .sequence = value.sequence, .turn = value.turn },
                 else => null,
             }, .observed_run_id = switch (parsed.value.known) {
@@ -3026,6 +3211,9 @@ pub const Session = struct {
             parsed.deinit();
             return wire.EVENT_FATAL;
         }
+        // Close can stop the queue before starting arrives. Deliver cancellation
+        // before enqueueWaiting can return ConsumerStopped.
+        if (abort_after_start) self.abortRun(run_id, abort_signal.?);
         const is_file_changes = switch (parsed.value) {
             .unknown => false,
             .known => |known| std.meta.activeTag(known) == .file_changes,
@@ -3100,22 +3288,12 @@ pub const Session = struct {
         return wire.EVENT_CONTINUE;
     }
 
-    pub fn onUiRequest(
-        context: ?*anyopaque,
-        raw_run: ?*const wire.RunContextV1,
-        request_json: wire.BytesViewV1,
-        out_response: ?*wire.OwnedBytesV1,
-    ) callconv(.c) u32 {
-        if (out_response) |out| out.* = emptyOwnedBytes();
-        const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
+    fn handleUiRequest(self: *Session, callback_run_id: u64, request_json: wire.BytesViewV1, out_response: ?*wire.OwnedBytesV1) u32 {
         const output = out_response orelse {
             self.recordCallbackRejection(.{ .boundary = .ui_response, .reason = .invalid_response });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
-        const callback_run_id = self.retainCoreCallback(raw_run, false) orelse return wire.UI_FATAL;
-        defer self.releaseCoreCallback();
-
         const encoded_request = sdk.borrowedBytes(request_json) catch {
             self.recordCallbackRejection(.{ .boundary = .ui_decode, .reason = .invalid_bytes });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
@@ -3152,6 +3330,12 @@ pub const Session = struct {
         {
             self.recordCallbackRejectionLocked(.{ .boundary = .ui_admission, .reason = .identity_mismatch, .encoded_bytes = encoded_request.len });
             self.failCoreIdentityLocked();
+            self.unlock();
+            if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
+            return wire.UI_FATAL;
+        }
+        if (self.state == .closing) {
+            self.controlled_callback_close = self.close_interruption;
             self.unlock();
             if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
             return wire.UI_FATAL;
@@ -3259,7 +3443,7 @@ pub const Session = struct {
     fn captureModelErrorLocked(self: *Session, value: ModelError.View, run_id: u64, encoded_bytes: usize) bool {
         const rejection: CallbackRejection.Reason = if (value.run_id != run_id)
             .identity_mismatch
-        else if (self.terminal_run_state_seen)
+        else if (self.terminal_phase != null)
             .model_error_after_terminal
         else if (self.model_error != null)
             .duplicate_model_error
@@ -3415,7 +3599,13 @@ pub const Session = struct {
     }
 };
 
+fn recordHostFailureLocked(self: *Session, signal: TerminationSignal) void {
+    if (self.first_host_failure == null)
+        self.first_host_failure = HostFailure.fromSignal(signal);
+}
+
 fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
+    recordHostFailureLocked(self, signal);
     if (self.termination_signal == null) self.termination_signal = signal;
     for (self.image_calls) |call| if (call) |active| active.cancellation.request();
     for (self.delivery_calls) |call| if (call) |active| active.store(true, .release);
