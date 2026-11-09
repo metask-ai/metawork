@@ -8618,10 +8618,10 @@ fn requestRunTermination(
     _ = run.pending_termination.cmpxchgStrong(
         .none,
         pending,
-        .acq_rel,
+        .seq_cst,
         .acquire,
     );
-    switch (run.agent_handoff.load(.acquire)) {
+    switch (run.agent_handoff.load(.seq_cst)) {
         .queued, .starting => return .pending,
         .finishing => return .already_finishing,
         .running => {},
