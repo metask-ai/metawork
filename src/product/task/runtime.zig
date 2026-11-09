@@ -6963,7 +6963,8 @@ pub const Runtime = struct {
             const has_live_workers = task.runtime.worker_leases.hasLive();
             if (has_live_workers != task.observed_live_workers) {
                 task.observed_live_workers = has_live_workers;
-                result.changed = true;
+                // The active operation already accounts for both action gates.
+                if (!task_policy.hasActiveOperation(task)) result.changed = true;
             }
         };
         return result;
