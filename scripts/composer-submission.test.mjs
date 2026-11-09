@@ -1475,7 +1475,9 @@ test("App keeps Workspace selection in the draft toolbar and hides the automatic
   );
   assert.ok(!screen.queryByText(path));
   assert.ok(!document.querySelector(".composer-workspace-context"));
-  await user.click(screen.getByRole("button", { name: "Task information" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Task information" }),
+  );
   assert.ok(!screen.queryByText("Working directory"));
   assert.ok(!screen.queryByText(path));
   await fixture.settle();
