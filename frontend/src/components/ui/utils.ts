@@ -22,5 +22,7 @@ export function cn(...inputs: ClassName[]): string | ((state: any) => string) {
 export const focusRing =
   "outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--ui-focus-ring)";
 
+export const controlFocus = "ui-control-focus outline-none";
+
 export const controlBase =
   "border border-(--ui-border) bg-(--ui-surface-panel) text-(--ui-content-primary) placeholder:text-(--ui-content-muted) transition-colors disabled:cursor-not-allowed disabled:opacity-50";

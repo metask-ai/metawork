@@ -419,8 +419,10 @@ pub const Adapter = struct {
     ) bool {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         const current = scheduledTaskNow(context) orelse return false;
+        // Native timers use relative delays. Reobserve wall time at least
+        // once a minute so a clock change cannot strand a distant deadline.
         const delay_seconds = if (due_unix_seconds > current)
-            due_unix_seconds - current
+            @min(due_unix_seconds - current, 60)
         else
             1;
         const delay_ns = std.math.mul(
@@ -905,6 +907,8 @@ test "SDK consumption timers preserve producer IDs and explicit failures" {
     try std.testing.expectEqual(scheduled_task_timer_id, Spy.id);
     try std.testing.expectEqual(std.time.ns_per_s, Spy.interval);
     try std.testing.expect(!Spy.repeats);
+    try std.testing.expect(Adapter.armScheduledTaskTimer(&adapter, Adapter.scheduledTaskNow(&adapter).? + 3600));
+    try std.testing.expectEqual(60 * std.time.ns_per_s, Spy.interval);
     Adapter.cancelScheduledTaskTimer(&adapter);
     try std.testing.expectEqual(scheduled_task_timer_id, Spy.id);
     Spy.fail = true;

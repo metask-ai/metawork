@@ -24,8 +24,11 @@ const { AppShell, resolveWorkbenchColumns } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { TaskWorkspace, NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
+const { TaskWorkspace } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
+);
+const { NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
+  "/src/features/approvals/ApprovalModeMenu.tsx",
 );
 const { TaskList } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskList.tsx",

@@ -1,6 +1,6 @@
 import type { HTMLAttributes, ReactNode } from "react";
 
-import { cn } from "../ui/utils.ts";
+import { cn, controlFocus } from "../ui/utils.ts";
 
 export function Composer({
   state = "normal",
@@ -12,7 +12,11 @@ export function Composer({
   children: ReactNode;
 }) {
   return (
-    <div className={cn("ai-composer", className)} data-state={state} {...props}>
+    <div
+      className={cn("ai-composer", controlFocus, className)}
+      data-state={state}
+      {...props}
+    >
       {children}
     </div>
   );

@@ -11,7 +11,13 @@ const state = @import("product_schedule_state");
 const persistence = @import("product_schedule_persistence");
 const view = @import("product_schedule_view");
 
+const preflight_retry_seconds: u64 = 60;
+
 pub const Recurrence = state.Recurrence;
+pub const LocalRecurrence = state.LocalRecurrence;
+pub const calendarDayMask = state.calendarDayMask;
+pub const TimeZone = state.TimeZone;
+pub const CalendarFrequency = state.CalendarFrequency;
 pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;
 pub const Definition = state.Definition;
@@ -220,7 +226,6 @@ fn unavailableBinding(_: ?*anyopaque, _: ModelBinding) BindingAvailability {
 
 const Due = struct {
     id: u64,
-    epoch: u64,
     planned_at_unix_seconds: u64,
     triggered_at_unix_seconds: u64,
 };
@@ -237,8 +242,10 @@ const Claim = struct {
     source_generation: u64,
     protocol: Protocol,
     permission_profile: PermissionProfile,
+    completion: ?state.Store,
 
     pub fn deinit(self: *Claim) void {
+        if (self.completion) |*candidate| candidate.deinit();
         self.allocator.free(self.title);
         self.allocator.free(self.input);
         self.allocator.free(self.source_id);
@@ -369,6 +376,15 @@ pub const Runtime = struct {
         return self.timer.now();
     }
 
+    pub fn resolveLocalRecurrence(self: *Runtime, input: LocalRecurrence, id: ?u64) Error!Recurrence {
+        const now_unix_seconds = self.timer.now() orelse return error.ScheduleTimerUnavailable;
+        const previous = if (id) |item_id|
+            (self.store.find(item_id) orelse return error.UnknownScheduledTask).recurrence
+        else
+            null;
+        return input.resolve(now_unix_seconds, previous);
+    }
+
     pub fn timerEnabled(self: *const Runtime) bool {
         return self.timer.enabled;
     }
@@ -393,6 +409,7 @@ pub const Runtime = struct {
         var candidate = self.store.clone(self.allocator) catch return .failed;
         var owned = true;
         defer if (owned) candidate.deinit();
+        _ = candidate.interruptClaimedOccurrences();
         _ = redactStore(&candidate, redaction, "");
         const output = self.allocator.alloc(u8, persistence.max_store_bytes) catch
             return .failed;
@@ -548,8 +565,6 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity)
                 self.stopForOccurrenceCapacity(id, redaction);
-            if (err == error.ExecutionUnavailable or err == error.ExecutionInUse)
-                self.timer.cancelCurrent();
             return err;
         };
     }
@@ -571,7 +586,9 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
-            } else {
+            } else if (self.persistence_health != .ready or
+                self.store.find(due.id).?.preflight_retry_at_unix_seconds == null)
+            {
                 // No claim may have been committed. Leave its cursor intact
                 // and wait for an authority/lifecycle wake, never arm the same
                 // overdue point again from this failed callback.
@@ -599,6 +616,9 @@ pub const Runtime = struct {
         binding: ExecutionBinding,
         redaction: Redaction,
     ) bool {
+        for (self.store.items) |*entry| {
+            if (entry.*) |*item| item.preflight_retry_at_unix_seconds = null;
+        }
         return self.reconcileBindingsNoFail(binding, redaction);
     }
 
@@ -631,19 +651,13 @@ pub const Runtime = struct {
         }
         const current = self.timer.now() orelse return null;
         const item = self.earliestReady(binding) orelse return null;
-        const planned = item.next_run_at_unix_seconds orelse return null;
-        if (planned > current) {
+        if (timerDueAt(item) > current) {
             _ = self.rearmNoFail(binding, redaction);
             return null;
         }
         return .{
             .id = item.id,
-            .epoch = item.epoch,
-            .planned_at_unix_seconds = switch (item.recurrence) {
-                .once => planned,
-                .interval => |interval| interval.start_at_unix_seconds +
-                    ((current - interval.start_at_unix_seconds) / interval.every_seconds) * interval.every_seconds,
-            },
+            .planned_at_unix_seconds = (item.recurrence.lastAtOrBefore(current) catch return null) orelse return null,
             .triggered_at_unix_seconds = current,
         };
     }
@@ -701,6 +715,10 @@ pub const Runtime = struct {
             current_binding.model_ref.model_id,
         );
         errdefer self.allocator.free(model_id);
+        // Reserve the external-result state before committing the claim.
+        // No allocation failure may leave a claim that was never launched.
+        var completion = try candidate.clone(self.allocator);
+        errdefer completion.deinit();
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
@@ -716,6 +734,7 @@ pub const Runtime = struct {
             .source_generation = current_binding.source_generation,
             .protocol = current_binding.protocol,
             .permission_profile = candidate_item.permission_profile,
+            .completion = completion,
         } };
     }
 
@@ -756,8 +775,10 @@ pub const Runtime = struct {
         self: *Runtime,
         candidate: *state.Store,
         redaction: Redaction,
-    ) void {
+    ) bool {
+        var committed = true;
         self.commitCandidate(candidate, redaction) catch {
+            committed = false;
             // The Task effect has already happened and cannot be rolled back.
             // Retain its identity in memory while persistence health keeps all
             // further automatic triggers fail closed.
@@ -765,8 +786,10 @@ pub const Runtime = struct {
                 self.persistence_health = .write_failed;
                 self.changed = true;
             }
+            self.timer.cancelCurrent();
         };
         self.replace(candidate);
+        return committed;
     }
 
     /// Prevent a successor from replacing the terminal observed for this occurrence.
@@ -826,6 +849,7 @@ pub const Runtime = struct {
             candidate.find(pending.scheduled_task_id) orelse return false,
             pending.planned_at_unix_seconds,
             pending.source,
+            pending.task_id,
             resolution.outcome,
             if (resolution.permission_required) .permission_required else null,
         ) catch return false;
@@ -858,19 +882,25 @@ pub const Runtime = struct {
         redaction: Redaction,
     ) anyerror!u64 {
         const blocking_task_id = try self.activeTaskId(id, tasks);
+        const item = self.store.find(id) orelse return error.UnknownScheduledTask;
+        item.preflight_retry_at_unix_seconds = null;
         if (blocking_task_id == 0) {
-            const item = self.store.find(id) orelse return error.UnknownScheduledTask;
             const binding = item.bindingView();
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
-            try tasks.preflight_fn(tasks.context, .{
+            tasks.preflight_fn(tasks.context, .{
                 .title = item.title,
                 .input = item.input.borrowed(),
                 .model_ref = binding.model_ref,
                 .source_generation = binding.source_generation,
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
-            });
+            }) catch |err| {
+                if (err == error.ExecutionUnavailable or err == error.ExecutionInUse or
+                    err == error.ExecutionGenerationMismatch)
+                    item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
+                return err;
+            };
         }
         const begin = try self.beginOccurrence(
             id,
@@ -885,11 +915,7 @@ pub const Runtime = struct {
             .claimed => |value| value,
         };
         defer claim.deinit();
-        // Allocate the completion candidate before crossing into Task. Once
-        // launch returns, the Task effect may no longer be reversible.
-        var completion = try self.store.clone(self.allocator);
-        var completion_owned = true;
-        defer if (completion_owned) completion.deinit();
+        const completion = &claim.completion.?;
         const launch = tasks.launch(.{
             .title = claim.title,
             .input = claim.input,
@@ -909,8 +935,8 @@ pub const Runtime = struct {
                     claim.source,
                     task_id,
                 ) catch unreachable;
-                self.retainExternalResult(&completion, redaction);
-                completion_owned = false;
+                _ = self.retainExternalResult(completion, redaction);
+                claim.completion = null;
                 return task_id;
             },
             .rejected => |failure| {
@@ -921,10 +947,11 @@ pub const Runtime = struct {
                     failure.reason,
                     failure.task_id,
                 ) catch unreachable;
-                self.retainExternalResult(&completion, redaction);
-                completion_owned = false;
-                _ = self.notifier.notify(.{
+                const committed = self.retainExternalResult(completion, redaction);
+                claim.completion = null;
+                if (committed) _ = self.notifier.notify(.{
                     .scheduled_task_id = claim.id,
+                    .task_id = failure.task_id,
                     .title = self.store.find(claim.id).?.title,
                     .kind = .needs_attention,
                 });
@@ -969,11 +996,29 @@ pub const Runtime = struct {
 
     pub fn recoverInterruptedNoFail(self: *Runtime, redaction: Redaction) bool {
         if (self.persistence_health != .ready) return false;
-        var candidate = self.store.clone(self.allocator) catch return false;
+        const interrupted = for (self.store.items) |entry| {
+            const item = entry orelse continue;
+            for (item.occurrences()) |occurrence| {
+                if (occurrence.result == .claimed) break;
+            } else continue;
+            break true;
+        } else false;
+        if (!interrupted) return false;
+        var candidate = self.store.clone(self.allocator) catch {
+            self.persistence_health = .write_failed;
+            self.changed = true;
+            return false;
+        };
         var owned = true;
         defer if (owned) candidate.deinit();
         if (!candidate.interruptClaimedOccurrences()) return false;
-        self.commitCandidate(&candidate, redaction) catch return false;
+        self.commitCandidate(&candidate, redaction) catch {
+            if (self.persistence_health == .ready) {
+                self.persistence_health = .write_failed;
+                self.changed = true;
+            }
+            return false;
+        };
         self.replace(&candidate);
         owned = false;
         return true;
@@ -1033,13 +1078,17 @@ pub const Runtime = struct {
         return redactStore(&self.store, redaction, additional_credential);
     }
 
+    fn timerDueAt(item: *const state.Item) u64 {
+        return @max(item.next_run_at_unix_seconds.?, item.preflight_retry_at_unix_seconds orelse 0);
+    }
+
     fn earliestReady(self: *Runtime, authority: ExecutionBinding) ?*state.Item {
         var earliest: ?*state.Item = null;
         for (self.store.items) |*entry| {
             const item = if (entry.*) |*value| value else continue;
             if (!item.enabled or item.health != .ready or item.next_run_at_unix_seconds == null or
                 authority.status(item.bindingView()) != .ready) continue;
-            if (earliest == null or item.next_run_at_unix_seconds.? < earliest.?.next_run_at_unix_seconds.?) earliest = item;
+            if (earliest == null or timerDueAt(item) < timerDueAt(earliest.?)) earliest = item;
         }
         return earliest;
     }
@@ -1053,8 +1102,7 @@ pub const Runtime = struct {
         if (!self.background_available or self.persistence_health != .ready or
             !binding.available) return false;
         const item = self.earliestReady(binding) orelse return false;
-        const due = item.next_run_at_unix_seconds orelse return false;
-        if (self.timer.armAt(due)) return false;
+        if (self.timer.armAt(timerDueAt(item))) return false;
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
@@ -1090,6 +1138,7 @@ pub const Runtime = struct {
         if (redaction.contains(bytes)) {
             self.persistence_health = .write_failed;
             self.changed = true;
+            self.timer.cancelCurrent();
             return error.ScheduledTaskPersistenceFailed;
         }
         switch (self.persistence.commit(bytes)) {
@@ -1097,11 +1146,13 @@ pub const Runtime = struct {
             .failed => {
                 self.persistence_health = .write_failed;
                 self.changed = true;
+                self.timer.cancelCurrent();
                 return error.ScheduledTaskPersistenceFailed;
             },
             .outcome_unknown => {
                 self.persistence_health = .outcome_unknown;
                 self.changed = true;
+                self.timer.cancelCurrent();
                 return error.ScheduledTaskPersistenceOutcomeUnknown;
             },
         }
@@ -1165,16 +1216,6 @@ pub const testing = if (builtin.is_test) struct {
             .last_occurrence = stored.last_occurrence,
         };
     }
-
-    pub fn overwriteInputPrefix(
-        runtime: *Runtime,
-        id: u64,
-        bytes: []const u8,
-    ) void {
-        const stored = runtime.store.find(id) orelse unreachable;
-        std.debug.assert(bytes.len <= stored.input.value.len);
-        @memcpy(stored.input.value[0..bytes.len], bytes);
-    }
 } else struct {};
 
 fn redactStore(
@@ -1228,6 +1269,9 @@ const TestEffects = struct {
     notification_kind: ?NotificationKind = null,
     notification_task_id: u64 = 0,
     armed_at: ?u64 = null,
+    durable_storage: ?[]u8 = null,
+    durable_len: usize = 0,
+    unknown_landed: bool = false,
 
     fn clock(context: ?*anyopaque) ?u64 {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
@@ -1245,10 +1289,19 @@ const TestEffects = struct {
         self.armed_at = null;
     }
 
-    fn commit(context: ?*anyopaque, _: []const u8) PersistenceCommit {
+    fn commit(context: ?*anyopaque, bytes: []const u8) PersistenceCommit {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         if (self.fail_commit_at == self.commits) return .failed;
+        if (self.commit_result == .committed or
+            (self.commit_result == .outcome_unknown and self.unknown_landed))
+        {
+            if (self.durable_storage) |storage| {
+                std.debug.assert(bytes.len <= storage.len);
+                @memcpy(storage[0..bytes.len], bytes);
+                self.durable_len = bytes.len;
+            }
+        }
         return self.commit_result;
     }
 
@@ -1303,9 +1356,15 @@ const TestTasks = struct {
     terminal_task_id: u64 = 0,
     active_task_id: u64 = 0,
     preflight_error: ?anyerror = null,
+    preflight_blocked_title: ?[]const u8 = null,
+    rejection: ?TaskLaunchFailure = null,
+    launch_effects: ?*TestEffects = null,
+    launch_commit: PersistenceCommit = .committed,
 
-    fn preflight(context: *anyopaque, _: TaskLaunch) anyerror!void {
+    fn preflight(context: *anyopaque, input: TaskLaunch) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.preflight_blocked_title) |title|
+            if (std.mem.eql(u8, title, input.title)) return error.ExecutionUnavailable;
         if (self.preflight_error) |err| return err;
     }
 
@@ -1316,6 +1375,8 @@ const TestTasks = struct {
 
     fn launch(context: *anyopaque, input: TaskLaunch) TaskLaunchOutcome {
         const self: *TestTasks = @ptrCast(@alignCast(context));
+        if (self.launch_effects) |value| value.commit_result = self.launch_commit;
+        if (self.rejection) |failure| return .{ .rejected = failure };
         self.launched_profile = input.permission_profile;
         const task_id = self.next_task_id;
         self.next_task_id += 1;
@@ -1595,7 +1656,7 @@ test "full protected history stops without eviction or an overdue timer retry" {
     }
 }
 
-test "preflight refusal leaves no claim and cancels overdue timer until authority returns" {
+test "transient preflight failure retries without a claim and runs only the latest due occurrence" {
     var effects: TestEffects = .{};
     var tasks: TestTasks = .{ .preflight_error = error.ExecutionUnavailable };
     var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
@@ -1604,22 +1665,34 @@ test "preflight refusal leaves no claim and cancels overdue timer until authorit
     });
     defer runtime.deinit();
     const redaction = testRedaction(&effects);
-    const id = try runtime.create(testDefinition("preflight", "inspect"), testBinding(), redaction);
+    var definition = testDefinition("preflight", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
     _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
     const commits = effects.commits;
     effects.now = 200;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
-    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+    effects.now = 259;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+    effects.now = 260;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 320), effects.armed_at);
     try std.testing.expectEqual(commits, effects.commits);
     try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
     try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
     try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, redaction, tasks.effects()));
     try std.testing.expectEqual(commits, effects.commits);
     tasks.preflight_error = null;
-    _ = runtime.refreshBindingNoFail(testBinding(), redaction);
+    effects.now = 382;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
     runtime.onTimer(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
-    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    const item = runtime.store.find(id).?;
+    try std.testing.expectEqual(@as(usize, 1), item.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 380), item.occurrences()[0].planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 440), effects.armed_at);
 }
 
 test "unavailable binding cancels an armed timer without invalidating a due definition" {
@@ -2061,4 +2134,385 @@ test "old Schedule canonical is quarantined before bootstrap installs the empty 
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "preflight failure isolates one plan across lifecycle wakes and store replacements" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{ .preflight_blocked_title = "blocked" };
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 3, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const blocked = try runtime.create(testDefinition("blocked", "inspect"), testBinding(), redaction);
+    const valid = try runtime.create(testDefinition("valid", "inspect"), testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 200), effects.armed_at);
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(valid).?.occurrence_count);
+    try std.testing.expectEqual(@as(usize, 0), runtime.store.find(blocked).?.occurrence_count);
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+    tasks.preflight_blocked_title = null;
+    effects.now = 260;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 44), tasks.next_task_id);
+}
+
+test "allocation failure before launch never strands a committed claim" {
+    var failures: usize = 0;
+    for (0..40) |index| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("allocation", "inspect"), testBinding(), redaction);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        runtime.allocator = failing.allocator();
+        const result = runtime.runNow(id, 1, redaction, tasks.effects());
+        runtime.allocator = std.testing.allocator;
+        if (result) |_| {} else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+        for (runtime.store.find(id).?.occurrences()) |occurrence|
+            try std.testing.expect(occurrence.result != .claimed);
+        if (tasks.next_task_id == 42) {
+            try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+            try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
+            _ = try runtime.runNow(id, 1, redaction, tasks.effects());
+        } else {
+            try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
+        }
+    }
+    try std.testing.expect(failures > 0);
+}
+
+test "rejected launch notification follows a confirmed Schedule commit" {
+    for ([_]PersistenceCommit{ .committed, .failed, .outcome_unknown }) |commit| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{ .rejection = .{ .cause = error.QueueFull, .reason = .capacity_reached, .task_id = 42 }, .launch_effects = &effects, .launch_commit = commit };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("rejected", "inspect"), testBinding(), redaction);
+        try std.testing.expectError(error.QueueFull, runtime.runNow(id, 1, redaction, tasks.effects()));
+        try std.testing.expectEqual(@as(usize, if (commit == .committed) 1 else 0), effects.notifications);
+        if (commit == .committed) try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
+        try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
+    }
+}
+
+test "same-second manual occurrences reconcile by their actual Task identity" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(testDefinition("manual", "inspect"), testBinding(), redaction);
+    const first = try runtime.runNow(id, 1, redaction, tasks.effects());
+    const second = try runtime.runNow(id, 1, redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal_task_id = first;
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(first));
+    try std.testing.expect(runtime.hasPendingSubmittedOccurrence(second));
+    try std.testing.expectEqual(@as(?TaskOutcome, null), runtime.store.find(id).?.occurrences()[1].task_outcome);
+    tasks.terminal_task_id = second;
+    tasks.terminal = .{ .outcome = .failed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(second));
+    try std.testing.expectEqual(TaskOutcome.completed, runtime.store.find(id).?.occurrences()[0].task_outcome.?);
+    try std.testing.expectEqual(TaskOutcome.failed, runtime.store.find(id).?.last_occurrence.?.task_outcome.?);
+}
+
+test "startup claim recovery is fail closed on allocation failure and explicit recovery settles every claim" {
+    for (0..8) |index| {
+        var effects: TestEffects = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("interrupted", "inspect"), testBinding(), redaction);
+        const item = runtime.store.find(id).?;
+        try runtime.store.claim(item, 100, 100, .manual);
+        try runtime.store.claim(item, 101, 101, .manual);
+        // A later record must not hide an older interrupted claim.
+        try runtime.store.markSkipped(item, 200, 200, 0);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        runtime.allocator = failing.allocator();
+        const recovered = runtime.recoverInterruptedNoFail(redaction);
+        runtime.allocator = std.testing.allocator;
+        if (!recovered) {
+            try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth());
+            _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+            try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+            try std.testing.expectEqual(PersistenceRecoveryOutcome.recovered, runtime.recoverPersistence(redaction));
+        }
+        const restored = runtime.store.find(id).?;
+        try std.testing.expectEqual(Health.needs_attention, restored.health);
+        for (restored.occurrences()[0..2]) |occurrence| {
+            try std.testing.expectEqual(state.OccurrenceResult.rejected, occurrence.result);
+            try std.testing.expectEqual(FailureReason.host_interrupted, occurrence.reason.?);
+        }
+        try std.testing.expectEqual(state.OccurrenceResult.skipped, restored.last_occurrence.?.result);
+    }
+}
+
+test "backward wall-clock movement cannot replay a consumed timer occurrence" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("clock", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    effects.now = 100;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+}
+
+test "failed Schedule mutations cancel an existing timer without publishing their candidate" {
+    for ([_]PersistenceCommit{ .failed, .outcome_unknown }) |commit| {
+        var effects: TestEffects = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("retained", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        _ = runtime.takeChanged();
+        effects.commit_result = commit;
+        const result = runtime.setEnabled(id, 1, false, testBinding(), redaction);
+        if (commit == .failed) {
+            try std.testing.expectError(error.ScheduledTaskPersistenceFailed, result);
+        } else try std.testing.expectError(error.ScheduledTaskPersistenceOutcomeUnknown, result);
+        try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+        try std.testing.expect(runtime.takeChanged());
+        try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
+        try std.testing.expectEqual(@as(u64, 1), runtime.store.find(id).?.epoch);
+    }
+}
+
+test "restart never replays a launched occurrence after a failed or indeterminate result commit" {
+    const storage = try std.testing.allocator.alloc(u8, persistence.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    const Scenario = struct { commit: PersistenceCommit, landed: bool };
+    for ([_]Scenario{ .{ .commit = .failed, .landed = false }, .{ .commit = .outcome_unknown, .landed = false }, .{ .commit = .outcome_unknown, .landed = true } }) |scenario| {
+        var effects: TestEffects = .{ .durable_storage = storage, .unknown_landed = scenario.landed };
+        var tasks: TestTasks = .{ .launch_effects = &effects, .launch_commit = scenario.commit };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        const redaction = testRedaction(&effects);
+        const id = runtime.create(testDefinition("restart", "inspect"), testBinding(), redaction) catch |err| {
+            runtime.deinit();
+            return err;
+        };
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 200;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
+        try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+        runtime.deinit();
+        effects.restored_bytes = storage[0..effects.durable_len];
+        effects.commit_result = .committed;
+        var restored = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer restored.deinit();
+        _ = restored.recoverInterruptedNoFail(redaction);
+        _ = restored.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 400;
+        restored.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+        const occurrence = restored.store.find(id).?.occurrences()[0];
+        if (scenario.landed) {
+            try std.testing.expectEqual(state.OccurrenceResult.submitted, occurrence.result);
+            try std.testing.expectEqual(@as(u64, 42), occurrence.task_id);
+        } else {
+            try std.testing.expectEqual(state.OccurrenceResult.rejected, occurrence.result);
+            try std.testing.expectEqual(FailureReason.host_interrupted, occurrence.reason.?);
+        }
+    }
+}
+
+test "unrelated mutations retain in-process redaction facts" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const first = try runtime.create(testDefinition("[redacted]", "[redacted]"), testBinding(), redaction);
+    runtime.store.find(first).?.title_redacted = true;
+    runtime.store.find(first).?.input.redacted = true;
+    _ = try runtime.create(testDefinition("unrelated", "inspect"), testBinding(), redaction);
+    try std.testing.expect(runtime.store.find(first).?.title_redacted);
+    try std.testing.expect(runtime.store.find(first).?.input.redacted);
+}
+
+test "late calendar wake selects one latest local occurrence and advances past the DST fold" {
+    var effects: TestEffects = .{ .now = 1_793_424_600 };
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("calendar", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = effects.now, .timezone = .@"America/New_York", .frequency = .daily } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 1_793_513_400; // Second 01:10, after the first 01:30 has passed.
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    const occurrence = runtime.store.find(id).?.occurrences()[0];
+    try std.testing.expectEqual(@as(u64, 1_793_511_000), occurrence.planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 1_793_601_000), effects.armed_at);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "creation timezone is captured once and survives edits and restart" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("zone", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .@"Asia/Shanghai", .frequency = .daily } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    definition.recurrence.calendar.timezone = .@"Europe/Berlin";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    var bytes: [persistence.max_store_bytes]u8 = undefined;
+    const encoded = try persistence.encode(&bytes, &runtime.store);
+    var restored = try persistence.decode(std.testing.allocator, encoded, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer restored.deinit();
+    try std.testing.expectEqual(TimeZone.@"Asia/Shanghai", restored.find(id).?.created_timezone.?);
+}
+
+test "title-only edit must not replay a consumed timer occurrence" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("before", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    definition.title = "after";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "pause and resume after clock rollback must not replay a consumed point" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("clock", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
+    effects.now = 150;
+    _ = try runtime.setEnabled(id, 2, true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "consumed one-time schedules stay completed after editing and enabling" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("once", "inspect");
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    effects.now = 150;
+    definition.title = "renamed";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    try std.testing.expect(!try runtime.setEnabled(id, 2, true, testBinding(), redaction));
+    try std.testing.expectEqual(Health.completed, runtime.store.find(id).?.health);
+    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "calendar edits and resume respect the consumed absolute boundary" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("calendar", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .UTC, .frequency = .daily } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    try std.testing.expectEqual(@as(u64, 1), try runtime.epoch(id));
+    try std.testing.expectEqual(@as(u64, 1), try runtime.epoch(id));
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    definition.title = "renamed";
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 86600), effects.armed_at);
+    _ = try runtime.setEnabled(id, 2, false, testBinding(), redaction);
+    effects.now = 150;
+    _ = try runtime.setEnabled(id, 3, true, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 86600), effects.armed_at);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    // An explicit rule change also cannot reuse an already consumed identity.
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 199, .every_seconds = 60 } };
+    effects.now = 150;
+    try runtime.update(id, 4, definition, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 259), effects.armed_at);
+    try std.testing.expectEqual(@as(u64, 5), try runtime.epoch(id));
+}
+
+test "multiple weekdays admit only the latest due occurrence and keep the consumed boundary" {
+    var effects: TestEffects = .{};
+    effects.now = 1793606400 - 1;
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("weekdays", "inspect");
+    definition.recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1793606400, .timezone = .UTC, .frequency = .weekly, .days = 10 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 1793692800), effects.armed_at);
+    effects.now = 1793952000;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    const item = runtime.store.find(id).?;
+    try std.testing.expectEqual(@as(usize, 1), item.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, 1793865600), item.last_timer_planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 1794297600), item.next_run_at_unix_seconds);
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
+    effects.now = 1793692800;
+    _ = try runtime.setEnabled(id, 2, true, testBinding(), redaction);
+    try std.testing.expectEqual(@as(?u64, 1794297600), runtime.store.find(id).?.next_run_at_unix_seconds);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
 }

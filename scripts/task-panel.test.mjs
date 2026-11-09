@@ -71,7 +71,7 @@ const { TaskInformation } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskInformation.tsx",
 );
 const { NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
-  "/src/features/tasks/NewTaskView.tsx",
+  "/src/features/approvals/ApprovalModeMenu.tsx",
 );
 const { ConversationContext } = await vite.ssrLoadModule(
   "/src/features/composer/ConversationContext.tsx",
@@ -994,44 +994,54 @@ function taskContentElement(
   );
 }
 
-test("Task MCP suggestion uses canonical source identity even without recorded tools", () => {
+test("Task supplements retain canonical Task and Run identity when tools were not recorded", () => {
   const current = run({ tools: [], recordingIncomplete: true });
   const value = task({ runs: [current] });
-  const proposal = {
-    id: "17",
-    taskId: value.id,
-    runId: current.id,
-    draft: {
-      displayName: "Suggested server",
-      transport: "stdio",
-      command: "node",
-      arguments: [],
-      cwd: null,
-      environmentNames: [],
-      negotiation: "automatic",
-      timeoutMs: 30000,
-    },
-  };
   const reviewed = [];
+  const renderRunSupplement = ({ taskId, runId, disabled }) =>
+    createElement(
+      "button",
+      {
+        type: "button",
+        disabled,
+        onClick: () => reviewed.push({ taskId, runId }),
+      },
+      "Inspect run supplement",
+    );
   const view = render(
-    taskContentElement(value, "1", {
-      mcpInstallationProposal: proposal,
-      onReviewMcpProposal: (entry) => reviewed.push(entry),
-    }),
+    taskContentElement(value, "1", { renderRunSupplement, synchronized: true }),
   );
   fireEvent.click(
-    screen.getByRole("button", { name: "Review MCP configuration" }),
+    screen.getByRole("button", { name: "Inspect run supplement" }),
   );
-  assert.deepEqual(reviewed, [proposal]);
+  assert.deepEqual(reviewed, [{ taskId: value.id, runId: current.id }]);
   view.rerender(
     taskContentElement(value, "2", {
-      mcpInstallationProposal: { ...proposal, taskId: "999" },
+      renderRunSupplement,
+      synchronized: false,
     }),
   );
   assert.equal(
-    screen.queryByRole("button", { name: "Review MCP configuration" }),
-    null,
+    screen.getByRole("button", { name: "Inspect run supplement" }).disabled,
+    true,
   );
+  const another = task({
+    id: "999",
+    runs: [run({ id: "998", tools: [], recordingIncomplete: true })],
+  });
+  view.rerender(
+    taskContentElement(another, "3", {
+      renderRunSupplement,
+      synchronized: true,
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Inspect run supplement" }),
+  );
+  assert.deepEqual(reviewed, [
+    { taskId: value.id, runId: current.id },
+    { taskId: "999", runId: "998" },
+  ]);
 });
 
 function runProcessElement(

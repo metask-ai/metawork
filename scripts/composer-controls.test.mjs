@@ -3872,7 +3872,7 @@ for (const accessRequired of [false, true]) {
 
 test("new Task approval menu explains each mode only when opened and changes the draft choice", async () => {
   const { NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
-    "/src/features/tasks/NewTaskView.tsx",
+    "/src/features/approvals/ApprovalModeMenu.tsx",
   );
   const choices = [];
   renderComposer({

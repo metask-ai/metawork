@@ -6689,6 +6689,14 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
 }
 
 test "custom schedule creates updates and launches manual and timed Tasks through source authority" {
+    try testScheduledSourceAuthority(.{ .interval = .{ .start_at_unix_seconds = 2_000, .every_seconds = 300 } });
+}
+
+test "calendar schedule launches manual and timed Tasks through the same durable source authority" {
+    try testScheduledSourceAuthority(.{ .calendar = .{ .start_at_unix_seconds = 2_000, .timezone = .@"Asia/Shanghai", .frequency = .daily } });
+}
+
+fn testScheduledSourceAuthority(recurrence: product_control.ScheduledTaskRecurrence) !void {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
     defer {
@@ -6737,10 +6745,20 @@ test "custom schedule creates updates and launches manual and timed Tasks throug
         .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Review work",
-        .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2_000, .every_seconds = 300 } },
+        .recurrence = recurrence,
     });
     const first = try workbench.runScheduledTaskNow(id, 2);
-    try waitControlSnapshot(&workbench, "\"taskOutcome\":\"completed\"");
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        if (workbench.schedule.store.find(id).?.occurrences()[0].task_outcome == .completed) break;
+        std.Thread.yield() catch {};
+    } else return error.TestUnexpectedResult;
+    if (recurrence == .calendar) {
+        var snapshot_storage: [512 * 1024]u8 = undefined;
+        const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"calendar\"") != null);
+        try std.testing.expectEqual(@as(u64, 2), try workbench.scheduledTaskEpoch(id));
+    }
     schedule.now = 2_000;
     workbench.onScheduledTaskTimer();
     const occurrence = workbench.schedule.store.find(id).?.last_occurrence.?;

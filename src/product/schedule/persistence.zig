@@ -49,7 +49,9 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
 
 pub const RecoveryFault = enum {
     none,
+    stage_failed,
     install_failed,
+    restore_failed,
     interrupted_after_quarantine,
     interrupted_after_install,
 };
@@ -169,7 +171,7 @@ pub const FileStore = struct {
     ) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
-        try self.settleIncompleteRecoveries();
+        if (self.recovery_fault == .stage_failed) return error.WriteFailed;
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
         const random_hex = std.fmt.bytesToHex(random, .lower);
@@ -246,6 +248,10 @@ pub const FileStore = struct {
         pending.close(self.io);
         pending_open = false;
         if (!self.syncPath(pending_name)) return error.WriteFailed;
+        // A new durable marker must protect the store before older recovery
+        // evidence is settled. Any later failure remains visible on restart.
+        clean_pending = false;
+        try self.settleIncompleteRecoveries(&random_hex);
 
         var quarantined = true;
         self.dir.rename(
@@ -260,6 +266,7 @@ pub const FileStore = struct {
         if (quarantined and !self.syncPath(quarantine_name)) {
             if (!self.restoreCanonical(quarantine_name))
                 return error.PersistenceOutcomeUnknown;
+            clean_pending = true;
             return error.WriteFailed;
         }
 
@@ -268,9 +275,12 @@ pub const FileStore = struct {
             clean_pending = false;
             return error.PersistenceOutcomeUnknown;
         }
-        if (self.recovery_fault == .install_failed) {
-            if (quarantined and !self.restoreCanonical(quarantine_name))
-                return error.PersistenceOutcomeUnknown;
+        if (self.recovery_fault == .install_failed or self.recovery_fault == .restore_failed) {
+            if (quarantined) {
+                if (!self.restoreCanonical(quarantine_name))
+                    return error.PersistenceOutcomeUnknown;
+                clean_pending = true;
+            }
             return error.WriteFailed;
         }
         self.dir.rename(
@@ -279,8 +289,11 @@ pub const FileStore = struct {
             file_name,
             self.io,
         ) catch {
-            if (quarantined and !self.restoreCanonical(quarantine_name))
-                return error.PersistenceOutcomeUnknown;
+            if (quarantined) {
+                if (!self.restoreCanonical(quarantine_name))
+                    return error.PersistenceOutcomeUnknown;
+                clean_pending = true;
+            }
             return error.WriteFailed;
         };
         temp_exists = false;
@@ -316,6 +329,7 @@ pub const FileStore = struct {
     }
 
     fn restoreCanonical(self: *FileStore, quarantine_name: []const u8) bool {
+        if (self.recovery_fault == .restore_failed) return false;
         self.dir.rename(
             quarantine_name,
             self.dir,
@@ -329,10 +343,10 @@ pub const FileStore = struct {
     /// recovery transactions. Preserve every displaced canonical as a final
     /// quarantine, remove uninstalled candidates, and clear pending markers
     /// last so a crash during settlement remains fail closed.
-    fn settleIncompleteRecoveries(self: *FileStore) FileStoreError!void {
+    fn settleIncompleteRecoveries(self: *FileStore, current_id: []const u8) FileStoreError!void {
         var operations: usize = 0;
         var name_storage: [96]u8 = undefined;
-        while (try self.findRecoveryArtifact(".bak", &name_storage)) |name| {
+        while (try self.findRecoveryArtifact(".bak", &name_storage, current_id)) |name| {
             operations += 1;
             if (operations > max_recovery_artifacts)
                 return error.PersistenceOutcomeUnknown;
@@ -355,7 +369,7 @@ pub const FileStore = struct {
                 return error.PersistenceOutcomeUnknown;
         }
         var removed_temp = false;
-        while (try self.findRecoveryArtifact(".tmp", &name_storage)) |name| {
+        while (try self.findRecoveryArtifact(".tmp", &name_storage, current_id)) |name| {
             operations += 1;
             if (operations > max_recovery_artifacts)
                 return error.PersistenceOutcomeUnknown;
@@ -366,7 +380,7 @@ pub const FileStore = struct {
         if (removed_temp and !self.syncDirectory())
             return error.PersistenceOutcomeUnknown;
         var removed_pending = false;
-        while (try self.findRecoveryArtifact(".pending", &name_storage)) |name| {
+        while (try self.findRecoveryArtifact(".pending", &name_storage, current_id)) |name| {
             operations += 1;
             if (operations > max_recovery_artifacts)
                 return error.PersistenceOutcomeUnknown;
@@ -382,6 +396,7 @@ pub const FileStore = struct {
         self: *FileStore,
         suffix: []const u8,
         output: []u8,
+        excluded_id: ?[]const u8,
     ) FileStoreError!?[]const u8 {
         var iterable = self.dir.openDir(
             self.io,
@@ -391,8 +406,10 @@ pub const FileStore = struct {
         defer iterable.close(self.io);
         var iterator = iterable.iterate();
         while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
-            if (entry.kind != .file or
-                recoveryTransactionId(entry.name, suffix) == null) continue;
+            if (entry.kind != .file) continue;
+            const id = recoveryTransactionId(entry.name, suffix) orelse continue;
+            if (excluded_id) |excluded|
+                if (std.mem.eql(u8, id, excluded)) continue;
             if (entry.name.len > output.len)
                 return error.PersistenceOutcomeUnknown;
             @memcpy(output[0..entry.name.len], entry.name);
@@ -496,6 +513,8 @@ const ItemWire = struct {
     failure_reason: ?[]const u8,
     next_run_at_unix_seconds: ?u64,
     occurrences: []OccurrenceWire,
+    created_timezone: ?[]const u8 = null,
+    last_timer_planned_at_unix_seconds: ?u64 = null,
 };
 
 const BindingWire = struct {
@@ -519,6 +538,9 @@ const RecurrenceWire = struct {
     at_unix_seconds: ?u64 = null,
     start_at_unix_seconds: ?u64 = null,
     every_seconds: ?u64 = null,
+    timezone: ?[]const u8 = null,
+    frequency: ?[]const u8 = null,
+    days: ?[]const u8 = null,
 };
 
 const OccurrenceWire = struct {
@@ -624,8 +646,13 @@ fn decodeCurrent(
             else
                 null,
             .next_run_at_unix_seconds = wire.next_run_at_unix_seconds,
+            .last_timer_planned_at_unix_seconds = wire.last_timer_planned_at_unix_seconds,
             .occurrences = occurrences[0..wire.occurrences.len],
-        }) catch return error.ScheduledTaskStoreCorrupt;
+            .created_timezone = if (wire.created_timezone) |name|
+                parseEnum(scheduled.TimeZone, name) orelse return error.ScheduledTaskStoreCorrupt
+            else
+                null,
+        }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ScheduledTaskStoreCorrupt;
     }
     store.restoreNextId(parsed.value.next_id) catch
         return error.ScheduledTaskStoreCorrupt;
@@ -658,6 +685,12 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
     try encodeInput(writer, item.input.borrowed());
     try writer.writeAll(",\"recurrence\":");
     try encodeRecurrence(writer, item.recurrence);
+    if (item.created_timezone) |zone| {
+        try writer.writeAll(",\"created_timezone\":");
+        try jsonString(writer, @tagName(zone));
+    }
+    if (item.last_timer_planned_at_unix_seconds) |last|
+        try writer.print(",\"last_timer_planned_at_unix_seconds\":{d}", .{last});
     try writer.print(
         ",\"enabled\":{s},\"health\":",
         .{if (item.enabled) "true" else "false"},
@@ -720,6 +753,21 @@ fn encodeInput(writer: *std.Io.Writer, input: []const u8) !void {
 
 fn encodeRecurrence(writer: *std.Io.Writer, recurrence: scheduled.Recurrence) !void {
     switch (recurrence) {
+        .calendar => |rule| {
+            try writer.print("{{\"kind\":\"calendar\",\"start_at_unix_seconds\":{d},\"timezone\":\"{s}\",\"frequency\":\"{s}\"", .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) });
+            if (rule.frequency == .weekly or rule.frequency == .monthly) {
+                try writer.writeAll(",\"days\":[");
+                var count: usize = 0;
+                for (0..31) |day| {
+                    if (rule.selectedDays() & (@as(u32, 1) << @as(u5, @intCast(day))) == 0) continue;
+                    if (count != 0) try writer.writeByte(',');
+                    try writer.print("{d}", .{day + 1});
+                    count += 1;
+                }
+                try writer.writeByte(']');
+            }
+            try writer.writeByte('}');
+        },
         .once => |once| try writer.print(
             "{{\"kind\":\"once\",\"at_unix_seconds\":{d}}}",
             .{once.at_unix_seconds},
@@ -740,6 +788,18 @@ fn decodeInput(wire: InputWire) Error![]const u8 {
 }
 
 fn decodeRecurrence(wire: RecurrenceWire) Error!scheduled.Recurrence {
+    if (std.mem.eql(u8, wire.kind, "calendar")) {
+        if (wire.at_unix_seconds != null or wire.every_seconds != null) return error.ScheduledTaskStoreCorrupt;
+        var result: scheduled.Recurrence = .{ .calendar = .{
+            .start_at_unix_seconds = wire.start_at_unix_seconds orelse return error.ScheduledTaskStoreCorrupt,
+            .timezone = parseEnum(scheduled.TimeZone, wire.timezone orelse return error.ScheduledTaskStoreCorrupt) orelse return error.ScheduledTaskStoreCorrupt,
+            .frequency = parseEnum(scheduled.CalendarFrequency, wire.frequency orelse return error.ScheduledTaskStoreCorrupt) orelse return error.ScheduledTaskStoreCorrupt,
+        } };
+        if (wire.days) |days| result.calendar = result.calendar.withDays(days) catch return error.ScheduledTaskStoreCorrupt;
+        result.validate() catch return error.ScheduledTaskStoreCorrupt;
+        return result;
+    }
+    if (wire.timezone != null or wire.frequency != null or wire.days != null) return error.ScheduledTaskStoreCorrupt;
     if (std.mem.eql(u8, wire.kind, "once")) {
         if (wire.start_at_unix_seconds != null or wire.every_seconds != null)
             return error.ScheduledTaskStoreCorrupt;
@@ -825,8 +885,9 @@ test "scheduled task store round trips bounded occurrence history" {
         } },
     }, 1_000);
     const item = store.find(id).?;
-    try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
-    try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed, null);
+    try store.claim(item, 2_000, 2_001, .timer);
+    try store.finalizeClaimSubmitted(item, 2_000, .timer, 42);
+    try store.finalizeOccurrenceTask(item, 2_000, .timer, 42, .completed, null);
     try store.markSkipped(item, 5_600, 5_601, 42);
     try store.markSkipped(item, 9_200, 9_201, 0);
     const default_id = try store.create(.{
@@ -1139,4 +1200,215 @@ test "orphan recovery files without an exact pending marker do not block load" {
     const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings(canonical, restored);
+}
+
+test "recovery rollback failure keeps restart fail closed and preserves original bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    const previous = "original interrupted canonical";
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit(previous);
+    testing.setRecoveryFault(&file_store, .restore_failed);
+    try std.testing.expectError(error.PersistenceOutcomeUnknown, file_store.recover(replacement));
+    try std.testing.expectError(error.ReadFailed, file_store.loadAlloc(std.testing.allocator));
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+    var storage: [96]u8 = undefined;
+    const quarantine_name = (try file_store.findRecoveryArtifact(".quarantine", &storage, null)).?;
+    const original = try tmp.dir.readFileAlloc(std.testing.io, quarantine_name, std.testing.allocator, .limited(max_store_bytes));
+    defer std.testing.allocator.free(original);
+    try std.testing.expectEqualStrings(previous, original);
+}
+
+test "a failed recovery retry cannot erase the last interrupted recovery marker" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit("interrupted original");
+    testing.setRecoveryFault(&file_store, .interrupted_after_quarantine);
+    try std.testing.expectError(error.PersistenceOutcomeUnknown, file_store.recover(replacement));
+    testing.setRecoveryFault(&file_store, .stage_failed);
+    try std.testing.expectError(error.WriteFailed, file_store.recover(replacement));
+    try std.testing.expectError(error.ReadFailed, file_store.loadAlloc(std.testing.allocator));
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+}
+
+test "Schedule decoder rejects cursors outside the saved recurrence" {
+    var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer store.deinit();
+    const id = try store.create(.{
+        .title = "cursor",
+        .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+        .permission_profile = .approval_required,
+        .input = "inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
+    }, 100);
+    const item = store.find(id).?;
+    var output: [max_store_bytes]u8 = undefined;
+    item.next_run_at_unix_seconds = 100;
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    item.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    for ([_]u64{ 0, 100, 201, 259 }) |cursor| {
+        item.next_run_at_unix_seconds = cursor;
+        try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    }
+    item.next_run_at_unix_seconds = 260;
+    const bytes = try encode(&output, &store);
+    const Decode = struct {
+        fn check(allocator: std.mem.Allocator, input: []const u8) !void {
+            var restored = try decode(allocator, input, .{ .max_items = 1, .max_projection_bytes = 8192 });
+            defer restored.deinit();
+            try std.testing.expectEqual(@as(?u64, 260), restored.find(1).?.next_run_at_unix_seconds);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Decode.check, .{bytes});
+}
+
+test "calendar definition and cursor round trip without changing fixed interval semantics" {
+    var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer store.deinit();
+    const id = try store.create(.{
+        .title = "calendar",
+        .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+        .permission_profile = .approval_required,
+        .input = "inspect",
+        .recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1_793_424_600, .timezone = .@"America/New_York", .frequency = .daily } },
+    }, 1_793_424_601);
+    var buffer: [max_store_bytes]u8 = undefined;
+    const bytes = try encode(&buffer, &store);
+    var restored = try decode(std.testing.allocator, bytes, .{ .max_items = 1, .max_projection_bytes = 8192 });
+    defer restored.deinit();
+    const item = restored.find(id).?;
+    try std.testing.expectEqual(scheduled.TimeZone.@"America/New_York", item.recurrence.calendar.timezone);
+    try std.testing.expectEqual(scheduled.CalendarFrequency.daily, item.recurrence.calendar.frequency);
+    try std.testing.expectEqual(@as(?u64, 1_793_511_000), item.next_run_at_unix_seconds);
+    const fixed: scheduled.Recurrence = .{ .interval = .{ .start_at_unix_seconds = 1_793_424_600, .every_seconds = 86400 } };
+    try std.testing.expectEqual(@as(?u64, 1_793_597_400), try fixed.firstStrictlyAfter(1_793_511_000));
+    try std.testing.expectEqual(@as(?u64, 1_793_601_000), try item.recurrence.firstStrictlyAfter(1_793_511_000));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "daily", .timezone = "Unknown/Zone" }));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .frequency = "unknown", .timezone = "UTC" }));
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1, .every_seconds = 86400, .frequency = "daily", .timezone = "UTC" }));
+}
+
+test "timer consumption survives history eviction and a paused-store restart" {
+    for ([_]scheduled.Recurrence{
+        .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } },
+        .{ .calendar = .{ .start_at_unix_seconds = 200, .timezone = .UTC, .frequency = .daily } },
+    }) |recurrence| {
+        var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer store.deinit();
+        const id = try store.create(.{
+            .title = "boundary",
+            .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+            .permission_profile = .approval_required,
+            .input = "inspect",
+            .recurrence = recurrence,
+        }, 100);
+        const item = store.find(id).?;
+        try store.claim(item, 200, 200, .timer);
+        try store.finalizeClaimSubmitted(item, 200, .timer, 42);
+        try store.finalizeOccurrenceTask(item, 200, .timer, 42, .completed, null);
+        for (0..scheduled.max_occurrence_history) |index| {
+            const planned = 201 + index;
+            const task_id = 100 + index;
+            try store.claim(item, planned, planned, .manual);
+            try store.finalizeClaimSubmitted(item, planned, .manual, task_id);
+            try store.finalizeOccurrenceTask(item, planned, .manual, task_id, .completed, null);
+        }
+        for (item.occurrences()) |occurrence| try std.testing.expectEqual(scheduled.OccurrenceSource.manual, occurrence.source);
+        try store.setEnabled(id, 1, false, 300);
+        var output: [max_store_bytes]u8 = undefined;
+        var restored = try decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer restored.deinit();
+        try std.testing.expectEqual(@as(?u64, 200), restored.find(id).?.last_timer_planned_at_unix_seconds);
+        try restored.setEnabled(id, 2, true, 100);
+        try std.testing.expectEqual(try recurrence.firstStrictlyAfter(200), restored.find(id).?.next_run_at_unix_seconds);
+    }
+}
+
+test "legacy timer facts repair a rewound cursor without discarding definitions" {
+    for ([_]scheduled.Recurrence{
+        .{ .once = .{ .at_unix_seconds = 200 } },
+        .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } },
+    }) |recurrence| {
+        var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer store.deinit();
+        const id = try store.create(.{
+            .title = "legacy",
+            .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+            .permission_profile = .approval_required,
+            .input = "inspect",
+            .recurrence = recurrence,
+        }, 100);
+        const item = store.find(id).?;
+        try store.claim(item, 200, 200, .timer);
+        try store.finalizeClaimSubmitted(item, 200, .timer, 42);
+        try store.finalizeOccurrenceTask(item, 200, .timer, 42, .completed, null);
+        // A schema-1 record written by the previous edit/resume path.
+        item.last_timer_planned_at_unix_seconds = null;
+        item.enabled = true;
+        item.health = .ready;
+        item.next_run_at_unix_seconds = 200;
+        var output: [max_store_bytes]u8 = undefined;
+        var restored = try decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer restored.deinit();
+        const copy = restored.find(id).?;
+        try std.testing.expectEqual(@as(?u64, 200), copy.last_timer_planned_at_unix_seconds);
+        try std.testing.expectEqual(try recurrence.firstStrictlyAfter(200), copy.next_run_at_unix_seconds);
+        try std.testing.expectEqualStrings("legacy", copy.title);
+        try std.testing.expectEqual(@as(usize, 1), copy.occurrence_count);
+        // Explicit new-format boundaries must not contradict saved state.
+        item.last_timer_planned_at_unix_seconds = 200;
+        try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+        item.last_timer_planned_at_unix_seconds = 199;
+        item.next_run_at_unix_seconds = null;
+        item.enabled = false;
+        item.health = .paused;
+        try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decode(std.testing.allocator, try encode(&output, &store), .{ .max_items = 1, .max_projection_bytes = 8192 }));
+    }
+}
+
+test "all calendar frequencies preserve their rule through persistence" {
+    for (std.enums.values(scheduled.CalendarFrequency)) |frequency| {
+        var store = try scheduled.Store.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer store.deinit();
+        const id = try store.create(.{
+            .title = "calendar",
+            .binding = .{ .model_ref = .{ .source_id = "metask:test", .model_id = "model" }, .source_generation = 1, .protocol = .anthropic_messages },
+            .permission_profile = .approval_required,
+            .input = "inspect",
+            .recurrence = .{ .calendar = .{ .start_at_unix_seconds = 1769860800, .timezone = .@"Asia/Shanghai", .frequency = frequency } },
+        }, 1769860801);
+        var buffer: [max_store_bytes]u8 = undefined;
+        var restored = try decode(std.testing.allocator, try encode(&buffer, &store), .{ .max_items = 1, .max_projection_bytes = 8192 });
+        defer restored.deinit();
+        try std.testing.expectEqual(frequency, restored.find(id).?.recurrence.calendar.frequency);
+        try std.testing.expectEqual(store.find(id).?.next_run_at_unix_seconds, restored.find(id).?.next_run_at_unix_seconds);
+    }
+}
+
+test "multiple calendar days survive persistence and legacy anchors retain their single date" {
+    for ([_]scheduled.CalendarFrequency{ .weekly, .monthly }) |frequency| {
+        const recurrence = try decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1793606400, .timezone = "UTC", .frequency = @tagName(frequency), .days = &.{ 1, 3, 7 } });
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try encodeRecurrence(&writer, recurrence);
+        const parsed = try std.json.parseFromSlice(RecurrenceWire, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const restored = try decodeRecurrence(parsed.value);
+        try std.testing.expectEqual(recurrence.calendar.selectedDays(), restored.calendar.selectedDays());
+        try std.testing.expectEqual(try recurrence.firstStrictlyAfter(1793606400), try restored.firstStrictlyAfter(1793606400));
+        const legacy = try decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1793606400, .timezone = "UTC", .frequency = @tagName(frequency) });
+        try std.testing.expectEqual(@as(u32, 1), @as(u32, @popCount(legacy.calendar.selectedDays())));
+    }
+    try std.testing.expectError(error.ScheduledTaskStoreCorrupt, decodeRecurrence(.{ .kind = "calendar", .start_at_unix_seconds = 1000, .timezone = "UTC", .frequency = "weekly", .days = &.{} }));
 }

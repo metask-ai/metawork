@@ -493,17 +493,6 @@ pub fn checkpointFailureAttempt(
     };
 }
 
-pub fn lastTerminalFacts(
-    runs: []?task_state.RunRecord,
-) ?task_state.ProductTerminalFacts {
-    var latest: ?*const task_state.RunRecord = null;
-    for (runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        if (latest == null or run.id > latest.?.id) latest = run;
-    }
-    return if (latest) |run| task_state.productTerminalFacts(run) else null;
-}
-
 pub fn latestTerminalRun(
     runs: []?task_state.RunRecord,
 ) ?*const task_state.RunRecord {

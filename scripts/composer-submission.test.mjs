@@ -1344,6 +1344,72 @@ test("App late send result preserves another Task's draft and focus", async (ctx
   assert.equal(document.activeElement, next);
 });
 
+test("App composes MCP installation cards only into their owning Task and Run", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const user = userEvent.setup({ document });
+  const calls = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "cancelMcpInstallation",
+    async (...args) => {
+      calls.push(args);
+      return { outcome: "unchanged", desiredGeneration: "9" };
+    },
+  );
+  const operation = {
+    serverId: "owned-server",
+    taskId: fixture.task.id,
+    runId: fixture.task.runs[0].id,
+    revision: "2",
+    desiredGeneration: "9",
+    displayName: "Current installation",
+    phase: "connecting",
+    failure: null,
+    sourceOrigin: "https://source.example",
+    targetOrigin: null,
+    canCancel: true,
+    missingCredentials: [],
+  };
+  fixture.snapshot.mcpInstallation = {
+    operations: [
+      operation,
+      {
+        ...operation,
+        serverId: "other-task",
+        taskId: "999",
+        displayName: "Another Task installation",
+      },
+      {
+        ...operation,
+        serverId: "other-run",
+        runId: "999",
+        displayName: "Another Run installation",
+      },
+    ],
+    notice: { taskId: operation.taskId, runId: operation.runId },
+  };
+  await fixture.publish();
+  await screen.findByText("Current installation");
+  assert.equal(screen.queryByText("Another Task installation"), null);
+  assert.equal(screen.queryByText("Another Run installation"), null);
+  assert.ok(screen.getByText(/MCP configuration could not be created/));
+  await user.click(screen.getByRole("button", { name: "Cancel installation" }));
+  assert.deepEqual(calls, [[operation.serverId, operation.revision]]);
+
+  fixture.snapshot.mcpInstallation.notice = {
+    taskId: operation.taskId,
+    runId: "999",
+  };
+  await fixture.publish();
+  await waitFor(() =>
+    assert.ok(
+      screen.queryByText(/MCP configuration could not be created/) === null,
+    ),
+  );
+  assert.ok(screen.getByText("Current installation"));
+});
+
 test("Task information shows the directory name and opens the bound Workspace by identity", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx);
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
