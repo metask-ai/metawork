@@ -354,7 +354,7 @@ Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；�
 
 > Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability、credential submission、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
 
-MCP 页面与 Skill、Scheduled tasks 使用同一个全局管理页骨架：居中的有界内容区负责标题、搜索、状态分组和连接列表，详情与 Add/Edit 只在用户明确选择后进入可关闭的右侧 drawer。页面不得自动选择第一个服务，也不得在空 registry、无选择或 drawer 关闭时预留第二列。drawer 使用统一的遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复；窄窗占满可用宽度。整体沿用 Workbench 的标题尺度和克制中性色，只用紫色表示进行中的连接、绿色表示成功、琥珀色表示需要处理。
+MCP 页面沿用定时任务的内容底色、有界阅读宽度、标题、低强调搜索和中性主按钮。服务按状态分组，用细分隔线呈现连续列表。窄窗允许页首动作和服务信息换行，保留工具可用情况和启停开关。详情与 Add/Edit 使用定时任务同款居中模态弹窗，窄窗保留视口边距。弹窗正文独立滚动，标题及添加、编辑的底部动作保持可见。弹窗使用统一遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复。
 
 HTTP 地址提供显式“此地址包含凭据”选项，开启后使用 password 输入。已保存敏感地址只显示域名，不回填完整地址；替换连接时明确要求重新填写完整地址，关闭或提交后清除输入。普通公开地址保持可编辑。
 
@@ -364,31 +364,7 @@ HTTP 地址提供显式“此地址包含凭据”选项，开启后使用 passw
 
 配置应用、整体目录可用性和单服务健康分别呈现。应用失败保留用户配置与仍适用于相同来源的正式健康事实，没有该服务观测时显示未加载，不推断网络不可达；只有正式 Activation 的单服务失败可显示不可达。整体 Activation 失败不能因各行显示未加载而变成全局可用。同 ID 改变连接来源后，旧健康与工具发现不能证明新来源已连接。未接管的配置通过重试连接再次 apply；已接管但缺目录时重试刷新，孤立连接测试不恢复正式准入。
 
-```text
-MCP                                                        [ Add server ]
-Connect external tools and choose what new tasks can use.
-
-[ Search servers and tools                              ] [ Refresh ]
-
-Needs attention
-┃ Search             HTTP · OAuth    Sign in
-
-Available servers
-┃ GitHub             HTTP · OAuth    Connected       Enabled  [●]
-
-Disabled
-┃ Local database     stdio · static  Disabled        Disabled [○]
-
-点击 GitHub 后：
-                                           ┌ GitHub                       × ┐
-                                           │ Connection → MCP → Choose tools│
-                                           │ Connected    Ready       2/8   │
-                                           │ Tool permissions              │
-                                           │ Connection and auth           │
-                                           └───────────────────────────────┘
-```
-
-- Header 使用 `Add server` 主动作与 `Refresh tools` 次级动作。列表占据完整管理页宽度；每个服务行都为带文字状态的启停 switch 保留固定位置，switch 与打开详情的主点击区是并列交互元素，不能嵌套，切换不自动打开 drawer。连接配置被遮蔽或 legacy approval 尚未完成时仍显示 switch，但以 disabled 状态配合同行的明确问题状态引导用户进入详情，不能直接移除控制而让启停能力不可发现。停用只收缩后续新 Task authority且可恢复，直接提交并显示已打开 Task 不变的结果；启用在没有已允许工具时同样直接提交，只有恢复非空 tool allowlist 时才确认并明确将重新开放的工具数量。点击连接的其余区域才打开 detail drawer；Add/Edit 与详情复用同一个 drawer surface，但保持各自清晰标题和提交动作。drawer 可关闭，关闭时保留列表滚动与筛选并把焦点还给原触发点；目标服务从 authoritative projection 消失时同样关闭并恢复到相邻列表上下文。操作仍在进行时不得因 backdrop 或 Escape 丢失未完成状态。Add 在 drawer 中显式选择 `STDIO` 或 `Streamable HTTP`。STDIO 普通路径提供 display name 与一条 launch command；Renderer 以不执行 shell 的 tokenizer 将引号/转义解析为 command + ordered argv，并拒绝 pipe、重定向、变量或命令替换。Edit 的 command 与有序 argv 使用独立字段，无修改保存不经过命令字符串；只有用户明确改为编辑完整启动命令时，才按本机桌面平台成对分词与格式化，并保留空参数及字面值。cwd、environment slot、auth、协议策略和 timeout 收入 Advanced settings。HTTP 普通路径提供 display name 与 endpoint，auth/registration/header 等高级设置保持 typed。OAuth 不出现在 STDIO；不提供 legacy SSE 或 generic advanced blob。
+- 页首使用 `Add server` 主动作。已有服务时，在同一行显示带可访问名称和悬停说明的刷新、搜索图标。搜索就地展开，关闭时保留筛选并可重新打开清除。列表占据完整管理页宽度；每个服务行都为带文字状态的启停 switch 保留固定位置，switch 与打开详情的主点击区是并列交互元素，不能嵌套，切换不自动打开详情。连接配置被遮蔽或 legacy approval 尚未完成时仍显示 switch，但以 disabled 状态配合同行的明确问题状态引导用户进入详情，不能直接移除控制而让启停能力不可发现。停用只收缩后续新 Task authority且可恢复，直接提交并显示已打开 Task 不变的结果；启用在没有已允许工具时同样直接提交，只有恢复非空 tool allowlist 时才确认并明确将重新开放的工具数量。点击连接主体打开详情弹窗。Add/Edit 与详情复用弹窗样式，分别呈现对应标题和动作。弹窗关闭时保留列表滚动与筛选并把焦点还给原触发点。目标服务从 authoritative projection 消失时关闭弹窗并恢复到列表上下文。弹窗内相关操作正在进行时禁用关闭、取消、遮罩和 Escape 退出。Add 在弹窗中显式选择 `STDIO` 或 `Streamable HTTP`。STDIO 普通路径提供 display name 与一条 launch command；Renderer 以不执行 shell 的 tokenizer 将引号/转义解析为 command + ordered argv，并拒绝 pipe、重定向、变量或命令替换。Edit 的 command 与有序 argv 使用独立字段，无修改保存不经过命令字符串；只有用户明确改为编辑完整启动命令时，才按本机桌面平台成对分词与格式化，并保留空参数及字面值。cwd、environment slot、auth、协议策略和 timeout 收入 Advanced settings。HTTP 普通路径提供 display name 与 endpoint，auth/registration/header 等高级设置保持 typed。OAuth 不出现在 STDIO；不提供 legacy SSE 或 generic advanced blob。
 - Agent 安装以 Host 操作状态卡显示在来源 Task 和 MCP 页，普通进度不要求点击，也不自动导航或抢占已打开表单。缺少凭据时只显示专用 password 输入；跨 origin 或来源意图不明确时使用 Host 确认，OAuth 使用现有授权流。进行中可按精确身份取消；凭据在提交、目标/revision/generation 变化或离页时清除，不回填或重放。安装完成保留完成历史；后续启停与目录有效性由正常服务状态呈现，不显示成仍在连接。
 - Add/Edit 的提交按钮分别使用 `Add server` / `Save connection`，其显式提交本身授权完整 typed connection，并在同一个 transaction 中保存 connection fingerprint；按钮不声称默认关闭的工具已经向 Task 开放，也不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
 - Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 的每个 secret slot 与 OAuth pre-registered client secret 使用普通 password input，显示名称、已设置/缺失状态与保存/取消动作，已保存值不回填。输入清理与提交遵守 [Renderer Bridge 合同](renderer-bridge-contract.md)；超过凭据存储 UTF-8 字节上限时，在本地阻止提交并明确提示上限与修改方式，不截断输入；提交期间禁用重复保存，失败显示既有 mutation 反馈。OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，确认页须事先说明确认会替换现有授权、确认后取消或浏览器失败仍需重新登录；具体 grant 退休边界以 [Product 架构](product-architecture.md#25-mcp-authority) 为准。用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的替换/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。新的服务连接等待授权结束，页面必须明确说明；已打开 Task 的工具不变。列表与详情分别显示等待恢复授权和正在更新授权，恢复完成后自动连接，期间不提供重试连接或取消 refresh。ready 但当前未加载目标连接失败时，按 Host `canAuthorize` 保留重新登录出口，同时保留显式连接重试；裸 401/403 不显示为已确认 token 过期。

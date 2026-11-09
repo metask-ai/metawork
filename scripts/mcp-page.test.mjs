@@ -402,10 +402,12 @@ test("MCP opens details only on request and restores the list trigger on close",
   row.focus();
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+  const heading = within(dialog).getByRole("heading", { name: "GitHub" });
+  await waitFor(() => assert.ok(document.activeElement === heading));
+  fireEvent.keyDown(heading, { key: "Escape" });
 
-  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  await waitFor(() => assert.equal(document.activeElement, row));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  await waitFor(() => assert.ok(document.activeElement === row));
 });
 
 test("MCP toggles a server from the list without opening details", async () => {
@@ -502,25 +504,6 @@ test("MCP locks every server switch while one mutation is pending", async () => 
   await waitFor(() =>
     assert.equal(gitlabToggle.getAttribute("aria-disabled"), null),
   );
-});
-
-test("MCP shares the centered management-page frame and foundation Drawer", async () => {
-  const [page, css] = await Promise.all([
-    readFile(
-      join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
-      "utf8",
-    ),
-    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
-  ]);
-
-  assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
-  assert.match(page, /label: t\("mcp\.negotiation\.automatic"\)/);
-  assert.doesNotMatch(page, /label: "Automatic"/);
-  assert.match(
-    css,
-    /\.mcp-page-inner \{[\s\S]*?width: min\(100%, 944px\);[\s\S]*?margin: 0 auto;/,
-  );
-  assert.doesNotMatch(css, /\.mcp-workspace\s*\{/);
 });
 
 test("MCP keeps isolated test results in connection details", () => {
@@ -1734,11 +1717,11 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
   };
   const view = render(pageElement(management, "", handlers));
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
-  let drawer = screen.getByRole("dialog");
-  assert.equal(within(drawer).queryByText("Cannot connect"), null);
-  assert.ok(within(drawer).getByText(pending.safeDiagnostic));
+  let dialog = screen.getByRole("dialog");
+  assert.equal(within(dialog).queryByText("Cannot connect"), null);
+  assert.ok(within(dialog).getByText(pending.safeDiagnostic));
   fireEvent.click(
-    within(drawer).getByRole("button", { name: "Retry connection" }),
+    within(dialog).getByRole("button", { name: "Retry connection" }),
   );
   await waitFor(() => assert.deepEqual(calls, ["refresh"]));
   view.rerender(
@@ -1754,9 +1737,9 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
       handlers,
     ),
   );
-  drawer = screen.getByRole("dialog");
+  dialog = screen.getByRole("dialog");
   fireEvent.click(
-    within(drawer).getByRole("button", { name: "Retry connection" }),
+    within(dialog).getByRole("button", { name: "Retry connection" }),
   );
   await waitFor(() => assert.deepEqual(calls, ["refresh", "apply"]));
   assert.ok(screen.getByText("Connection changes were not applied"));
@@ -2316,9 +2299,11 @@ test("MCP sensitive address uses a one-shot password field and never refills a s
   assert.equal(replacement.type, "password");
   assert.equal(replacement.value, "");
   assert.equal(
-    within(form).getByRole("checkbox", {
-      name: /This address contains credentials/,
-    }).checked,
-    true,
+    within(form)
+      .getByRole("checkbox", {
+        name: /This address contains credentials/,
+      })
+      .getAttribute("aria-checked"),
+    "true",
   );
 });

@@ -299,7 +299,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.navigation_label": "工作台工具",
   "mcp.title": "MCP",
   "mcp.subtitle": "连接外部工具，并选择新任务可以使用的能力。",
-  "mcp.search_label": "搜索 MCP 服务和工具",
+  "mcp.clear_search": "清除搜索",
   "mcp.search_placeholder": "搜索服务和工具",
   "mcp.section.attention": "需要处理",
   "mcp.section.available": "可用服务",
@@ -351,11 +351,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.unavailable_body":
     "MetaWork 当前无法加载 MCP 管理。重新打开应用以恢复服务列表。",
   "mcp.empty_title": "还没有 MCP 服务",
-  "mcp.empty_body":
-    "添加一个受信任的 STDIO 或 Streamable HTTP 服务。连接会启用，但工具默认不向任务开放。",
   "mcp.no_results_title": "没有匹配的服务或工具",
   "mcp.no_results_body": "没有与“{query}”匹配的内容。",
-  "mcp.detail.eyebrow": "MCP 服务",
   "mcp.detail.new_tasks": "新任务",
   "mcp.detail.tool_permissions": "工具权限",
   "mcp.detail.connection_test": "连接测试",
@@ -373,11 +370,9 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.existing_tasks_note":
     "现有任务不会获得后续新增工具；撤销授权会限制其后续访问。",
   "mcp.add.action": "添加服务",
-  "mcp.add.eyebrow": "新 MCP 服务",
   "mcp.add.title": "添加 MCP 服务",
   "mcp.add.intro":
     "选择连接方式并保存公开配置。添加操作会同时授权并启用连接，工具仍默认关闭。",
-  "mcp.edit.eyebrow": "编辑 MCP 连接",
   "mcp.edit.title": "编辑连接配置",
   "mcp.edit.intro":
     "修改已保存的非敏感配置。密钥值不会显示；只有可执行文件或 Endpoint 未改变时，已有密钥才会保留。",
@@ -425,8 +420,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.client_auth.client_secret_basic": "Client Secret（HTTP Basic）",
   "mcp.client_auth.client_secret_post": "Client Secret（请求体）",
   "mcp.add.remove_row": "删除此行",
-  "mcp.add.sensitive_endpoint":
-    "此地址包含凭据（安全保存；替换时填写完整地址）",
+  "mcp.add.sensitive_endpoint": "此地址包含凭据",
+  "mcp.add.sensitive_endpoint_replace": "请填写完整地址以替换已保存的地址。",
   "mcp.install.phase.preparing": "正在准备配置…",
   "mcp.install.phase.needs_authorization":
     "请在系统确认窗口中确认本次安装和凭据去向。",

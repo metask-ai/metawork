@@ -355,7 +355,7 @@ export const enUS = {
   "skills.navigation_label": "Workbench tools",
   "mcp.title": "MCP",
   "mcp.subtitle": "Connect external tools and choose what new tasks can use.",
-  "mcp.search_label": "Search MCP servers and tools",
+  "mcp.clear_search": "Clear search",
   "mcp.search_placeholder": "Search servers and tools",
   "mcp.section.attention": "Needs attention",
   "mcp.section.available": "Available servers",
@@ -410,11 +410,8 @@ export const enUS = {
   "mcp.unavailable_body":
     "MetaWork cannot load MCP management right now. Reopen the app to recover the server list.",
   "mcp.empty_title": "No MCP servers yet",
-  "mcp.empty_body":
-    "Add a trusted STDIO or Streamable HTTP server. The connection starts enabled, while tools stay unavailable to tasks by default.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
-  "mcp.detail.eyebrow": "MCP server",
   "mcp.detail.new_tasks": "New tasks",
   "mcp.detail.tool_permissions": "Tool permissions",
   "mcp.detail.connection_test": "Connection test",
@@ -433,11 +430,9 @@ export const enUS = {
   "mcp.existing_tasks_note":
     "Existing tasks cannot gain newly added tools. Revoked permissions restrict future access.",
   "mcp.add.action": "Add server",
-  "mcp.add.eyebrow": "New MCP server",
   "mcp.add.title": "Add an MCP server",
   "mcp.add.intro":
     "Choose a transport and save the public connection settings. Adding the server authorizes and enables the connection; tools stay off by default.",
-  "mcp.edit.eyebrow": "Edit MCP connection",
   "mcp.edit.title": "Edit connection settings",
   "mcp.edit.intro":
     "Change the saved non-secret settings. Secret values stay hidden and are preserved only while the executable or endpoint remains unchanged.",
@@ -485,8 +480,9 @@ export const enUS = {
   "mcp.client_auth.client_secret_basic": "Client secret (HTTP Basic)",
   "mcp.client_auth.client_secret_post": "Client secret (request body)",
   "mcp.add.remove_row": "Remove row",
-  "mcp.add.sensitive_endpoint":
-    "This address contains credentials (stored securely; enter the full address to replace it)",
+  "mcp.add.sensitive_endpoint": "This address contains credentials",
+  "mcp.add.sensitive_endpoint_replace":
+    "Enter the full address to replace the saved address.",
   "mcp.install.phase.preparing": "Preparing configuration…",
   "mcp.install.phase.needs_authorization":
     "Confirm this installation in the system confirmation window.",

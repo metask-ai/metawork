@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 import type {
@@ -30,9 +31,9 @@ import { Alert } from "../../components/ui/alert.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
-import { Drawer } from "../../components/ui/drawer.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Input } from "../../components/ui/input.tsx";
-import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
@@ -204,12 +205,10 @@ function McpServerRow({
     <li
       className="mcp-server-row"
       data-status={serverVisualStatus(server, applying)}
-      data-selected={selected}
     >
       <span className="mcp-status-rail" aria-hidden="true" />
       <button
         className="mcp-server-open focus-ring"
-        aria-current={selected ? "true" : undefined}
         aria-haspopup="dialog"
         aria-expanded={selected}
         onClick={(event) => onOpen(server, event.currentTarget)}
@@ -238,7 +237,6 @@ function McpServerRow({
             </small>
           )}
         </span>
-        <Icon name="chevron-right" />
       </button>
       <span
         className="mcp-server-enablement"
@@ -250,6 +248,7 @@ function McpServerRow({
             : t("mcp.desired.disabled")}
         </span>
         <Switch.Root
+          className="h-4 w-7 data-checked:bg-(--metask-state-complete)"
           checked={server.desiredEnabled}
           disabled={toggleDisabled || enablementUnavailable}
           aria-label={t("mcp.enablement.label", {
@@ -265,7 +264,7 @@ function McpServerRow({
             onToggle(server, !server.desiredEnabled, event.currentTarget)
           }
         >
-          <Switch.Thumb />
+          <Switch.Thumb className="size-3 data-checked:translate-x-3" />
         </Switch.Root>
         {enablementDescription && (
           <span id={enablementDescriptionId} className="sr-only">
@@ -277,32 +276,34 @@ function McpServerRow({
   );
 }
 
-function McpDetailDrawer({
+function McpServiceDialog({
   closeLocked,
+  headingRef,
   onClose,
   children,
 }: {
   closeLocked: boolean;
+  headingRef: RefObject<HTMLHeadingElement | null>;
   onClose: () => void;
   children: ReactNode;
 }) {
   return (
-    <Drawer.Root
+    <Dialog.Root
       open
       onOpenChange={(open) => {
         if (!open && !closeLocked) onClose();
       }}
     >
-      <Drawer.Portal>
-        <Drawer.Backdrop />
-        <Drawer.Popup
-          className="mcp-detail-pane w-[min(620px,calc(100vw-28px))] max-[620px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
-          aria-labelledby="mcp-detail-title"
+      <Dialog.Portal>
+        <Dialog.Backdrop />
+        <Dialog.Popup
+          className="mcp-service-dialog w-[min(640px,calc(100vw-32px))] gap-0 overflow-hidden p-0"
+          initialFocus={() => headingRef.current}
         >
           {children}
-        </Drawer.Popup>
-      </Drawer.Portal>
-    </Drawer.Root>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -1465,6 +1466,19 @@ export function McpPage({
   const unavailable = management.managementHealth === "unavailable";
   const frozenWithoutDesired =
     management.desiredGeneration === null && !unavailable;
+  const refreshing = refreshPending || management.operation === "refreshing";
+  const refreshLabel = t(
+    refreshing ? "mcp.refresh.refreshing" : "mcp.refresh.action",
+  );
+  const operationNotice = notice && (
+    <p
+      className="mcp-operation-notice"
+      data-tone={notice.tone}
+      aria-live="polite"
+    >
+      {notice.text}
+    </p>
+  );
 
   return (
     <section className="mcp-page" aria-labelledby="mcp-title">
@@ -1477,22 +1491,35 @@ export function McpPage({
               </h1>
               <p>{t("mcp.subtitle")}</p>
             </div>
-            {!empty && (
+            {!unavailable && !frozenWithoutDesired && (
               <div className="mcp-header-actions">
+                {!empty && (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="mcp-refresh-button aria-busy:[&_svg]:animate-spin motion-reduce:[&_svg]:animate-none"
+                      aria-label={refreshLabel}
+                      aria-busy={refreshing}
+                      title={refreshLabel}
+                      disabled={refreshLocked}
+                      onClick={() => void refreshCatalog()}
+                    >
+                      <Icon name="refresh" />
+                    </Button>
+                    <HeaderSearch
+                      label={t("mcp.search_placeholder")}
+                      clearLabel={t("mcp.clear_search")}
+                      value={query}
+                      onChange={onQuery}
+                    />
+                  </>
+                )}
                 <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={refreshLocked}
-                  onClick={() => void refreshCatalog()}
-                >
-                  <Icon name="refresh" />
-                  {refreshPending || management.operation === "refreshing"
-                    ? t("mcp.refresh.refreshing")
-                    : t("mcp.refresh.action")}
-                </Button>
-                <Button
+                  className="mcp-create-button"
                   variant="primary"
                   size="sm"
+                  aria-haspopup="dialog"
                   disabled={mutationLocked}
                   onClick={(event) => openAdd(event.currentTarget)}
                 >
@@ -1527,30 +1554,10 @@ export function McpPage({
             </p>
           )}
 
-          {notice && (
-            <p
-              className="mcp-operation-notice"
-              data-tone={notice.tone}
-              aria-live="polite"
-            >
-              {notice.text}
-            </p>
-          )}
-
-          {!unavailable && !frozenWithoutDesired && !empty && (
-            <div className="mcp-toolbar">
-              <SearchField
-                className="w-[min(100%,420px)]"
-                label={t("mcp.search_label")}
-                value={query}
-                placeholder={t("mcp.search_placeholder")}
-                onChange={(event) => onQuery(event.target.value)}
-              />
-            </div>
-          )}
+          {paneState === null && operationNotice}
 
           {unavailable ? (
-            <div className="mcp-empty-state">
+            <div className="mcp-placeholder">
               <span>
                 <Icon name="warning" />
               </span>
@@ -1558,24 +1565,9 @@ export function McpPage({
               <p>{t("mcp.unavailable_body")}</p>
             </div>
           ) : frozenWithoutDesired ? null : empty ? (
-            <div className="mcp-empty-state">
-              <span>
-                <Icon name="mcp" />
-              </span>
-              <h2>{t("mcp.empty_title")}</h2>
-              <p>{t("mcp.empty_body")}</p>
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={mutationLocked}
-                onClick={(event) => openAdd(event.currentTarget)}
-              >
-                <Icon name="plus" />
-                {t("mcp.add.action")}
-              </Button>
-            </div>
+            <p className="mcp-empty-state">{t("mcp.empty_title")}</p>
           ) : noResults ? (
-            <div className="mcp-empty-state mcp-empty-state-compact">
+            <div className="mcp-placeholder">
               <span>
                 <Icon name="search" />
               </span>
@@ -1592,48 +1584,41 @@ export function McpPage({
         </div>
 
         {paneState !== null && (
-          <McpDetailDrawer
+          <McpServiceDialog
             closeLocked={paneCloseLocked}
-            onClose={() => closePane()}
+            headingRef={paneHeading}
+            onClose={closePane}
           >
             <header>
               <div>
-                <small>
-                  {paneState?.kind === "add"
-                    ? t("mcp.add.eyebrow")
-                    : paneState?.kind === "replace"
-                      ? t("mcp.edit.eyebrow")
-                      : t("mcp.detail.eyebrow")}
-                </small>
-                <h2 id="mcp-detail-title" ref={paneHeading} tabIndex={-1}>
-                  {paneState?.kind === "add"
+                <Dialog.Title ref={paneHeading} tabIndex={-1}>
+                  {paneState.kind === "add"
                     ? t("mcp.add.title")
-                    : paneState?.kind === "replace"
+                    : paneState.kind === "replace"
                       ? t("mcp.edit.title")
                       : selected?.displayName}
-                </h2>
-                {selected && <p>{selected.namespace}</p>}
-              </div>
-              <div className="mcp-detail-header-actions">
-                {selected && paneState?.kind === "server" && (
-                  <span
-                    className="mcp-enabled-badge"
-                    data-enabled={selected.desiredEnabled}
-                  >
-                    {selected.desiredEnabled
-                      ? t("mcp.desired.enabled")
-                      : t("mcp.desired.disabled")}
-                  </span>
+                </Dialog.Title>
+                {selected && (
+                  <Dialog.Description>
+                    {paneState.kind === "replace"
+                      ? selected.displayName
+                      : t(
+                          selected.desiredEnabled
+                            ? "mcp.desired.enabled"
+                            : "mcp.desired.disabled",
+                        )}
+                  </Dialog.Description>
                 )}
-                <button
-                  className="icon-button focus-ring"
-                  aria-label={t("common.close")}
-                  disabled={paneCloseLocked}
-                  onClick={() => closePane()}
-                >
-                  <Icon name="close" />
-                </button>
               </div>
+              <button
+                type="button"
+                className="icon-button focus-ring"
+                aria-label={t("common.close")}
+                disabled={paneCloseLocked}
+                onClick={closePane}
+              >
+                <Icon name="close" />
+              </button>
             </header>
 
             {paneState?.kind === "add" || paneState?.kind === "replace" ? (
@@ -1645,6 +1630,7 @@ export function McpPage({
                 }}
               >
                 <div className="mcp-add-fields">
+                  {operationNotice}
                   <p className="mcp-form-intro">
                     {t(
                       paneState?.kind === "replace"
@@ -1858,20 +1844,27 @@ export function McpPage({
                           onChange={(event) => setEndpoint(event.target.value)}
                         />
                         <small id="mcp-add-endpoint-help">
-                          {t("mcp.add.endpoint_help")}
+                          {sensitiveEndpoint &&
+                          selected?.connection?.kind === "streamable_http" &&
+                          selected.connection.sensitiveEndpoint
+                            ? t("mcp.add.sensitive_endpoint_replace")
+                            : t("mcp.add.endpoint_help")}
                         </small>
                       </label>
-                      <label>
-                        <Input
-                          type="checkbox"
+                      <label className="mcp-sensitive-endpoint">
+                        <Checkbox.Root
                           checked={sensitiveEndpoint}
                           disabled={createPending}
-                          onChange={(event) => {
+                          onCheckedChange={(checked) => {
                             setEndpoint("");
-                            setSensitiveEndpoint(event.target.checked);
+                            setSensitiveEndpoint(checked);
                           }}
-                        />
-                        {t("mcp.add.sensitive_endpoint")}
+                        >
+                          <Checkbox.Indicator aria-hidden="true">
+                            ✓
+                          </Checkbox.Indicator>
+                        </Checkbox.Root>
+                        <span>{t("mcp.add.sensitive_endpoint")}</span>
                       </label>
                       <fieldset className="mcp-auth-choice">
                         <legend>{t("mcp.add.authentication")}</legend>
@@ -2057,7 +2050,8 @@ export function McpPage({
                     type="button"
                     variant="secondary"
                     size="sm"
-                    onClick={() => closePane()}
+                    disabled={paneCloseLocked}
+                    onClick={closePane}
                   >
                     {t("common.cancel")}
                   </Button>
@@ -2077,6 +2071,7 @@ export function McpPage({
               </form>
             ) : selected ? (
               <div className="mcp-detail-body">
+                {operationNotice}
                 <section
                   className="mcp-connection-trace"
                   aria-label={t("mcp.trace.label")}
@@ -2698,7 +2693,7 @@ export function McpPage({
                 </section>
               </div>
             ) : null}
-          </McpDetailDrawer>
+          </McpServiceDialog>
         )}
       </>
       {confirmationServer && confirmation && (
