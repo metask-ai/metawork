@@ -1332,7 +1332,6 @@ pub const Runtime = struct {
     approval_history_dirty: bool = false,
     approval_history_unknown: ?task_persistence.CommitToken = null,
     ordinary_history_unknown: ?task_persistence.CommitToken = null,
-    pending_model_intent: ?task_runtime.PreparedModelIntent = null,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
     /// the Stop-barrier investigation; never persisted or published.
@@ -4379,13 +4378,8 @@ pub const Runtime = struct {
                         .history => |result| switch (result) {
                             .committed, .failed => {
                                 if (readback) {
-                                    if (self.pending_model_intent) |*intent| {
-                                        if (result == .committed) {
-                                            const intent_task_id = intent.task.durable.id;
-                                            intent.complete();
-                                            self.rememberTaskModelPreference(intent_task_id);
-                                        } else intent.rollback();
-                                        self.pending_model_intent = null;
+                                    if (self.task_runtime.settleModelIntent(result == .committed)) |task_id| {
+                                        self.rememberTaskModelPreference(task_id);
                                     }
 
                                     self.approval_history_unknown = null;
@@ -4718,16 +4712,14 @@ pub const Runtime = struct {
             .expected_catalog_generation = input.expected_catalog_generation,
         }))
             return error.StaleCatalog;
-        if (self.approvalHistoryBlocked() or self.task_runtime.approvalHistoryWorkerActive()) return error.TaskBusy;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change != null) return error.TaskBusy;
-        var prepared = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
-        defer if (prepared.active) prepared.rollback();
-        const revision = prepared.task.durable.model_intent.?.revision;
+        if (self.approvalHistoryBlocked() or self.task_runtime.approvalChangePending()) return error.TaskBusy;
+        const revision = try self.task_runtime.beginModelIntent(task_id, input.expected_selection_revision, input.target);
+        var rollback = true;
+        defer if (rollback) {
+            _ = self.task_runtime.settleModelIntent(false);
+        };
         if (self.task_persistence.enabled or self.task_persistence.restore_failed) {
-            switch (self.task_persistence_health) {
-                .ready, .degraded, .write_failed => {},
-                else => return error.TaskPersistenceUnavailable,
-            }
+            if (!self.task_persistence_health.allowsWrite(.retry_failed)) return error.TaskPersistenceUnavailable;
             var scratch = try self.buildTaskStateWire();
             defer scratch.deinit();
             if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return error.TaskStoreEncodeFailed;
@@ -4740,8 +4732,7 @@ pub const Runtime = struct {
                 },
                 .outcome_unknown => {
                     self.approval_history_unknown = candidate.token orelse return error.TaskPersistenceFailed;
-                    self.pending_model_intent = prepared;
-                    prepared.active = false;
+                    rollback = false;
                     self.approval_history_dirty = true;
                     self.task_persistence_health = .outcome_unknown;
                     self.bumpRevision();
@@ -4749,16 +4740,17 @@ pub const Runtime = struct {
                 },
             }
         }
-        prepared.complete();
+        const settled_task_id = self.task_runtime.settleModelIntent(true).?;
+        std.debug.assert(settled_task_id == task_id);
+        rollback = false;
         self.rememberTaskModelPreference(task_id);
         self.bumpRevision();
         return revision;
     }
 
     fn rememberTaskModelPreference(self: *Runtime, task_id: u64) void {
-        const task = self.task_runtime.findConst(task_id) orelse return;
-        const intent = task.durable.model_intent orelse return;
-        _ = self.custom_providers.rememberPreference(intent.modelRef());
+        const model_ref = self.task_runtime.committedModelRef(task_id) orelse return;
+        _ = self.custom_providers.rememberPreference(model_ref);
     }
 
     /// Close admission before any Application shutdown drain can reconcile.
@@ -7490,8 +7482,6 @@ pub const Runtime = struct {
         self.shutdownExecutor();
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
-        if (self.pending_model_intent) |*intent| intent.rollback();
-        self.pending_model_intent = null;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         self.attachments.deinit();
@@ -7839,10 +7829,10 @@ pub const Runtime = struct {
 
     fn taskModelSelectionAvailability(self: *Runtime, query: task_runtime.ProjectionAuthorityQuery) product_task.ModelSelectionAvailability {
         if (self.shutting_down) return .task_unavailable;
-        const task = self.task_runtime.findConst(query.task_id) orelse return .task_unavailable;
-        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle or task.runtime.close_requested)
-            return .task_unavailable;
-        const intent_source = if (task.durable.model_intent) |intent| intent.source_id else null;
+        const intent_source = switch (self.task_runtime.modelSelectionScope(query.task_id)) {
+            .unavailable => return .task_unavailable,
+            .editable => |source| source,
+        };
         return switch (self.custom_providers.selectionCatalogAvailability(intent_source)) {
             .available => .available,
             .catalog_loading => .catalog_loading,
@@ -8993,10 +8983,10 @@ pub const Runtime = struct {
         // During an approval transaction, ordinary lifecycle facts join the
         // existing bounded history writer. Even a gap between its jobs must
         // not turn cancel/terminal reconciliation into synchronous disk I/O.
-        for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change != null) {
+        if (self.task_runtime.approvalChangePending()) {
             self.approval_history_dirty = true;
             return error.TaskBusy;
-        };
+        }
         if (self.approvalHistoryBlocked()) {
             self.approval_history_dirty = true;
             return error.TaskBusy;
@@ -9004,10 +8994,7 @@ pub const Runtime = struct {
         // Retry failed memory scrubs using the Store's retained credential
         // lease, even if its execution owner has already retired.
         self.syncHistoryCredentials(null, null);
-        switch (self.task_persistence_health) {
-            .ready, .degraded, .write_failed, .outcome_unknown => {},
-            .read_failed, .corrupt, .unavailable => return error.TaskPersistenceUnavailable,
-        }
+        if (!self.task_persistence_health.allowsWrite(.after_readback)) return error.TaskPersistenceUnavailable;
         var scratch = self.buildTaskStateWireWithCheckpoint(checkpoint_override) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
@@ -15828,7 +15815,7 @@ test "Task model selection unknown commit resolves the original candidate before
         var settled = false;
         for (0..100_000) |_| {
             control.syncLifecycle();
-            if (control.pending_model_intent == null) {
+            if (!control.task_runtime.modelIntentPending()) {
                 settled = true;
                 break;
             }

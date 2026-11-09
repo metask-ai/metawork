@@ -240,7 +240,16 @@ pub const Health = enum {
     outcome_unknown,
 
     pub fn operational(self: Health) bool {
-        return self == .ready or self == .degraded;
+        return self.allowsWrite(.healthy_only);
+    }
+
+    pub fn allowsWrite(self: Health, mode: enum { healthy_only, retry_failed, after_readback }) bool {
+        return switch (self) {
+            .ready, .degraded => true,
+            .write_failed => mode != .healthy_only,
+            .outcome_unknown => mode == .after_readback,
+            .unavailable, .read_failed, .corrupt => false,
+        };
     }
 };
 

@@ -683,7 +683,7 @@ pub const ReleaseEffects = struct {
 /// Synchronous history overlay. Control must complete the durable write before
 /// completing this transaction, or roll it back before publishing a snapshot.
 /// Neither path changes the installed Session, Run, or permission authority.
-pub const PreparedModelIntent = struct {
+const PreparedModelIntent = struct {
     allocator: std.mem.Allocator,
     task: *task_state.Task,
     previous: ?task_state.ModelIntent,
@@ -1260,6 +1260,7 @@ pub const Runtime = struct {
     permission_reviews_closed: bool = false,
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
+    pending_model_intent: ?PreparedModelIntent = null,
 
     const ApprovalJobRecipient = union(enum) {
         approval: u64,
@@ -1383,6 +1384,13 @@ pub const Runtime = struct {
         for (self.tasks) |entry| if (entry) |task| {
             if (task.approval_change) |change| if (change.phase == .outcome_unknown) return true;
             if (task.runtime.restore_job) |job| if (job.binding_commit != .not_started) return true;
+        };
+        return false;
+    }
+
+    pub fn approvalChangePending(self: *const Runtime) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.approval_change != null) return true;
         };
         return false;
     }
@@ -3327,16 +3335,64 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn prepareModelIntent(
+    fn modelIntentEditable(task: *const task_state.Task) bool {
+        return task.read_only_history == null and !task.durable.archived and
+            task.deletion == .idle and !task.runtime.close_requested;
+    }
+
+    pub fn modelSelectionScope(self: *const Runtime, task_id: u64) union(enum) {
+        unavailable,
+        editable: ?[]const u8,
+    } {
+        const task = self.findConst(task_id) orelse return .unavailable;
+        if (!modelIntentEditable(task)) return .unavailable;
+        return .{ .editable = if (task.durable.model_intent) |intent| intent.source_id else null };
+    }
+
+    pub fn committedModelRef(self: *const Runtime, task_id: u64) ?models_contract.ModelRef {
+        const task = self.findConst(task_id) orelse return null;
+        if (task.model_intent_prepared) return null;
+        const intent = task.durable.model_intent orelse return null;
+        return intent.modelRef();
+    }
+
+    pub fn modelIntentPending(self: *const Runtime) bool {
+        return self.pending_model_intent != null;
+    }
+
+    pub fn beginModelIntent(
+        self: *Runtime,
+        task_id: u64,
+        expected_revision: u64,
+        target: models_contract.ModelRef,
+    ) ModelIntentError!u64 {
+        if (self.modelIntentPending()) return error.TaskBusy;
+        const prepared = try self.prepareModelIntent(task_id, expected_revision, target);
+        self.pending_model_intent = prepared;
+        return prepared.task.durable.model_intent.?.revision;
+    }
+
+    /// Only confirmed history makes the new preference available to callers.
+    pub fn settleModelIntent(self: *Runtime, committed: bool) ?u64 {
+        var pending = self.pending_model_intent orelse return null;
+        self.pending_model_intent = null;
+        if (!committed) {
+            pending.rollback();
+            return null;
+        }
+        const task_id = pending.task.durable.id;
+        pending.complete();
+        return task_id;
+    }
+
+    fn prepareModelIntent(
         self: *Runtime,
         task_id: u64,
         expected_revision: u64,
         target: models_contract.ModelRef,
     ) ModelIntentError!PreparedModelIntent {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null or task.durable.archived or
-            task.deletion != .idle or task.runtime.close_requested)
-            return error.TaskClosing;
+        if (!modelIntentEditable(task)) return error.TaskClosing;
         if (task.approval_change != null or task.model_intent_prepared) return error.TaskBusy;
         const revision = if (task.durable.model_intent) |intent| intent.revision else 0;
         if (expected_revision != revision) return error.TaskModelMismatch;
@@ -5060,6 +5116,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinitTasks(self: *Runtime, effects: ReleaseEffects) void {
+        _ = self.settleModelIntent(false);
         if (self.taskCount() != 0) self.noteSearchChange();
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
