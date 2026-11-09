@@ -1,21 +1,14 @@
 import type { Ref, ReactNode } from "react";
-import type {
-  ModelsView,
-  TaskView,
-  WorkspaceView,
-} from "../../bridge/contracts.ts";
+import type { ModelsView, TaskView } from "../../bridge/contracts.ts";
 import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { Popover } from "../../components/ui/popover.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { useWorkspaceDirectoryOpen } from "../workspaces/useWorkspaceDirectoryOpen.ts";
 
 export function TaskInformation({
   task,
   models,
-  workspace,
-  workspaceOpenDisabled = false,
-  onOpenWorkspace,
+  workspaceDirectory,
   workspaceDiagnostic,
   permissionProfilesEnabled,
   triggerRef,
@@ -23,24 +16,13 @@ export function TaskInformation({
 }: {
   task: TaskView;
   models: ModelsView;
-  workspace?: WorkspaceView;
-  workspaceOpenDisabled?: boolean;
-  onOpenWorkspace?: () => Promise<{ opened: boolean }>;
+  workspaceDirectory?: ReactNode;
   workspaceDiagnostic?: string;
   permissionProfilesEnabled: boolean;
   triggerRef?: Ref<HTMLButtonElement>;
   diagnostics?: ReactNode;
 }) {
   const { t } = useI18n();
-  const { cannotOpen, openDirectory, openFailed } = useWorkspaceDirectoryOpen(
-    workspace,
-    onOpenWorkspace,
-    workspaceOpenDisabled,
-  );
-  const workspaceName =
-    workspace?.kind === "manual" && !workspace.redacted
-      ? workspace.displayName
-      : "";
   const activeRun = task.activeOperation?.kind === "run";
   const executionRun = activeRun
     ? task.runs.find((run) => run.id === task.activeOperation?.id)
@@ -76,31 +58,7 @@ export function TaskInformation({
               </DiagnosticDisclosure>
             )}
             <dl className="task-facts">
-              {workspaceName && (
-                <div className="task-workspace-fact">
-                  <dt>{t("workspace.working_directory")}</dt>
-                  <dd>
-                    <div className="task-workspace-directory">
-                      <span>{workspaceName}</span>
-                      <button
-                        type="button"
-                        className="icon-button focus-ring"
-                        aria-label={t("workspace.open")}
-                        title={t("workspace.open")}
-                        disabled={cannotOpen}
-                        onClick={() => void openDirectory()}
-                      >
-                        <Icon name="folder-open" />
-                      </button>
-                    </div>
-                    {openFailed && (
-                      <small className="task-workspace-error" role="alert">
-                        {t("workspace.open_failed")}
-                      </small>
-                    )}
-                  </dd>
-                </div>
-              )}
+              {workspaceDirectory}
               <div>
                 <dt>{t("task.selected_provider")}</dt>
                 <dd>{providerLabel}</dd>

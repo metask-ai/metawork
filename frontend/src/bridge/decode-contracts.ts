@@ -4295,6 +4295,19 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     },
   };
 }
+function scheduleTimezone(value: unknown, path: string) {
+  const timezone = stringValue(value, path);
+  if (!/^[A-Za-z0-9_+./-]{1,128}$/.test(timezone))
+    fail(path, "expected IANA timezone");
+  return timezone;
+}
+
+function scheduleLocalTime(value: unknown, path: string) {
+  const time = stringValue(value, path);
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) fail(path, "expected HH:mm");
+  return time;
+}
+
 function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   const item = object(value, path, [
     "id",
@@ -4403,7 +4416,80 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
               ),
             };
           })()
-        : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");
+        : recurrenceKind === "calendar"
+          ? (() => {
+              const rule = object(item.recurrence, `${path}.recurrence`, [
+                "kind",
+                "startAtUnixSeconds",
+                "timezone",
+                "frequency",
+                "localTime",
+                ...(Object.hasOwn(
+                  record(item.recurrence, `${path}.recurrence`),
+                  "days",
+                )
+                  ? ["days"]
+                  : []),
+              ]);
+              const timezone = scheduleTimezone(
+                rule.timezone,
+                `${path}.recurrence.timezone`,
+              );
+              const localTime = scheduleLocalTime(
+                rule.localTime,
+                `${path}.recurrence.localTime`,
+              );
+              const start = positiveWireId(
+                rule.startAtUnixSeconds,
+                `${path}.recurrence.startAtUnixSeconds`,
+              );
+              if (BigInt(start) > 253402300799n)
+                fail(
+                  `${path}.recurrence.startAtUnixSeconds`,
+                  "out of calendar range",
+                );
+              const frequency = enumValue(
+                rule.frequency,
+                `${path}.recurrence.frequency`,
+                ["hourly", "daily", "weekly", "monthly", "yearly"] as const,
+              );
+              let days: number[] | undefined;
+              if (rule.days !== undefined) {
+                const limit =
+                  frequency === "weekly" ? 7 : frequency === "monthly" ? 31 : 0;
+                const values = arrayValue(
+                  rule.days,
+                  `${path}.recurrence.days`,
+                  (value) => value,
+                );
+                if (!limit || !values.length || values.length > limit)
+                  fail(`${path}.recurrence.days`, "invalid calendar days");
+                let previous = 0;
+                days = values.map((value, index) => {
+                  if (
+                    typeof value !== "number" ||
+                    !Number.isInteger(value) ||
+                    value <= previous ||
+                    value > limit
+                  )
+                    fail(
+                      `${path}.recurrence.days[${index}]`,
+                      "expected ordered unique calendar day",
+                    );
+                  previous = value as number;
+                  return value as number;
+                });
+              }
+              return {
+                kind: "calendar" as const,
+                startAtUnixSeconds: start,
+                timezone,
+                localTime,
+                frequency,
+                ...(days ? { days } : {}),
+              };
+            })()
+          : fail(`${path}.recurrence.kind`, "unexpected recurrence kind");
   const occurrences = arrayValue(
     item.occurrences,
     `${path}.occurrences`,

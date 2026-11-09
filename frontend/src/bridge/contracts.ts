@@ -534,7 +534,16 @@ export type AttachmentReceiveResult =
       status: "rejected";
       reason: "invalid_transfer" | "stale_transfer";
     };
+export type ScheduledTaskCalendarFrequency =
+  "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 export type ScheduledTaskRecurrence =
+  | {
+      kind: "calendar";
+      startAtUnixSeconds: string;
+      timezone: string;
+      frequency: ScheduledTaskCalendarFrequency;
+      days?: number[];
+    }
   | {
       kind: "once";
       atUnixSeconds: string;
@@ -544,6 +553,17 @@ export type ScheduledTaskRecurrence =
       startAtUnixSeconds: string;
       everySeconds: string;
     };
+type ScheduledTaskCalendar = Extract<
+  ScheduledTaskRecurrence,
+  { kind: "calendar" }
+>;
+type ScheduledTaskRecurrenceView =
+  | (ScheduledTaskCalendar & { localTime: string })
+  | Exclude<ScheduledTaskRecurrence, { kind: "calendar" }>;
+type ScheduledTaskLocalRecurrence = Omit<
+  ScheduledTaskCalendar,
+  "startAtUnixSeconds"
+> & { localTime: string };
 export type ScheduledTaskBinding = {
   modelRef: ModelRef;
   sourceGeneration: string;
@@ -578,7 +598,7 @@ export type ScheduledTaskView = {
     text: string;
     redacted: boolean;
   };
-  recurrence: ScheduledTaskRecurrence;
+  recurrence: ScheduledTaskRecurrenceView;
   nextRunAtUnixSeconds: string | null;
   occurrences: Array<{
     plannedAtUnixSeconds: string;
@@ -608,7 +628,7 @@ export type ScheduledTaskMutation = {
       kind: "text";
     }
   >;
-  recurrence: ScheduledTaskRecurrence;
+  recurrence: ScheduledTaskRecurrence | ScheduledTaskLocalRecurrence;
 };
 export type RunInputView =
   | {

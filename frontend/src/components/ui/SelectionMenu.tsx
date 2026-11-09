@@ -72,7 +72,7 @@ export function SelectionMenu({
       <Select.Trigger
         id={triggerId}
         ref={triggerRef}
-        className={`selection-trigger focus-ring ${triggerClassName}`.trim()}
+        className={`selection-trigger ${triggerClassName}`.trim()}
         aria-label={ariaLabel}
         aria-busy={busy || undefined}
         data-busy={busy || undefined}

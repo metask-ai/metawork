@@ -1,7 +1,7 @@
 import { Combobox as BaseCombobox } from "@base-ui/react/combobox";
 import type { ComponentProps } from "react";
 
-import { cn, controlBase, focusRing } from "./utils.ts";
+import { cn, controlBase, controlFocus, focusRing } from "./utils.ts";
 
 export const Combobox = {
   Root: BaseCombobox.Root,
@@ -23,8 +23,9 @@ export const Combobox = {
   }: ComponentProps<typeof BaseCombobox.InputGroup>) => (
     <BaseCombobox.InputGroup
       className={cn(
-        "relative flex h-9 w-full items-center rounded-[7px] data-focused:outline-2 data-focused:outline-offset-2 data-focused:outline-(--ui-focus-ring)",
+        "relative flex h-9 w-full items-center rounded-[7px]",
         controlBase,
+        controlFocus,
         className,
       )}
       {...props}
@@ -37,7 +38,6 @@ export const Combobox = {
     <BaseCombobox.Input
       className={cn(
         "h-full min-w-0 flex-1 bg-transparent px-3 text-sm outline-none",
-        focusRing,
         className,
       )}
       {...props}

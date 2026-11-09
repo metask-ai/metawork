@@ -1487,6 +1487,35 @@ test("Skill catalogs and typed Skill history decode without exposing loader inte
   );
 });
 
+test("Host Schedule projection fixture keeps the current Renderer contract", () => {
+  const scheduled = clone(fixture);
+  Object.assign(scheduled.capabilities, {
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  scheduled.scheduledTasks = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/schedule/renderer_projection.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const decoded = decodeWorkbenchSnapshot(scheduled);
+  assert.deepEqual(decoded.scheduledTasks, scheduled.scheduledTasks);
+  assert.deepEqual(
+    decoded.scheduledTasks.map((task) => task.id),
+    ["1", "2", "3", "4", "5"],
+  );
+  assert.deepEqual(
+    decoded.scheduledTasks.map((task) => task.recurrence.kind),
+    ["calendar", "once", "calendar", "interval", "calendar"],
+  );
+});
+
 test("Scheduled Task projection decodes recurrence and occurrence without secrets", () => {
   const scheduled = clone(fixture);
   scheduled.capabilities.scheduledTasks = true;
@@ -4073,4 +4102,87 @@ test("rejection-limit handoff keeps the model reason and no new approval mode", 
     reason: "Not a model reason",
   };
   assert.throws(() => decodeWorkbenchSnapshot(value));
+});
+
+test("calendar Schedule projection strictly validates frequency, zone and timestamp", () => {
+  const snapshot = clone(fixture);
+  Object.assign(snapshot.capabilities, {
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  const entries = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/schedule/renderer_projection.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  snapshot.scheduledTasks = [entries[0]];
+  for (const frequency of ["hourly", "daily", "weekly", "monthly", "yearly"]) {
+    snapshot.scheduledTasks[0].recurrence.frequency = frequency;
+    if (frequency !== "weekly" && frequency !== "monthly")
+      delete snapshot.scheduledTasks[0].recurrence.days;
+    assert.equal(
+      decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.frequency,
+      frequency,
+    );
+  }
+  for (const patch of [
+    { frequency: "unknown" },
+    { timezone: "Invalid Zone" },
+    { timezone: "" },
+    { startAtUnixSeconds: "253402300800" },
+    { startAtUnixSeconds: "01" },
+    { everySeconds: "86400" },
+    { localTime: "24:00" },
+    { localTime: null },
+  ]) {
+    const invalid = clone(snapshot);
+    Object.assign(invalid.scheduledTasks[0].recurrence, patch);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+  snapshot.scheduledTasks[0].recurrence.timezone = "Factory";
+  assert.equal(
+    decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.localTime,
+    "08:33",
+  );
+});
+
+test("calendar day sets decode strictly and preserve all selected dates", () => {
+  const snapshot = clone(fixture);
+  Object.assign(snapshot.capabilities, {
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  const entries = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/schedule/renderer_projection.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  snapshot.scheduledTasks = [entries[0]];
+  Object.assign(snapshot.scheduledTasks[0].recurrence, {
+    frequency: "weekly",
+    days: [1, 3, 7],
+  });
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.days,
+    [1, 3, 7],
+  );
+  for (const days of [[], [0], [8], [1, 1], [3, 1], [1.5], ["1"], null]) {
+    const invalid = clone(snapshot);
+    invalid.scheduledTasks[0].recurrence.days = days;
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+  snapshot.scheduledTasks[0].recurrence.frequency = "daily";
+  assert.throws(() => decodeWorkbenchSnapshot(snapshot));
 });

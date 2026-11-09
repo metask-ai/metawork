@@ -366,6 +366,8 @@ Schedule 定向入口为 `zig build test-product-schedule test-product-control t
 
 Schedule 执行正确性的回归还必须覆盖：连续跳过超过有界历史容量时，活跃 Task blocker 与待收口 submitted 仍保留，手动和定时路径均不重叠；无可淘汰项时停止计时，持久化失败或结果未知不对旧到期点空转；完整 source resolve 的瞬态拒绝发生在 durable claim 前，replacement 内正常到期不推进游标或写成定义失败；迟到固定间隔只接纳最新到期点；needs_attention 不能经暂停、恢复或立即运行绕过编辑确认。跨语言 fixture 必须验证实际安装 protocol、skipped blocker 和连接 generation 约束下的真实 Task 导航；Renderer 必须验证错误可见、确认提示、过期单次字段、timeout 刷新而不重放。
 
+Schedule 日历引擎的证据必须覆盖显式 IANA identity 与创建时区不变、持久化 round trip、所有支持时区的边界和单调游标、DST gap/fold、南半球半小时变化、日期变更线跳日及 TZif 最后 transition 以后的规则。初始 Run 结果关联、同秒多次手动运行、claim 前内存失败、全部中断 claim 恢复、未知提交是否实际落盘、恢复 rollback 与重试失败必须各有回归。消费边界必须覆盖同秒编辑、时钟回拨后的暂停恢复、规则变更、单次完成、历史淘汰后的暂停重启，以及旧记录边界恢复时不丢定义。日历投影必须以 Host/Renderer 共用 fixture 验证，覆盖 mixed recurrence 列表、严格频率/时区/时间解码与同一 id/epoch mutation；月末缺日、闰日及世纪非闰年必须覆盖前后查找和持久化。Renderer 验证四种新建选项、唯一时分选择器、周/月二级多选默认今天、最后一项不能取消、排序展示、提交与回填一致；Host 验证多星期/日期前后查找、跨月缺日、迟到只接纳最新到期点与重启后的游标边界。跨语言合同必须拒绝空集合、重复、乱序、越界以及不适用频率的日期集合。非时间编辑保留原规则，旧 calendar/interval 定义不重解释。日历开放边界以[Bridge 合同](renderer-bridge-contract.md)为准。
+
 真实桌面组合入口复用 `scripts/test-agentcore-vertical-macos.mjs`，以 `METAWORK_SCHEDULE_ONLY=1` 选择 Schedule 场景；它使用隔离 HOME、现有进程内测试 vault 与合成 Provider 回复，执行真实 Product、canonical staged AgentCore、OS timer、权限停止与重启恢复。SDK notification action → Application command → Bridge 和 Renderer 定位分别验证；这些自动化证据不替代系统通知中心的真实点击、关闭窗口后的后台运行、其他原生平台或日历/DST 时间语义验收。
 
 MCP 与 Task admission 的最小充分证据必须覆盖：浏览器 OAuth 只排除目标 server，其他 server 的 refresh 可继续；refresh enqueue 失败保留 pending fact 并由 owner timer 重试；MCP refresh/apply/OAuth 任一状态都不拒绝普通 Text Task；Task create result、snapshot decoder 与 Task 只读任务信息严格区分 `ready(selected)`、`ready(none)`、`unavailable`，拒绝混合 shape；该事实不进入 Task persistence，恢复 Task 默认 unavailable。

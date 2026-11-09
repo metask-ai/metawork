@@ -1752,12 +1752,36 @@ fn wireAgentCore(
         "product_workspace_automatic_root",
         product_workspace_automatic_root,
     );
+    const timezone_generator = b.addExecutable(.{
+        .name = "schedule-timezones",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build_support/schedule_timezones.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const timezone_run = b.addRunArtifact(timezone_generator);
+    timezone_generator.root_module.addImport("tempora", b.dependency("tempora", .{ .target = b.graph.host, .optimize = std.builtin.OptimizeMode.ReleaseSafe }).module("tempora"));
+    timezone_run.addDirectoryArg(b.dependency("tzdata", .{}).path("."));
+    const timezone_data = b.createModule(.{
+        .root_source_file = timezone_run.captureStdOut(.{ .basename = "timezones.zig" }),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const schedule_calendar = b.createModule(.{
+        .root_source_file = b.path("src/product/schedule/calendar.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    schedule_calendar.addImport("schedule_timezones", timezone_data);
+    schedule_calendar.addImport("tempora", b.dependency("tempora", .{ .target = target, .optimize = root_module.optimize }).module("tempora"));
     const product_schedule_state = b.createModule(.{
         .root_source_file = b.path("src/product/schedule/state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     product_schedule_state.addImport("metawork_product_models_contract", models_contract);
+    product_schedule_state.addImport("product_schedule_calendar", schedule_calendar);
     const product_schedule_persistence = b.createModule(.{
         .root_source_file = b.path("src/product/schedule/persistence.zig"),
         .target = target,

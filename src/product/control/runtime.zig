@@ -339,6 +339,10 @@ pub const NewTaskModelSelectionInput = struct {
 };
 
 pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
+pub const ScheduledTaskLocalRecurrence = product_schedule.LocalRecurrence;
+pub const scheduledTaskCalendarDayMask = product_schedule.calendarDayMask;
+pub const ScheduledTaskTimeZone = product_schedule.TimeZone;
+pub const ScheduledTaskCalendarFrequency = product_schedule.CalendarFrequency;
 
 pub const ScheduledTaskBindingInput = product_schedule.ModelBinding;
 
@@ -346,8 +350,10 @@ pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
     model_selection: ?NewTaskModelSelectionInput,
     input: []const u8,
-    recurrence: ScheduledTaskRecurrence,
+    recurrence: ?ScheduledTaskRecurrence = null,
+    local_recurrence: ?ScheduledTaskLocalRecurrence = null,
     permission_profile: PermissionProfile,
+    timezone: ?ScheduledTaskTimeZone = null,
 };
 
 pub const WorkspaceAuthorization = product_workspace.Authorization;
@@ -5438,7 +5444,7 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const definition = try self.scheduledTaskDefinition(input, null);
+        const definition = try self.scheduledTaskDefinition(input, null, null);
         const id = try self.schedule.create(
             definition,
             self.scheduleExecutionBinding(),
@@ -5456,7 +5462,7 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch));
+        const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch), id);
         try self.schedule.update(
             id,
             expected_epoch,
@@ -8572,7 +8578,7 @@ pub const Runtime = struct {
     ) product_schedule.TaskObservation {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.task_runtime.findConst(task_id) == null) return .unavailable;
-        const terminal = self.task_runtime.lastTerminalSummary(task_id) orelse
+        const terminal = self.task_runtime.initialRunTerminalSummary(task_id) orelse
             return .pending;
         return .{ .terminal = .{
             .outcome = scheduledTaskOutcome(terminal.outcome),
@@ -8636,6 +8642,7 @@ pub const Runtime = struct {
         self: *Runtime,
         input: ScheduledTaskDefinitionInput,
         retained: ?ScheduledTaskBindingInput,
+        id: ?u64,
     ) Error!product_schedule.Definition {
         const binding: ScheduledTaskBindingInput = if (input.model_selection) |selection| selected: {
             if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
@@ -8647,10 +8654,14 @@ pub const Runtime = struct {
         if (title.len == 0 or title.len > self.limits.max_task_title_bytes or !std.unicode.utf8ValidateSlice(title)) return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
         if (!self.workspace.automaticRootAvailable()) return error.WorkspaceUnavailable;
-        try input.recurrence.validate();
+        const recurrence = if (input.local_recurrence) |local| resolved: {
+            if (input.recurrence != null) return error.InvalidSchedule;
+            break :resolved try self.schedule.resolveLocalRecurrence(local, id);
+        } else input.recurrence orelse return error.InvalidSchedule;
+        try recurrence.validate();
         const instruction = std.mem.trim(u8, input.input, " \t\r\n");
         if (instruction.len == 0 or instruction.len > self.limits.max_user_message_bytes or !std.unicode.utf8ValidateSlice(instruction)) return error.InvalidScheduledTaskInput;
-        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = input.recurrence };
+        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = recurrence, .timezone = input.timezone };
     }
 
     fn validateScheduledBinding(self: *Runtime, expected: ScheduledTaskBindingInput) Error!void {
@@ -13394,7 +13405,8 @@ test "Schedule blocker projection matches the shared Renderer fixture" {
         .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
     }, 1000);
     const item = control.schedule.store.find(id).?;
-    try control.schedule.store.markSubmitted(item, 2000, 2001, .timer, 3);
+    try control.schedule.store.claim(item, 2000, 2001, .timer);
+    try control.schedule.store.finalizeClaimSubmitted(item, 2000, .timer, 3);
     try control.schedule.store.markSkipped(item, 5600, 5601, 3);
     try control.schedule.store.markSkipped(item, 9200, 9201, 0);
     var storage: [8192]u8 = undefined;
@@ -14567,13 +14579,18 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     try std.testing.expectEqual(commits, persistence.commits);
     try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
     try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
-    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+    const retry_at = clock.armed_at orelse return error.TestUnexpectedResult;
+    try std.testing.expect(retry_at > clock.now);
     vault.read_fails = false;
-    try std.testing.expect(control.custom_providers.clearDefault().accepted);
-    try control.validateScheduledBinding(try control.schedule.bindingAt(id, 1));
-    _ = control.schedule.rearmNoFail(control.scheduleExecutionBinding(), control.scheduleRedaction());
-    try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);
-    try std.testing.expectEqual(commits, persistence.commits);
+    clock.now = retry_at;
+    control.onScheduledTaskTimer();
+    const occurrences = control.schedule.store.find(id).?.occurrences();
+    try std.testing.expectEqual(@as(usize, 1), occurrences.len);
+    try std.testing.expectEqual(@as(u64, 2000), occurrences[0].planned_at_unix_seconds);
+    // This fixture has no Task persistence, so admission rejects after the claim.
+    try std.testing.expect(occurrences[0].result == .rejected);
+    try std.testing.expectEqual(product_schedule.FailureReason.task_start_failed, occurrences[0].reason.?);
+    try std.testing.expectEqual(commits + 2, persistence.commits);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {

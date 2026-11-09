@@ -81,6 +81,23 @@ fn writeItem(
         return error.SnapshotTooLarge;
     writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
     switch (item.recurrence) {
+        .calendar => |rule| {
+            writer.print("{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"{d}\",\"timezone\":\"{s}\",\"frequency\":\"{s}\"", .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) }) catch return error.SnapshotTooLarge;
+            const minute = state.localMinute(rule.timezone, rule.start_at_unix_seconds);
+            writer.print(",\"localTime\":\"{d:0>2}:{d:0>2}\"", .{ minute / 60, minute % 60 }) catch return error.SnapshotTooLarge;
+            if (rule.frequency == .weekly or rule.frequency == .monthly) {
+                writer.writeAll(",\"days\":[") catch return error.SnapshotTooLarge;
+                var count: usize = 0;
+                for (0..31) |day| {
+                    if (rule.selectedDays() & (@as(u32, 1) << @as(u5, @intCast(day))) == 0) continue;
+                    if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                    writer.print("{d}", .{day + 1}) catch return error.SnapshotTooLarge;
+                    count += 1;
+                }
+                writer.writeByte(']') catch return error.SnapshotTooLarge;
+            }
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        },
         .once => |once| writer.print(
             "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
             .{once.at_unix_seconds},
@@ -130,4 +147,46 @@ fn writeItem(
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
+}
+
+test "Renderer projection includes calendar and legacy recurrence definitions" {
+    var store = try state.Store.init(std.testing.allocator, .{ .max_items = 5, .max_projection_bytes = 8192 });
+    defer store.deinit();
+    for (0..5) |index| {
+        _ = try store.create(.{
+            .title = "Schedule",
+            .binding = .{ .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" }, .source_generation = 1, .protocol = .openai_chat_completions },
+            .permission_profile = .approval_required,
+            .input = "Inspect",
+            .recurrence = switch (index) {
+                1 => .{ .once = .{ .at_unix_seconds = 2000 } },
+                3 => .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
+                else => .{ .calendar = .{ .start_at_unix_seconds = 2000, .timezone = .@"Asia/Shanghai", .frequency = switch (index) {
+                    0 => .monthly,
+                    2 => .yearly,
+                    else => .daily,
+                } } },
+            },
+        }, 1000);
+    }
+    const Text = struct {
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var context: u8 = 0;
+    const text: TextProjection = .{ .context = &context, .write_json_fn = Text.write };
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeProjection(&writer, &store, text);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @embedFile("renderer_projection.fixture"), "\r\n"), writer.buffered());
+    for ([_]u64{ 1, 3, 5 }) |id| {
+        try std.testing.expectEqual(state.TimeZone.@"Asia/Shanghai", store.find(id).?.recurrence.calendar.timezone);
+        try std.testing.expectEqual(@as(?u64, 2000), store.find(id).?.next_run_at_unix_seconds);
+    }
+    try store.delete(2, 1);
+    try store.delete(4, 1);
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeProjection(&writer, &store, text);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"kind\":\"calendar\"") != null);
 }

@@ -5254,7 +5254,8 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
-        const task_id = try (try self.requireProductControl()).runScheduledTaskNow(
+        const workbench = try self.requireProductControl();
+        const task_id = try workbench.runScheduledTaskNow(
             id,
             epoch,
         );
@@ -5282,7 +5283,8 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
-        try (try self.requireProductControl()).deleteScheduledTask(id, epoch);
+        const workbench = try self.requireProductControl();
+        try workbench.deleteScheduledTask(id, epoch);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -5791,6 +5793,7 @@ fn scheduledTaskDefinition(
     instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !product_control.ScheduledTaskDefinitionInput {
+    const timing = try handlers.parseScheduledTaskRecurrence(recurrence_value);
     return .{
         .title = title,
         .model_selection = if (selection) |value| .{
@@ -5801,7 +5804,8 @@ fn scheduledTaskDefinition(
         .permission_profile = handlers.permissionProfile(permission_profile_wire) orelse
             return error.InvalidBridgePayload,
         .input = instruction,
-        .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
+        .recurrence = if (timing == .absolute) timing.absolute else null,
+        .local_recurrence = if (timing == .local) timing.local else null,
     };
 }
 
@@ -8445,6 +8449,133 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         try std.testing.expectEqual(@as(?u32, @intCast(index + 1)), run.additional_inputs[index].?.sequence);
     }
     try std.testing.expect(task.durable.runs[1] == null);
+}
+
+test "local Schedule requests keep the selected clock across timezone rule differences" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"calendar","frequency":"daily","timezone":"America/Havana","localTime":"07:00"}
+    , .{});
+    defer parsed.deinit();
+    const local = (try handlers.parseScheduledTaskRecurrence(parsed.value)).local;
+    const recurrence = try local.resolve(1_794_700_800, null); // 2026-11-15 00:00 UTC
+    // The pinned Host rules use UTC-4 on this date. A runtime using UTC-5
+    // would submit 12:00 UTC if it interpreted 07:00 before sending it.
+    try std.testing.expectEqual(@as(u64, 1_794_740_400), recurrence.calendar.start_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 1_794_826_800), try recurrence.firstStrictlyAfter(recurrence.calendar.start_at_unix_seconds));
+}
+
+test "local Schedule requests validate their clock, zone and frequency fields" {
+    for ([_][]const u8{
+        \\{"kind":"calendar","frequency":"daily","timezone":"UTC","localTime":"24:00"}
+        ,
+        \\{"kind":"calendar","frequency":"daily","timezone":"Unknown/Zone","localTime":"07:00"}
+        ,
+        \\{"kind":"calendar","frequency":"weekly","timezone":"UTC","localTime":"07:00"}
+        ,
+        \\{"kind":"calendar","frequency":"weekly","timezone":"UTC","localTime":"07:00","days":[3,1]}
+        ,
+        \\{"kind":"calendar","frequency":"daily","timezone":"UTC","localTime":"07:00","startAtUnixSeconds":"2000"}
+        ,
+    }) |request| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidBridgePayload, handlers.parseScheduledTaskRecurrence(parsed.value));
+    }
+}
+
+test "Scheduled Task Bridge admits calendars and preserves epoch protection" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn scheduleNow(_: ?*anyopaque) ?u64 {
+            return 1000;
+        }
+        fn arm(_: ?*anyopaque, _: u64) bool {
+            return true;
+        }
+        fn cancelSchedule(_: ?*anyopaque) void {}
+        fn commit(_: ?*anyopaque, _: []const u8) product_control.SchedulePersistenceCommit {
+            return .committed;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            @memset(out, 7);
+            return true;
+        }
+    };
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.maximumSmallFixture(control);
+    defer control.deinit();
+    control.schedule.timer = .{ .enabled = true, .now_unix_seconds = Host.scheduleNow, .arm = Host.arm, .cancel = Host.cancelSchedule };
+    control.schedule.persistence = .{ .enabled = true, .commit_fn = Host.commit };
+    control.schedule.persistence_health = .ready;
+    const id = try control.schedule.store.create(.{
+        .title = "Host calendar",
+        .binding = .{ .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" }, .source_generation = 1, .protocol = .openai_chat_completions },
+        .permission_profile = .approval_required,
+        .input = "Inspect",
+        .recurrence = .{ .calendar = .{ .start_at_unix_seconds = 2000, .timezone = .@"Asia/Shanghai", .frequency = .daily } },
+    }, 1000);
+    var dispatcher = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer dispatcher.deinit();
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [8192]u8 = undefined;
+    _ = native.dispatch("{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &output);
+    control.syncLifecycle();
+    const revision = control.revision;
+    const initial_enabled = control.schedule.store.find(id).?.enabled;
+    const tasks = control.task_runtime.taskCount();
+    for ([_][]const u8{
+        commands.update_scheduled_task,
+        commands.set_scheduled_task_enabled,
+        commands.run_scheduled_task_now,
+        commands.delete_scheduled_task,
+    }) |command| {
+        const fields = if (std.mem.eql(u8, command, commands.update_scheduled_task))
+            ",\"title\":\"Overwrite\",\"modelSelection\":null,\"permissionProfile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"Inspect\"},\"recurrence\":{\"kind\":\"interval\",\"startAtUnixSeconds\":\"2000\",\"everySeconds\":\"3600\"}"
+        else if (std.mem.eql(u8, command, commands.set_scheduled_task_enabled))
+            ",\"enabled\":false"
+        else
+            "";
+        var request_buffer: [2048]u8 = undefined;
+        const request = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"blocked\",\"command\":\"{s}\",\"payload\":{{\"scheduledTaskId\":\"{d}\",\"expectedEpoch\":\"2\"{s}}}}}", .{ command, id, fields });
+        const response = native.dispatch(request, source, &output);
+        try std.testing.expect(std.mem.indexOf(u8, response, "handler_failed") != null);
+        try std.testing.expectEqual(revision, control.revision);
+        try std.testing.expectEqual(tasks, control.task_runtime.taskCount());
+        const item = control.schedule.store.find(id).?;
+        try std.testing.expectEqual(@as(u64, 1), item.epoch);
+        try std.testing.expectEqual(initial_enabled, item.enabled);
+        try std.testing.expectEqual(product_control.ScheduledTaskTimeZone.@"Asia/Shanghai", item.recurrence.calendar.timezone);
+    }
+    var request_buffer: [512]u8 = undefined;
+    const deletion = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"delete-calendar\",\"command\":\"{s}\",\"payload\":{{\"scheduledTaskId\":\"{d}\",\"expectedEpoch\":\"1\"}}}}", .{ commands.delete_scheduled_task, id });
+    const deleted = native.dispatch(deletion, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, deleted, "\"deleted\":true") != null);
+    try std.testing.expect(control.schedule.store.find(id) == null);
+    try std.testing.expectEqual(tasks, control.task_runtime.taskCount());
 }
 
 test "Product view Dispatcher freezes and transports a complete multi-chunk snapshot through the native registry" {

@@ -699,9 +699,44 @@ pub fn parseScheduledTaskInstruction(value: std.json.Value) ![]const u8 {
     };
 }
 
+fn parseScheduleDays(frequency: product_control.ScheduledTaskCalendarFrequency, value: std.json.Value) !u32 {
+    const values = switch (value) {
+        .array => |array| array.items,
+        else => return error.InvalidBridgePayload,
+    };
+    if (values.len > 31) return error.InvalidBridgePayload;
+    var days: [31]u8 = undefined;
+    for (values, 0..) |entry, index| {
+        days[index] = switch (entry) {
+            .integer => |day| if (day > 0 and day <= 31) @intCast(day) else return error.InvalidBridgePayload,
+            else => return error.InvalidBridgePayload,
+        };
+    }
+    return product_control.scheduledTaskCalendarDayMask(frequency, days[0..values.len]) catch error.InvalidBridgePayload;
+}
+
+const ScheduledTaskTiming = union(enum) {
+    absolute: product_control.ScheduledTaskRecurrence,
+    local: product_control.ScheduledTaskLocalRecurrence,
+};
+
+fn parseScheduleClock(value: std.json.Value) !u16 {
+    const time = switch (value) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    if (time.len != 5 or time[2] != ':' or
+        !std.ascii.isDigit(time[0]) or !std.ascii.isDigit(time[1]) or
+        !std.ascii.isDigit(time[3]) or !std.ascii.isDigit(time[4])) return error.InvalidBridgePayload;
+    const hour = (time[0] - '0') * 10 + time[1] - '0';
+    const minute = (time[3] - '0') * 10 + time[4] - '0';
+    if (hour > 23 or minute > 59) return error.InvalidBridgePayload;
+    return @as(u16, hour) * 60 + minute;
+}
+
 pub fn parseScheduledTaskRecurrence(
     value: std.json.Value,
-) !product_control.ScheduledTaskRecurrence {
+) !ScheduledTaskTiming {
     const object = switch (value) {
         .object => |object| object,
         else => return error.InvalidBridgePayload,
@@ -718,7 +753,40 @@ pub fn parseScheduledTaskRecurrence(
             .string => |text| try parseWireId(text),
             else => return error.InvalidBridgePayload,
         };
-        return .{ .once = .{ .at_unix_seconds = at } };
+        return .{ .absolute = .{ .once = .{ .at_unix_seconds = at } } };
+    }
+    if (std.mem.eql(u8, kind, "calendar")) {
+        if (object.count() != @as(usize, 4) + @intFromBool(object.contains("days"))) return error.InvalidBridgePayload;
+        const timezone = switch (object.get("timezone") orelse return error.InvalidBridgePayload) {
+            .string => |text| std.meta.stringToEnum(product_control.ScheduledTaskTimeZone, text) orelse return error.InvalidBridgePayload,
+            else => return error.InvalidBridgePayload,
+        };
+        const frequency = switch (object.get("frequency") orelse return error.InvalidBridgePayload) {
+            .string => |text| std.meta.stringToEnum(product_control.ScheduledTaskCalendarFrequency, text) orelse return error.InvalidBridgePayload,
+            else => return error.InvalidBridgePayload,
+        };
+        const days = if (object.get("days")) |value_days| try parseScheduleDays(frequency, value_days) else 0;
+        if (object.get("localTime")) |time| {
+            if ((frequency == .weekly or frequency == .monthly) and days == 0) return error.InvalidBridgePayload;
+            return .{ .local = .{
+                .timezone = timezone,
+                .minute = try parseScheduleClock(time),
+                .frequency = frequency,
+                .days = days,
+            } };
+        }
+        const start = switch (object.get("startAtUnixSeconds") orelse return error.InvalidBridgePayload) {
+            .string => |text| try parseWireId(text),
+            else => return error.InvalidBridgePayload,
+        };
+        const recurrence: product_control.ScheduledTaskRecurrence = .{ .calendar = .{
+            .start_at_unix_seconds = start,
+            .timezone = timezone,
+            .frequency = frequency,
+            .days = days,
+        } };
+        recurrence.validate() catch return error.InvalidBridgePayload;
+        return .{ .absolute = recurrence };
     }
     if (!std.mem.eql(u8, kind, "interval") or object.count() != 3)
         return error.InvalidBridgePayload;
@@ -732,10 +800,10 @@ pub fn parseScheduledTaskRecurrence(
         .string => |text| try parseWireId(text),
         else => return error.InvalidBridgePayload,
     };
-    return .{ .interval = .{
+    return .{ .absolute = .{ .interval = .{
         .start_at_unix_seconds = start,
         .every_seconds = every,
-    } };
+    } } };
 }
 
 pub fn acknowledgementSequence(payload: []const u8) !u64 {
@@ -1034,7 +1102,7 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
     defer once.deinit();
     try std.testing.expectEqual(
         @as(u64, 1_700_000_000),
-        (try parseScheduledTaskRecurrence(once.value)).once.at_unix_seconds,
+        (try parseScheduledTaskRecurrence(once.value)).absolute.once.at_unix_seconds,
     );
     var interval = try std.json.parseFromSlice(
         std.json.Value,
@@ -1046,7 +1114,7 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
     defer interval.deinit();
     try std.testing.expectEqual(
         @as(u64, 3600),
-        (try parseScheduledTaskRecurrence(interval.value)).interval.every_seconds,
+        (try parseScheduledTaskRecurrence(interval.value)).absolute.interval.every_seconds,
     );
     var extra = try std.json.parseFromSlice(
         std.json.Value,
@@ -1060,6 +1128,11 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
         error.InvalidBridgePayload,
         parseScheduledTaskRecurrence(extra.value),
     );
+    var calendar_rule = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"calendar","startAtUnixSeconds":"1700000000","timezone":"Asia/Shanghai","frequency":"daily"}
+    , .{});
+    defer calendar_rule.deinit();
+    try std.testing.expectEqual(product_control.ScheduledTaskCalendarFrequency.daily, (try parseScheduledTaskRecurrence(calendar_rule.value)).absolute.calendar.frequency);
 }
 
 test "Scheduled Task payload rejects Workspace and Skill configuration" {
@@ -1268,5 +1341,40 @@ test "attachment remainingFiles is optional and accepts only JSON u32 integer li
         var buffer: [256]u8 = undefined;
         const input = try std.fmt.bufPrint(&buffer, "{{\"generation\":\"1\",\"batchId\":\"2\",\"remainingFiles\":{s},\"source\":{{\"kind\":\"picker\"}}}}", .{value});
         try std.testing.expectError(error.InvalidBridgePayload, parsePayload(AttachmentAddBegin, input));
+    }
+}
+
+test "calendar Bridge recurrence validates every frequency and rejects malformed fields" {
+    for (std.enums.values(product_control.ScheduledTaskCalendarFrequency)) |frequency| {
+        var buffer: [256]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&buffer, "{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"1700000000\",\"timezone\":\"America/New_York\",\"frequency\":\"{s}\"}}", .{@tagName(frequency)});
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(frequency, (try parseScheduledTaskRecurrence(parsed.value)).absolute.calendar.frequency);
+    }
+    for ([_][]const u8{
+        "{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"1700000000\",\"timezone\":\"Unknown/Zone\",\"frequency\":\"daily\"}",
+        "{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"253402300800\",\"timezone\":\"UTC\",\"frequency\":\"daily\"}",
+        "{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"1700000000\",\"timezone\":\"UTC\",\"frequency\":\"unknown\"}",
+        "{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"1700000000\",\"timezone\":\"UTC\",\"frequency\":\"daily\",\"everySeconds\":\"86400\"}",
+    }) |bytes| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidBridgePayload, parseScheduledTaskRecurrence(parsed.value));
+    }
+}
+
+test "calendar Bridge accepts ordered day selections and rejects malformed sets" {
+    var valid = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"calendar","startAtUnixSeconds":"1793606400","timezone":"UTC","frequency":"weekly","days":[1,3,7]}
+    , .{});
+    defer valid.deinit();
+    try std.testing.expectEqual(@as(u32, 69), (try parseScheduledTaskRecurrence(valid.value)).absolute.calendar.days);
+    for ([_][]const u8{ "[]", "[0]", "[8]", "[1,1]", "[2,1]", "[1.5]", "[\"1\"]", "null" }) |days| {
+        var buffer: [256]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"1793606400\",\"timezone\":\"UTC\",\"frequency\":\"weekly\",\"days\":{s}}}", .{days});
+        var invalid = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+        defer invalid.deinit();
+        try std.testing.expectError(error.InvalidBridgePayload, parseScheduledTaskRecurrence(invalid.value));
     }
 }

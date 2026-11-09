@@ -20,6 +20,7 @@ import {
   Pencil,
   FileDiff,
   Layers3,
+  History,
   ListTree,
   LoaderCircle,
   LogOut,
@@ -30,6 +31,7 @@ import {
   Puzzle,
   Package,
   Paperclip,
+  Play,
   Plug,
   Radar,
   RefreshCw,
@@ -78,6 +80,7 @@ type IconName =
   | "shield"
   | "shield-alert"
   | "info"
+  | "history"
   | "arrow-left"
   | "arrow-down"
   | "close"
@@ -107,6 +110,7 @@ type IconName =
   | "scheduled-tasks"
   | "mcp"
   | "calendar-days"
+  | "play"
   | "radar"
   | "sunrise";
 
@@ -136,6 +140,7 @@ const icons: Record<IconName, LucideIcon> = {
   shield: ShieldCheck,
   "shield-alert": ShieldAlert,
   info: Info,
+  history: History,
   "arrow-left": ArrowLeft,
   "arrow-down": ArrowDown,
   close: X,
@@ -165,6 +170,7 @@ const icons: Record<IconName, LucideIcon> = {
   "scheduled-tasks": Clock3,
   mcp: Plug,
   "calendar-days": CalendarDays,
+  play: Play,
   radar: Radar,
   sunrise: Sunrise,
 };

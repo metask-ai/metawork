@@ -1,6 +1,6 @@
 import { forwardRef, type TextareaHTMLAttributes } from "react";
 
-import { cn, controlBase, focusRing } from "./utils.ts";
+import { cn, controlBase, controlFocus } from "./utils.ts";
 
 export const Textarea = forwardRef<
   HTMLTextAreaElement,
@@ -11,7 +11,7 @@ export const Textarea = forwardRef<
     className={cn(
       "min-h-24 w-full resize-y rounded-[7px] px-3 py-2 text-sm",
       controlBase,
-      focusRing,
+      controlFocus,
       className,
     )}
     {...props}
