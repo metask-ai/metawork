@@ -41,12 +41,6 @@ function activeCompact(task: TaskNavigation) {
     : null;
 }
 
-export type TaskSignals = {
-  running: boolean;
-  attention: boolean;
-  failed: boolean;
-};
-
 function permissionReviewInProgress(task: TaskNavigation): boolean {
   return (
     task.currentRunPhase === "waiting_ui" &&
@@ -147,43 +141,6 @@ export function taskDisplayState(task: TaskNavigation): TaskDisplayState {
     "runs" in task ? lastTerminalRun(task)?.terminal : task.latestTerminal;
   if (terminal) return { kind: "outcome", value: terminal.outcome };
   return { kind: "ready" };
-}
-
-export function taskSignals(task: TaskNavigation): TaskSignals {
-  const compact = activeCompact(task);
-  const lastCompact =
-    "compacts" in task
-      ? task.compacts.at(-1)
-      : task.lastCompactPhase === null
-        ? null
-        : { phase: task.lastCompactPhase };
-  const terminal =
-    "runs" in task
-      ? (lastTerminalRun(task)?.terminal ?? null)
-      : task.latestTerminal;
-  return {
-    running:
-      task.currentRunPhase === "queued" ||
-      task.currentRunPhase === "running" ||
-      task.currentRunPhase === "stopping" ||
-      permissionReviewInProgress(task) ||
-      compact?.phase === "queued" ||
-      compact?.phase === "compacting" ||
-      compact?.phase === "stopping" ||
-      task.activeOperation?.kind === "restore",
-    attention:
-      task.currentRunPhase === "waiting_ui" &&
-      !permissionReviewInProgress(task),
-    failed:
-      task.deletionStatus === "failed" ||
-      terminal?.outcome === "failed" ||
-      terminal?.outcome === "dependency_contract_failure" ||
-      terminal?.outcome === "interrupted" ||
-      (terminal?.cause != null &&
-        terminal.cause !== "user_cancel" &&
-        terminal.cause !== "session_close") ||
-      lastCompact?.phase === "failed",
-  };
 }
 
 export type SearchResult = {

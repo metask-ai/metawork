@@ -9422,6 +9422,185 @@ test "approval Core refusal and export failure keep the old mode or restore its 
     }
 }
 
+test "approval recovery owns restore before waiting input" {
+    const Gate = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+
+        fn wait(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.entered.swap(true, .acq_rel)) return;
+            while (!self.released.load(.acquire))
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+
+        fn cancel(_: *anyopaque) void {}
+    };
+    for ([_]enum { waiting, recovering }{ .waiting, .recovering }) |phase| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(1);
+        if (phase == .waiting) {
+            fake_core.setNextPlan(.controlled);
+            fake_core.makeNextCheckpointResultMalformed();
+        }
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var history = TaskPersistenceProbe{ .storage = bytes };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+        try waitInitialTaskCatalog(&control, task_id);
+        const task = control.task_runtime.find(task_id).?;
+        var close_gate: Gate = .{};
+        var restore_gate: Gate = .{};
+        fake_core.lock();
+        fake_core.session_destroy_probe = .{ .context = &close_gate, .observe_fn = Gate.wait };
+        fake_core.unlock();
+        defer {
+            restore_gate.released.store(true, .release);
+            close_gate.released.store(true, .release);
+            fake_core.releaseControlled();
+            fake_core.lock();
+            fake_core.session_destroy_probe = null;
+            fake_core.unlock();
+        }
+        const old_run_id = if (phase == .waiting) running: {
+            const id = try runPreparedTask(&control, task_id, .{ .text = "run before approval change" });
+            fake_core.waitRunEntered();
+            try std.testing.expectEqual(.attached, std.meta.activeTag(task.runtime.attachment));
+            try std.testing.expectEqual(id, task.runtime.active_operation.run);
+            break :running id;
+        } else null;
+
+        const attempt_before = control.task_runtime.next_restore_attempt_id;
+        const revision = try control.setApprovalMode(task_id, .full_access, task.durable.binding_epoch, 1);
+        if (old_run_id) |id| {
+            const old_run = task_state.findRun(task.durable.runs, id).?;
+            // The last lease belongs to checkpoint postprocessing. Task folds
+            // the poisoned disposition and starts close on the same turn that
+            // releases it, while approval is still waiting.
+            for (0..5000) |_| {
+                if (old_run.checkpoint.state.load(.acquire) == .failure_ready and
+                    task.runtime.worker_leases.liveCount() == 1) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.PoisonedCheckpointDidNotSettle;
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                if (close_gate.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.PoisonedSessionDidNotStartClosing;
+            try std.testing.expectEqual(.cancelled, task_state.productTerminalFacts(old_run).?.outcome);
+            try std.testing.expectEqual(.poisoned, old_run.checkpoint.session_disposition.?);
+            try std.testing.expectEqual(.closing, std.meta.activeTag(task.runtime.attachment));
+        } else {
+            const baseline = for (control.task_runtime.approval_jobs) |entry| {
+                if (entry) |slot| if (slot.task_id == task_id) break slot.job;
+            } else return error.TestUnexpectedResult;
+            for (0..2000) |_| {
+                if (baseline.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(baseline.completionReady() and baseline.outcome == .checkpoint);
+            fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT);
+            for (0..5000) |_| {
+                control.syncLifecycle();
+                if (close_gate.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(close_gate.entered.load(.acquire));
+            fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+        }
+        try std.testing.expectEqualStrings(@tagName(phase), @tagName(task.approval_change.?.phase));
+
+        const operation_id = "approval-queued-input";
+        const accepted = try control.sendInput(operation_id, task_id, .{ .text = "run after approval recovery" });
+        try std.testing.expectEqual(.accepted, accepted.outcome);
+        try std.testing.expectEqual(.waiting, task.input_submissions.items[0].state);
+        try std.testing.expectEqual(attempt_before, control.task_runtime.next_restore_attempt_id);
+        if (phase == .waiting) {
+            // A queued history write would mask the input admission window.
+            for (0..5000) |_| {
+                control.syncLifecycle();
+                if (!control.task_runtime.approvalHistoryWorkerActive() and !control.approval_history_dirty) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.DeferredHistoryDidNotSettle;
+            // Keep the admitted restore queued while checking who acquired it.
+            try control.executor.enqueue(.{ .identity = &restore_gate, .context = &restore_gate, .execute_fn = Gate.wait, .cancel_fn = Gate.cancel });
+            for (0..2000) |_| {
+                if (restore_gate.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.RestoreGateDidNotStart;
+        }
+        close_gate.released.store(true, .release);
+        for (0..5000) |_| {
+            control.syncLifecycle();
+            if (task.runtime.active_operation == .restore or task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(.restore, std.meta.activeTag(task.runtime.active_operation));
+        try std.testing.expectEqual(.detached, std.meta.activeTag(task.runtime.attachment));
+        try std.testing.expectEqual(false, task.input_submissions.items[0].preparation_attempted);
+        try std.testing.expectEqual(@as(?u64, attempt_before), task.approval_change.?.recovery_attempt_id);
+        try std.testing.expectEqual(attempt_before, task.runtime.active_operation.restore.id);
+        restore_gate.released.store(true, .release);
+
+        const queued_run = completed: {
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                for (task.durable.runs) |*entry| if (entry.*) |*run| {
+                    const submission = run.submission orelse continue;
+                    if (!std.mem.eql(u8, submission.operationId(), operation_id)) continue;
+                    try std.testing.expect(task.approval_change == null);
+                    if (task_state.productTerminalFacts(run)) |terminal| {
+                        try std.testing.expectEqual(.completed, terminal.outcome);
+                        break :completed run;
+                    }
+                };
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqual(attempt_before + 1, control.task_runtime.next_restore_attempt_id);
+        try std.testing.expectEqual(revision, task.approval_result.?.revision);
+        if (phase == .recovering) {
+            try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(.checkpoint_failed, task.approval_result.?.reason.?);
+            try std.testing.expectEqual(.approval_required, queued_run.permission_profile);
+        } else {
+            try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(.full_access, queued_run.permission_profile);
+            for (&fake_core.sessions) |*session| {
+                session.lock();
+                defer session.unlock();
+                if (!session.in_use or session.destroyed) continue;
+                try std.testing.expectEqual(wire.PERMISSION_FULL_ACCESS, session.permission_mode_code);
+                break;
+            } else return error.ExpectedLiveSession;
+        }
+    }
+}
+
 test "approval fresh recovery stays queued and one failure never starts an implicit retry" {
     const Blocker = struct {
         entered: std.atomic.Value(bool) = .init(false),

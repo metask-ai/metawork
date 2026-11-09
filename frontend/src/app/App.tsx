@@ -213,7 +213,6 @@ import {
   orderedProjects,
   pendingInputContinuation,
   taskDisplayState,
-  taskSignals,
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { WorkspaceRemovalMenu } from "../features/workspaces/WorkspaceRemovalMenu.tsx";
@@ -1561,21 +1560,19 @@ export default function App() {
   const inputContinuation = pendingInputContinuation(activeTask);
   const taskCanCompose =
     newTaskDraftActive || Boolean(activeTask?.inputAcceptance.available);
-  const outputEditContext = useRef({
-    task: activeTask,
-    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
-    audience: attachmentAudience.current,
-  });
-  outputEditContext.current = {
-    task: activeTask,
-    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
-    audience: attachmentAudience.current,
-  };
   const taskOperationInFlight = Boolean(
     activeTask?.activeOperation ||
     inputContinuation ||
     activeTask?.inputSubmissions.some((input) => input.state === "waiting"),
   );
+  const taskDraftAction = {
+    task: activeTask,
+    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
+    prepareRunInput: !taskOperationInFlight,
+    audience: attachmentAudience.current,
+  };
+  const taskDraftActionContext = useRef(taskDraftAction);
+  taskDraftActionContext.current = taskDraftAction;
   const composerWorkspaceId =
     activeTask?.workspaceId ??
     selectedTaskSummary?.workspaceId ??
@@ -3837,7 +3834,7 @@ export default function App() {
     runId: string,
     outputId: string,
   ): OutputEditResult {
-    const current = outputEditContext.current;
+    const current = taskDraftActionContext.current;
     if (
       current.audience !== outputEditAudience ||
       !current.allowed ||
@@ -3861,7 +3858,7 @@ export default function App() {
       return "edit_unavailable";
     composerDraftRef.current = prepared.draft;
     window.requestAnimationFrame(() => {
-      const latest = outputEditContext.current;
+      const latest = taskDraftActionContext.current;
       if (
         latest.audience === outputEditAudience &&
         latest.allowed &&
@@ -3874,20 +3871,34 @@ export default function App() {
     });
     return "edit_prepared";
   }
-  function prepareRetry(input: RunInputView) {
-    if (!activeTask || !taskCanCompose) return;
-    const audience = attachmentAudience.current;
+  function prepareRetry(input: RunInputView, taskId: string, runId: string) {
+    const current = taskDraftActionContext.current;
+    const task = current.task;
+    const run = task?.runs.at(-1);
+    if (
+      !current.allowed ||
+      !current.prepareRunInput ||
+      task?.id !== taskId ||
+      composerDraftScopeRef.current !== `task:${taskId}` ||
+      run?.id !== runId ||
+      run.input !== input ||
+      !run.terminal?.feedback.offerInputPreparation ||
+      input.redacted
+    )
+      return;
+    const draft = composerDraftRef.current;
+    const audience = current.audience;
     const focusPreparedInput = () =>
       window.requestAnimationFrame(() => {
         if (attachmentAudience.current === audience) composer.current?.focus();
       });
     if (input.kind === "skill") {
-      if (composerDraftHasContent(composerDraft)) {
+      if (composerDraftHasContent(draft)) {
         observeLocalFeedback(
-          `prepare-retry:${activeTask.id}`,
+          `prepare-retry:${taskId}`,
           quietStatus("run.draft_preserved", {
             scope: "task",
-            taskId: activeTask.id,
+            taskId,
           }),
         );
       } else {
@@ -3895,18 +3906,18 @@ export default function App() {
         if (reusable) {
           updateComposerDraft(reusable);
           observeLocalFeedback(
-            `prepare-retry:${activeTask.id}`,
+            `prepare-retry:${taskId}`,
             quietStatus("run.retry_prepared", {
               scope: "task",
-              taskId: activeTask.id,
+              taskId,
             }),
           );
         } else {
           observeLocalFeedback(
-            `prepare-retry:${activeTask.id}`,
+            `prepare-retry:${taskId}`,
             attentionStatus("mutation.reason.stale_catalog", {
               scope: "task",
-              taskId: activeTask.id,
+              taskId,
             }),
           );
         }
@@ -3915,55 +3926,55 @@ export default function App() {
       return;
     }
     if (input.kind === "multimodal") {
-      if (composerDraftHasContent(composerDraft)) {
+      if (composerDraftHasContent(draft)) {
         observeLocalFeedback(
-          `prepare-retry:${activeTask.id}`,
+          `prepare-retry:${taskId}`,
           quietStatus("run.draft_preserved", {
             scope: "task",
-            taskId: activeTask.id,
+            taskId,
           }),
         );
       } else {
         const reusable = composerDraftFromRunInput(input);
         if (reusable) updateComposerDraft(reusable);
         observeLocalFeedback(
-          `prepare-retry:${activeTask.id}`,
+          `prepare-retry:${taskId}`,
           quietStatus("run.retry_prepared", {
             scope: "task",
-            taskId: activeTask.id,
+            taskId,
           }),
         );
       }
       focusPreparedInput();
       return;
     }
-    const prepared = prepareRetryDraft(composerDraft, input.text);
+    const prepared = prepareRetryDraft(draft, input.text);
     switch (prepared.kind) {
       case "prepared":
         updateComposerDraft(prepared.draft);
         observeLocalFeedback(
-          `prepare-retry:${activeTask.id}`,
+          `prepare-retry:${taskId}`,
           quietStatus("run.retry_prepared", {
             scope: "task",
-            taskId: activeTask.id,
+            taskId,
           }),
         );
         break;
       case "preserved":
         observeLocalFeedback(
-          `prepare-retry:${activeTask.id}`,
+          `prepare-retry:${taskId}`,
           quietStatus("run.draft_preserved", {
             scope: "task",
-            taskId: activeTask.id,
+            taskId,
           }),
         );
         break;
       case "too_long":
         observeLocalFeedback(
-          `prepare-retry:${activeTask.id}`,
+          `prepare-retry:${taskId}`,
           attentionStatus("run.retry_too_long", {
             scope: "task",
-            taskId: activeTask.id,
+            taskId,
           }),
         );
         break;
@@ -4505,7 +4516,7 @@ export default function App() {
     panelTarget.taskId === fileChanges.taskId &&
     panelTarget.runId === fileChanges.runId;
   const pendingLocator =
-    panelTask?.pendingUi && taskSignals(panelTask).attention ? (
+    panelTask?.pendingUi && panelTask.signal === "attention" ? (
       <button
         type="button"
         className="task-attention-locator focus-ring"
@@ -5453,7 +5464,7 @@ export default function App() {
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}
                 retryAvailable={
-                  !bridgeUnavailable && taskCanCompose && !taskOperationInFlight
+                  taskDraftAction.allowed && taskDraftAction.prepareRunInput
                 }
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}

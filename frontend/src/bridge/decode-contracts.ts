@@ -5,7 +5,8 @@ import {
   skillImportPhases,
   outputActionStates,
   modelErrorCategories,
-  modelErrorRecoveries,
+  runGuidances,
+  taskNavigationSignals,
   type RunModelError,
 } from "./contracts.ts";
 import {
@@ -2576,7 +2577,6 @@ function decodeModelError(value: unknown, path: string): RunModelError | null {
     "hostRedacted",
     "hostTruncated",
     "source",
-    "recovery",
   ]);
   const bounded = (value: unknown, name: string, limit: number) => {
     const text = stringValue(value, `${path}.${name}`);
@@ -2621,18 +2621,11 @@ function decodeModelError(value: unknown, path: string): RunModelError | null {
       "metask",
       "custom_provider",
     ] as const),
-    recovery: enumValue(
-      item.recovery,
-      `${path}.recovery`,
-      modelErrorRecoveries,
-    ),
   };
   if (BigInt(result.attempts) > 4294967295n)
     fail(`${path}.attempts`, "expected u32");
   if (!result.message && !result.hostRedacted && !result.hostTruncated)
     fail(`${path}.message`, "expected model failure message");
-  if (result.recovery === "account_settings" && result.source !== "metask")
-    fail(`${path}.recovery`, "account recovery requires Metask provenance");
   return result;
 }
 
@@ -2646,8 +2639,25 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
           "diagnosticDisposition",
           "modelError",
           "recordingIncomplete",
+          "feedback",
+        ]);
+        const feedbackPath = path + ".feedback";
+        const feedback = object(terminalItem.feedback, feedbackPath, [
+          "guidance",
+          "offerInputPreparation",
         ]);
         const result = {
+          feedback: {
+            guidance: enumValue(
+              feedback.guidance,
+              feedbackPath + ".guidance",
+              runGuidances,
+            ),
+            offerInputPreparation: booleanValue(
+              feedback.offerInputPreparation,
+              feedbackPath + ".offerInputPreparation",
+            ),
+          },
           recordingIncomplete: booleanValue(
             terminalItem.recordingIncomplete,
             `${path}.recordingIncomplete`,
@@ -2668,14 +2678,26 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
             `${path}.modelError`,
           ),
         };
+        const { guidance } = result.feedback;
         if (
-          result.cause !== "provider_failure" &&
-          result.modelError &&
-          result.modelError.recovery !== "none"
+          (guidance === "account_settings" || guidance === "model_settings") &&
+          (result.outcome !== "failed" ||
+            result.cause !== "provider_failure" ||
+            result.modelError === null)
         )
           fail(
-            `${path}.modelError.recovery`,
-            "supplemental observation cannot grant recovery",
+            feedbackPath,
+            "settings guidance requires a primary model error",
+          );
+        if (
+          guidance === "account_settings" &&
+          (result.modelError?.source !== "metask" ||
+            (result.modelError.category !== "authentication" &&
+              result.modelError.category !== "payment_required"))
+        )
+          fail(
+            feedbackPath,
+            "account guidance requires a Metask authentication or payment error",
           );
         return result;
       })();
@@ -2760,6 +2782,9 @@ function decodeRun(value: unknown, path: string): RunView {
   ]);
   const phase = enumValue(item.phase, `${path}.phase`, runPhases);
   const terminal = decodeRunTerminal(item.terminal, `${path}.terminal`);
+  const input = decodeRunInput(item.input, `${path}.input`);
+  if (input.redacted && terminal?.feedback.offerInputPreparation)
+    fail(`${path}.terminal.feedback`, "redacted input cannot be prepared");
   validateRunTerminalState(phase, terminal, path);
   if (terminal?.cause === "provider_failure" && terminal.outcome !== "failed")
     fail(`${path}.terminal`, "provider failure must describe a failed Run");
@@ -2849,7 +2874,7 @@ function decodeRun(value: unknown, path: string): RunView {
       item.submission === null
         ? null
         : decodeInputSubmission(item.submission, `${path}.submission`),
-    input: decodeRunInput(item.input, `${path}.input`),
+    input,
     additionalInputs: decodeAdditionalInputs(
       item.additionalInputs,
       `${path}.additionalInputs`,
@@ -3592,6 +3617,7 @@ function decodeTask(
 ): TaskView {
   const item = object(value, path, [
     "inputReady",
+    "signal",
     "inputAcceptance",
     "inputSubmissions",
     "id",
@@ -4171,6 +4197,7 @@ function decodeTask(
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
+    signal: nullableEnum(item.signal, `${path}.signal`, taskNavigationSignals),
     permissionProfile,
     approvalMode,
     approvalRevision,
@@ -5296,6 +5323,7 @@ function decodeRunManifest(value: unknown, path: string): RunManifest {
 function decodeTaskSummary(value: unknown, path: string): TaskSummary {
   const item = object(value, path, [
     "id",
+    "signal",
     "recentOrder",
     "title",
     "workspaceId",
@@ -5338,6 +5366,7 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
       item.historyReadOnly,
       `${path}.historyReadOnly`,
     ),
+    signal: nullableEnum(item.signal, `${path}.signal`, taskNavigationSignals),
     permissionReviewState: enumValue(
       item.permissionReviewState,
       `${path}.permissionReviewState`,
@@ -6113,6 +6142,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       "archived",
       "lifecycle",
       "deletionStatus",
+      "signal",
       "currentRunPhase",
       "permissionReviewState",
       "unreadCompletionRunId",

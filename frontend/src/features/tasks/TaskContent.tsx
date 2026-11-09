@@ -185,11 +185,6 @@ function outcomeMessage(outcome: RunOutcome): MessageId {
       return "run.terminal.failed";
   }
 }
-function retryable(outcome: RunOutcome): boolean {
-  return ["failed", "interrupted", "dependency_contract_failure"].includes(
-    outcome,
-  );
-}
 function terminalMessage(
   responseKind: RunView["output"]["responseKind"],
   outcome: RunOutcome,
@@ -344,7 +339,7 @@ export function TaskContent({
   onOutputAction?: OutputActionHandler;
   onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
-  onPrepareRetry: (input: RunInputView) => void;
+  onPrepareRetry: (input: RunInputView, taskId: string, runId: string) => void;
   onOpenSettings?: (target: "account" | "models") => void;
   loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
@@ -713,10 +708,27 @@ export function TaskContent({
           const isCurrent = run.id === currentRun?.id;
           const terminal = run.terminal;
           const modelError = terminal?.modelError;
-          const recovery = modelError?.recovery;
-          const settingsRecovery =
-            terminal?.cause === "provider_failure" &&
-            (recovery === "account_settings" || recovery === "model_settings");
+          const guidance = terminal?.feedback.guidance;
+          const settingsTarget =
+            guidance === "account_settings"
+              ? "account"
+              : guidance === "model_settings"
+                ? "models"
+                : null;
+          const canPrepareInput =
+            isCurrent &&
+            synchronized &&
+            retryAvailable &&
+            terminal?.feedback.offerInputPreparation &&
+            !run.input.redacted;
+          const prepareInput = () => onPrepareRetry(run.input, task.id, run.id);
+          const guidanceText =
+            guidance &&
+            guidance !== "none" &&
+            guidance !== "account_settings" &&
+            guidance !== "model_settings"
+              ? t(`run.guidance.${guidance}`)
+              : undefined;
           const reason =
             terminal?.cause === "provider_failure"
               ? t(
@@ -742,6 +754,13 @@ export function TaskContent({
               ? t("run.recording_incomplete")
               : `${outcomeLabel} ${t("run.recording_incomplete")}`
             : outcomeLabel;
+          const visibleTerminalLabel =
+            terminal?.outcome === "stopped" && reason
+              ? t("run.terminal.with_reason", {
+                  outcome: t("run.terminal.stopped"),
+                  reason: terminalLabel,
+                })
+              : terminalLabel;
           const responseCopyable = responseCopyEligible(run);
           const submittedTime = formatRunTimestamp(
             locale,
@@ -907,7 +926,8 @@ export function TaskContent({
                         : undefined
                     }
                     state={outcomeState(terminal.outcome)}
-                    label={terminalLabel}
+                    label={visibleTerminalLabel}
+                    detail={guidanceText}
                     announce={
                       isCurrent &&
                       observedRunTerminals.current.get(
@@ -915,60 +935,39 @@ export function TaskContent({
                       ) === false
                     }
                     action={
-                      (isCurrent &&
-                        retryAvailable &&
-                        retryable(terminal.outcome)) ||
-                      settingsRecovery ? (
+                      (settingsTarget && onOpenSettings) || canPrepareInput ? (
                         <div className="run-terminal-actions">
-                          {onOpenSettings &&
-                            terminal.cause === "provider_failure" &&
-                            (terminal.modelError?.recovery ===
-                              "account_settings" ||
-                              terminal.modelError?.recovery ===
-                                "model_settings") && (
-                              <button
-                                className="ai-activity-retry focus-ring"
-                                data-primary="true"
-                                disabled={responseDisabled || !synchronized}
-                                onClick={() =>
-                                  onOpenSettings(
-                                    terminal.modelError?.recovery ===
-                                      "account_settings"
-                                      ? "account"
-                                      : "models",
-                                  )
-                                }
-                              >
-                                {t(
-                                  terminal.modelError.recovery ===
-                                    "account_settings"
-                                    ? "run.model_error.open_account"
-                                    : "run.model_error.open_models",
-                                )}
-                              </button>
-                            )}
-                          {isCurrent &&
-                            retryAvailable &&
-                            !settingsRecovery &&
-                            retryable(terminal.outcome) && (
-                              <button
-                                className="ai-activity-retry focus-ring"
-                                data-primary={
-                                  terminal.cause !== "provider_failure" ||
-                                  recovery === "prepare_retry"
-                                }
-                                title={
-                                  composerHasDraft
-                                    ? t("run.review_draft_help")
-                                    : t("run.retry_help")
-                                }
-                                onClick={() => onPrepareRetry(run.input)}
-                              >
-                                {composerHasDraft
-                                  ? t("run.review_draft")
-                                  : t("run.prepare_retry")}
-                              </button>
-                            )}
+                          {settingsTarget && onOpenSettings ? (
+                            <button
+                              className="ai-activity-retry focus-ring"
+                              data-primary="true"
+                              disabled={responseDisabled || !synchronized}
+                              onClick={() => onOpenSettings(settingsTarget)}
+                            >
+                              {t(
+                                settingsTarget === "account"
+                                  ? "run.model_error.open_account"
+                                  : "run.model_error.open_models",
+                              )}
+                            </button>
+                          ) : (
+                            <button
+                              className="ai-activity-retry focus-ring"
+                              data-primary={guidance === "prepare_retry"}
+                              title={t(
+                                composerHasDraft
+                                  ? "run.review_draft_help"
+                                  : "run.retry_help",
+                              )}
+                              onClick={prepareInput}
+                            >
+                              {t(
+                                composerHasDraft
+                                  ? "run.review_draft"
+                                  : "run.prepare_retry",
+                              )}
+                            </button>
+                          )}
                         </div>
                       ) : undefined
                     }
@@ -979,12 +978,8 @@ export function TaskContent({
                   run={run}
                   composerHasDraft={composerHasDraft}
                   onPrepareRetry={
-                    settingsRecovery &&
-                    isCurrent &&
-                    retryAvailable &&
-                    terminal &&
-                    retryable(terminal.outcome)
-                      ? () => onPrepareRetry(run.input)
+                    settingsTarget && onOpenSettings && canPrepareInput
+                      ? prepareInput
                       : undefined
                   }
                 />

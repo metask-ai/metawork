@@ -54,23 +54,18 @@ export const enUS = {
     "This response reached the model's output limit.",
   "run.model_error.category.unknown":
     "The model service could not complete this request.",
-  "run.model_error.recovery.model_settings":
-    "Review the model and its provider settings.",
-  "run.model_error.recovery.review_context":
-    "Shorten your next message, or compact the conversation when available.",
-  "run.model_error.recovery.revise_instruction":
-    "Ask for a smaller response or send a new message to continue.",
-  "run.model_error.recovery.wait": "Please try again later.",
-  "run.model_error.recovery.prepare_retry":
-    "You can copy the instruction to the input box and review it before sending.",
-  "run.model_error.recovery.account_authentication":
-    "Open account settings to check your Metask sign-in.",
-  "run.model_error.recovery.account_payment":
-    "Open the Metask top-up page from account settings.",
-  "run.model_error.recovery.provider_authentication":
-    "Check the provider credentials in model settings.",
-  "run.model_error.recovery.provider_payment":
-    "Check your account with the model provider.",
+  "run.guidance.review_context":
+    "Shorten your next message or compact the conversation when available.",
+  "run.guidance.revise_instruction":
+    "Revise the instruction or narrow the request before continuing.",
+  "run.guidance.wait": "Please try again later.",
+  "run.guidance.prepare_retry":
+    "Review the original instruction before sending again.",
+  "run.guidance.review_changes":
+    "Review any resulting changes before continuing.",
+  "run.guidance.review_permissions": "Check the permissions before continuing.",
+  "run.guidance.review_image_input":
+    "Confirm that the selected model supports image input, then add the images again.",
   "run.provider_failure.no_response_title": "Could not generate a response",
   "run.provider_failure.partial_title": "The response is incomplete",
   "run.model_error.open_account": "Open account settings",
@@ -936,6 +931,7 @@ export const enUS = {
   "task.signal.running": "Working",
   "task.signal.attention": "Attention",
   "task.signal.failed": "Failed",
+  "task.signal.interrupted": "Interrupted",
   "task.signal.completed": "New completion",
   "task.signal.archived": "Archived",
   "task.actions": "Task actions",
@@ -998,8 +994,7 @@ export const enUS = {
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
   "run.placeholder_closing": "This task is ending",
-  "run.placeholder_unavailable":
-    "This conversation cannot continue right now. Check recovery status and try again",
+  "run.placeholder_unavailable": "This task cannot continue right now",
   "run.placeholder_execution_rebind_required":
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.placeholder_history_read_only":
@@ -1101,6 +1096,7 @@ export const enUS = {
   "run.actions": "Run actions",
   "run.recording_incomplete":
     "Some process details or response content were not fully retained.",
+  "run.terminal.with_reason": "{outcome}. {reason}",
   "run.terminal.partial_reason": "{reason} Response incomplete.",
   "account.diagnostics": "Account diagnostics",
   "feedback.pending": "Working…",
@@ -1730,18 +1726,17 @@ export const enUS = {
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",
   "cause.app_shutdown": "Workbench closed",
-  "cause.event_pipeline_failure": "Activity delivery failed",
+  "cause.event_pipeline_failure": "The run did not complete normally.",
   "cause.event_payload_too_large":
-    "A single execution result exceeded the size limit; the task was interrupted",
+    "A single execution result exceeded the size limit",
   "cause.queue_capacity_failure":
     "The execution queue had insufficient capacity to continue",
   "cause.ui_pipeline_failure": "Response delivery failed",
-  "cause.agent_failure": "Agent execution failed. Try again.",
+  "cause.agent_failure": "Agent execution failed",
   "cause.provider_failure": "Model service request failed",
-  "cause.tool_failure":
-    "Tool execution failed and could not recover. Check any resulting changes before trying again.",
+  "cause.tool_failure": "The tool process could not complete",
   "cause.image_input_unsupported":
-    "The current model does not support image input. Choose a model that supports images and select the image again.",
+    "The current model could not accept this image input",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
   "cause.stale_catalog":
     "Skill execution did not start because the catalog is out of date",

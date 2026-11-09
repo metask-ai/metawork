@@ -1168,7 +1168,6 @@ pub const ApprovalFailureReason = @import("product_task_view_contract").Approval
 
 pub const ApprovalChange = struct {
     revision: u64,
-    binding_epoch: u64,
     target: ApprovalMode,
     phase: enum {
         waiting,

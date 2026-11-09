@@ -149,6 +149,14 @@ function terminal(
     diagnosticDisposition,
     recordingIncomplete: false,
     modelError: null,
+    feedback: {
+      guidance: "none",
+      offerInputPreparation: [
+        "failed",
+        "interrupted",
+        "dependency_contract_failure",
+      ].includes(outcome),
+    },
   };
 }
 
@@ -969,6 +977,7 @@ function taskContentElement(
       snapshotReceivedAt: null,
       revision,
       composerHasDraft: false,
+      synchronized: true,
       retryAvailable: false,
       responseDisabled: false,
       fileChangesEnabled: false,
@@ -3177,31 +3186,26 @@ test("partial output and terminal failure render one composite notice", () => {
 });
 
 test("typed Agent failures render accurate recovery guidance", () => {
-  const cases = [
-    [
-      "tool_failure",
-      "Tool execution failed and could not recover.",
-      "工具执行失败且未能恢复",
-    ],
-    [
-      "image_input_unsupported",
-      "The current model does not support image input.",
-      "当前模型不支持图片输入",
-    ],
-  ];
-
-  for (const [cause, expectedEnglish, expectedChinese] of cases) {
+  for (const [cause, guidance] of [
+    ["tool_failure", "review_changes"],
+    ["image_input_unsupported", "review_image_input"],
+  ]) {
     const value = task({
-      runs: [run({ phase: "failed", terminal: terminal("failed", cause) })],
+      runs: [
+        run({
+          phase: "failed",
+          terminal: {
+            ...terminal("failed", cause),
+            feedback: { guidance, offerInputPreparation: true },
+          },
+        }),
+      ],
     });
-    assert.match(
-      renderTaskContent(value),
-      new RegExp(expectedEnglish.replaceAll(".", "\\.")),
-    );
-    assert.match(
-      renderTaskContent(value, "zh-CN"),
-      new RegExp(expectedChinese),
-    );
+    for (const locale of ["en-US", "zh-CN"]) {
+      const html = renderTaskContent(value, locale);
+      assert.ok(html.includes(translate(locale, `cause.${cause}`)));
+      assert.ok(html.includes(translate(locale, `run.guidance.${guidance}`)));
+    }
   }
 });
 
@@ -3315,6 +3319,70 @@ test("provider failure details open for the exact historical Run", async () => {
   assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
 });
 
+test("tool-loop feedback offers input preparation only while eligible", () => {
+  const input = {
+    kind: "text",
+    text: "Check the changed files",
+    redacted: false,
+  };
+  const stopped = run({
+    phase: "stopped",
+    input,
+    terminal: {
+      ...terminal("stopped", "tool_failure"),
+      feedback: { guidance: "review_changes", offerInputPreparation: true },
+    },
+  });
+  const value = task({ runs: [stopped] });
+  const prepared = [];
+  const ready = {
+    synchronized: true,
+    retryAvailable: true,
+    onPrepareRetry: (...args) => prepared.push(args),
+  };
+  const view = render(taskContentElement(value, "1", ready));
+  const notice = view.container.querySelector(
+    ".run-terminal-feedback [data-state=stopped]",
+  );
+  assert.match(notice.textContent, /Work stopped/);
+  assert.match(notice.textContent, /Review any resulting changes/);
+  const action = () =>
+    screen.queryByRole("button", { name: "Copy to input box" });
+  fireEvent.click(action());
+  assert.deepEqual(prepared, [[input, value.id, stopped.id]]);
+  view.rerender(
+    taskContentElement(value, "1", { ...ready, synchronized: false }),
+  );
+  assert.equal(action(), null);
+  view.rerender(
+    taskContentElement(value, "1", { ...ready, retryAvailable: false }),
+  );
+  assert.equal(action(), null);
+  view.rerender(
+    taskContentElement(
+      task({
+        runs: [
+          {
+            ...stopped,
+            input: { ...input, redacted: true },
+            terminal: {
+              ...stopped.terminal,
+              feedback: {
+                guidance: "review_changes",
+                offerInputPreparation: false,
+              },
+            },
+          },
+        ],
+      }),
+      "1",
+      ready,
+    ),
+  );
+  assert.equal(action(), null);
+  assert.equal(prepared.length, 1);
+});
+
 test("model error notices expose safe details and explicit settings without sending a retry", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const detail = JSON.parse(
@@ -3331,6 +3399,10 @@ test("model error notices expose safe details and explicit settings without send
         terminal: {
           ...terminal("failed", "provider_failure"),
           modelError: detail,
+          feedback: {
+            guidance: "account_settings",
+            offerInputPreparation: true,
+          },
         },
       }),
     ],
@@ -3418,7 +3490,6 @@ test("model error categories explain the failure in both locales without exposin
                 modelError: {
                   ...detail,
                   category,
-                  recovery: "none",
                   message: "raw-error-hidden-until-open",
                 },
               },
@@ -3480,8 +3551,8 @@ test("payment guidance matches the source and prioritizes settings without claim
                   ...detail,
                   category: "payment_required",
                   source,
-                  recovery,
                 },
+                feedback: { guidance: recovery, offerInputPreparation: true },
               },
             }),
           ],
@@ -3582,6 +3653,10 @@ test("historical settings navigation survives while retry stays current and sync
         terminal: {
           ...terminal("failed", "provider_failure"),
           modelError: detail,
+          feedback: {
+            guidance: "account_settings",
+            offerInputPreparation: true,
+          },
         },
       }),
       run(),
@@ -3628,7 +3703,11 @@ test("tool records never assert successful effects and only retry advice promote
                 tools: [technicalTool({ state, isError: state === "failed" })],
                 terminal: {
                   ...terminal("failed", "provider_failure"),
-                  modelError: { ...detail, category: "timeout", recovery },
+                  modelError: {
+                    ...detail,
+                    category: recovery === "wait" ? "rate_limited" : "timeout",
+                  },
+                  feedback: { guidance: recovery, offerInputPreparation: true },
                 },
               }),
             ],
@@ -3663,7 +3742,6 @@ test("supplemental model errors retain the primary failure and do not offer acco
       "utf8",
     ),
   );
-  detail.recovery = "none";
   const value = task({
     runs: [
       run({
@@ -3683,6 +3761,7 @@ test("supplemental model errors retain the primary failure and do not offer acco
       },
     }),
   );
+  assert.ok(screen.getByText("The run did not complete normally."));
   assert.equal(
     screen.queryByRole("button", { name: "Open account settings" }),
     null,

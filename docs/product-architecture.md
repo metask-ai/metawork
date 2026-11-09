@@ -435,9 +435,11 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 
 Run 准入时预留固定容量的独立 owned 错误存储，Product 在 Agent 结果释放前按值复制合法 `model_error` 并随终态一次性发布；捕获不新增分配失败点，Run 关闭静止后唯一释放。其容量复用 Agent 公共错误值，不借用 Session 或 SDK 存储；冷历史仅为实际存在的错误分配该固定值，保持历史记录本体的既有内存上限。Host 使用既有 credential projector 清洗 message、code、type 与 request ID，分别保留上游截断和 Host 清洗/截断事实；后续首次获知、替换或释放凭据时再次清洗。该观察不改变 Agent 执行结果、Session disposition 或 Product 原有终态优先级；普通 ABI/callback 或后续 pipeline/合同失败附带的合法观察仅作补充。Agent Run identity 只作执行来源，不成为 Product 路由。错误正文不进入日志或 event pump，不从 diagnostic 反推详情。
 
-来源类别在执行准入时从 Models 的真实来源冻结为 Metask 或 Custom Provider；历史缺失时保留未知，不从模型名、协议或当前绑定猜测。Product 纯策略根据 category、来源和主终态生成恢复建议，Renderer 只显示对应入口；鉴权/支付对 Metask 提供 Account 设置入口，对其他或未知来源提供模型设置入口。建议不改 Account 状态、余额、Models 可用性或当前 generation，不执行登录、支付、模型测试或整轮重放；`retryable` 只描述上游请求层。非 provider_failure 的补充观察不提供恢复动作，历史观察也不授予当前操作资格；准备重试仍由当前 Task 的既有 gate 决定，且只把可恢复文本填回 Composer。
+来源类别在执行准入时从 Models 的真实来源冻结为 Metask 或 Custom Provider；历史缺失时保留未知，不从模型名、协议或当前绑定猜测。Task policy 根据正式 Run 结果、原因及模型错误的 category 与来源派生处理建议，Renderer 按建议呈现文案与入口；鉴权/支付对 Metask 提供 Account 设置入口，对其他或未知来源提供模型设置入口。建议不改 Account 状态、余额、Models 可用性或当前 generation，不执行登录、支付、模型测试或整轮重放；`retryable` 只描述上游请求层。非 provider_failure 的补充模型观察只作诊断。输入准备只使用安全的原始 Run 输入，填回仍需当前 Task 可接收输入且空闲。发送经过现有准入，附件历史不恢复文件授权。Run 反馈随投影派生，不写入持久化。
 
 产品终态映射消费 Agent 的实际终止效果和独立首个 Host 故障，不因 `termination_signal` 非空就覆盖 Core 已发生的失败。无独立 Host 故障时，模型鉴权失败后 Stop 得到 `too_late` 仍为 failed/provider_failure，保留模型详情与适用恢复入口；工具失败同样保留 tool_failure。调用前阻止、实际 aborted 和受控关闭分别按相应控制事实处理；finalizing 中接受并实际生效的 Stop 可合法收口为 aborted，不补造已被 Core 省略的模型错误。Stop 后真实 callback/事件故障仍有确定的 Host cause，关闭导致的合法 UI callback 结束保留 session_close。permission_required 继续具有显式产品优先级；已确认凭据更新故障分别以 dependency_contract_failure、resource_limit 或 agent_failure 解释，合法模型观察仅作补充且不提供恢复动作，合同违约仍抑制其公开交付。
+
+Task policy 为正文、索引和 Workspace 聚合派生同一个导航信号。需要用户处理的等待优先，其次为执行、自动评审、Compact 或恢复进行中，再次为删除失败，最后为最近正式 Run 的失败或中断。Run 停止、取消和历史 Compact 失败各归所属操作。归档 Task 不参与 Workspace 计数，完成未读独立于导航信号。
 
 Product aggregate 独占产品事实、局部事务和执行资格。Product Control 投影只读取已经提交的事实，生成用于展示的摘要、页面上下文、当前 Task 和有界历史，不接纳 Run、不推进 lifecycle、不提交历史。Bridge 可达的版本、Workspace、Task、catalog、permission 与视图查询适用同一约束。Application 按明确 command、Agent event、worker completion 和 lifecycle wake 安排业务推进；有无 Renderer、读频率、分块和重试不得改变必要的推进路径。
 

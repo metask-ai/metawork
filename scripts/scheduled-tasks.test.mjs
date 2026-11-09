@@ -528,6 +528,36 @@ test("list action failures stay visible without opening an editor", async () => 
   );
 });
 
+test("permission-stopped Schedule explains confirmation and opens the original Task", () => {
+  const opened = [];
+  const snapshot = scheduleSnapshot({
+    enabled: false,
+    health: "needs_attention",
+    failureReason: "permission_required",
+    nextRunAtUnixSeconds: null,
+    occurrences: [
+      {
+        plannedAtUnixSeconds: "2000",
+        triggeredAtUnixSeconds: "2000",
+        source: "timer",
+        result: "submitted",
+        taskId: "3",
+        reason: "permission_required",
+        taskOutcome: "stopped",
+      },
+    ],
+  });
+  renderDom(
+    scheduledElement(snapshot, { onOpenTask: (id) => opened.push(id) }),
+  );
+  assert.match(
+    document.body.textContent,
+    /permission was required.*edit and confirm/i,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "View result" }));
+  assert.deepEqual(opened, ["3"]);
+});
+
 test("expired one-time edits use the shared clock picker and recalculate at submission", async (ctx) => {
   let now = new Date("2032-01-31T12:00").getTime();
   ctx.mock.method(Date, "now", () => now);

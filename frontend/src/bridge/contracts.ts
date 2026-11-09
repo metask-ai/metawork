@@ -711,15 +711,22 @@ export const modelErrorCategories = [
   "output_limit",
   "unknown",
 ] as const;
-export const modelErrorRecoveries = [
+export const runGuidances = [
   "account_settings",
   "model_settings",
   "review_context",
   "revise_instruction",
   "wait",
   "prepare_retry",
+  "review_changes",
+  "review_permissions",
+  "review_image_input",
   "none",
 ] as const;
+export type RunFeedback = {
+  guidance: (typeof runGuidances)[number];
+  offerInputPreparation: boolean;
+};
 export type RunModelError = {
   agentRunId: string;
   category: (typeof modelErrorCategories)[number];
@@ -735,7 +742,6 @@ export type RunModelError = {
   hostRedacted: boolean;
   hostTruncated: boolean;
   source: "metask" | "custom_provider" | null;
-  recovery: (typeof modelErrorRecoveries)[number];
 };
 export type RunTerminal = {
   recordingIncomplete: boolean;
@@ -743,6 +749,7 @@ export type RunTerminal = {
   cause: RunCause | null;
   diagnosticDisposition: "absent" | "withheld";
   modelError: RunModelError | null;
+  feedback: RunFeedback;
 };
 export type RunOutput = {
   commentary: string[];
@@ -1123,7 +1130,14 @@ export type AdditionalInputView = {
   transferredToRunId: string | null;
   continuationReason: SendInputReason | null;
 };
+export const taskNavigationSignals = [
+  "attention",
+  "running",
+  "failed",
+  "interrupted",
+] as const;
 export type TaskView = {
+  signal: (typeof taskNavigationSignals)[number] | null;
   inputReady: boolean;
   inputAcceptance: {
     available: boolean;
@@ -1276,6 +1290,7 @@ export type RunManifest = Pick<
 export type TaskSummary = Pick<
   TaskView,
   | "id"
+  | "signal"
   | "recentOrder"
   | "title"
   | "workspaceId"

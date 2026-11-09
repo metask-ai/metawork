@@ -538,6 +538,8 @@ pub const RecoveryStartInput = struct {
     source_generation: u64 = 0,
     metask_authorization_scope: u64 = 0,
     continuation_source_id: ?u64 = null,
+    /// Pending approval transaction identity for synchronous recovery admission.
+    approval_revision: ?u64 = null,
     agent_runtime: *agent.Runtime,
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_limits: agent.CheckpointLimits,
@@ -1342,7 +1344,7 @@ pub const Runtime = struct {
             task.runtime.permission_review.settled_request_id = task.runtime.pending_ui_request_id;
         }
         task.approval_result = null;
-        task.approval_change = .{ .revision = revision, .binding_epoch = task.durable.binding_epoch, .target = target };
+        task.approval_change = .{ .revision = revision, .target = target };
         return revision;
     }
 
@@ -3955,28 +3957,10 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id or task.durable.archived) continue;
-            if (task_policy.currentRunPhase(task)) |phase| {
-                switch (phase) {
-                    .waiting_ui => if (task.permissionReviewPhase() == .reviewing) {
-                        signals.running +|= 1;
-                    } else {
-                        signals.attention +|= 1;
-                    },
-                    .queued, .running, .stopping => signals.running +|= 1,
-                    else => unreachable,
-                }
-                continue;
-            }
-            if (switch (task.runtime.active_operation) {
-                .compact => true,
-                .none, .run, .restore => false,
-            }) {
-                signals.running +|= 1;
-                continue;
-            }
-            if (task_policy.lastTerminalFacts(task.durable.runs)) |terminal| switch (terminal.outcome) {
-                .failed, .interrupted, .dependency_contract_failure => signals.failed_or_interrupted +|= 1,
-                .completed, .stopped, .cancelled => {},
+            if (task_policy.navigationSignal(task)) |signal| switch (signal) {
+                .running => signals.running +|= 1,
+                .attention => signals.attention +|= 1,
+                .failed, .interrupted => signals.failed_or_interrupted +|= 1,
             };
         }
         return signals;
@@ -5427,6 +5411,13 @@ pub const Runtime = struct {
         if (input.expected_binding_epoch == 0 or
             input.expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
+        if (input.approval_revision) |revision| {
+            const change = task.approval_change orelse return error.RecoveryUnavailable;
+            if (task.runtime.attachment != .detached or input.continuation_source_id != null or
+                change.revision != revision or change.recovery_attempt_id != null or
+                (change.phase != .waiting and change.phase != .recovering))
+                return error.RecoveryUnavailable;
+        } else if (task.approval_change != null) return error.RecoveryUnavailable;
         const checkpoint = task.durable.checkpoint;
         const attached_rebind = input.rebind != null and task.runtime.hasAttachedSession();
         if (attached_rebind) _ = try taskExecutionInput(task);
@@ -5441,7 +5432,7 @@ pub const Runtime = struct {
         if (task.runtime.active_operation != .none or
             (!attached_rebind and task.runtime.liveConst() != null) or task.runtime.close_requested or task.runtime.close_failed or
             task.runtime.worker_leases.hasLive() or task_state.hasUnfinalizedTerminalEvents(task) or
-            task.model_intent_prepared or task.approval_change != null or task.durable.archived or
+            task.model_intent_prepared or task.durable.archived or
             (attached_rebind and (input.checkpoint_store == null or input.rebind.?.capabilities == null)) or
             (input.rebind != null and input.checkpoint_store != null and input.checkpoint_store_health == null))
             return error.RecoveryUnavailable;
@@ -5608,6 +5599,7 @@ pub const Runtime = struct {
         };
         job_owned = false;
         self.next_restore_attempt_id += 1;
+        if (input.approval_revision != null) task.approval_change.?.recovery_attempt_id = attempt_id;
         return attempt_id;
     }
 
@@ -8626,10 +8618,10 @@ fn requestRunTermination(
     _ = run.pending_termination.cmpxchgStrong(
         .none,
         pending,
-        .acq_rel,
+        .seq_cst,
         .acquire,
     );
-    switch (run.agent_handoff.load(.acquire)) {
+    switch (run.agent_handoff.load(.seq_cst)) {
         .queued, .starting => return .pending,
         .finishing => return .already_finishing,
         .running => {},
@@ -11071,6 +11063,7 @@ test "Schedule terminal observation stays with the initial Run after later Runs 
     const summary = runtime.initialRunTerminalSummary(1).?;
     try std.testing.expectEqual(task_state.RunOutcome.completed, summary.outcome);
     try std.testing.expect(!summary.permission_required);
+    try std.testing.expectEqual(@as(?task_policy.NavigationSignal, .failed), task_policy.navigationSignal(&task));
     first.event_stream_finalized = false;
     try std.testing.expect(runtime.initialRunTerminalSummary(1) == null);
 }

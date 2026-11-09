@@ -20,11 +20,7 @@ import {
   readLocalPreference,
   writeLocalPreference,
 } from "../../platform/local-preferences.ts";
-import {
-  orderedProjects,
-  orderedTasks,
-  taskSignals,
-} from "../../workbench/selectors.ts";
+import { orderedProjects, orderedTasks } from "../../workbench/selectors.ts";
 
 export type TaskMenuAction = "rename" | "archive" | "delete";
 
@@ -395,21 +391,20 @@ export function TaskSignals({
   synchronized?: boolean;
 }) {
   const { t } = useI18n();
-  const signals = taskSignals(task);
-  if (!synchronized && (signals.running || signals.attention)) return null;
-  const signal = signals.attention
-    ? "attention"
-    : signals.running
-      ? "running"
-      : signals.failed
-        ? "failed"
-        : task.unreadCompletionRunId !== null &&
-            showCompleted &&
-            !completionSuppressed
-          ? "completed"
-          : task.archived
-            ? "archived"
-            : null;
+  if (
+    !synchronized &&
+    (task.signal === "running" || task.signal === "attention")
+  )
+    return null;
+  const signal =
+    task.signal ??
+    (task.unreadCompletionRunId !== null &&
+    showCompleted &&
+    !completionSuppressed
+      ? "completed"
+      : task.archived
+        ? "archived"
+        : null);
   if (signal === null) return null;
 
   const label = t(`task.signal.${signal}`);

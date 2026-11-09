@@ -141,6 +141,7 @@ const terminal = {
   cause: null,
   diagnosticDisposition: "absent",
   recordingIncomplete: false,
+  feedback: { guidance: "none", offerInputPreparation: false },
   modelError: null,
 };
 const done = {
@@ -190,6 +191,7 @@ function render(stage: string) {
                 : base,
           ];
   const task = {
+    signal: null,
     id: "3",
     recentOrder: "1",
     title: "Conversation fixture",

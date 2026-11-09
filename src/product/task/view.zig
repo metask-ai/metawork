@@ -221,6 +221,7 @@ pub const Input = struct {
 pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: TextProjection) Error!void {
     writer.print("{{\"id\":\"{d}\",\"recentOrder\":\"{d}\",\"title\":", .{ task.durable.id, task.durable.recent_order }) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, task.durable.title);
+    try writeNavigationSignal(writer, task);
     writer.print(",\"workspaceId\":\"{d}\",\"archived\":{},\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"historyReadOnly\":{},\"permissionReviewState\":\"{s}\",\"currentRunPhase\":", .{
         task.durable.workspace_id, task.durable.archived, @tagName(task_policy.taskLifecycle(task)), @tagName(task.deletion), task.read_only_history != null, @tagName(task.permissionReviewPhase()),
     }) catch return error.SnapshotTooLarge;
@@ -257,7 +258,15 @@ pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: 
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
-fn writeModelError(writer: *std.Io.Writer, text: TextProjection, observation: ?*const task_state.RunModelError, cause: ?task_state.RunCause) Error!void {
+fn writeNavigationSignal(writer: *std.Io.Writer, task: *const task_state.Task) Error!void {
+    writer.writeAll(",\"signal\":") catch return error.SnapshotTooLarge;
+    if (task_policy.navigationSignal(task)) |signal|
+        jsonValue(writer, @tagName(signal)) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
+
+fn writeModelError(writer: *std.Io.Writer, text: TextProjection, observation: ?*const task_state.RunModelError) Error!void {
     const detail = observation orelse {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
         return;
@@ -279,15 +288,44 @@ fn writeModelError(writer: *std.Io.Writer, text: TextProjection, observation: ?*
     if (value.retry_after_ms) |delay| writer.print("\"{d}\"", .{delay}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"attempts\":\"{d}\",\"truncated\":{},\"hostRedacted\":{},\"hostTruncated\":{},\"source\":", .{ value.attempts, value.truncated, redacted, detail.host_truncated }) catch return error.SnapshotTooLarge;
     if (detail.source) |source| jsonValue(writer, @tagName(source)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.print(",\"recovery\":\"{s}\"}}", .{@tagName(task_policy.modelErrorRecovery(detail, cause))}) catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn safeInputForPreparation(text: TextProjection, input: task_state.RunInputRecord) bool {
+    return switch (input) {
+        .text => |value| !value.redacted and !text.containsSensitive(value.value),
+        .multimodal => |value| blk: {
+            if (value.redacted) break :blk false;
+            if (value.text) |content| {
+                if (text.containsSensitive(content)) break :blk false;
+            }
+            for (value.attachments) |attachment| {
+                if (attachment.redacted or text.containsSensitive(attachment.display_name)) break :blk false;
+            }
+            break :blk true;
+        },
+        .skill => |value| blk: {
+            if (value.redacted or text.containsSensitive(value.skill_id) or
+                text.containsSensitive(value.catalog_revision) or text.containsSensitive(value.invocation_name) or
+                text.containsSensitive(value.display_name)) break :blk false;
+            for (value.argument_values) |argument| {
+                if (text.containsSensitive(argument)) break :blk false;
+            }
+            break :blk true;
+        },
+    };
 }
 
 fn writeTerminal(writer: *std.Io.Writer, text: TextProjection, run: *const task_state.RunRecord, terminal: task_state.ProductTerminalFacts) Error!void {
     writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
     if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"diagnosticDisposition\":\"{s}\",\"modelError\":", .{@tagName(terminal.diagnostic_disposition)}) catch return error.SnapshotTooLarge;
-    try writeModelError(writer, text, task_state.terminalPayload(run).?.model_error, terminal.cause);
-    writer.print(",\"recordingIncomplete\":{}}}", .{run.event_projection_failure != null}) catch return error.SnapshotTooLarge;
+    const detail = task_state.terminalPayload(run).?.model_error;
+    try writeModelError(writer, text, detail);
+    const feedback = task_policy.runFeedback(terminal.outcome, terminal.cause, detail);
+    writer.print(",\"recordingIncomplete\":{},\"feedback\":{{\"guidance\":\"{s}\",\"offerInputPreparation\":{}}}}}", .{
+        run.event_projection_failure != null, @tagName(feedback.guidance), feedback.offer_input_preparation and safeInputForPreparation(text, run.input),
+    }) catch return error.SnapshotTooLarge;
 }
 
 pub fn writeRunManifest(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {
@@ -322,6 +360,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         task.durable.recent_order,
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.title);
+    try writeNavigationSignal(writer, task);
     writer.print(",\"approvalRevision\":\"{d}\",\"availableApprovalModes\":[", .{task.durable.approval_revision}) catch return error.SnapshotTooLarge;
     for (input.available_approval_modes, 0..) |mode, index| {
         if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;

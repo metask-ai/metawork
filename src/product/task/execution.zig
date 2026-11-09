@@ -280,8 +280,9 @@ pub fn executeRun(context: *anyopaque) void {
         },
     };
     run.execution.?.run_control = agent_run.control();
-    run.agent_handoff.store(.running, .release);
-    if (run.pending_termination.load(.acquire) != .none) {
+    // Pair with requestRunTermination so both sides cannot miss the handoff.
+    run.agent_handoff.store(.running, .seq_cst);
+    if (run.pending_termination.load(.seq_cst) != .none) {
         if (run.execution.?.run_control.tryAcquireLease()) |lease_value| {
             var lease = lease_value;
             const result = lease.requestTermination(policy.pendingTerminationSignal(run));

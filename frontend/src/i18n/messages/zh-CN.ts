@@ -39,22 +39,14 @@ export const zhCN: Record<MessageId, string> = {
   "run.model_error.category.stream_interrupted": "接收模型回复时传输中断。",
   "run.model_error.category.output_limit": "这次回复达到了模型的输出限制。",
   "run.model_error.category.unknown": "模型服务未能完成这次请求。",
-  "run.model_error.recovery.model_settings": "请检查模型及其服务商设置。",
-  "run.model_error.recovery.review_context":
-    "可缩短后续消息，或在功能可用时压缩对话。",
-  "run.model_error.recovery.revise_instruction":
-    "可缩小要求，或发送新消息继续。",
-  "run.model_error.recovery.wait": "请稍后再试。",
-  "run.model_error.recovery.prepare_retry":
-    "可将原指令填回输入框，检查后再发送。",
-  "run.model_error.recovery.account_authentication":
-    "请打开账号设置，检查 Metask 登录情况。",
-  "run.model_error.recovery.account_payment":
-    "可在账号设置中打开 Metask 充值页面。",
-  "run.model_error.recovery.provider_authentication":
-    "请检查模型设置中的服务商凭据。",
-  "run.model_error.recovery.provider_payment":
-    "请到所用模型服务商的账户页面查看。",
+  "run.guidance.review_context": "缩短下一条消息，或在可用时整理对话。",
+  "run.guidance.revise_instruction": "调整指令或缩小请求范围后继续。",
+  "run.guidance.wait": "请稍后再试。",
+  "run.guidance.prepare_retry": "再次发送前请检查原指令。",
+  "run.guidance.review_changes": "继续前请检查可能产生的更改。",
+  "run.guidance.review_permissions": "继续前请检查权限设置。",
+  "run.guidance.review_image_input":
+    "请确认所选模型支持图片输入，再重新添加图片。",
   "run.provider_failure.no_response_title": "无法生成回复",
   "run.provider_failure.partial_title": "回复未能完整生成",
   "run.model_error.open_account": "打开账号设置",
@@ -821,6 +813,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.signal.running": "工作中",
   "task.signal.attention": "待处理",
   "task.signal.failed": "失败",
+  "task.signal.interrupted": "已中断",
   "task.signal.completed": "有新的完成结果",
   "task.signal.archived": "已归档",
   "task.actions": "任务操作",
@@ -876,7 +869,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_no_task": "请先开始一个任务",
   "run.placeholder_archived": "恢复此任务后才能继续",
   "run.placeholder_closing": "此任务正在结束",
-  "run.placeholder_unavailable": "当前会话暂时无法继续，请检查恢复状态后重试",
+  "run.placeholder_unavailable": "当前任务暂时无法继续",
   "run.placeholder_execution_rebind_required":
     "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
   "run.placeholder_history_read_only":
@@ -953,6 +946,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.no_final_response": "本轮未返回回复",
   "run.actions": "本轮操作",
   "run.recording_incomplete": "部分过程或回复未完整保留。",
+  "run.terminal.with_reason": "{outcome}。{reason}",
   "run.terminal.partial_reason": "{reason}回复未完成。",
   "account.diagnostics": "账号诊断",
   "feedback.pending": "正在处理…",
@@ -1512,15 +1506,14 @@ export const zhCN: Record<MessageId, string> = {
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",
   "cause.app_shutdown": "工作台已关闭",
-  "cause.event_pipeline_failure": "活动传递失败",
-  "cause.event_payload_too_large": "单次执行结果超过大小限制，任务已中断",
+  "cause.event_pipeline_failure": "本轮未能正常完成",
+  "cause.event_payload_too_large": "单次执行结果超过大小限制",
   "cause.queue_capacity_failure": "执行队列容量不足，任务未能继续",
   "cause.ui_pipeline_failure": "回复传递失败",
-  "cause.agent_failure": "Agent 执行失败，请重试",
+  "cause.agent_failure": "Agent 执行失败",
   "cause.provider_failure": "模型服务请求失败",
-  "cause.tool_failure": "工具执行失败且未能恢复，请检查产生的更改后重试",
-  "cause.image_input_unsupported":
-    "当前模型不支持图片输入，请更换支持图片的模型并重新选择图片",
+  "cause.tool_failure": "工具流程未能完成",
+  "cause.image_input_unsupported": "当前模型无法接收此图片输入",
   "cause.dependency_contract_failure": "任务运行环境已不兼容",
   "cause.stale_catalog": "Skill 未开始执行：所选目录已过期",
   "cause.skill_not_found": "Skill 未开始执行：所选 Skill 已不可用",

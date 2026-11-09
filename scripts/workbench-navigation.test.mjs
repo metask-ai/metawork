@@ -32,7 +32,6 @@ import {
   taskDisplayState,
   pendingInputContinuation,
   orderedTasks,
-  taskSignals,
 } from "../frontend/src/workbench/selectors.ts";
 
 function run(id, text, assistant, outcome, toolContent = "", cause = null) {
@@ -69,6 +68,7 @@ function run(id, text, assistant, outcome, toolContent = "", cause = null) {
             cause,
             diagnosticDisposition: "absent",
             recordingIncomplete: false,
+            feedback: { guidance: "none", offerInputPreparation: false },
             modelError: null,
           },
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
@@ -202,22 +202,12 @@ test("automatic review is processing until the current request needs a user", ()
     currentRunPhase: "running",
     recentOrder: "11",
   });
-  assert.deepEqual(taskSignals(reviewing), {
-    running: true,
-    attention: false,
-    failed: false,
-  });
   assert.deepEqual(taskDisplayState(reviewing), { kind: "permission_review" });
   assert.deepEqual(
     orderedTasks([reviewing, working, manual]).map((item) => item.id),
     ["manual", "working", "reviewing"],
   );
   reviewing.permissionReviewState = "needs_user";
-  assert.deepEqual(taskSignals(reviewing), {
-    running: false,
-    attention: true,
-    failed: false,
-  });
   assert.deepEqual(taskDisplayState(reviewing), {
     kind: "phase",
     value: "waiting_ui",
@@ -225,45 +215,6 @@ test("automatic review is processing until the current request needs a user", ()
   assert.deepEqual(
     orderedTasks([working, reviewing]).map((item) => item.id),
     ["reviewing", "working"],
-  );
-});
-
-test("Task signals distinguish waiting, running, completed, failed, and interrupted work", () => {
-  const tasks = [
-    task({ id: "1", currentRunId: "9", currentRunPhase: "running" }),
-    task({
-      id: "2",
-      currentRunId: "10",
-      currentRunPhase: "waiting_ui",
-    }),
-    task({
-      id: "3",
-      workspaceId: "2",
-      runs: [run("3", "", "", "failed")],
-    }),
-    task({
-      id: "4",
-      workspaceId: "2",
-      archived: true,
-      runs: [run("4", "", "", "failed")],
-    }),
-  ];
-  assert.deepEqual(taskSignals(tasks[2]), {
-    running: false,
-    attention: false,
-    failed: true,
-  });
-  assert.deepEqual(
-    taskSignals(
-      task({
-        runs: [run("5", "", "", "interrupted", "", "app_shutdown")],
-      }),
-    ),
-    { running: false, attention: false, failed: true },
-  );
-  assert.deepEqual(
-    taskSignals(task({ archived: true, deletionStatus: "failed" })),
-    { running: false, attention: false, failed: true },
   );
 });
 
@@ -328,7 +279,6 @@ test("manual Compact participates in Task action ordering without becoming a Run
     value: "compacting",
   });
   assert.deepEqual(orderedTasks([compacting]), [compacting]);
-  assert.equal(taskSignals(compacting).running, true);
 });
 
 test("Conversation recovery remains visible as Task work without becoming a Run", () => {
@@ -341,7 +291,6 @@ test("Conversation recovery remains visible as Task work without becoming a Run"
   assert.equal(isRunInFlight(restoring), false);
   assert.deepEqual(taskDisplayState(restoring), { kind: "recovery" });
   assert.deepEqual(orderedTasks([restoring]), [restoring]);
-  assert.equal(taskSignals(restoring).running, true);
 });
 
 test("a new Task draft is not mistaken for an in-flight Run", () => {

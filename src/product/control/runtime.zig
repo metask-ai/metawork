@@ -4379,7 +4379,7 @@ pub const Runtime = struct {
         return true;
     }
 
-    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64) Error!u64 {
+    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64, approval_revision: ?u64) Error!u64 {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
         const attached = task.runtime.hasAttachedSession();
@@ -4440,6 +4440,7 @@ pub const Runtime = struct {
             .execution = config,
             .source_generation = execution.source_generation,
             .continuation_source_id = continuation_source_id,
+            .approval_revision = approval_revision,
             .metask_authorization_scope = try self.metaskAuthorizationScope(execution.target.provider_id),
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = self.checkpoint_store,
@@ -4464,6 +4465,10 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         self.syncLifecycle();
+        return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null);
+    }
+
+    fn admitTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64, approval_revision: ?u64) Error!u64 {
         const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
         if (task.durable.model_intent == null or task.runtime.active_operation != .none)
             return error.RecoveryUnavailable;
@@ -4482,7 +4487,7 @@ pub const Runtime = struct {
         }
         if (target) |*value| if (task.runtime.attachment == .detached or
             (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
-            return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
+            return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null, approval_revision);
         return error.RecoveryUnavailable;
     }
 
@@ -4576,14 +4581,9 @@ pub const Runtime = struct {
     }
 
     fn beginApprovalRecovery(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.find(task_id) orelse return false;
-        var change = task.approval_change orelse return false;
-        task.approval_change = null;
-        defer {
-            task.approval_change = change;
-            task.approval_change.?.binding_epoch = task.durable.binding_epoch;
-        }
-        change.recovery_attempt_id = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch return false;
+        const task = self.task_runtime.findConst(task_id) orelse return false;
+        const change = task.approval_change orelse return false;
+        _ = self.admitTaskConversationRestore(task_id, task.durable.binding_epoch, change.revision) catch return false;
         return true;
     }
 
@@ -5174,7 +5174,7 @@ pub const Runtime = struct {
             if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
                 if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
                     return error.ExecutionUnavailable;
-                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null);
+                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
                 return error.RestoreBusy;
             };
         }
@@ -6076,7 +6076,7 @@ pub const Runtime = struct {
                 defer if (target) |*value| value.deinit();
                 const task = self.task_runtime.findConst(task_id).?;
                 if (target) |*value| if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(value.input())) {
-                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id) catch |err| {
+                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id, null) catch |err| {
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
                         return true;
@@ -18213,11 +18213,15 @@ test "model error projection matches the shared Renderer fixture after Host cred
     const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("model_error.fixture"), .{});
     defer expected.deinit();
     const projected = actual.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object.get("modelError").?;
-    inline for (.{ "agentRunId", "category", "message", "code", "type", "requestId", "retry", "retryAfterMs", "attempts", "source", "recovery" }) |field|
+    inline for (.{ "agentRunId", "category", "message", "code", "type", "requestId", "retry", "retryAfterMs", "attempts", "source" }) |field|
         try std.testing.expectEqualStrings(expected.value.object.get(field).?.string, projected.object.get(field).?.string);
     inline for (.{ "truncated", "hostRedacted", "hostTruncated" }) |field|
         try std.testing.expectEqual(expected.value.object.get(field).?.bool, projected.object.get(field).?.bool);
     try std.testing.expectEqual(expected.value.object.get("httpStatus").?.integer, projected.object.get("httpStatus").?.integer);
+    try std.testing.expect(projected.object.get("recovery") == null);
+    const feedback = actual.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object.get("feedback").?.object;
+    try std.testing.expectEqualStrings("account_settings", feedback.get("guidance").?.string);
+    try std.testing.expect(feedback.get("offerInputPreparation").?.bool);
 }
 
 test "Renderer transport failures never own Agent Run termination" {
@@ -20454,7 +20458,7 @@ test "projection gap preserves completion, continuation and completion-seen pers
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool, feedback: struct { guidance: []const u8, offerInputPreparation: bool } }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -20472,6 +20476,93 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         try std.testing.expectEqualStrings(expected.outcome, terminal.get("outcome").?.string);
         try std.testing.expectEqualStrings(expected.cause, terminal.get("cause").?.string);
         try std.testing.expectEqualStrings(expected.diagnosticDisposition, terminal.get("diagnosticDisposition").?.string);
+        const feedback = terminal.get("feedback").?.object;
+        try std.testing.expectEqualStrings(expected.feedback.guidance, feedback.get("guidance").?.string);
+        try std.testing.expectEqual(expected.feedback.offerInputPreparation, feedback.get("offerInputPreparation").?.bool);
+    }
+}
+
+test "Product view shares Run feedback and navigation with the index, manifest and Workspace" {
+    const cases = [_]struct {
+        outcome: RunOutcome,
+        cause: ?RunCause,
+        guidance: []const u8,
+        signal: ?[]const u8 = null,
+        offer: bool,
+    }{
+        .{ .outcome = .stopped, .cause = .tool_failure, .guidance = "review_changes", .offer = true },
+        .{ .outcome = .stopped, .cause = .resource_limit, .guidance = "revise_instruction", .offer = true },
+        .{ .outcome = .stopped, .cause = .permission_required, .guidance = "review_permissions", .offer = false },
+        .{ .outcome = .cancelled, .cause = .timeout, .guidance = "prepare_retry", .offer = true },
+        .{ .outcome = .cancelled, .cause = .user_cancel, .guidance = "none", .offer = false },
+        .{ .outcome = .interrupted, .cause = .app_shutdown, .guidance = "prepare_retry", .signal = "interrupted", .offer = true },
+        .{ .outcome = .failed, .cause = .provider_failure, .guidance = "prepare_retry", .signal = "failed", .offer = true },
+        .{ .outcome = .failed, .cause = .image_input_unsupported, .guidance = "review_image_input", .signal = "failed", .offer = true },
+        .{ .outcome = .completed, .cause = null, .guidance = "none", .offer = false },
+    };
+    for (cases) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.task_runtime.find(3).?;
+        const run = &task.durable.runs[0].?;
+        const phase: RunPhase = switch (case.outcome) {
+            .dependency_contract_failure => .failed,
+            inline else => |outcome| @field(RunPhase, @tagName(outcome)),
+        };
+        try std.testing.expect(commitTerminal(run, phase, case.outcome, case.cause, .reusable, "", false));
+        control.markTerminalRunsBeforeEventDrain();
+        finalizeTestTerminalDrain(&control);
+        detachTaskForTest(&control, task);
+
+        var storage: [96 * 1024]u8 = undefined;
+        const snapshot = try control.writeViewFixture(&storage, .{ .task_id = task.durable.id });
+        const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer decoded.deinit();
+        const root = decoded.value.object;
+        const summary = root.get("taskIndex").?.array.items[0].object;
+        const page = root.get("taskPage").?.object;
+        const body = page.get("task").?.object;
+        for ([_]std.json.Value{ summary.get("signal").?, body.get("signal").? }) |signal| {
+            if (case.signal) |expected|
+                try std.testing.expectEqualStrings(expected, signal.string)
+            else
+                try std.testing.expect(signal == .null);
+        }
+        for ([_]std.json.Value{ body.get("runs").?.array.items[0], page.get("runManifest").?.array.items[0] }) |entry| {
+            const feedback = entry.object.get("terminal").?.object.get("feedback").?.object;
+            try std.testing.expectEqualStrings(case.guidance, feedback.get("guidance").?.string);
+            try std.testing.expectEqual(case.offer, feedback.get("offerInputPreparation").?.bool);
+        }
+        const workspace = root.get("workspaces").?.array.items[0].object.get("signals").?.object;
+        try std.testing.expectEqual(@as(i64, @intFromBool(case.signal != null)), workspace.get("failedOrInterrupted").?.integer);
+        if (case.cause == .tool_failure) {
+            const previous_epoch = control.projectionSecurityEpoch();
+            control.learnProjectionCredential("inspect");
+            try std.testing.expect(control.projectionSecurityEpoch() > previous_epoch);
+            const redacted_snapshot = try control.writeViewFixture(&storage, .{ .task_id = task.durable.id });
+            const redacted = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, redacted_snapshot, .{});
+            defer redacted.deinit();
+            const redacted_page = redacted.value.object.get("taskPage").?.object;
+            const redacted_run = redacted_page.get("task").?.object.get("runs").?.array.items[0].object;
+            try std.testing.expect(redacted_run.get("input").?.object.get("redacted").?.bool);
+            for ([_]std.json.Value{ redacted_run.get("terminal").?, redacted_page.get("runManifest").?.array.items[0].object.get("terminal").? }) |terminal| {
+                const feedback = terminal.object.get("feedback").?.object;
+                try std.testing.expectEqualStrings("review_changes", feedback.get("guidance").?.string);
+                try std.testing.expect(!feedback.get("offerInputPreparation").?.bool);
+            }
+        }
+        if (case.outcome == .completed) {
+            task.deletion = .failed;
+            try std.testing.expectEqual(@as(u32, 1), control.task_runtime.workspaceSignals(task.durable.workspace_id).failed_or_interrupted);
+            task.runtime.active_operation = .{ .restore = .{ .id = 1 } };
+            const restoring = control.task_runtime.workspaceSignals(task.durable.workspace_id);
+            try std.testing.expectEqual(@as(u32, 1), restoring.running);
+            try std.testing.expectEqual(@as(u32, 0), restoring.failed_or_interrupted);
+            task.durable.archived = true;
+            try std.testing.expectEqual(@as(u32, 0), control.task_runtime.workspaceSignals(task.durable.workspace_id).running);
+            task.runtime.active_operation = .none;
+            task.deletion = .idle;
+        }
     }
 }
 
@@ -20520,7 +20611,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false,\"feedback\":{\"guidance\":\"none\",\"offerInputPreparation\":true}}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }
