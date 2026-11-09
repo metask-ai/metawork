@@ -1,4 +1,4 @@
-// Preserve a saved calendar's local clock while leaving occurrence scheduling to Host.
+// Resolve absolute one-time and fixed-interval inputs.
 function wallTimestamp(unixMilliseconds: number, timezone: string): number {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: timezone,
@@ -20,15 +20,6 @@ function wallTimestamp(unixMilliseconds: number, timezone: string): number {
     number("minute"),
     number("second"),
   );
-}
-
-export function calendarDateTime(
-  unixSeconds: number,
-  timezone: string,
-): string {
-  return new Date(wallTimestamp(unixSeconds * 1000, timezone))
-    .toISOString()
-    .slice(0, 16);
 }
 
 function resolveWall(wall: number, timezone: string): number | null {
@@ -56,24 +47,22 @@ export function calendarInstant(text: string, timezone: string): number | null {
     : null;
 }
 
-export function nextCalendarTime(
-  time: string,
-  kind: "once" | "daily" | "weekly" | "monthly",
-  days: number[],
-  timezone: string,
-): number | null {
+export function nextOnceTime(time: string, timezone: string): number | null {
   if (!/^\d{2}:\d{2}$/.test(time)) return null;
   const [hour, minute] = time.split(":").map(Number);
   if (hour > 23 || minute > 59) return null;
   const now = Date.now();
-  const today = new Date(wallTimestamp(now, timezone));
+  let today: Date;
+  try {
+    today = new Date(wallTimestamp(now, timezone));
+  } catch (error) {
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
   today.setUTCHours(hour, minute, 0, 0);
   for (let offset = 0; offset < 367; offset++) {
     const candidate = new Date(today);
     candidate.setUTCDate(candidate.getUTCDate() + offset);
-    if (kind === "weekly" && !days.includes(candidate.getUTCDay() || 7))
-      continue;
-    if (kind === "monthly" && !days.includes(candidate.getUTCDate())) continue;
     const instant = resolveWall(candidate.getTime(), timezone);
     if (instant !== null && instant > now && instant <= 253402300799000)
       return Math.floor(instant / 1000);

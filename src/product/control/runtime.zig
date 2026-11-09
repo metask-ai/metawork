@@ -340,6 +340,8 @@ pub const NewTaskModelSelectionInput = struct {
 };
 
 pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
+pub const ScheduledTaskLocalRecurrence = product_schedule.LocalRecurrence;
+pub const scheduledTaskCalendarDayMask = product_schedule.calendarDayMask;
 pub const ScheduledTaskTimeZone = product_schedule.TimeZone;
 pub const ScheduledTaskCalendarFrequency = product_schedule.CalendarFrequency;
 
@@ -349,7 +351,8 @@ pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
     model_selection: ?NewTaskModelSelectionInput,
     input: []const u8,
-    recurrence: ScheduledTaskRecurrence,
+    recurrence: ?ScheduledTaskRecurrence = null,
+    local_recurrence: ?ScheduledTaskLocalRecurrence = null,
     permission_profile: PermissionProfile,
     timezone: ?ScheduledTaskTimeZone = null,
 };
@@ -5442,7 +5445,7 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const definition = try self.scheduledTaskDefinition(input, null);
+        const definition = try self.scheduledTaskDefinition(input, null, null);
         const id = try self.schedule.create(
             definition,
             self.scheduleExecutionBinding(),
@@ -5460,7 +5463,7 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch));
+        const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch), id);
         try self.schedule.update(
             id,
             expected_epoch,
@@ -8652,6 +8655,7 @@ pub const Runtime = struct {
         self: *Runtime,
         input: ScheduledTaskDefinitionInput,
         retained: ?ScheduledTaskBindingInput,
+        id: ?u64,
     ) Error!product_schedule.Definition {
         const binding: ScheduledTaskBindingInput = if (input.model_selection) |selection| selected: {
             if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
@@ -8663,10 +8667,14 @@ pub const Runtime = struct {
         if (title.len == 0 or title.len > self.limits.max_task_title_bytes or !std.unicode.utf8ValidateSlice(title)) return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
         if (!self.workspace.automaticRootAvailable()) return error.WorkspaceUnavailable;
-        try input.recurrence.validate();
+        const recurrence = if (input.local_recurrence) |local| resolved: {
+            if (input.recurrence != null) return error.InvalidSchedule;
+            break :resolved try self.schedule.resolveLocalRecurrence(local, id);
+        } else input.recurrence orelse return error.InvalidSchedule;
+        try recurrence.validate();
         const instruction = std.mem.trim(u8, input.input, " \t\r\n");
         if (instruction.len == 0 or instruction.len > self.limits.max_user_message_bytes or !std.unicode.utf8ValidateSlice(instruction)) return error.InvalidScheduledTaskInput;
-        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = input.recurrence, .timezone = input.timezone };
+        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = recurrence, .timezone = input.timezone };
     }
 
     fn validateScheduledBinding(self: *Runtime, expected: ScheduledTaskBindingInput) Error!void {

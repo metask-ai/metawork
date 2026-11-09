@@ -1194,6 +1194,7 @@ test("the countdown shares the rule line while the description fills the space b
       frequency: "daily",
       timezone: "Asia/Shanghai",
       startAtUnixSeconds: "1800000000",
+      localTime: "16:00",
     },
   ]) {
     renderDom(scheduledElement(scheduleSnapshot({ recurrence })));
@@ -1255,6 +1256,7 @@ test("calendar rules show their saved clock separately from the relative next ru
             days,
             timezone: "Asia/Shanghai",
             startAtUnixSeconds: String(start),
+            localTime: "08:00",
           },
           nextRunAtUnixSeconds: String(next),
         }),
@@ -1484,10 +1486,10 @@ test("run history stays current without duplicating the task definition", async 
 
 test("new calendar choices submit their selected days and use one shared time picker", async (ctx) => {
   ctx.mock.method(Date, "now", () => new Date("2032-01-31T12:00").getTime());
-  for (const [frequency, date, days] of [
-    ["daily", "2032-02-01T09:30", undefined],
-    ["weekly", "2032-02-07T09:30", [6]],
-    ["monthly", "2032-03-31T09:30", [31]],
+  for (const [frequency, days] of [
+    ["daily", undefined],
+    ["weekly", [6]],
+    ["monthly", [31]],
   ]) {
     const snapshot = scheduleSnapshot();
     snapshot.scheduledTasks = [];
@@ -1519,7 +1521,7 @@ test("new calendar choices submit their selected days and use one shared time pi
       kind: "calendar",
       frequency,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      startAtUnixSeconds: String(new Date(date).getTime() / 1000),
+      localTime: "09:30",
       ...(days ? { days } : {}),
     });
     cleanup();
@@ -1536,11 +1538,14 @@ test("calendar edits preserve the stored recurrence", async () => {
   };
   let saved;
   renderDom(
-    scheduledElement(scheduleSnapshot({ recurrence }), {
-      onUpdate: async (_id, _epoch, input) => {
-        saved = input;
+    scheduledElement(
+      scheduleSnapshot({ recurrence: { ...recurrence, localTime: "03:30" } }),
+      {
+        onUpdate: async (_id, _epoch, input) => {
+          saved = input;
+        },
       },
-    }),
+    ),
   );
   fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   fireEvent.change(screen.getByLabelText("Name"), {
@@ -1661,9 +1666,9 @@ test("one time panel contains both columns and supports keyboard navigation", as
 
 test("weekly and monthly submenus default to today, enforce one selection, and submit sorted sets", async (ctx) => {
   ctx.mock.method(Date, "now", () => new Date("2032-01-31T12:00").getTime());
-  for (const [label, defaultLabel, extraLabels, expectedDays, expectedDate] of [
-    ["Weekly", "Sat", ["Wed", "Mon"], [1, 3], "2032-02-02T09:30"],
-    ["Monthly", "31", ["15", "1"], [1, 15], "2032-02-01T09:30"],
+  for (const [label, defaultLabel, extraLabels, expectedDays] of [
+    ["Weekly", "Sat", ["Wed", "Mon"], [1, 3]],
+    ["Monthly", "31", ["15", "1"], [1, 15]],
   ]) {
     const snapshot = scheduleSnapshot();
     snapshot.scheduledTasks = [];
@@ -1717,10 +1722,7 @@ test("weekly and monthly submenus default to today, enforce one selection, and s
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() => assert.ok(saved));
     assert.deepEqual(saved.recurrence.days, expectedDays);
-    assert.equal(
-      saved.recurrence.startAtUnixSeconds,
-      String(new Date(expectedDate).getTime() / 1000),
-    );
+    assert.equal(saved.recurrence.localTime, "09:30");
     cleanup();
   }
 });
@@ -1743,11 +1745,14 @@ test("editing day selections and time preserves untouched rules and refills all 
     };
     let saved;
     renderDom(
-      scheduledElement(scheduleSnapshot({ recurrence }), {
-        onUpdate: async (_id, _epoch, input) => {
-          saved = input;
+      scheduledElement(
+        scheduleSnapshot({ recurrence: { ...recurrence, localTime: "08:30" } }),
+        {
+          onUpdate: async (_id, _epoch, input) => {
+            saved = input;
+          },
         },
-      }),
+      ),
     );
     const user = userEvent.setup({ document });
     await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
@@ -1781,13 +1786,14 @@ test("editing day selections and time preserves untouched rules and refills all 
     await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
     await chooseTime(user, "09:45");
     await user.click(screen.getByRole("button", { name: "Confirm" }));
-    const expected =
-      frequency === "weekly" ? "2032-02-02T09:45" : "2032-02-01T09:45";
     await waitFor(() =>
-      assert.equal(
-        saved.recurrence.startAtUnixSeconds,
-        String(new Date(expected).getTime() / 1000),
-      ),
+      assert.deepEqual(saved.recurrence, {
+        kind: "calendar",
+        frequency,
+        localTime: "09:45",
+        timezone: recurrence.timezone,
+        ...(days ? { days } : {}),
+      }),
     );
     cleanup();
   }
@@ -1833,6 +1839,7 @@ test("editing a saved weekly rule keeps its local clock and selected weekdays", 
     timezone: "America/New_York",
     days: [1, 3],
     startAtUnixSeconds: String(Date.parse("2032-01-01T08:30:37-05:00") / 1000),
+    localTime: "08:30",
   };
   renderDom(
     scheduledElement(scheduleSnapshot({ recurrence }), {
@@ -1852,7 +1859,10 @@ test("editing a saved weekly rule keeps its local clock and selected weekdays", 
   await user.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(saved));
   assert.deepEqual(saved.recurrence, {
-    ...recurrence,
-    startAtUnixSeconds: String(Date.parse("2032-02-02T09:45:00-05:00") / 1000),
+    kind: "calendar",
+    frequency: "weekly",
+    timezone: recurrence.timezone,
+    days: recurrence.days,
+    localTime: "09:45",
   });
 });

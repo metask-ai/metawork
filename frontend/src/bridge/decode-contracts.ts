@@ -4295,6 +4295,19 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     },
   };
 }
+function scheduleTimezone(value: unknown, path: string) {
+  const timezone = stringValue(value, path);
+  if (!/^[A-Za-z0-9_+./-]{1,128}$/.test(timezone))
+    fail(path, "expected IANA timezone");
+  return timezone;
+}
+
+function scheduleLocalTime(value: unknown, path: string) {
+  const time = stringValue(value, path);
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) fail(path, "expected HH:mm");
+  return time;
+}
+
 function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   const item = object(value, path, [
     "id",
@@ -4410,6 +4423,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
                 "startAtUnixSeconds",
                 "timezone",
                 "frequency",
+                "localTime",
                 ...(Object.hasOwn(
                   record(item.recurrence, `${path}.recurrence`),
                   "days",
@@ -4417,17 +4431,14 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
                   ? ["days"]
                   : []),
               ]);
-              const timezone = stringValue(
+              const timezone = scheduleTimezone(
                 rule.timezone,
                 `${path}.recurrence.timezone`,
               );
-              if (!/^[A-Za-z0-9_+./-]{1,128}$/.test(timezone))
-                fail(`${path}.recurrence.timezone`, "expected IANA timezone");
-              try {
-                new Intl.DateTimeFormat("en", { timeZone: timezone });
-              } catch {
-                fail(`${path}.recurrence.timezone`, "unknown IANA timezone");
-              }
+              const localTime = scheduleLocalTime(
+                rule.localTime,
+                `${path}.recurrence.localTime`,
+              );
               const start = positiveWireId(
                 rule.startAtUnixSeconds,
                 `${path}.recurrence.startAtUnixSeconds`,
@@ -4473,6 +4484,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
                 kind: "calendar" as const,
                 startAtUnixSeconds: start,
                 timezone,
+                localTime,
                 frequency,
                 ...(days ? { days } : {}),
               };

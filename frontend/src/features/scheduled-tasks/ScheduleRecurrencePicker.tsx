@@ -1,7 +1,4 @@
-import type {
-  ScheduledTaskCalendarFrequency,
-  ScheduledTaskRecurrence,
-} from "../../bridge/contracts.ts";
+import type { ScheduledTaskCalendarFrequency } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { cn, controlFocus } from "../../components/ui/utils.ts";
@@ -9,25 +6,6 @@ import { useI18n } from "../../i18n/context.ts";
 
 type Kind = "once" | "interval" | ScheduledTaskCalendarFrequency;
 type Translate = ReturnType<typeof useI18n>["t"];
-
-export function calendarDays(
-  rule: Extract<ScheduledTaskRecurrence, { kind: "calendar" }>,
-): number[] {
-  if (rule.days) return rule.days;
-  if (rule.frequency !== "weekly" && rule.frequency !== "monthly") return [];
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: rule.timezone,
-    weekday: "short",
-    day: "numeric",
-  }).formatToParts(new Date(Number(rule.startAtUnixSeconds) * 1000));
-  return [
-    rule.frequency === "monthly"
-      ? Number(parts.find((part) => part.type === "day")!.value)
-      : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(
-          parts.find((part) => part.type === "weekday")!.value,
-        ) + 1,
-  ];
-}
 
 export function formatRecurrence(kind: Kind, days: number[], t: Translate) {
   const label = t(`scheduled.recurrence.${kind}`);

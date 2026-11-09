@@ -4133,16 +4133,23 @@ test("calendar Schedule projection strictly validates frequency, zone and timest
   }
   for (const patch of [
     { frequency: "unknown" },
-    { timezone: "Unknown/Zone" },
+    { timezone: "Invalid Zone" },
     { timezone: "" },
     { startAtUnixSeconds: "253402300800" },
     { startAtUnixSeconds: "01" },
     { everySeconds: "86400" },
+    { localTime: "24:00" },
+    { localTime: null },
   ]) {
     const invalid = clone(snapshot);
     Object.assign(invalid.scheduledTasks[0].recurrence, patch);
     assert.throws(() => decodeWorkbenchSnapshot(invalid));
   }
+  snapshot.scheduledTasks[0].recurrence.timezone = "Factory";
+  assert.equal(
+    decodeWorkbenchSnapshot(snapshot).scheduledTasks[0].recurrence.localTime,
+    "08:33",
+  );
 });
 
 test("calendar day sets decode strictly and preserve all selected dates", () => {

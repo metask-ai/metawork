@@ -29,15 +29,10 @@ import { BridgeCommandTimeoutError } from "../../bridge/client.ts";
 
 import {
   ScheduleRecurrencePicker,
-  calendarDays,
   formatRecurrence,
 } from "./ScheduleRecurrencePicker.tsx";
 
-import {
-  calendarDateTime,
-  calendarInstant,
-  nextCalendarTime,
-} from "./calendar-time.ts";
+import { calendarInstant, nextOnceTime } from "./calendar-time.ts";
 
 type Draft = {
   modelId: string;
@@ -90,7 +85,7 @@ function draftFromTask(task: ScheduledTaskView): Draft {
       : Intl.DateTimeFormat().resolvedOptions().timeZone;
   const startText =
     task.recurrence.kind === "calendar"
-      ? calendarDateTime(Number(start), timezone)
+      ? task.recurrence.localTime
       : localDateTime(Number(start));
   const everySeconds =
     task.recurrence.kind === "interval"
@@ -120,12 +115,12 @@ function draftFromTask(task: ScheduledTaskView): Draft {
     weekdays:
       task.recurrence.kind === "calendar" &&
       task.recurrence.frequency === "weekly"
-        ? calendarDays(task.recurrence)
+        ? (task.recurrence.days ?? [])
         : [new Date(Date.now()).getDay() || 7],
     monthDays:
       task.recurrence.kind === "calendar" &&
       task.recurrence.frequency === "monthly"
-        ? calendarDays(task.recurrence)
+        ? (task.recurrence.days ?? [])
         : [new Date(Date.now()).getDate()],
     timezone,
     originalStart: { text: startText, unixSeconds: Number(start) },
@@ -143,45 +138,28 @@ function modelOptions(snapshot: WorkbenchSnapshot) {
 }
 
 function draftUnixSeconds(draft: Draft): number | null {
-  const days =
-    draft.recurrenceKind === "weekly" ? draft.weekdays : draft.monthDays;
-  if (["weekly", "monthly"].includes(draft.recurrenceKind)) {
-    const limit = draft.recurrenceKind === "weekly" ? 7 : 31;
-    if (
-      !days.length ||
-      days.some(
-        (day, i) =>
-          !Number.isInteger(day) ||
-          day < 1 ||
-          day > limit ||
-          (i > 0 && day <= days[i - 1]),
-      )
-    )
-      return null;
-  }
   if (draft.originalStart && draft.start === draft.originalStart.text)
     return draft.originalStart.unixSeconds;
-  const time = draft.start.slice(11);
-  if (!/^\d{2}:\d{2}$/.test(time)) return null;
-  const [hour, minute] = time.split(":").map(Number);
-  if (hour > 23 || minute > 59) return null;
-  if (
-    draft.recurrenceKind === "interval" ||
-    draft.recurrenceKind === "hourly" ||
-    draft.recurrenceKind === "yearly"
-  ) {
-    return calendarInstant(draft.start, draft.timezone);
-  }
-  return nextCalendarTime(time, draft.recurrenceKind, days, draft.timezone);
+  return draft.recurrenceKind === "interval"
+    ? calendarInstant(draft.start, draft.timezone)
+    : nextOnceTime(draft.start.slice(-5), draft.timezone);
 }
 
 function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
 ): ScheduledTaskMutation | null {
-  const start = draftUnixSeconds(draft);
-  if (!draft.title.trim() || start === null) return null;
-  if (draft.recurrenceKind === "once" && start <= Math.floor(Date.now() / 1000))
+  const absolute =
+    draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
+  const start = absolute
+    ? draftUnixSeconds(draft)
+    : (draft.originalStart?.unixSeconds ?? null);
+  const localTime = draft.start.slice(-5);
+  if (!draft.title.trim() || (absolute && start === null)) return null;
+  if (
+    draft.recurrenceKind === "once" &&
+    Number(start) <= Math.floor(Date.now() / 1000)
+  )
     return null;
   if (!draft.text.trim()) return null;
   if (!snapshot.capabilities.automaticWorkspaces) return null;
@@ -227,7 +205,9 @@ function toMutation(
             }
           : {
               kind: "calendar",
-              startAtUnixSeconds: String(start),
+              ...(start === null
+                ? { localTime }
+                : { startAtUnixSeconds: String(start) }),
               timezone: draft.timezone,
               frequency: draft.recurrenceKind,
               ...(draft.recurrenceKind === "weekly"
@@ -324,8 +304,10 @@ export function ScheduledTasksPage({
   }, [hasNextRun]);
   const timeLabel = t("scheduled.time");
   const mutation = toMutation(snapshot, draft);
-  const draftStart = draftUnixSeconds(draft);
-  const invalidStart = draftStart === null;
+  const absolute =
+    draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
+  const draftStart = absolute ? draftUnixSeconds(draft) : null;
+  const invalidStart = absolute && draftStart === null;
   const expiredOnce =
     draft.recurrenceKind === "once" &&
     draftStart !== null &&
@@ -461,9 +443,9 @@ export function ScheduledTasksPage({
     if (task.recurrence.kind === "calendar")
       return `${formatRecurrence(
         task.recurrence.frequency,
-        calendarDays(task.recurrence),
+        task.recurrence.days ?? [],
         t,
-      )} ${calendarDateTime(Number(task.recurrence.startAtUnixSeconds), task.recurrence.timezone).slice(11)}`;
+      )} ${task.recurrence.localTime}`;
     const seconds = Number(task.recurrence.everySeconds);
     const clock = localDateTime(
       Number(task.recurrence.startAtUnixSeconds),
@@ -1203,14 +1185,14 @@ export function ScheduledTasksPage({
                               ? "scheduled-time-error"
                               : undefined
                           }
-                          value={draft.start.slice(11)}
+                          value={draft.start.slice(-5)}
                           hourLabel={t("scheduled.hours")}
                           minuteLabel={t("scheduled.minutes")}
                           className="flex-1 border-0 bg-transparent px-0"
                           onValueChange={(time) =>
                             setDraft((value) => ({
                               ...value,
-                              start: `${value.start.slice(0, 11)}${time}`,
+                              start: `${value.start.slice(0, -5)}${time}`,
                               originalStart: null,
                             }))
                           }

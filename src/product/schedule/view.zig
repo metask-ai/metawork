@@ -83,6 +83,8 @@ fn writeItem(
     switch (item.recurrence) {
         .calendar => |rule| {
             writer.print("{{\"kind\":\"calendar\",\"startAtUnixSeconds\":\"{d}\",\"timezone\":\"{s}\",\"frequency\":\"{s}\"", .{ rule.start_at_unix_seconds, @tagName(rule.timezone), @tagName(rule.frequency) }) catch return error.SnapshotTooLarge;
+            const minute = state.localMinute(rule.timezone, rule.start_at_unix_seconds);
+            writer.print(",\"localTime\":\"{d:0>2}:{d:0>2}\"", .{ minute / 60, minute % 60 }) catch return error.SnapshotTooLarge;
             if (rule.frequency == .weekly or rule.frequency == .monthly) {
                 writer.writeAll(",\"days\":[") catch return error.SnapshotTooLarge;
                 var count: usize = 0;

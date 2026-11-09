@@ -5,6 +5,8 @@ const models_contract = @import("metawork_product_models_contract");
 const calendar = @import("product_schedule_calendar");
 pub const TimeZone = calendar.Zone;
 pub const CalendarFrequency = calendar.Frequency;
+pub const calendarDayMask = calendar.dayMask;
+pub const localMinute = calendar.localMinute;
 
 pub const minimum_interval_seconds: u64 = 60;
 pub const max_occurrence_history: usize = 16;
@@ -26,6 +28,30 @@ pub const Protocol = models_contract.Protocol;
 pub const PermissionProfile = enum {
     approval_required,
     full_access,
+};
+
+pub const LocalRecurrence = struct {
+    timezone: TimeZone,
+    minute: u16,
+    frequency: CalendarFrequency,
+    days: u32,
+
+    pub fn resolve(self: LocalRecurrence, now: u64, previous: ?Recurrence) error{InvalidSchedule}!Recurrence {
+        const start = switch (self.frequency) {
+            .daily, .weekly, .monthly => calendar.nextLocalTime(self.timezone, self.minute, self.frequency, self.days, now),
+            .hourly, .yearly => legacy: {
+                const prior = previous orelse return error.InvalidSchedule;
+                if (prior != .calendar or prior.calendar.frequency != self.frequency) return error.InvalidSchedule;
+                break :legacy calendar.timeOnAnchorDate(self.timezone, self.minute, prior.calendar.start_at_unix_seconds);
+            },
+        } orelse return error.InvalidSchedule;
+        return .{ .calendar = .{
+            .start_at_unix_seconds = start,
+            .timezone = self.timezone,
+            .frequency = self.frequency,
+            .days = self.days,
+        } };
+    }
 };
 
 pub const Recurrence = union(enum) {
@@ -957,6 +983,20 @@ fn claimedOccurrence(
         occurrence.source != source)
         return null;
     return occurrence;
+}
+
+test "local Schedule submission uses the Host date for selected days" {
+    const now = 1_959_163_200; // 2032-01-31 12:00 UTC
+    var local: LocalRecurrence = .{
+        .timezone = .UTC,
+        .minute = 9 * 60 + 30,
+        .frequency = .weekly,
+        .days = try calendarDayMask(.weekly, &.{ 1, 3 }),
+    };
+    try std.testing.expectEqual(@as(u64, 1_959_327_000), (try local.resolve(now, null)).calendar.start_at_unix_seconds);
+    local.frequency = .monthly;
+    local.days = try calendarDayMask(.monthly, &.{31});
+    try std.testing.expectEqual(@as(u64, 1_964_338_200), (try local.resolve(now, null)).calendar.start_at_unix_seconds);
 }
 
 test "fixed recurrence aligns without replaying missed occurrences" {

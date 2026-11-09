@@ -16,32 +16,12 @@ pub const Rule = struct {
 
     pub fn selectedDays(self: Rule) u32 {
         if (self.days != 0) return self.days;
-        const start: i64 = @intCast(self.start_at_unix_seconds);
-        const date = wallDate(start + offsetAt(self.timezone, start));
-        const day: u5 = @intCast(switch (self.frequency) {
-            .weekly => date.week_day().as_iso() - 1,
-            .monthly => date.ymd().day.as_number() - 1,
-            else => return 0,
-        });
-        return @as(u32, 1) << day;
+        return dayBit(self.frequency, localWall(self.timezone, self.start_at_unix_seconds));
     }
 
     pub fn withDays(self: Rule, days: []const u8) error{InvalidSchedule}!Rule {
-        const limit: u8 = switch (self.frequency) {
-            .weekly => 7,
-            .monthly => 31,
-            else => return error.InvalidSchedule,
-        };
-        if (days.len == 0 or days.len > limit) return error.InvalidSchedule;
-        var mask: u32 = 0;
-        var previous: u8 = 0;
-        for (days) |day| {
-            if (day <= previous or day > limit) return error.InvalidSchedule;
-            mask |= @as(u32, 1) << @as(u5, @intCast(day - 1));
-            previous = day;
-        }
         var result = self;
-        result.days = mask;
+        result.days = try dayMask(self.frequency, days);
         try result.validate();
         return result;
     }
@@ -82,7 +62,7 @@ pub const Rule = struct {
         if (query > max_timestamp) return error.InvalidSchedule;
         const start: i64 = @intCast(self.start_at_unix_seconds);
         const current: i64 = @intCast(query);
-        const anchor = start + offsetAt(self.timezone, start);
+        const anchor = localWall(self.timezone, self.start_at_unix_seconds);
         const zone = data.entries[@intFromEnum(self.timezone)];
         var minimum: i64 = zone.initial_offset;
         var maximum = minimum;
@@ -111,7 +91,7 @@ pub const Rule = struct {
             if (direction == .forward and wall - maximum > max_timestamp) return null;
             if (direction == .backward and wall < anchor) return null;
             const selected = self.frequency != .weekly or
-                self.selectedDays() & (@as(u32, 1) << @as(u5, @intCast(wallDate(wall).week_day().as_iso() - 1))) != 0;
+                self.selectedDays() & dayBit(.weekly, wall) != 0;
             if (selected) {
                 if (resolveWall(self.timezone, wall)) |instant| {
                     if (instant >= start and instant <= max_timestamp and
@@ -156,6 +136,68 @@ pub const Rule = struct {
         return null;
     }
 };
+
+pub fn dayMask(frequency: Frequency, days: []const u8) error{InvalidSchedule}!u32 {
+    const limit: u8 = switch (frequency) {
+        .weekly => 7,
+        .monthly => 31,
+        else => return error.InvalidSchedule,
+    };
+    if (days.len == 0 or days.len > limit) return error.InvalidSchedule;
+    var mask: u32 = 0;
+    var previous: u8 = 0;
+    for (days) |day| {
+        if (day <= previous or day > limit) return error.InvalidSchedule;
+        mask |= @as(u32, 1) << @as(u5, @intCast(day - 1));
+        previous = day;
+    }
+    return mask;
+}
+
+fn dayBit(frequency: Frequency, wall: i64) u32 {
+    const date = wallDate(wall);
+    const day: u5 = @intCast(switch (frequency) {
+        .weekly => date.week_day().as_iso() - 1,
+        .monthly => date.ymd().day.as_number() - 1,
+        else => return 0,
+    });
+    return @as(u32, 1) << day;
+}
+
+fn localWall(zone: Zone, instant: u64) i64 {
+    const timestamp: i64 = @intCast(instant);
+    return timestamp + offsetAt(zone, timestamp);
+}
+
+pub fn localMinute(zone: Zone, instant: u64) u16 {
+    return @intCast(@divFloor(@mod(localWall(zone, instant), 86400), 60));
+}
+
+pub fn timeOnAnchorDate(zone: Zone, minute: u16, anchor: u64) ?u64 {
+    if (minute >= 1440 or anchor > max_timestamp) return null;
+    const wall = @divFloor(localWall(zone, anchor), 86400) * 86400 + @as(i64, minute) * 60;
+    const instant = resolveWall(zone, wall) orelse return null;
+    if (instant <= 0 or instant > max_timestamp) return null;
+    return @intCast(instant);
+}
+
+pub fn nextLocalTime(zone: Zone, minute: u16, frequency: Frequency, days: u32, now: u64) ?u64 {
+    if (minute >= 1440 or now >= max_timestamp) return null;
+    const current: i64 = @intCast(now);
+    // Include the previous date in case an offset transition moves the clock
+    // back across midnight. resolveWall uses the earlier instant in a fold.
+    var wall = (@divFloor(localWall(zone, now), 86400) - 1) * 86400 + @as(i64, minute) * 60;
+    for (0..367) |_| {
+        if (days == 0 or days & dayBit(frequency, wall) != 0) {
+            if (resolveWall(zone, wall)) |instant| {
+                if (instant > max_timestamp) return null;
+                if (instant > current) return @intCast(instant);
+            }
+        }
+        wall += 86400;
+    }
+    return null;
+}
 
 fn wallDate(wall: i64) tempora.Date {
     return tempora.Date.unix_epoch.plus_days(@intCast(@divFloor(wall, 86400)));

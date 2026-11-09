@@ -5797,6 +5797,7 @@ fn scheduledTaskDefinition(
     instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !product_control.ScheduledTaskDefinitionInput {
+    const timing = try handlers.parseScheduledTaskRecurrence(recurrence_value);
     return .{
         .title = title,
         .model_selection = if (selection) |value| .{
@@ -5807,7 +5808,8 @@ fn scheduledTaskDefinition(
         .permission_profile = handlers.permissionProfile(permission_profile_wire) orelse
             return error.InvalidBridgePayload,
         .input = instruction,
-        .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
+        .recurrence = if (timing == .absolute) timing.absolute else null,
+        .local_recurrence = if (timing == .local) timing.local else null,
     };
 }
 
@@ -8451,6 +8453,38 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         try std.testing.expectEqual(@as(?u32, @intCast(index + 1)), run.additional_inputs[index].?.sequence);
     }
     try std.testing.expect(task.durable.runs[1] == null);
+}
+
+test "local Schedule requests keep the selected clock across timezone rule differences" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"kind":"calendar","frequency":"daily","timezone":"America/Havana","localTime":"07:00"}
+    , .{});
+    defer parsed.deinit();
+    const local = (try handlers.parseScheduledTaskRecurrence(parsed.value)).local;
+    const recurrence = try local.resolve(1_794_700_800, null); // 2026-11-15 00:00 UTC
+    // The pinned Host rules use UTC-4 on this date. A runtime using UTC-5
+    // would submit 12:00 UTC if it interpreted 07:00 before sending it.
+    try std.testing.expectEqual(@as(u64, 1_794_740_400), recurrence.calendar.start_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 1_794_826_800), try recurrence.firstStrictlyAfter(recurrence.calendar.start_at_unix_seconds));
+}
+
+test "local Schedule requests validate their clock, zone and frequency fields" {
+    for ([_][]const u8{
+        \\{"kind":"calendar","frequency":"daily","timezone":"UTC","localTime":"24:00"}
+        ,
+        \\{"kind":"calendar","frequency":"daily","timezone":"Unknown/Zone","localTime":"07:00"}
+        ,
+        \\{"kind":"calendar","frequency":"weekly","timezone":"UTC","localTime":"07:00"}
+        ,
+        \\{"kind":"calendar","frequency":"weekly","timezone":"UTC","localTime":"07:00","days":[3,1]}
+        ,
+        \\{"kind":"calendar","frequency":"daily","timezone":"UTC","localTime":"07:00","startAtUnixSeconds":"2000"}
+        ,
+    }) |request| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidBridgePayload, handlers.parseScheduledTaskRecurrence(parsed.value));
+    }
 }
 
 test "Scheduled Task Bridge admits calendars and preserves epoch protection" {

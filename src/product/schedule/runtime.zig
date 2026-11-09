@@ -12,6 +12,8 @@ const persistence = @import("product_schedule_persistence");
 const view = @import("product_schedule_view");
 
 pub const Recurrence = state.Recurrence;
+pub const LocalRecurrence = state.LocalRecurrence;
+pub const calendarDayMask = state.calendarDayMask;
 pub const TimeZone = state.TimeZone;
 pub const CalendarFrequency = state.CalendarFrequency;
 pub const Protocol = state.Protocol;
@@ -371,6 +373,15 @@ pub const Runtime = struct {
 
     pub fn now(self: *const Runtime) ?u64 {
         return self.timer.now();
+    }
+
+    pub fn resolveLocalRecurrence(self: *Runtime, input: LocalRecurrence, id: ?u64) Error!Recurrence {
+        const now_unix_seconds = self.timer.now() orelse return error.ScheduleTimerUnavailable;
+        const previous = if (id) |item_id|
+            (self.store.find(item_id) orelse return error.UnknownScheduledTask).recurrence
+        else
+            null;
+        return input.resolve(now_unix_seconds, previous);
     }
 
     pub fn timerEnabled(self: *const Runtime) bool {
