@@ -651,24 +651,24 @@ pub fn writeProjection(
             mcpNewTaskAccess(mcp, server.id),
         }) catch return error.SnapshotTooLarge;
         try input.text.writeJson(writer, if (mcp.runtime_uncertain)
-            "Runtime configuration outcome is unknown. Restart the application."
+            "Runtime configuration outcome is unknown."
         else if (serverApplyStatus(mcp, server) == .waiting_auth)
             "Authorization recovery is pending. The connection will retry automatically."
         else if (serverCapacityBlocked(mcp, server))
-            "MCP connection capacity is full. Close unused tasks, then retry the connection."
+            "MCP connection capacity is full."
         else if ((status == .@"unreachable" or (status == .not_loaded and (serverApplyStatus(mcp, server) == .failed or serverApplyStatus(mcp, server) == .rejected))) and processDiagnostic(mcp, server) != null)
             processDiagnostic(mcp, server).?
         else if (mcp.refresh_schedule_failed)
-            "Automatic refresh could not be scheduled. Select Refresh to retry."
+            "Automatic refresh could not be scheduled."
         else if (mcp.refresh_paused)
-            "Tool catalog refresh paused after repeated failures. Select Refresh to retry."
+            "Tool catalog refresh paused after repeated failures."
         else if (mcp.admission == .ready and !mcp.admissionFresh())
             "Tool catalog expired"
         else switch (status) {
             .not_loaded => if (serverApplyStatus(mcp, server) == .failed or serverApplyStatus(mcp, server) == .rejected)
-                "Configuration changes were not applied. Retry the connection."
+                "Configuration changes were not applied."
             else if (mcp.activation_failed)
-                "Tool catalog is unavailable. Select Refresh to retry."
+                "Tool catalog is unavailable."
             else
                 "No current tool catalog observation",
             .ready, .disabled => "",

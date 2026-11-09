@@ -3365,7 +3365,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
                 defer decoded.deinit();
                 const projected = decoded.value.object.get("mcp").?.object.get("servers").?.array.items[0].object;
                 try std.testing.expectEqualStrings("not_loaded", projected.get("runtimeStatus").?.string);
-                try std.testing.expectEqualStrings(if (paused) "Tool catalog refresh paused after repeated failures. Select Refresh to retry." else "Tool catalog expired", projected.get("safeDiagnostic").?.string);
+                try std.testing.expectEqualStrings(if (paused) "Tool catalog refresh paused after repeated failures." else "Tool catalog expired", projected.get("safeDiagnostic").?.string);
             }
         }
         state.refresh_paused = false;

@@ -1839,7 +1839,7 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
     ...servers[0],
     runtimeStatus: "not_loaded",
     newTaskAccess: "unavailable",
-    safeDiagnostic: "Tool catalog is unavailable. Select Refresh to retry.",
+    safeDiagnostic: "Tool catalog is unavailable.",
     tools: [],
   };
   const management = {

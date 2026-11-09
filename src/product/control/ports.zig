@@ -174,19 +174,14 @@ pub const AgentEventConsumer = struct {
 
 pub const McpInstallIngress = struct { id: u64, task_id: u64, run_id: u64, json: []const u8 };
 /// Main-thread borrow, invalidated by the next Product mutation.
-pub const McpInstallObservation = struct {
-    generation: u64,
-    server: mcp_contract.ServerWire,
-    source_available: bool,
-    ready: bool,
-    connection_failed: bool,
-};
+pub const McpInstallObservation = mcp.InstallationObservation;
 
 pub const McpManagementPort = struct {
     context: *anyopaque,
     installation_request_fn: *const fn (*anyopaque) ?McpInstallIngress,
     start_installation_fn: *const fn (*anyopaque, u64, ?[]const u8) anyerror!mcp_contract.CreateResult,
     observe_installation_fn: *const fn (*anyopaque, ?[]const u8) ?McpInstallObservation,
+    next_installation_retry_candidate_fn: *const fn (*anyopaque, u64, *usize) anyerror!?mcp.InstallationRetryCandidate,
     update_installation_fn: *const fn (*anyopaque, u64, mcp_contract.InstallationUpdate) anyerror!mcp_contract.ManagementOutcome,
     capture_installation_fn: *const fn (*anyopaque, u64, []const u8, []const u8, bool, []u8) anyerror!mcp_contract.ManagementOutcome,
     replace_installation_fn: *const fn (*anyopaque, u64, []const u8, u64, mcp_contract.InstallationConnection) anyerror!mcp_contract.ManagementOutcome,
@@ -228,6 +223,9 @@ pub const McpManagementPort = struct {
     }
     pub fn installation(self: @This(), server_id: ?[]const u8) ?McpInstallObservation {
         return self.observe_installation_fn(self.context, server_id);
+    }
+    pub fn nextInstallationRetryCandidate(self: @This(), task_id: u64, index: *usize) !?mcp.InstallationRetryCandidate {
+        return self.next_installation_retry_candidate_fn(self.context, task_id, index);
     }
     pub fn updateInstallation(self: @This(), generation: u64, input: mcp_contract.InstallationUpdate) !mcp_contract.ManagementOutcome {
         return self.update_installation_fn(self.context, generation, input);

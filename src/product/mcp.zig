@@ -10,6 +10,8 @@ const runtime_module = @import("product_mcp_runtime");
 pub const contract = @import("product_mcp_configuration");
 
 pub const Runtime = runtime_module.Runtime;
+pub const InstallationObservation = Runtime.InstallationObservation;
+pub const InstallationRetryCandidate = Runtime.InstallationRetryCandidate;
 pub const NewTaskAdmission = runtime_module.NewTaskAdmission;
 pub const Startup = runtime_module.Startup;
 pub const Error = runtime_module.Error;

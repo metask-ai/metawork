@@ -5071,10 +5071,8 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (self.observeMcpInstallation(null)) |observation| {
-            const operation = observation.server.installation.?;
-            if (operation.task_id == task_id and operation.run_id == run_id) {
-                const id = observation.server.id[0..mcp_configuration.created_identity_bytes].*;
-                _ = self.cancelMcpInstallation(&id, operation.revision) catch {};
+            if (observation.task_id == task_id and observation.run_id == run_id) {
+                _ = self.cancelMcpInstallation(&observation.server_id, observation.revision) catch {};
             }
         }
         if (try self.task_runtime.cancelRun(
@@ -6029,66 +6027,16 @@ pub const Runtime = struct {
         var parsed = lifecycle.parseMcpInstallRequest(self.allocator, pending.json) catch return .{ .outcome = .rejected };
         defer parsed.deinit();
         const request = parsed.parsed.value;
-        const d = request.connection;
-        const source_url = std.mem.sliceTo(request.sourceUrl, '#');
-        const origin = mcp_configuration.endpointOrigin(source_url, 4096) orelse return .{ .outcome = .rejected };
         const evidence = self.task_runtime.mcpInstallationSourceEvidence(pending.task_id, request.sourceUrl);
-        const source_message = evidence.message_id;
-        var needs_authorization = evidence.requiresConfirmation();
-        const destination = if (d.endpoint) |endpoint| mcp_configuration.endpointOrigin(endpoint, 4096) orelse return .{ .outcome = .rejected } else null;
-        var slots: [16]mcp_configuration.InstallationCredentialWire = undefined;
-        for (request.credentials, 0..) |plan, i| {
-            slots[i] = .{ .name = plan.slot, .manual = plan.kind == .user_input };
-            if (plan.url) |url| {
-                const credential_origin = mcp_configuration.endpointOrigin(url, 4096) orelse return .{ .outcome = .rejected };
-                if (!std.mem.eql(u8, credential_origin, origin) or (destination != null and !std.mem.eql(u8, credential_origin, destination.?))) needs_authorization = true;
-            }
-        }
-        const connection: mcp_configuration.InstallationConnection = if (std.mem.eql(u8, d.transport, "stdio")) .{ .stdio = .{
-            .display_name = d.displayName,
-            .command = d.command.?,
-            .arguments = d.arguments,
-            .cwd = d.cwd,
-            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
-            .environment_names = d.environmentNames,
-        } } else if (std.mem.eql(u8, d.authMode, "oauth")) .{ .oauth = .{ .display_name = d.displayName, .url = d.endpoint.?, .client = .dynamic_registration } } else .{ .http = .{
-            .display_name = d.displayName,
-            .url = d.endpoint.?,
-            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
-            .header_names = d.headerNames,
-        } };
-        const inspection = runtime.state.management.?.inspect();
         defer self.publishMcpRuntimeChanges();
-        return runtime.startInstallation(inspection.desired_generation orelse 0, connection, .{
-            .task_id = pending.task_id,
-            .run_id = pending.run_id,
-            .source_message_id = source_message orelse pending.run_id,
-            .source_origin = origin,
-            .phase = if (needs_authorization) .needs_authorization else .preparing,
-            .request = pending.json,
-            .existing_server_id = request.serverId orelse existing,
-            .credentials = slots[0..request.credentials.len],
-        }) catch |err| return @errorCast(err);
+        return runtime.startPendingInstallation(id, request, evidence.message_id, evidence.requiresConfirmation(), existing) catch |err| return @errorCast(err);
     }
 
     pub fn observeMcpInstallation(self: *Runtime, id: ?[]const u8) ?control_ports.McpInstallObservation {
         const runtime = if (self.mcp) |*value| value else return null;
-        const management = if (runtime.state.management) |*value| value else return null;
-        const registry = management.desiredRegistry() orelse return null;
-        for (registry.servers) |server| {
-            const operation = server.installation orelse continue;
-            if (id) |value| {
-                if (!std.mem.eql(u8, value, server.id)) continue;
-            } else if (!operation.phase.active() and !operation.stop_pending) continue;
-            return .{
-                .generation = registry.generation,
-                .server = server,
-                .source_available = self.task_runtime.mcpInstallationSourceAvailable(operation.task_id, operation.run_id),
-                .ready = runtime.installationReady(server.id),
-                .connection_failed = runtime.installationConnectionFailed(server.id),
-            };
-        }
-        return null;
+        var observed = runtime.observeInstallation(id) orelse return null;
+        observed.source_available = self.task_runtime.mcpInstallationSourceAvailable(observed.task_id, observed.run_id);
+        return observed;
     }
 
     pub fn updateMcpInstallation(self: *Runtime, generation: u64, input: mcp_configuration.InstallationUpdate) Error!mcp_configuration.ManagementOutcome {
@@ -6104,8 +6052,8 @@ pub const Runtime = struct {
     }
     pub fn replaceMcpInstallation(self: *Runtime, generation: u64, id: []const u8, revision: u64, connection: mcp_configuration.InstallationConnection) Error!mcp_configuration.ManagementOutcome {
         const observed = self.observeMcpInstallation(id) orelse return .rejected;
-        const operation = observed.server.installation.?;
-        if (!observed.source_available or operation.revision != revision or observed.generation != generation or !operation.phase.active() or operation.phase == .needs_authorization or operation.phase == .connecting) return .rejected;
+        if (!observed.source_available or observed.revision != revision or observed.generation != generation or !observed.can_replace)
+            return .rejected;
         return switch (connection) {
             .http => |value| try self.updateMcpHttpConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .url = value.url, .sensitive_endpoint = true, .endpoint_parts = value.endpoint_parts, .auth_mode = value.auth_mode, .header_names = value.header_names }),
             .oauth => |value| try self.updateMcpOauthHttpConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .url = value.url, .sensitive_endpoint = true, .endpoint_parts = value.endpoint_parts, .client = value.client }),
@@ -10236,6 +10184,7 @@ pub const Runtime = struct {
             .installation_request_fn = controlMcpInstallationRequest,
             .start_installation_fn = controlMcpStartInstallation,
             .observe_installation_fn = controlMcpObserveInstallation,
+            .next_installation_retry_candidate_fn = controlMcpNextInstallationRetryCandidate,
             .update_installation_fn = controlMcpUpdateInstallation,
             .capture_installation_fn = controlMcpCaptureInstallation,
             .replace_installation_fn = controlMcpReplaceInstallation,
@@ -10790,6 +10739,11 @@ fn controlMcpStartInstallation(context: *anyopaque, id: u64, existing: ?[]const 
 }
 fn controlMcpObserveInstallation(context: *anyopaque, id: ?[]const u8) ?control_ports.McpInstallObservation {
     return controlOwner(context).observeMcpInstallation(id);
+}
+fn controlMcpNextInstallationRetryCandidate(context: *anyopaque, task_id: u64, index: *usize) !?product_mcp.InstallationRetryCandidate {
+    const self = controlOwner(context);
+    const runtime = if (self.mcp) |*value| value else return null;
+    return runtime.nextInstallationRetryCandidate(task_id, index);
 }
 fn controlMcpUpdateInstallation(context: *anyopaque, generation: u64, input: mcp_configuration.InstallationUpdate) !mcp_configuration.ManagementOutcome {
     return controlOwner(context).updateMcpInstallation(generation, input);
