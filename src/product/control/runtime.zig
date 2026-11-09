@@ -7830,7 +7830,7 @@ pub const Runtime = struct {
             .unavailable => return .task_unavailable,
             .editable => |source| source,
         };
-        return switch (self.custom_providers.selectionCatalogAvailability(intent_source)) {
+        return switch (models_aggregate.Runtime.selectionCatalogAvailability(self.custom_providers.view(), intent_source)) {
             .available => .available,
             .catalog_loading => .catalog_loading,
             .catalog_unavailable => .catalog_unavailable,

@@ -1,0 +1,9 @@
+[
+  {"intentSource":"other","persistenceHealth":"ready","customState":"ready","customEnabled":true,"metaskCatalog":"ready","menuSources":["other"],"availability":"available"},
+  {"intentSource":"other","persistenceHealth":"recovery_required","customState":"ready","customEnabled":true,"metaskCatalog":"ready","menuSources":[],"availability":"catalog_unavailable"},
+  {"intentSource":"other","persistenceHealth":"ready","customState":"disabled","customEnabled":false,"metaskCatalog":"ready","menuSources":[],"availability":"catalog_unavailable"},
+  {"intentSource":null,"persistenceHealth":"ready","customState":"disabled","customEnabled":false,"metaskCatalog":"ready","menuSources":["metask"],"availability":"available"},
+  {"intentSource":"other","persistenceHealth":"ready","customState":"configuring","customEnabled":true,"metaskCatalog":"ready","menuSources":[],"availability":"catalog_unavailable"},
+  {"intentSource":"metask","persistenceHealth":"ready","customState":"ready","customEnabled":true,"metaskCatalog":"loading","menuSources":[],"availability":"catalog_loading"},
+  {"intentSource":"removed","persistenceHealth":"ready","customState":"ready","customEnabled":true,"metaskCatalog":"ready","menuSources":["metask","other"],"availability":"available"}
+]

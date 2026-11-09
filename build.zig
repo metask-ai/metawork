@@ -1647,6 +1647,9 @@ fn wireAgentCore(
     models_runtime.addImport("product_models_ports", models_ports);
     models_runtime.addImport("product_models_providers", models_providers);
     models_runtime.addImport("product_models_metask", models_metask);
+    const models_contract_fixture = b.addOptions();
+    models_contract_fixture.addOption([]const u8, "task_model_menu", @embedFile("frontend/src/bridge/__fixtures__/task-model-menu.fixture"));
+    models_runtime.addOptions("product_models_contract_fixture", models_contract_fixture);
     models_runtime.addImport(
         "product_models_builtin_providers",
         models_builtin_providers,

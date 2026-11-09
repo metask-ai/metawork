@@ -291,8 +291,7 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn selectionCatalogAvailability(self: *Runtime, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {
-        const models = self.view();
+    pub fn selectionCatalogAvailability(models: contract.ModelsView, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {
         if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
         const source_scope = scope: {
             const source_id = intent_source orelse break :scope null;
@@ -1248,6 +1247,56 @@ pub const Runtime = struct {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
     }
 };
+
+test "Task model menu availability agrees with the Renderer fixture" {
+    const Case = struct {
+        intentSource: ?[]const u8,
+        persistenceHealth: contract.PersistenceHealth,
+        customState: contract.CustomProviderState,
+        customEnabled: bool,
+        metaskCatalog: contract.CatalogState,
+        menuSources: []const []const u8,
+        availability: []const u8,
+    };
+    const fixture = @import("product_models_contract_fixture").task_model_menu;
+    const cases = try std.json.parseFromSlice([]const Case, std.testing.allocator, fixture, .{});
+    defer cases.deinit();
+    for (cases.value) |entry| {
+        const providers = [_]contract.ProviderView{.{
+            .id = contract.metask_source_id,
+            .display_name = "Metask",
+            .recommended = true,
+            .catalog_state = entry.metaskCatalog,
+            .models = &.{.{ .id = "model", .display_name = "Model" }},
+            .source_generation = 1,
+            .catalog_generation = 1,
+        }};
+        const custom = [_]contract.CustomProviderView{.{
+            .id = "other",
+            .display_name = "Other",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://example.com/v1/responses",
+            .state = entry.customState,
+            .credential_status = .ready,
+            .enabled = entry.customEnabled,
+            .models = &.{.{
+                .id = "model",
+                .test_status = if (entry.customState == .ready) .connected else .untested,
+                .ready = entry.customState == .ready,
+            }},
+            .provider_revision = 1,
+            .source_generation = 1,
+            .catalog_generation = 1,
+        }};
+        const models: contract.ModelsView = .{
+            .availability = .ready,
+            .persistence_health = entry.persistenceHealth,
+            .providers = &providers,
+            .custom_providers = &custom,
+        };
+        try std.testing.expectEqualStrings(entry.availability, @tagName(Runtime.selectionCatalogAvailability(models, entry.intentSource)));
+    }
+}
 
 fn mapRegistryError(err: anyerror) contract.ManagementError {
     return switch (err) {
