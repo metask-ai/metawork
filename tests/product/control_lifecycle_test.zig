@@ -9282,7 +9282,7 @@ test "approval Core refusal and export failure keep the old mode or restore its 
         try std.testing.expectEqual(.baseline_export, task.approval_change.?.phase);
         const baseline = pending: {
             for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
-                if (slot.task_id == task_id) break :pending slot.job;
+                if (slot.recipient.taskId() == task_id) break :pending slot.job;
             };
             return error.TestUnexpectedResult;
         };
@@ -9514,7 +9514,7 @@ test "approval recovery owns restore before waiting input" {
             try std.testing.expectEqual(.closing, std.meta.activeTag(task.runtime.attachment));
         } else {
             const baseline = for (control.task_runtime.approval_jobs) |entry| {
-                if (entry) |slot| if (slot.task_id == task_id) break slot.job;
+                if (entry) |slot| if (slot.recipient.taskId() == task_id) break slot.job;
             } else return error.TestUnexpectedResult;
             for (0..2000) |_| {
                 if (baseline.completionReady()) break;
@@ -9985,7 +9985,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
             try std.testing.expect(blocker.entered.load(.acquire));
             control.syncLifecycle();
             const writer = queued: {
-                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.restore_attempt_id == attempt_id) break :queued slot.job;
+                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.recipient == .recovery and slot.recipient.recovery.attempt_id == attempt_id) break :queued slot.job;
                 return error.TestUnexpectedResult;
             };
             try std.testing.expectEqual(.queued, writer.state.load(.acquire));
@@ -10067,7 +10067,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         if (case.single_wake) {
             const writer = pending: {
                 for (control.task_runtime.approval_jobs) |entry| if (entry) |slot|
-                    if (slot.restore_attempt_id == attempt_id) break :pending slot.job;
+                    if (slot.recipient == .recovery and slot.recipient.recovery.attempt_id == attempt_id) break :pending slot.job;
                 return error.TestUnexpectedResult;
             };
             for (0..2000) |_| {
@@ -10104,7 +10104,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         if (case.shutdown) {
             const history_job = pending: {
                 for (control.task_runtime.approval_jobs) |entry| if (entry) |slot|
-                    if (slot.restore_attempt_id == attempt_id) break :pending slot.job;
+                    if (slot.recipient == .recovery and slot.recipient.recovery.attempt_id == attempt_id) break :pending slot.job;
                 return error.TestUnexpectedResult;
             };
             for (0..2000) |_| {
@@ -10445,7 +10445,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         _ = try control.setApprovalMode(task_id, .full_access, 1, 1);
         try std.testing.expectEqual(.baseline_export, task.approval_change.?.phase);
         const baseline_job = pending: {
-            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.task_id == task_id) break :pending slot.job;
+            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.recipient.taskId() == task_id) break :pending slot.job;
             return error.TestUnexpectedResult;
         };
         for (0..2000) |_| {

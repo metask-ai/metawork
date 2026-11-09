@@ -1259,7 +1259,22 @@ pub const Runtime = struct {
     agent_runtime_shutdown_complete: bool = false,
     permission_reviews_closed: bool = false,
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
-    approval_jobs: [approval_job.max_operations]?struct { task_id: u64, restore_attempt_id: ?u64 = null, job: *approval_job.Job } = @splat(null),
+    approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
+
+    const ApprovalJobRecipient = union(enum) {
+        approval: u64,
+        recovery: struct { task_id: u64, attempt_id: u64 },
+        history_projection,
+        checkpoint_retirement,
+
+        pub fn taskId(self: ApprovalJobRecipient) ?u64 {
+            return switch (self) {
+                .approval => |id| id,
+                .recovery => |identity| identity.task_id,
+                .history_projection, .checkpoint_retirement => null,
+            };
+        }
+    };
 
     pub const ApprovalError = error{
         UnknownTask,
@@ -1354,7 +1369,7 @@ pub const Runtime = struct {
     }
 
     pub fn approvalJobFor(self: *const Runtime, task_id: u64) bool {
-        for (self.approval_jobs) |entry| if (entry) |slot| if (slot.task_id == task_id) return true;
+        for (self.approval_jobs) |entry| if (entry) |slot| if (slot.recipient.taskId() == task_id) return true;
         return false;
     }
 
@@ -1423,13 +1438,13 @@ pub const Runtime = struct {
             job.lease.deinit();
             return err;
         };
-        self.approval_jobs[slot] = .{ .task_id = task_id, .job = job };
+        self.approval_jobs[slot] = .{ .recipient = .{ .approval = task_id }, .job = job };
         task.approval_change.?.phase = if (mutate) .mutation_export else .baseline_export;
     }
 
     pub fn queueApprovalHistory(self: *Runtime, task_id: u64, candidate: task_persistence.OwnedCandidate, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
-        return self.queueApprovalHistoryWork(task_id, null, .{ .candidate = candidate }, capability, executor, notifier);
+        return self.queueApprovalHistoryWork(.{ .approval = task_id }, .{ .candidate = candidate }, capability, executor, notifier);
     }
 
     pub fn queueApprovalResolution(self: *Runtime, task_id: u64, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
@@ -1438,14 +1453,14 @@ pub const Runtime = struct {
         const change = task.approval_change orelse return error.TaskBusy;
         if (change.phase != .outcome_unknown) return error.TaskBusy;
         const history = change.unknown_history orelse return error.ApprovalUnavailable;
-        try self.queueApprovalHistoryWork(task_id, null, .{ .resolution = history.token }, capability, executor, notifier);
+        try self.queueApprovalHistoryWork(.{ .approval = task_id }, .{ .resolution = history.token }, capability, executor, notifier);
     }
 
     /// A post-commit projection uses the same bounded writer and outlives the
     /// completed Task intent, like retirement of its superseded checkpoint.
     pub fn queueApprovalProjection(self: *Runtime, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         if (self.approvalHistoryWorkerActive()) return error.TaskBusy;
-        return self.queueApprovalHistoryWork(0, null, input, capability, executor, notifier);
+        return self.queueApprovalHistoryWork(.history_projection, input, capability, executor, notifier);
     }
 
     /// Recovery binding confirmation shares the same single history writer.
@@ -1456,14 +1471,15 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const restore = task.runtime.restore_job orelse return error.TaskBusy;
         if (resolve_only and (restore.binding_commit != .outcome_unknown or restore.unknown_history == null)) return error.TaskBusy;
-        try self.queueApprovalHistoryWork(task_id, restore.attempt.attempt_id, input, capability, executor, notifier);
+        try self.queueApprovalHistoryWork(.{ .recovery = .{ .task_id = task_id, .attempt_id = restore.attempt.attempt_id } }, input, capability, executor, notifier);
+        if (!resolve_only) restore.binding_commit = .pending;
     }
 
-    fn queueApprovalHistoryWork(self: *Runtime, task_id: u64, restore_attempt_id: ?u64, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
-        const leases = if (task_id == 0) &self.approval_cleanup_leases else leases: {
+    fn queueApprovalHistoryWork(self: *Runtime, recipient: ApprovalJobRecipient, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        const leases = if (recipient.taskId()) |task_id| leases: {
             const task = self.find(task_id) orelse return error.UnknownTask;
             break :leases &task.runtime.worker_leases;
-        };
+        } else &self.approval_cleanup_leases;
         const slot = try self.approvalJobSlot();
         var lease = try leases.acquire();
         var lease_live = true;
@@ -1481,7 +1497,39 @@ pub const Runtime = struct {
             job.lease.deinit();
             return err;
         };
-        self.approval_jobs[slot] = .{ .task_id = task_id, .restore_attempt_id = restore_attempt_id, .job = job };
+        self.approval_jobs[slot] = .{ .recipient = recipient, .job = job };
+    }
+
+    pub fn finishRecoveryHistory(self: *Runtime, task_id: u64, attempt_id: u64, job: *const approval_job.Job) enum { unchanged, ready, write_failed, outcome_unknown } {
+        const task = self.find(task_id) orelse unreachable;
+        const restore = task.runtime.restore_job orelse unreachable;
+        std.debug.assert(restore.attempt.attempt_id == attempt_id);
+        const readback = job.work.history.input == .resolution;
+        switch (job.outcome) {
+            .history => |outcome| switch (outcome) {
+                .committed, .failed => {
+                    restore.binding_commit = if (outcome == .committed) .committed else .failed;
+                    restore.unknown_history = null;
+                    task.runtime.last_restore_failure = if (outcome == .failed) .binding_persistence_failed else null;
+                    return if (outcome == .committed or readback) .ready else .write_failed;
+                },
+                .outcome_unknown => {
+                    restore.binding_commit = .outcome_unknown;
+                    if (!readback) restore.unknown_history = job.historyToken();
+                    task.runtime.last_restore_failure = .binding_persistence_unknown;
+                    return .outcome_unknown;
+                },
+            },
+            .none, .failure, .checkpoint, .retired => {
+                if (readback) return .unchanged;
+                restore.binding_commit = .failed;
+                if (job.outcome == .failure and job.outcome.failure.reason == .cancelled) {
+                    task.runtime.last_restore_failure = .cancelled;
+                    return .unchanged;
+                }
+                return .write_failed;
+            },
+        }
     }
 
     pub fn queueApprovalRetirement(self: *Runtime, store: *checkpoint_store.FileStore, identity: checkpoint_store.Identity, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
@@ -1502,7 +1550,7 @@ pub const Runtime = struct {
             job.lease.deinit();
             return err;
         };
-        self.approval_jobs[slot] = .{ .task_id = 0, .job = job };
+        self.approval_jobs[slot] = .{ .recipient = .checkpoint_retirement, .job = job };
     }
 
     pub const PreparedApprovalCommit = struct {
@@ -1581,6 +1629,33 @@ pub const Runtime = struct {
         if (task.runtime.attached()) |attached| attached.health = .session_poisoned;
         task.runtime.close_failed = true;
         self.failApprovalChange(task_id, .recovery_failed, false);
+    }
+
+    pub fn advanceApprovalAttachment(self: *Runtime, task_id: u64) union(enum) { wait, changed, detached, detach, checkpoint: bool } {
+        const task = self.find(task_id) orelse return .wait;
+        const change = if (task.approval_change) |*value| value else return .wait;
+        std.debug.assert(change.phase == .waiting or change.phase == .recovering);
+        if (task.runtime.close_failed and task.runtime.close_thread == null and
+            (change.phase == .recovering or change.recovery_attempt_id != null))
+        {
+            self.failApprovalRecovery(task_id);
+            return .changed;
+        }
+        if (!task.runtime.hasAttachedSession()) return .detached;
+        if (change.phase == .recovering) {
+            if (change.recovery_attempt_id != null and task.runtime.active_operation == .none) {
+                std.debug.assert(change.candidate == null);
+                self.failApprovalChange(task_id, change.failure orelse .mode_update_failed, false);
+                return .changed;
+            }
+            return .detach;
+        }
+        if (task.durable.permission_profile == change.target.profile()) {
+            change.phase = .mode_commit;
+            return .changed;
+        }
+        if (!self.approvalCoreIdle(task_id)) return .wait;
+        return .{ .checkpoint = change.baseline_confirmed };
     }
 
     pub const ApprovalRecoveryOutcome = union(enum) {

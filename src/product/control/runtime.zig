@@ -4367,14 +4367,18 @@ pub const Runtime = struct {
         for (&self.task_runtime.approval_jobs) |*entry| {
             const slot = entry.* orelse continue;
             if (!slot.job.completionReady()) continue;
-            const task_id = slot.task_id;
-            if (task_id == 0) {
-                if (slot.job.work == .history) {
-                    const resolve_only = slot.job.work.history.input == .resolution;
+            const task_id = switch (slot.recipient) {
+                .checkpoint_retirement => {
+                    slot.job.deinit();
+                    entry.* = null;
+                    continue;
+                },
+                .history_projection => {
+                    const readback = slot.job.work.history.input == .resolution;
                     switch (slot.job.outcome) {
                         .history => |result| switch (result) {
                             .committed, .failed => {
-                                if (resolve_only) {
+                                if (readback) {
                                     if (self.pending_model_intent) |*intent| {
                                         if (result == .committed) {
                                             const intent_task_id = intent.task.durable.id;
@@ -4387,7 +4391,7 @@ pub const Runtime = struct {
                                     self.approval_history_unknown = null;
                                     self.approval_history_dirty = true;
                                 }
-                                if (resolve_only or result == .committed)
+                                if (readback or result == .committed)
                                     self.task_persistence_health = .ready
                                 else {
                                     self.approval_history_dirty = true;
@@ -4395,7 +4399,7 @@ pub const Runtime = struct {
                                 }
                             },
                             .outcome_unknown => {
-                                if (!resolve_only) {
+                                if (!readback) {
                                     std.debug.assert(self.approval_history_unknown == null);
                                     self.approval_history_unknown = slot.job.historyToken();
                                 }
@@ -4403,57 +4407,31 @@ pub const Runtime = struct {
                                 self.task_persistence_health = .outcome_unknown;
                             },
                         },
-                        .none, .failure, .checkpoint, .retired => if (!resolve_only) {
+                        .none, .failure, .checkpoint, .retired => if (!readback) {
                             self.approval_history_dirty = true;
                             if (!self.shutting_down) self.markTaskPersistenceWriteFailed();
                         },
                     }
                     changed = true;
-                }
-                slot.job.deinit();
-                entry.* = null;
-                continue;
-            }
+                    slot.job.deinit();
+                    entry.* = null;
+                    continue;
+                },
+                .recovery => |identity| {
+                    switch (self.task_runtime.finishRecoveryHistory(identity.task_id, identity.attempt_id, slot.job)) {
+                        .unchanged => {},
+                        .ready => self.task_persistence_health = .ready,
+                        .write_failed => if (!self.shutting_down or slot.job.outcome == .history) self.markTaskPersistenceWriteFailed(),
+                        .outcome_unknown => self.task_persistence_health = .outcome_unknown,
+                    }
+                    slot.job.deinit();
+                    entry.* = null;
+                    changed = true;
+                    continue;
+                },
+                .approval => |id| id,
+            };
             const task = self.task_runtime.find(task_id) orelse unreachable;
-            if (slot.restore_attempt_id) |attempt_id| {
-                const restore = task.runtime.restore_job orelse unreachable;
-                std.debug.assert(restore.attempt.attempt_id == attempt_id);
-                const resolve_only = slot.job.work.history.input == .resolution;
-                switch (slot.job.outcome) {
-                    .history => |outcome| {
-                        restore.binding_commit = switch (outcome) {
-                            .committed => .committed,
-                            .failed => .failed,
-                            .outcome_unknown => .outcome_unknown,
-                        };
-                        switch (outcome) {
-                            .committed, .failed => {
-                                restore.unknown_history = null;
-                                task.runtime.last_restore_failure = if (outcome == .failed) .binding_persistence_failed else null;
-                                if (outcome == .committed or resolve_only)
-                                    self.task_persistence_health = .ready
-                                else
-                                    self.markTaskPersistenceWriteFailed();
-                            },
-                            .outcome_unknown => {
-                                if (!resolve_only) restore.unknown_history = slot.job.historyToken();
-                                self.task_persistence_health = .outcome_unknown;
-                                task.runtime.last_restore_failure = .binding_persistence_unknown;
-                            },
-                        }
-                    },
-                    .none, .failure, .checkpoint, .retired => if (!resolve_only) {
-                        restore.binding_commit = .failed;
-                        const cancelled = slot.job.outcome == .failure and slot.job.outcome.failure.reason == .cancelled;
-                        if (cancelled) task.runtime.last_restore_failure = .cancelled;
-                        if (!cancelled and !self.shutting_down) self.markTaskPersistenceWriteFailed();
-                    },
-                }
-                slot.job.deinit();
-                entry.* = null;
-                changed = true;
-                continue;
-            }
             const change = task.approval_change.?;
             const mode_commit = if (change.phase == .outcome_unknown) if (change.unknown_history) |history| history.mode_commit else false else change.phase == .mode_commit;
             const phase = change.phase;
@@ -4521,27 +4499,24 @@ pub const Runtime = struct {
             if (self.task_runtime.approvalJobFor(task.durable.id)) continue;
             if (self.shutting_down) continue;
             switch (change.phase) {
-                .waiting => {
-                    if (change.recovery_attempt_id != null and task.runtime.close_failed and task.runtime.close_thread == null) {
-                        self.task_runtime.failApprovalRecovery(task.durable.id);
+                .waiting, .recovering => switch (self.task_runtime.advanceApprovalAttachment(task.durable.id)) {
+                    .wait => {},
+                    .changed => changed = true,
+                    .detached => changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed,
+                    .detach => {
+                        _ = self.task_runtime.beginDetach(task.durable.id, self.taskRuntimeOperationEffects()) catch |err| switch (err) {
+                            error.CloseInProgress => {},
+                            else => self.task_runtime.failApprovalRecovery(task.durable.id),
+                        };
                         changed = true;
-                        continue;
-                    }
-                    if (!task.runtime.hasAttachedSession()) {
-                        changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed;
-                        continue;
-                    }
-                    if (task.durable.permission_profile == change.target.profile()) {
-                        task.approval_change.?.phase = .mode_commit;
-                        changed = true;
-                    } else {
-                        if (!self.task_runtime.approvalCoreIdle(task.durable.id)) continue;
+                    },
+                    .checkpoint => |baseline_confirmed| {
                         const resources = self.taskRuntimeOperationEffects().worker.checkpoint;
-                        self.task_runtime.queueApprovalCheckpoint(task.durable.id, change.baseline_confirmed, resources, self.approvalExecutor(), self.approvalNotifier()) catch {
+                        self.task_runtime.queueApprovalCheckpoint(task.durable.id, baseline_confirmed, resources, self.approvalExecutor(), self.approvalNotifier()) catch {
                             self.failApprovalChange(task.durable.id, .checkpoint_failed, false);
                         };
                         changed = true;
-                    }
+                    },
                 },
                 .baseline_commit, .mode_commit => {
                     if (self.approvalHistoryBlocked()) continue;
@@ -4555,24 +4530,6 @@ pub const Runtime = struct {
                         self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                     };
                     changed = true;
-                },
-                .recovering => {
-                    if (task.runtime.close_failed and task.runtime.close_thread == null) {
-                        self.task_runtime.failApprovalRecovery(task.durable.id);
-                        changed = true;
-                        continue;
-                    }
-                    if (task.runtime.hasAttachedSession()) {
-                        if (change.recovery_attempt_id != null and task.runtime.active_operation == .none) {
-                            self.failApprovalChange(task.durable.id, change.failure orelse .mode_update_failed, false);
-                        } else {
-                            _ = self.task_runtime.beginDetach(task.durable.id, self.taskRuntimeOperationEffects()) catch |err| switch (err) {
-                                error.CloseInProgress => {},
-                                else => self.task_runtime.failApprovalRecovery(task.durable.id),
-                            };
-                        }
-                        changed = true;
-                    } else changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed;
                 },
                 .baseline_export, .mutation_export, .outcome_unknown => {},
             }
@@ -9069,7 +9026,6 @@ pub const Runtime = struct {
         var input: task_runtime.HistoryInput = .{ .candidate = try self.captureTaskHistoryCandidate(null) };
         errdefer input.deinit();
         try self.task_runtime.queueRecoveryHistory(task_id, input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
-        self.task_runtime.find(task_id).?.runtime.restore_job.?.binding_commit = .pending;
         return null;
     }
 
@@ -17864,7 +17820,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
         for (0..2000) |_| {
             const pending = pending: {
                 for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
-                    if (slot.task_id == 3) break :pending slot.job;
+                    if (slot.recipient.taskId() == 3) break :pending slot.job;
                 };
                 break :pending null;
             };
@@ -21620,7 +21576,7 @@ test "approval shutdown settles joined history outcomes before releasing Task re
         _ = control.syncApprovalChanges();
         const pending = pending: {
             for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
-                if (slot.task_id == 3) break :pending slot.job;
+                if (slot.recipient.taskId() == 3) break :pending slot.job;
             };
             return error.TestUnexpectedResult;
         };
