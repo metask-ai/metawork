@@ -116,6 +116,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     CatalogUnavailable,
     McpManagementUnavailable,
     McpManagementBusy,
+    McpRestoreBusy,
     McpOauthScopeCapacity,
     CatalogRequestGenerationExhausted,
     StaleCatalog,
@@ -4384,7 +4385,10 @@ pub const Runtime = struct {
         if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
         const attached = task.runtime.hasAttachedSession();
         if (task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
-        if (!attached) _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
+        if (!attached) _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
+            error.McpRestoreBusy => return if (approval_revision != null) err else error.RecoveryUnavailable,
+            else => return err,
+        };
         if (attached and (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready))
             return error.RecoveryUnavailable;
         const workspace = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
@@ -4465,7 +4469,10 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         self.syncLifecycle();
-        return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null);
+        return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null) catch |err| switch (err) {
+            error.McpRestoreBusy => error.RecoveryUnavailable,
+            else => err,
+        };
     }
 
     fn admitTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64, approval_revision: ?u64) Error!u64 {
@@ -4482,7 +4489,8 @@ pub const Runtime = struct {
             switch (self.agent_runtime.restoreAdmission(null)) {
                 .available => {},
                 .capacity_reached => return self.sessionPressureError(task_id),
-                .mcp_busy, .unavailable => return error.RecoveryUnavailable,
+                .mcp_busy => return error.McpRestoreBusy,
+                .unavailable => return error.RecoveryUnavailable,
             }
         }
         if (target) |*value| if (task.runtime.attachment == .detached or
@@ -4580,11 +4588,31 @@ pub const Runtime = struct {
         };
     }
 
-    fn beginApprovalRecovery(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        const change = task.approval_change orelse return false;
-        _ = self.admitTaskConversationRestore(task_id, task.durable.binding_epoch, change.revision) catch return false;
-        return true;
+    fn startApprovalRecovery(context: *anyopaque, task_id: u64, binding_epoch: u64, revision: u64) task_runtime.ApprovalRecoveryOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        _ = self.admitTaskConversationRestore(task_id, binding_epoch, revision) catch |err| return switch (err) {
+            error.SessionReleasing => if (self.task_runtime.activeSessionCloseTask()) |blocking_id|
+                .{ .waiting = .{ .session_close = blocking_id } }
+            else
+                .failed,
+            error.McpRestoreBusy => .{ .waiting = .mcp_apply },
+            else => .failed,
+        };
+        return .started;
+    }
+
+    fn advanceDetachedApprovalRecovery(self: *Runtime, task_id: u64) bool {
+        return self.task_runtime.advanceDetachedApprovalRecovery(task_id, .{
+            .context = self,
+            .start_fn = startApprovalRecovery,
+            .mcp_apply_pending_fn = approvalMcpApplyPending,
+        });
+    }
+
+    fn approvalMcpApplyPending(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.mcp) |*mcp| if (mcp.configurationApplyInProgress()) return true;
+        return self.agent_runtime.restoreAdmission(null) == .mcp_busy;
     }
 
     fn syncApprovalChanges(self: *Runtime) bool {
@@ -4758,12 +4786,7 @@ pub const Runtime = struct {
                         continue;
                     }
                     if (!task.runtime.hasAttachedSession()) {
-                        if (task.runtime.active_operation != .none or task.runtime.hasClosingSession() or task.runtime.close_thread != null) continue;
-                        if (change.recovery_attempt_id != null) {
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        } else if (!self.beginApprovalRecovery(task.durable.id))
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        changed = true;
+                        changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed;
                         continue;
                     }
                     if (task.durable.permission_profile == change.target.profile()) {
@@ -4807,13 +4830,7 @@ pub const Runtime = struct {
                             };
                         }
                         changed = true;
-                    } else if (task.runtime.active_operation == .none and !task.runtime.hasClosingSession() and task.runtime.close_thread == null) {
-                        if (change.recovery_attempt_id != null) {
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        } else if (!self.beginApprovalRecovery(task.durable.id))
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        changed = true;
-                    }
+                    } else changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed;
                 },
                 .baseline_export, .mutation_export, .outcome_unknown => {},
             }

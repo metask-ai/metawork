@@ -11783,7 +11783,7 @@ test "file delivery Run authority survives preparation changes until worker and 
     try std.testing.expectEqual(@as(usize, 1), probe.released);
 }
 
-test "MCP apply barrier never releases an unrelated idle Session as capacity recovery" {
+test "approval recovery waits for Session pressure and the MCP apply barrier" {
     fake_core.reset();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11812,6 +11812,7 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     var input = productControlTaskInput();
     input.workspace_root = home;
     input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
     const waiter_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     const waiter = control.task_runtime.find(waiter_id).?;
     try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, waiter_id));
@@ -11821,6 +11822,7 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     const other_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+    try waitInitialTaskCatalog(&control, other_id);
     const other = control.task_runtime.find(other_id).?;
     const destroyed = fake_core.session_destroyed;
     runtime.mcp_operation.phase = .apply;
@@ -11832,6 +11834,36 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     try std.testing.expect(other.runtime.close_thread == null);
     try std.testing.expect(!other.runtime.close_requested);
     try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
+
+    runtime.mcp_operation.phase = .idle;
+    const attempt_before = control.task_runtime.next_restore_attempt_id;
+    const revision = try control.setApprovalMode(waiter_id, .auto_review, waiter.durable.binding_epoch, 1);
+    try std.testing.expect(waiter.approval_change != null);
+    try std.testing.expect(waiter.approval_result == null);
+    try std.testing.expect(other.runtime.close_thread != null);
+    try std.testing.expectEqual(attempt_before, control.task_runtime.next_restore_attempt_id);
+
+    runtime.sessions_mutex.lockUncancelable(std.testing.io);
+    runtime.mcp_operation.phase = .apply;
+    runtime.sessions_mutex.unlock(std.testing.io);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (other.runtime.attachment == .detached) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(waiter.approval_change != null);
+    try std.testing.expectEqual(attempt_before, control.task_runtime.next_restore_attempt_id);
+
+    runtime.mcp_operation.phase = .idle;
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (waiter.approval_change == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.completed, waiter.approval_result.?.outcome);
+    try std.testing.expectEqual(revision, waiter.durable.approval_revision);
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(waiter_id));
+    try std.testing.expectEqual(attempt_before + 1, control.task_runtime.next_restore_attempt_id);
 }
 
 test "Session pressure never cancels busy work or automatically retries a failed close" {

@@ -918,6 +918,10 @@ pub const Runtime = struct {
         }
     }
 
+    pub fn configurationApplyInProgress(self: *const Runtime) bool {
+        return self.state.configuration_apply_state == .applying;
+    }
+
     pub fn beginConfigurationApply(
         self: *Runtime,
         expected_generation: u64,

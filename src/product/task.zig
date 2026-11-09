@@ -77,6 +77,7 @@ pub const ApprovalMode = state.ApprovalMode;
 pub const approval_capacity = runtime.approval_job.max_operations;
 pub const ApprovalExecutor = runtime.ExecutorPort;
 pub const ApprovalNotifier = @FieldType(runtime.WorkerResources, "notifier");
+pub const ApprovalRecoveryOutcome = runtime.Runtime.ApprovalRecoveryOutcome;
 pub const ApprovalFailureReason = state.ApprovalFailureReason;
 pub const PermissionInteraction = state.PermissionInteraction;
 pub const McpAuthorityAtCreation = attachment.McpAuthorityAtCreation;

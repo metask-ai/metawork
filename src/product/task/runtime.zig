@@ -1583,6 +1583,64 @@ pub const Runtime = struct {
         self.failApprovalChange(task_id, .recovery_failed, false);
     }
 
+    pub const ApprovalRecoveryOutcome = union(enum) {
+        started,
+        waiting: task_state.ApprovalRecoveryWait,
+        failed,
+    };
+
+    pub const ApprovalRecoveryEffects = struct {
+        context: *anyopaque,
+        start_fn: *const fn (*anyopaque, u64, u64, u64) ApprovalRecoveryOutcome,
+        mcp_apply_pending_fn: *const fn (*anyopaque) bool,
+    };
+
+    pub fn advanceDetachedApprovalRecovery(self: *Runtime, task_id: u64, effects: ApprovalRecoveryEffects) bool {
+        const task = self.find(task_id) orelse return false;
+        const change = if (task.approval_change) |*value| value else return false;
+        if (change.phase != .waiting and change.phase != .recovering) return false;
+        std.debug.assert(change.candidate == null);
+        if (task.runtime.active_operation != .none or task.runtime.hasAttachedSession() or
+            task.runtime.hasClosingSession() or task.runtime.close_thread != null) return false;
+        if (change.recovery_attempt_id != null or task.durable.archived or task.deletion != .idle or
+            task.runtime.close_requested)
+        {
+            self.failApprovalChange(task_id, .recovery_failed, false);
+            return true;
+        }
+        if (change.recovery_wait) |wait| {
+            if (wait.binding_epoch != task.durable.binding_epoch) {
+                self.failApprovalChange(task_id, .recovery_failed, false);
+                return true;
+            }
+            switch (wait.reason) {
+                .session_close => |blocking_id| if (self.findConst(blocking_id)) |blocking| {
+                    if (blocking.runtime.close_thread != null) return false;
+                    if (blocking.runtime.close_failed and blocking.runtime.liveConst() != null) {
+                        self.failApprovalChange(task_id, .recovery_failed, false);
+                        return true;
+                    }
+                },
+                .mcp_apply => if (effects.mcp_apply_pending_fn(effects.context)) return false,
+            }
+        }
+        change.recovery_wait = null;
+        switch (effects.start_fn(effects.context, task_id, task.durable.binding_epoch, change.revision)) {
+            .started => {},
+            .waiting => |wait| change.recovery_wait = .{ .binding_epoch = task.durable.binding_epoch, .reason = wait },
+            .failed => self.failApprovalChange(task_id, .recovery_failed, false),
+        }
+        return true;
+    }
+
+    pub fn activeSessionCloseTask(self: *const Runtime) ?u64 {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            if (task.runtime.close_thread != null) return task.durable.id;
+        }
+        return null;
+    }
+
     pub fn markApprovalUnknown(self: *Runtime, task_id: u64, token: ?task_persistence.CommitToken) void {
         const task = self.find(task_id) orelse unreachable;
         const change = &task.approval_change.?;
@@ -5371,7 +5429,7 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
         effects: RecoveryAdmissionEffects,
-    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable, SessionCapacity }!RecoveryStartFacts {
+    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable, SessionCapacity, McpRestoreBusy }!RecoveryStartFacts {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -5382,8 +5440,11 @@ pub const Runtime = struct {
         )) {
             .admitted => {},
             .denied => |reason| {
-                if (reason == .runtime_unavailable and external.runtime_admission == .capacity_reached and external.authority_stable)
-                    return error.SessionCapacity;
+                if (reason == .runtime_unavailable and external.authority_stable) switch (external.runtime_admission) {
+                    .capacity_reached => return error.SessionCapacity,
+                    .busy => return error.McpRestoreBusy,
+                    else => {},
+                };
                 return error.RecoveryUnavailable;
             },
         }
@@ -9810,6 +9871,88 @@ test "Task model intent transaction uses its own revision and rolls back without
     task.durable.model_intent.?.revision = std.math.maxInt(u64);
     try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, std.math.maxInt(u64), target));
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
+}
+
+test "approval recovery waits for the observed blocker before admitting one attempt" {
+    const Harness = struct {
+        task: *task_state.Task,
+        outcome: Runtime.ApprovalRecoveryOutcome,
+        calls: usize = 0,
+        applying: bool = false,
+
+        fn start(context: *anyopaque, id: u64, epoch: u64, revision: u64) Runtime.ApprovalRecoveryOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(id == self.task.durable.id and epoch == self.task.durable.binding_epoch);
+            std.debug.assert(revision == self.task.approval_change.?.revision);
+            self.calls += 1;
+            if (self.outcome == .started) self.task.approval_change.?.recovery_attempt_id = 8;
+            return self.outcome;
+        }
+
+        fn applyingNow(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.applying;
+        }
+
+        fn finishClose() void {}
+    };
+    var runtime = try Runtime.init(std.testing.allocator, 2);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    var blocker = testModelIntentTask();
+    blocker.durable.id = 2;
+    runtime.tasks[0] = &task;
+    runtime.tasks[1] = &blocker;
+    defer @memset(runtime.tasks, null);
+
+    task.approval_change = .{ .revision = 2, .target = .auto_review };
+    blocker.runtime.close_thread = try std.Thread.spawn(.{}, Harness.finishClose, .{});
+    defer if (blocker.runtime.close_thread) |thread| thread.join();
+    var harness = Harness{ .task = &task, .outcome = .{ .waiting = .{ .session_close = 2 } } };
+    const effects = Runtime.ApprovalRecoveryEffects{
+        .context = &harness,
+        .start_fn = Harness.start,
+        .mcp_apply_pending_fn = Harness.applyingNow,
+    };
+    try std.testing.expectEqual(@as(?u64, 2), runtime.activeSessionCloseTask());
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(task.approval_result == null and task.approval_change.?.recovery_attempt_id == null);
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 1), harness.calls);
+    blocker.runtime.close_thread.?.join();
+    blocker.runtime.close_thread = null;
+
+    // MCP apply can start while waiting for the Session. Re-evaluate it as a
+    // separate blocker without assigning an attempt to either wait.
+    harness.outcome = .{ .waiting = .mcp_apply };
+    harness.applying = true;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 2), harness.calls);
+    harness.outcome = .started;
+    harness.applying = false;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(?u64, 8), task.approval_change.?.recovery_attempt_id);
+    task.runtime.active_operation = .{ .restore = .{ .id = 8 } };
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 3), harness.calls);
+
+    task.runtime.active_operation = .none;
+    task.approval_change = .{ .revision = 3, .target = .auto_review, .phase = .recovering };
+    harness.outcome = .failed;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(.recovery_failed, task.approval_result.?.reason.?);
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+
+    task.approval_change = .{ .revision = 3, .target = .auto_review };
+    harness.outcome = .{ .waiting = .mcp_apply };
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    const waiting_calls = harness.calls;
+    task.durable.binding_epoch += 1;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(waiting_calls, harness.calls);
 }
 
 test "restoring a read-only Task frees its payload when record allocation fails" {

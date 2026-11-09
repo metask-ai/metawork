@@ -1166,6 +1166,11 @@ pub const RuntimeAttachment = task_attachment.State;
 
 pub const ApprovalFailureReason = @import("product_task_view_contract").ApprovalFailureReason;
 
+pub const ApprovalRecoveryWait = union(enum) {
+    session_close: u64,
+    mcp_apply,
+};
+
 pub const ApprovalChange = struct {
     revision: u64,
     target: ApprovalMode,
@@ -1180,6 +1185,7 @@ pub const ApprovalChange = struct {
     } = .waiting,
     baseline_confirmed: bool = false,
     recovery_attempt_id: ?u64 = null,
+    recovery_wait: ?struct { binding_epoch: u64, reason: ApprovalRecoveryWait } = null,
     unknown_history: ?struct { token: [32]u8, mode_commit: bool } = null,
     candidate: ?checkpoint_record.Record = null,
     failure: ?ApprovalFailureReason = null,
