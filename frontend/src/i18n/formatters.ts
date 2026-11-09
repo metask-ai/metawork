@@ -1,4 +1,19 @@
+import type { TaskActionBlocker } from "../bridge/contracts.ts";
+import type { MessageId } from "./context.ts";
 import type { Locale } from "./runtime.ts";
+
+const taskActionBlockerMessages: Record<TaskActionBlocker, MessageId> = {
+  busy: "slash.disabled_task_busy",
+  closing: "slash.disabled_task_busy",
+  deleting: "operation.task_delete",
+  history_read_only: "archive.history_read_only",
+  no_history: "slash.disabled_no_history",
+  unavailable: "slash.disabled_unavailable",
+};
+
+export function taskActionBlockerMessageId(blocker: TaskActionBlocker) {
+  return taskActionBlockerMessages[blocker];
+}
 
 export function formatInteger(locale: string, value: bigint | number): string {
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(

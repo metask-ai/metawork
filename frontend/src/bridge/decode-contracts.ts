@@ -6,6 +6,7 @@ import {
   outputActionStates,
   modelErrorCategories,
   runGuidances,
+  taskActionBlockers,
   taskNavigationSignals,
   type RunModelError,
 } from "./contracts.ts";
@@ -3618,6 +3619,7 @@ function decodeTask(
   const item = object(value, path, [
     "inputReady",
     "signal",
+    "compactBlocker",
     "inputAcceptance",
     "inputSubmissions",
     "id",
@@ -4198,6 +4200,11 @@ function decodeTask(
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     signal: nullableEnum(item.signal, `${path}.signal`, taskNavigationSignals),
+    compactBlocker: nullableEnum(
+      item.compactBlocker,
+      `${path}.compactBlocker`,
+      taskActionBlockers,
+    ),
     permissionProfile,
     approvalMode,
     approvalRevision,
@@ -5324,6 +5331,8 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
   const item = object(value, path, [
     "id",
     "signal",
+    "archiveBlocker",
+    "deleteBlocker",
     "recentOrder",
     "title",
     "workspaceId",
@@ -5352,6 +5361,16 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
         ]);
   const summary: TaskSummary = {
     id: positiveWireId(item.id, `${path}.id`),
+    archiveBlocker: nullableEnum(
+      item.archiveBlocker,
+      `${path}.archiveBlocker`,
+      taskActionBlockers,
+    ),
+    deleteBlocker: nullableEnum(
+      item.deleteBlocker,
+      `${path}.deleteBlocker`,
+      taskActionBlockers,
+    ),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),

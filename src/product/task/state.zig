@@ -1198,6 +1198,8 @@ pub const Task = struct {
     runtime: RuntimeAttachment,
     /// One synchronous model-intent history overlay may own this Task at a time.
     model_intent_prepared: bool = false,
+    /// Main-thread observation used to refresh action projections on worker wakes.
+    observed_live_workers: bool = false,
     /// A bounded correlation receipt, never a deferred input.
     send_input_result: ?SendInputResult = null,
     input_submissions: std.ArrayList(InputSubmission) = .empty,

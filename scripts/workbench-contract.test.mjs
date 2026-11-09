@@ -99,6 +99,24 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test("Task index and detail require their Host action blockers", () => {
+  const view = productViewFixture(fixture);
+  const decoded = decodeScopedSnapshot(view);
+  assert.equal(decoded.taskIndex[0].archiveBlocker, "busy");
+  assert.equal(decoded.taskIndex[0].deleteBlocker, null);
+  assert.equal(decoded.taskPage.task.compactBlocker, "busy");
+
+  const missing = clone(view);
+  delete missing.taskPage.task.compactBlocker;
+  assert.throws(() => decodeScopedSnapshot(missing), /compactBlocker/);
+  const unknown = clone(view);
+  unknown.taskIndex[0].deleteBlocker = "worker_busy";
+  assert.throws(() => decodeScopedSnapshot(unknown), /deleteBlocker/);
+  const misplaced = clone(view);
+  misplaced.taskPage.task.archiveBlocker = null;
+  assert.throws(() => decodeScopedSnapshot(misplaced), /unexpected fields: 1/);
+});
+
 test("project entry removal is a strict fact independent of Task directory and Workspace authorization", () => {
   const value = clone(fixture);
   value.workspaces[0].projectRemoved = true;

@@ -7937,6 +7937,7 @@ pub const Runtime = struct {
     fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
         return .{
             .now_ms = self.run_clock.now(),
+            .checkpoint_health = self.checkpoint_store_health.load(.acquire),
             .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
             .context = self,
             .authority_fn = taskProjectionAuthority,
@@ -14924,6 +14925,35 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     const completed = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
+    const task = control.task_runtime.find(3).?;
+    var action_storage: [16 * 1024]u8 = undefined;
+    const idle_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, idle_view, "\"compactBlocker\":null") != null);
+    const original_checkpoint_health = control.checkpoint_store_health.swap(.ready, .acq_rel);
+    var worker = try task.runtime.worker_leases.acquire();
+    defer if (worker.isActive()) worker.deinit();
+    control.syncLifecycle();
+    const worker_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, worker_view, "\"compactBlocker\":\"busy\"") != null);
+    worker.deinit();
+    control.syncLifecycle();
+    const released_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, released_view, "\"compactBlocker\":null") != null);
+    control.checkpoint_store_health.store(original_checkpoint_health, .release);
+    const coverage = completed.coverage;
+    completed.coverage = .excluded;
+    control.bumpRevision();
+    const excluded_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, excluded_view, "\"compactBlocker\":\"no_history\"") != null);
+    try std.testing.expectError(error.NoSuchRun, control.compactTaskAtBinding(3, task.durable.binding_epoch));
+    completed.coverage = coverage;
+    task.model_intent_prepared = true;
+    control.bumpRevision();
+    const pending_intent_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, pending_intent_view, "\"archiveBlocker\":\"busy\",\"deleteBlocker\":\"busy\"") != null);
+    try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskBusy, control.deleteTask(3));
+    task.model_intent_prepared = false;
     try control.setTaskArchived(3, true);
     try std.testing.expect(control.task_runtime.tasks[0].?.durable.archived);
 
@@ -14938,6 +14968,8 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     var deletion_lease = try control.task_runtime.tasks[0].?.runtime.worker_leases.acquire();
     try control.deleteTask(3);
     try std.testing.expect(control.task_runtime.tasks[0] != null);
+    const deleting_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, deleting_view, "\"archiveBlocker\":\"deleting\",\"deleteBlocker\":\"deleting\"") != null);
     try std.testing.expectError(error.TaskBusy, control.renameTask(3, "too late"));
     deletion_lease.deinit();
     const tracked_before_delete = control.projection_bytes;

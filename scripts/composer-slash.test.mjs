@@ -241,13 +241,7 @@ test("Command availability is derived independently for new task and compact", (
     ],
   );
 
-  const idleTask = {
-    lifecycleOpen: true,
-    continuationAvailable: true,
-    archived: false,
-    activeOperation: false,
-    hasFinalizedRun: true,
-  };
+  const idleTask = { compactBlocker: null };
   assert.deepEqual(
     resolveSlashCommandStates({
       newTaskDraftActive: false,
@@ -265,7 +259,7 @@ test("Command availability is derived independently for new task and compact", (
       newTaskDraftActive: false,
       bridgeUnavailable: false,
       taskMutationDisabled: true,
-      task: { ...idleTask, activeOperation: true },
+      task: { compactBlocker: "busy" },
     })[1].disabledReason,
     "task_busy",
   );

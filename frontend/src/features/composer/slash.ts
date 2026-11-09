@@ -1,6 +1,7 @@
 import type {
   AttachmentDescriptor,
   SkillCatalogView,
+  TaskActionBlocker,
   TaskRunInput,
 } from "../../bridge/contracts.ts";
 
@@ -222,13 +223,7 @@ export type SlashCommandContext = {
   newTaskDraftActive: boolean;
   bridgeUnavailable: boolean;
   taskMutationDisabled: boolean;
-  task: {
-    lifecycleOpen: boolean;
-    continuationAvailable: boolean;
-    archived: boolean;
-    activeOperation: boolean;
-    hasFinalizedRun: boolean;
-  } | null;
+  task: { compactBlocker: TaskActionBlocker | null } | null;
 };
 
 export function resolveSlashCommandStates({
@@ -243,11 +238,7 @@ export function resolveSlashCommandStates({
     !newTaskDraftActive &&
     !bridgeUnavailable &&
     !taskMutationDisabled &&
-    task.lifecycleOpen &&
-    task.continuationAvailable &&
-    !task.archived &&
-    !task.activeOperation &&
-    task.hasFinalizedRun,
+    task.compactBlocker === null,
   );
 
   return slashCommandNames.map((name) => {
@@ -266,13 +257,11 @@ export function resolveSlashCommandStates({
       enabled: compactEnabled,
       disabledReason: compactEnabled
         ? null
-        : newTaskDraftActive
+        : newTaskDraftActive || !task || task.compactBlocker === "no_history"
           ? "no_history"
-          : task?.activeOperation
+          : task.compactBlocker === "busy"
             ? "task_busy"
-            : !task?.hasFinalizedRun
-              ? "no_history"
-              : "unavailable",
+            : "unavailable",
     };
   });
 }

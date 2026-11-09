@@ -1136,8 +1136,19 @@ export const taskNavigationSignals = [
   "failed",
   "interrupted",
 ] as const;
+export const taskActionBlockers = [
+  "busy",
+  "closing",
+  "deleting",
+  "history_read_only",
+  "no_history",
+  "unavailable",
+] as const;
+export type TaskActionBlocker = (typeof taskActionBlockers)[number];
+
 export type TaskView = {
   signal: (typeof taskNavigationSignals)[number] | null;
+  compactBlocker: TaskActionBlocker | null;
   inputReady: boolean;
   inputAcceptance: {
     available: boolean;
@@ -1302,6 +1313,8 @@ export type TaskSummary = Pick<
   | "activeOperation"
   | "unreadCompletionRunId"
 > & {
+  archiveBlocker: TaskActionBlocker | null;
+  deleteBlocker: TaskActionBlocker | null;
   historyReadOnly: boolean;
   activeCompactPhase: CompactView["phase"] | null;
   lastCompactPhase: CompactView["phase"] | null;

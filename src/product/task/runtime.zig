@@ -1164,6 +1164,7 @@ pub const RecoveryAdmissionEffects = struct {
 
 pub const ProjectionEffects = struct {
     now_ms: ?u64 = null,
+    checkpoint_health: checkpoint_store.Health = .unavailable,
     max_pending_inputs_per_task: usize = 64,
     context: *anyopaque,
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
@@ -2580,10 +2581,8 @@ pub const Runtime = struct {
 
     pub fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
         const task = self.find(task_id) orelse return null;
-        for (task.durable.runs) |*entry| if (entry.*) |*run| {
-            if (run.input_continuation_pending) return run;
-        };
-        return null;
+        const slot = inputContinuationSlot(task) orelse return null;
+        return &task.durable.runs[slot].?;
     }
 
     pub fn cancelInputContinuation(self: *Runtime, task_id: u64, source_id: ?u64, reason: SendInputReason) bool {
@@ -2874,21 +2873,9 @@ pub const Runtime = struct {
         effects: OperationEffects,
     ) CompactError!PreparedCompact {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (self.inputContinuation(task_id) != null) return error.TaskBusy;
-        if (expected_binding_epoch == 0 or
-            expected_binding_epoch != task.durable.binding_epoch)
-            return error.BindingEpochMismatch;
-        _ = try taskExecutionInput(task);
-        if (task_policy.hasActiveOperation(task) or
-            checkpointMutationPending(task, effects.worker.checkpoint.store_health) or
-            task_state.hasUnfinalizedTerminalEvents(task))
-            return error.TaskBusy;
-        const slot = findEmptyCompact(task.durable.compacts) orelse growth: {
-            if (task.runtime.worker_leases.hasLive()) return error.TaskBusy;
-            break :growth try growHistory(self.allocator, task_state.CompactRecord, &task.durable.compacts);
-        };
-        const after_run_id = task_policy.lastConversationRunId(task) orelse
-            return error.NoSuchRun;
+        const after_run_id = try compactAdmission(task, expected_binding_epoch, effects.worker.checkpoint.store_health.load(.acquire));
+        const slot = findEmptyCompact(task.durable.compacts) orelse
+            try growHistory(self.allocator, task_state.CompactRecord, &task.durable.compacts);
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         var access_live = true;
         errdefer if (access_live) access.deinit();
@@ -3969,11 +3956,10 @@ pub const Runtime = struct {
         archived: bool,
     ) MutationError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null) return error.TaskReadOnly;
-        if (task.model_intent_prepared or task.deletion == .deleting or !failedDeletionCanBeAbandoned(task) or
-            task_policy.taskLifecycle(task) == .closing or
-            task_policy.hasActiveOperation(task))
-            return error.TaskBusy;
+        if (archiveBlocker(task)) |blocker| return switch (blocker) {
+            .history_read_only => error.TaskReadOnly,
+            else => error.TaskBusy,
+        };
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
         if (archived) {
@@ -4029,12 +4015,11 @@ pub const Runtime = struct {
 
     pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null) return error.TaskReadOnly;
-        if (task.model_intent_prepared or task.approval_change != null) return error.TaskBusy;
-        if (task.runtime.restore_job) |job| {
-            if (job.binding_commit == .pending or job.binding_commit == .outcome_unknown) return error.TaskBusy;
-        }
-        if (task.deletion == .deleting) return false;
+        if (deleteBlocker(task)) |blocker| switch (blocker) {
+            .history_read_only => return error.TaskReadOnly,
+            .deleting => return false,
+            else => return error.TaskBusy,
+        };
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
         _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
@@ -5405,6 +5390,7 @@ pub const Runtime = struct {
                 .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
                 .input_acceptance_reason = acceptance_reason,
+                .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .catalog = effects.catalog,
                 .pending_ui = .{
@@ -5421,7 +5407,7 @@ pub const Runtime = struct {
             const task = entry.* orelse continue;
             if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             count += 1;
-            try task_view.writeSummary(writer, task, text);
+            try task_view.writeSummary(writer, task, text, archiveBlocker(task), deleteBlocker(task));
         }
     }
 
@@ -5587,6 +5573,7 @@ pub const Runtime = struct {
         const older = bounds.older;
         var pending_ui_context = PendingUiContext{ .runtime = self, .max_json_bytes = effects.max_pending_ui_json_bytes };
         const external = effects.authority(projectionAuthorityQuery(task));
+        const recovery = self.recoveryProjectionWithAuthority(task, external);
         var available_modes: [3]task_state.ApprovalMode = undefined;
         writer.writeAll("{\"beforeRunId\":") catch return error.SnapshotTooLarge;
         if (before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -5598,11 +5585,12 @@ pub const Runtime = struct {
         try task_view.writeProjection(writer, .{
             .task = task,
             .now_ms = effects.now_ms,
-            .recovery = self.recoveryProjectionWithAuthority(task, external),
+            .recovery = recovery,
             .model_selection_availability = external.model_selection_availability,
             .available_approval_modes = self.availableApprovalModes(task, external, &available_modes),
             .shutting_down = external.shutting_down,
             .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
+            .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
@@ -5896,11 +5884,35 @@ pub const Runtime = struct {
     ) bool {
         const task = self.findConst(task_id) orelse return false;
         const external = effects.authority(projectionAuthorityQuery(task));
-        return !external.shutting_down and
+        return continuationAdmitted(task, external.shutting_down, self.recoveryProjectionWithAuthority(task, external));
+    }
+
+    fn continuationAdmitted(task: *const task_state.Task, shutting_down: bool, recovery: task_recovery.Projection) bool {
+        return !shutting_down and
             task_policy.taskLifecycle(task) == .open and
-            task_policy.continuationAvailable(
-                self.recoveryProjectionWithAuthority(task, external).continuation,
-            );
+            task_policy.continuationAvailable(recovery.continuation);
+    }
+
+    fn compactAdmission(task: *const task_state.Task, binding_epoch: u64, checkpoint_health: checkpoint_store.Health) error{ TaskBusy, BindingEpochMismatch, ExecutionUnavailable, ExecutionGenerationMismatch, NoSuchRun }!u64 {
+        if (inputContinuationSlot(task) != null) return error.TaskBusy;
+        if (binding_epoch == 0 or binding_epoch != task.durable.binding_epoch) return error.BindingEpochMismatch;
+        _ = try taskExecutionInput(task);
+        if (task_policy.hasActiveOperation(task) or task_state.hasUnfinalizedTerminalEvents(task)) return error.TaskBusy;
+        if (task.runtime.worker_leases.hasLive() and
+            (checkpoint_health != .unavailable or findEmptyCompact(task.durable.compacts) == null)) return error.TaskBusy;
+        return task_policy.lastConversationRunId(task) orelse error.NoSuchRun;
+    }
+
+    fn compactBlocker(task: *const task_state.Task, shutting_down: bool, recovery: task_recovery.Projection, checkpoint_health: checkpoint_store.Health) ?task_view.ActionBlocker {
+        if (task.read_only_history != null) return .history_read_only;
+        if (task_policy.taskLifecycle(task) == .closing) return .closing;
+        if (!continuationAdmitted(task, shutting_down, recovery)) return .unavailable;
+        _ = compactAdmission(task, task.durable.binding_epoch, checkpoint_health) catch |err| return switch (err) {
+            error.TaskBusy => .busy,
+            error.NoSuchRun => .no_history,
+            else => .unavailable,
+        };
+        return null;
     }
 
     fn inputAcceptanceReason(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, max_pending: usize) ?SendInputReason {
@@ -6947,6 +6959,13 @@ pub const Runtime = struct {
         // Checkpoint/close reconciliation above can retire the final lease on
         // this very pass. Do not retain the scrub credential until another wake.
         self.releaseQuiescentRunEffects(effects.release);
+        for (self.tasks) |entry| if (entry) |task| {
+            const has_live_workers = task.runtime.worker_leases.hasLive();
+            if (has_live_workers != task.observed_live_workers) {
+                task.observed_live_workers = has_live_workers;
+                result.changed = true;
+            }
+        };
         return result;
     }
 };
@@ -8987,6 +9006,30 @@ fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
     return task.deletion != .failed or
         (task_policy.taskLifecycle(task) == .open and !task_policy.hasActiveOperation(task) and
             !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
+}
+
+fn inputContinuationSlot(task: *const task_state.Task) ?usize {
+    for (task.durable.runs, 0..) |entry, slot| if (entry) |run| {
+        if (run.input_continuation_pending) return slot;
+    };
+    return null;
+}
+
+fn archiveBlocker(task: *const task_state.Task) ?task_view.ActionBlocker {
+    if (task.read_only_history != null) return .history_read_only;
+    if (task.deletion == .deleting) return .deleting;
+    if (task_policy.taskLifecycle(task) == .closing) return .closing;
+    if (task.model_intent_prepared or !failedDeletionCanBeAbandoned(task) or task_policy.hasActiveOperation(task)) return .busy;
+    return null;
+}
+
+fn deleteBlocker(task: *const task_state.Task) ?task_view.ActionBlocker {
+    if (task.read_only_history != null) return .history_read_only;
+    if (task.model_intent_prepared or task.approval_change != null) return .busy;
+    if (task.runtime.restore_job) |job| {
+        if (job.binding_commit == .pending or job.binding_commit == .outcome_unknown) return .busy;
+    }
+    return if (task.deletion == .deleting) .deleting else null;
 }
 
 /// A bounded window over the same readable text shown by the consumer.

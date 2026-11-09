@@ -14,7 +14,10 @@ import {
   createContextMenuAnchor,
   type ContextMenuAnchor,
 } from "../../components/ui/context-menu-anchor.ts";
-import { taskCountMessageId } from "../../i18n/formatters.ts";
+import {
+  taskActionBlockerMessageId,
+  taskCountMessageId,
+} from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import {
   readLocalPreference,
@@ -101,12 +104,7 @@ export function TaskList({
   }
 
   function archiveDisabled(task: TaskSummary) {
-    return (
-      taskMutationDisabled ||
-      task.historyReadOnly === true ||
-      task.activeOperation !== null ||
-      task.lifecycle === "closing"
-    );
+    return taskMutationDisabled || task.archiveBlocker !== null;
   }
 
   function openTaskMenu(
@@ -167,7 +165,11 @@ export function TaskList({
           aria-label={t("task.archive_for", {
             title: task.title || t("task.item", { id: task.id }),
           })}
-          title={t("task.archive")}
+          title={t(
+            task.archiveBlocker
+              ? taskActionBlockerMessageId(task.archiveBlocker)
+              : "task.archive",
+          )}
           disabled={archiveDisabled(task)}
           onClick={() => onTaskAction(task, "archive")}
           onContextMenu={(event) => openTaskMenu(event, task.id)}
@@ -342,6 +344,11 @@ export function TaskList({
                   </Menu.Item>
                   <Menu.Item
                     disabled={archiveDisabled(menuTask)}
+                    title={
+                      menuTask.archiveBlocker
+                        ? t(taskActionBlockerMessageId(menuTask.archiveBlocker))
+                        : undefined
+                    }
                     onClick={() => onTaskAction(menuTask, "archive")}
                   >
                     <Icon name="archive" />
@@ -350,11 +357,12 @@ export function TaskList({
                   <Menu.Item
                     variant="danger"
                     disabled={
-                      taskMutationDisabled ||
-                      menuTaskReadOnly ||
-                      menuTask.deletionStatus === "deleting" ||
-                      (menuTask.lifecycle === "closing" &&
-                        menuTask.deletionStatus !== "failed")
+                      taskMutationDisabled || menuTask.deleteBlocker !== null
+                    }
+                    title={
+                      menuTask.deleteBlocker
+                        ? t(taskActionBlockerMessageId(menuTask.deleteBlocker))
+                        : undefined
                     }
                     onClick={() => {
                       // The confirmation owns focus after the menu closes.

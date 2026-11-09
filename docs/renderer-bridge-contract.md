@@ -100,6 +100,8 @@ Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`
 
 `taskIndex` 的摘要与 `taskPage.task` 均必填 `signal`，值为 `attention | running | failed | interrupted | null`。同一次冻结读取中同一 Task 的值必须一致。`latestTerminal` 保留 outcome/cause 摘要，完成未读和归档独立。Workspace 的 `signals` 聚合未归档 Task 的同一信号，`failedOrInterrupted` 合计失败和中断。
 
+`taskIndex` 摘要必填 `archiveBlocker`（归档或恢复归档）及 `deleteBlocker`，`taskPage.task` 详情必填 `compactBlocker`。值为 `null` 时表示当次投影允许发起动作，其余值为 `busy | closing | deleting | history_read_only | no_history | unavailable`。Host 使用 Task 的动作准入和当前外部事实产生这些字段，执行命令时重新校验。Renderer 从这些字段呈现资格和原因，另保留连接及本地在途提交门禁。活动 Run 可以进入停止并删除，手动 compact 资格取 Task 的对话覆盖与操作状态，与已加载的历史页无关。
+
 Run terminal cause `event_payload_too_large` 表示单次执行事件超过 Host 有界接收上限；`queue_capacity_failure` 表示执行或事件队列无法继续准入。两者不代表磁盘空间不足。文件修改 observation 的 incomplete 只表示未能完整确认修改情况，不推断已保存文件损坏。
 
 每个 Run 另精确发布 `fileChanges = null | { observation, changes }`。null 表示没有建立 typed observation，不能解释为“确认没有修改”；observation 只取 `collecting | complete | incomplete`。`changes[]` entry 精确为 `{ id, order, kind, status, displayPath, fromDisplayPath, beforeBytes, afterBytes, diffAvailable, diffComplete, redacted }`：id 是 Run 内 opaque identity，order、beforeBytes、afterBytes 是 canonical decimal `u64` string；kind 只取 `created | modified | deleted | moved`，status 只取 `applied | partial`，fromDisplayPath 只在 moved 时非空，其余安全标志均为 boolean。同一 Run 的 id 和 order 必须唯一并按 order 严格递增；同路径多次记录不得合并。该投影不运输 raw locator、absolute path、AgentCore handle、agent depth、unified diff、credential 或文件当前内容。根 capability `typedFileChanges` 为 true 时 Renderer 才可消费此字段。
@@ -335,7 +337,7 @@ Scheduled Task setEnabled response 的 `enabled` 表示本次提交并完成 tim
 
 Scheduled Task 的 skipped occurrence 可携带 `taskId`，仅当 reason 为 `previous_task_running` 时表示阻塞它的真实 Task，不代表新建 Task；此前没有记录 blocker 的 null 值仍有效。
 
-`metawork.tasks.delete` 只接受 `{ taskId }`，仅对已归档 Task 开放。成功返回 `{ taskId, deleting: true }`，表示 Product Control 已受理唯一删除意图；它不声称 Task 已经物理删除。Task snapshot 以 `deletionStatus = idle | deleting | failed` 发布该 runtime-only 产品用例：`deleting` 时 Renderer 等待后续 snapshot 移除 Task，`failed` 时保留归档 Task 并重新开放显式删除动作。Product Control 自行收口 Attachment、等待 worker/checkpoint quiescence、提交 Task store；Renderer 不重复提交正常推进、不编排 Session teardown，也不解析 checkpoint、close failure 或 worker reference。
+`metawork.tasks.delete` 只接受 `{ taskId }`，已归档和未归档 Task 均可提交。成功返回 `{ taskId, deleting: true }`，表示 Product Control 已受理唯一删除意图；它不声称 Task 已经物理删除。Task snapshot 以 `deletionStatus = idle | deleting | failed` 发布该 runtime-only 产品用例：`deleting` 时 Renderer 等待后续 snapshot 移除 Task，`failed` 时保留 Task 及原归档状态，显式重试资格由 `deleteBlocker` 发布。Product Control 自行收口 Attachment、等待 worker/checkpoint quiescence、提交 Task store；Renderer 不重复提交正常推进、不编排 Session teardown，也不解析 checkpoint、close failure 或 worker reference。
 
 每个 Task snapshot 必须发布 `unreadCompletionRunId: canonical decimal u64 | null`。非空时必须精确引用该 Task `runs` 中最新的 terminal Run，且其 `terminal.outcome = completed`；不存在成功完成、最新 terminal 是其他 outcome，或该 Run 已由 Product receipt 确认时必须为 null。Renderer 不从 Run 数组另建未读真源。
 

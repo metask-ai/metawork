@@ -50,6 +50,9 @@ export function taskSummary(task) {
   const compact = task.compacts?.find(
     (entry) => entry.operationId === task.activeOperation?.id,
   );
+  const { archiveBlocker, deleteBlocker } = taskActionBlockers(task);
+  summary.archiveBlocker = archiveBlocker;
+  summary.deleteBlocker = deleteBlocker;
   summary.historyReadOnly =
     task.continuationUnavailableReason === "history_read_only";
   summary.activeCompactPhase =
@@ -60,6 +63,35 @@ export function taskSummary(task) {
     ? { outcome: terminal.outcome, cause: terminal.cause }
     : null;
   return summary;
+}
+
+function taskActionBlockers(task) {
+  const readOnly = task.continuationUnavailableReason === "history_read_only";
+  const deleting = task.deletionStatus === "deleting";
+  const closing = task.lifecycle === "closing";
+  const busy = task.activeOperation !== null || task.approvalChange !== null;
+  const intentPending = task.modelIntent?.state === "outcome_unknown";
+  const common = readOnly ? "history_read_only" : deleting ? "deleting" : null;
+  return {
+    archiveBlocker:
+      common ?? (closing ? "closing" : busy || intentPending ? "busy" : null),
+    deleteBlocker: readOnly
+      ? "history_read_only"
+      : intentPending || task.approvalChange !== null
+        ? "busy"
+        : common,
+    compactBlocker: readOnly
+      ? "history_read_only"
+      : closing
+        ? "closing"
+        : !task.continuationAvailable
+          ? "unavailable"
+          : busy
+            ? "busy"
+            : task.runs.some((run) => run.conversationCoverage === "included")
+              ? null
+              : "no_history",
+  };
 }
 
 function fixtureSignal(task, terminal) {
@@ -80,6 +112,7 @@ function fixtureSignal(task, terminal) {
 export function productViewFixture(
   state,
   scope = { ...initialViewScope, taskId: state.tasks[0]?.id ?? null },
+  { deriveTaskActions = true } = {},
 ) {
   scope = { ...initialViewScope, ...scope };
   const {
@@ -122,7 +155,13 @@ export function productViewFixture(
             ].map((key) => [key, run[key]]),
           ),
         })),
-        task: { ...selected, runs: selected.runs.slice(-scope.runLimit) },
+        task: {
+          ...selected,
+          compactBlocker: deriveTaskActions
+            ? taskActionBlockers(selected).compactBlocker
+            : selected.compactBlocker,
+          runs: selected.runs.slice(-scope.runLimit),
+        },
       }
     : null;
   return {
