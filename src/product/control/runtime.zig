@@ -14591,13 +14591,18 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     try std.testing.expectEqual(commits, persistence.commits);
     try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
     try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
-    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+    const retry_at = clock.armed_at orelse return error.TestUnexpectedResult;
+    try std.testing.expect(retry_at > clock.now);
     vault.read_fails = false;
-    try std.testing.expect(control.clearCustomProviderDefault().accepted);
-    try control.validateScheduledBinding(try control.schedule.bindingAt(id, 1));
-    _ = control.schedule.rearmNoFail(control.scheduleExecutionBinding(), control.scheduleRedaction());
-    try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);
-    try std.testing.expectEqual(commits, persistence.commits);
+    clock.now = retry_at;
+    control.onScheduledTaskTimer();
+    const occurrences = control.schedule.store.find(id).?.occurrences();
+    try std.testing.expectEqual(@as(usize, 1), occurrences.len);
+    try std.testing.expectEqual(@as(u64, 2000), occurrences[0].planned_at_unix_seconds);
+    // This fixture has no Task persistence, so admission rejects after the claim.
+    try std.testing.expect(occurrences[0].result == .rejected);
+    try std.testing.expectEqual(product_schedule.FailureReason.task_start_failed, occurrences[0].reason.?);
+    try std.testing.expectEqual(commits + 2, persistence.commits);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {

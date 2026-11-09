@@ -11,6 +11,8 @@ const state = @import("product_schedule_state");
 const persistence = @import("product_schedule_persistence");
 const view = @import("product_schedule_view");
 
+const preflight_retry_seconds: u64 = 60;
+
 pub const Recurrence = state.Recurrence;
 pub const LocalRecurrence = state.LocalRecurrence;
 pub const calendarDayMask = state.calendarDayMask;
@@ -585,12 +587,9 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
-            } else if (self.persistence_health == .ready and
-                self.store.find(due.id).?.preflight_blocked)
+            } else if (self.persistence_health != .ready or
+                self.store.find(due.id).?.preflight_retry_at_unix_seconds == null)
             {
-                _ = self.rearmNoFail(binding, redaction);
-                return;
-            } else {
                 // No claim may have been committed. Leave its cursor intact
                 // and wait for an authority/lifecycle wake, never arm the same
                 // overdue point again from this failed callback.
@@ -619,7 +618,7 @@ pub const Runtime = struct {
         redaction: Redaction,
     ) bool {
         for (self.store.items) |*entry| {
-            if (entry.*) |*item| item.preflight_blocked = false;
+            if (entry.*) |*item| item.preflight_retry_at_unix_seconds = null;
         }
         return self.reconcileBindingsNoFail(binding, redaction);
     }
@@ -653,8 +652,7 @@ pub const Runtime = struct {
         }
         const current = self.timer.now() orelse return null;
         const item = self.earliestReady(binding) orelse return null;
-        const planned = item.next_run_at_unix_seconds orelse return null;
-        if (planned > current) {
+        if (timerDueAt(item) > current) {
             _ = self.rearmNoFail(binding, redaction);
             return null;
         }
@@ -886,8 +884,9 @@ pub const Runtime = struct {
         redaction: Redaction,
     ) anyerror!u64 {
         const blocking_task_id = try self.activeTaskId(id, tasks);
+        const item = self.store.find(id) orelse return error.UnknownScheduledTask;
+        item.preflight_retry_at_unix_seconds = null;
         if (blocking_task_id == 0) {
-            const item = self.store.find(id) orelse return error.UnknownScheduledTask;
             const binding = item.bindingView();
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
@@ -901,10 +900,9 @@ pub const Runtime = struct {
             }) catch |err| {
                 if (err == error.ExecutionUnavailable or err == error.ExecutionInUse or
                     err == error.ExecutionGenerationMismatch)
-                    item.preflight_blocked = true;
+                    item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
                 return err;
             };
-            item.preflight_blocked = false;
         }
         const begin = try self.beginOccurrence(
             id,
@@ -1082,13 +1080,17 @@ pub const Runtime = struct {
         return redactStore(&self.store, redaction, additional_credential);
     }
 
+    fn timerDueAt(item: *const state.Item) u64 {
+        return @max(item.next_run_at_unix_seconds.?, item.preflight_retry_at_unix_seconds orelse 0);
+    }
+
     fn earliestReady(self: *Runtime, authority: ExecutionBinding) ?*state.Item {
         var earliest: ?*state.Item = null;
         for (self.store.items) |*entry| {
             const item = if (entry.*) |*value| value else continue;
-            if (!item.enabled or item.health != .ready or item.preflight_blocked or item.next_run_at_unix_seconds == null or
+            if (!item.enabled or item.health != .ready or item.next_run_at_unix_seconds == null or
                 authority.status(item.bindingView()) != .ready) continue;
-            if (earliest == null or item.next_run_at_unix_seconds.? < earliest.?.next_run_at_unix_seconds.?) earliest = item;
+            if (earliest == null or timerDueAt(item) < timerDueAt(earliest.?)) earliest = item;
         }
         return earliest;
     }
@@ -1102,8 +1104,7 @@ pub const Runtime = struct {
         if (!self.background_available or self.persistence_health != .ready or
             !binding.available) return false;
         const item = self.earliestReady(binding) orelse return false;
-        const due = item.next_run_at_unix_seconds orelse return false;
-        if (self.timer.armAt(due)) return false;
+        if (self.timer.armAt(timerDueAt(item))) return false;
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
@@ -1667,7 +1668,7 @@ test "full protected history stops without eviction or an overdue timer retry" {
     }
 }
 
-test "preflight refusal leaves no claim and cancels overdue timer until authority returns" {
+test "transient preflight failure retries without a claim and runs only the latest due occurrence" {
     var effects: TestEffects = .{};
     var tasks: TestTasks = .{ .preflight_error = error.ExecutionUnavailable };
     var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
@@ -1676,22 +1677,34 @@ test "preflight refusal leaves no claim and cancels overdue timer until authorit
     });
     defer runtime.deinit();
     const redaction = testRedaction(&effects);
-    const id = try runtime.create(testDefinition("preflight", "inspect"), testBinding(), redaction);
+    var definition = testDefinition("preflight", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
     _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
     const commits = effects.commits;
     effects.now = 200;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
-    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+    effects.now = 259;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+    effects.now = 260;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 320), effects.armed_at);
     try std.testing.expectEqual(commits, effects.commits);
     try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
     try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
     try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, redaction, tasks.effects()));
     try std.testing.expectEqual(commits, effects.commits);
     tasks.preflight_error = null;
-    _ = runtime.refreshBindingNoFail(testBinding(), redaction);
+    effects.now = 382;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
     runtime.onTimer(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
-    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+    const item = runtime.store.find(id).?;
+    try std.testing.expectEqual(@as(usize, 1), item.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 380), item.occurrences()[0].planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 440), effects.armed_at);
 }
 
 test "unavailable binding cancels an armed timer without invalidating a due definition" {
@@ -2153,9 +2166,9 @@ test "preflight failure isolates one plan across lifecycle wakes and store repla
     try std.testing.expectEqual(@as(usize, 1), runtime.store.find(valid).?.occurrence_count);
     try std.testing.expectEqual(@as(usize, 0), runtime.store.find(blocked).?.occurrence_count);
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
-    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
     tasks.preflight_blocked_title = null;
-    _ = runtime.refreshBindingNoFail(testBinding(), redaction);
+    effects.now = 260;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(@as(u64, 44), tasks.next_task_id);
 }

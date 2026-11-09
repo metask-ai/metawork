@@ -240,9 +240,8 @@ pub const Item = struct {
     last_occurrence: ?Occurrence = null,
     occurrence_history: [max_occurrence_history]Occurrence = undefined,
     occurrence_count: usize = 0,
-    /// Transient resolve refusal, cleared by an authority refresh or edit.
-    /// Never persisted: it does not invalidate the captured definition.
-    preflight_blocked: bool = false,
+    /// Earliest retry after a transient resolve failure. Process-local only.
+    preflight_retry_at_unix_seconds: ?u64 = null,
 
     pub fn occurrences(self: *const Item) []const Occurrence {
         return self.occurrence_history[0..self.occurrence_count];
@@ -344,7 +343,7 @@ pub const Store = struct {
                 .last_timer_planned_at_unix_seconds = item.last_timer_planned_at_unix_seconds,
             });
             const copied = result.find(item.id).?;
-            copied.preflight_blocked = item.preflight_blocked;
+            copied.preflight_retry_at_unix_seconds = item.preflight_retry_at_unix_seconds;
             copied.title_redacted = item.title_redacted;
             copied.input.redacted = item.input.redacted;
         }
