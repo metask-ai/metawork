@@ -13418,7 +13418,8 @@ test "Schedule blocker projection matches the shared Renderer fixture" {
         .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
     }, 1000);
     const item = control.schedule.store.find(id).?;
-    try control.schedule.store.markSubmitted(item, 2000, 2001, .timer, 3);
+    try control.schedule.store.claim(item, 2000, 2001, .timer);
+    try control.schedule.store.finalizeClaimSubmitted(item, 2000, .timer, 3);
     try control.schedule.store.markSkipped(item, 5600, 5601, 3);
     try control.schedule.store.markSkipped(item, 9200, 9201, 0);
     var storage: [8192]u8 = undefined;

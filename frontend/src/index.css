@@ -6109,9 +6109,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-section-heading {
   display: flex;
   min-height: 30px;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .scheduled-section-heading h2 {

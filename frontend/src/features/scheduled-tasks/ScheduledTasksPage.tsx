@@ -44,7 +44,7 @@ type Draft = {
   weekdays: number[];
   monthDays: number[];
   timezone: string;
-  originalStart: { text: string; unixSeconds: number } | null;
+  originalStart: number | null;
   start: string;
   every: string;
   unit: "minutes" | "hours" | "days";
@@ -123,7 +123,7 @@ function draftFromTask(task: ScheduledTaskView): Draft {
         ? (task.recurrence.days ?? [])
         : [new Date(Date.now()).getDate()],
     timezone,
-    originalStart: { text: startText, unixSeconds: Number(start) },
+    originalStart: Number(start),
     start: startText,
     every: String(everySeconds / divisor),
     unit,
@@ -138,22 +138,22 @@ function modelOptions(snapshot: WorkbenchSnapshot) {
 }
 
 function draftUnixSeconds(draft: Draft): number | null {
-  if (draft.originalStart && draft.start === draft.originalStart.text)
-    return draft.originalStart.unixSeconds;
-  return draft.recurrenceKind === "interval"
-    ? calendarInstant(draft.start, draft.timezone)
-    : nextOnceTime(draft.start.slice(-5), draft.timezone);
+  if (draft.originalStart !== null) return draft.originalStart;
+  if (draft.recurrenceKind === "interval")
+    return calendarInstant(draft.start, draft.timezone);
+  if (draft.recurrenceKind === "once")
+    return nextOnceTime(draft.start.slice(-5), draft.timezone);
+  return null;
 }
 
 function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
+  start: number | null,
+  availableModels: ReturnType<typeof modelOptions>,
 ): ScheduledTaskMutation | null {
   const absolute =
     draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
-  const start = absolute
-    ? draftUnixSeconds(draft)
-    : (draft.originalStart?.unixSeconds ?? null);
   const localTime = draft.start.slice(-5);
   if (!draft.title.trim() || (absolute && start === null)) return null;
   if (
@@ -178,7 +178,7 @@ function toMutation(
       !Number.isSafeInteger(every * unitSeconds))
   )
     return null;
-  const option = modelOptions(snapshot).find(
+  const option = availableModels.find(
     (candidate) => candidate.selectionId === draft.modelId,
   );
   if (draft.modelChanged && !option) return null;
@@ -303,16 +303,16 @@ export function ScheduledTasksPage({
     return () => window.clearInterval(interval);
   }, [hasNextRun]);
   const timeLabel = t("scheduled.time");
-  const mutation = toMutation(snapshot, draft);
+  const availableModels = modelOptions(snapshot);
+  const draftStart = draftUnixSeconds(draft);
+  const mutation = toMutation(snapshot, draft, draftStart, availableModels);
   const absolute =
     draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
-  const draftStart = absolute ? draftUnixSeconds(draft) : null;
   const invalidStart = absolute && draftStart === null;
   const expiredOnce =
     draft.recurrenceKind === "once" &&
     draftStart !== null &&
     draftStart <= Math.floor(Date.now() / 1000);
-  const availableModels = modelOptions(snapshot);
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
     if (!normalizedQuery) return true;
@@ -394,7 +394,12 @@ export function ScheduledTasksPage({
       setError(t("scheduled.changed"));
       return;
     }
-    const mutation = toMutation(snapshot, draft);
+    const mutation = toMutation(
+      snapshot,
+      draft,
+      draftUnixSeconds(draft),
+      availableModels,
+    );
     if (!mutation) {
       setError(t(expiredOnce ? "scheduled.expired_once" : "scheduled.error"));
       return;
@@ -650,7 +655,7 @@ export function ScheduledTasksPage({
                   >
                     <div className="scheduled-section-heading">
                       <h2 id={`scheduled-group-${group.key}`}>{group.label}</h2>
-                      <span>{group.tasks.length}</span>
+                      <span>({group.tasks.length})</span>
                     </div>
                     <ul className="scheduled-list" aria-label={group.label}>
                       {group.tasks.map((task) => {

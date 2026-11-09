@@ -885,7 +885,8 @@ test "scheduled task store round trips bounded occurrence history" {
         } },
     }, 1_000);
     const item = store.find(id).?;
-    try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
+    try store.claim(item, 2_000, 2_001, .timer);
+    try store.finalizeClaimSubmitted(item, 2_000, .timer, 42);
     try store.finalizeOccurrenceTask(item, 2_000, .timer, 42, .completed, null);
     try store.markSkipped(item, 5_600, 5_601, 42);
     try store.markSkipped(item, 9_200, 9_201, 0);
@@ -1313,12 +1314,14 @@ test "timer consumption survives history eviction and a paused-store restart" {
             .recurrence = recurrence,
         }, 100);
         const item = store.find(id).?;
-        try store.markSubmitted(item, 200, 200, .timer, 42);
+        try store.claim(item, 200, 200, .timer);
+        try store.finalizeClaimSubmitted(item, 200, .timer, 42);
         try store.finalizeOccurrenceTask(item, 200, .timer, 42, .completed, null);
         for (0..scheduled.max_occurrence_history) |index| {
             const planned = 201 + index;
             const task_id = 100 + index;
-            try store.markSubmitted(item, planned, planned, .manual, task_id);
+            try store.claim(item, planned, planned, .manual);
+            try store.finalizeClaimSubmitted(item, planned, .manual, task_id);
             try store.finalizeOccurrenceTask(item, planned, .manual, task_id, .completed, null);
         }
         for (item.occurrences()) |occurrence| try std.testing.expectEqual(scheduled.OccurrenceSource.manual, occurrence.source);
@@ -1347,7 +1350,8 @@ test "legacy timer facts repair a rewound cursor without discarding definitions"
             .recurrence = recurrence,
         }, 100);
         const item = store.find(id).?;
-        try store.markSubmitted(item, 200, 200, .timer, 42);
+        try store.claim(item, 200, 200, .timer);
+        try store.finalizeClaimSubmitted(item, 200, .timer, 42);
         try store.finalizeOccurrenceTask(item, 200, .timer, 42, .completed, null);
         // A schema-1 record written by the previous edit/resume path.
         item.last_timer_planned_at_unix_seconds = null;

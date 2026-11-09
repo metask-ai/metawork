@@ -5197,7 +5197,6 @@ pub const Dispatcher = struct {
             parsed.value.recurrence,
         );
         const workbench = try self.requireProductControl();
-        _ = try workbench.scheduledTaskEpoch(scheduled_task_id);
         try workbench.updateScheduledTask(
             scheduled_task_id,
             expected_epoch,
@@ -5229,7 +5228,6 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        _ = try workbench.scheduledTaskEpoch(id);
         const enabled = try workbench.setScheduledTaskEnabled(id, epoch, parsed.value.enabled);
         const next_epoch = try workbench.scheduledTaskEpoch(id);
         self.notifyCommitted();
@@ -5257,7 +5255,6 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        _ = try workbench.scheduledTaskEpoch(id);
         const task_id = try workbench.runScheduledTaskNow(
             id,
             epoch,
@@ -5287,7 +5284,6 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        _ = try workbench.scheduledTaskEpoch(id);
         try workbench.deleteScheduledTask(id, epoch);
         self.notifyCommitted();
         return std.fmt.bufPrint(

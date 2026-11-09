@@ -226,7 +226,6 @@ fn unavailableBinding(_: ?*anyopaque, _: ModelBinding) BindingAvailability {
 
 const Due = struct {
     id: u64,
-    epoch: u64,
     planned_at_unix_seconds: u64,
     triggered_at_unix_seconds: u64,
 };
@@ -658,7 +657,6 @@ pub const Runtime = struct {
         }
         return .{
             .id = item.id,
-            .epoch = item.epoch,
             .planned_at_unix_seconds = (item.recurrence.lastAtOrBefore(current) catch return null) orelse return null,
             .triggered_at_unix_seconds = current,
         };
@@ -1217,16 +1215,6 @@ pub const testing = if (builtin.is_test) struct {
             .next_run_at_unix_seconds = stored.next_run_at_unix_seconds,
             .last_occurrence = stored.last_occurrence,
         };
-    }
-
-    pub fn overwriteInputPrefix(
-        runtime: *Runtime,
-        id: u64,
-        bytes: []const u8,
-    ) void {
-        const stored = runtime.store.find(id) orelse unreachable;
-        std.debug.assert(bytes.len <= stored.input.value.len);
-        @memcpy(stored.input.value[0..bytes.len], bytes);
     }
 } else struct {};
 

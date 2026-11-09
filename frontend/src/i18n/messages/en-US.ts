@@ -1907,7 +1907,6 @@ export const enUS = {
     "The latest change could not be saved. Automatic runs are stopped.",
   "scheduled.persistence.outcome_unknown":
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
-  "scheduled.persistence.ready": "Schedule storage is ready.",
   "task.persistence.read_failed":
     "Saved task history could not be read. You can continue, but new work will not be saved in this session.",
   "task.persistence.corrupt":

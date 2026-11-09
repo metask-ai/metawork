@@ -549,41 +549,6 @@ pub const Store = struct {
         return &(self.items[index] orelse unreachable);
     }
 
-    pub fn earliestDue(self: *Store) ?*Item {
-        var earliest: ?*Item = null;
-        for (self.items) |*entry| {
-            const item = &(entry.* orelse continue);
-            if (!item.enabled or item.health != .ready or
-                item.next_run_at_unix_seconds == null)
-                continue;
-            if (earliest == null or
-                item.next_run_at_unix_seconds.? <
-                    earliest.?.next_run_at_unix_seconds.?)
-                earliest = item;
-        }
-        return earliest;
-    }
-
-    pub fn markSubmitted(
-        self: *Store,
-        item: *Item,
-        planned_at_unix_seconds: u64,
-        triggered_at_unix_seconds: u64,
-        source: OccurrenceSource,
-        task_id: u64,
-    ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
-        std.debug.assert(task_id != 0);
-        try self.recordOccurrence(item, .{
-            .planned_at_unix_seconds = planned_at_unix_seconds,
-            .triggered_at_unix_seconds = triggered_at_unix_seconds,
-            .source = source,
-            .result = .submitted,
-            .task_id = task_id,
-        });
-        if (source == .manual) return;
-        try advanceAfterTimer(item, triggered_at_unix_seconds);
-    }
-
     pub fn claim(
         self: *Store,
         item: *Item,
@@ -722,24 +687,6 @@ pub const Store = struct {
         item.health = .needs_attention;
         item.failure_reason = reason;
         item.next_run_at_unix_seconds = null;
-    }
-
-    pub fn markRejected(
-        self: *Store,
-        item: *Item,
-        planned_at_unix_seconds: u64,
-        triggered_at_unix_seconds: u64,
-        source: OccurrenceSource,
-        reason: FailureReason,
-    ) error{ScheduledOccurrenceCapacity}!void {
-        try self.recordOccurrence(item, .{
-            .planned_at_unix_seconds = planned_at_unix_seconds,
-            .triggered_at_unix_seconds = triggered_at_unix_seconds,
-            .source = source,
-            .result = .rejected,
-            .reason = reason,
-        });
-        self.markNeedsAttention(item, reason);
     }
 
     fn recordOccurrence(
@@ -1036,7 +983,8 @@ test "store updates optimistically and a one-time occurrence completes" {
     }, 1_000);
     const item = store.find(id).?;
     try std.testing.expectEqual(@as(u64, 1), item.epoch);
-    try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
+    try store.claim(item, 2_000, 2_001, .timer);
+    try store.finalizeClaimSubmitted(item, 2_000, .timer, 42);
     try std.testing.expectEqual(Health.completed, item.health);
     try std.testing.expect(!item.enabled);
     try std.testing.expect(item.next_run_at_unix_seconds == null);

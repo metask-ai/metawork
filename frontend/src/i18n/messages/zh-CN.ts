@@ -1656,7 +1656,6 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.persistence.write_failed": "最近的更改未能保存，自动触发已停止。",
   "scheduled.persistence.outcome_unknown":
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
-  "scheduled.persistence.ready": "定时任务存储已就绪。",
   "task.persistence.read_failed":
     "无法读取已保存的任务历史。你可以继续工作，但本次使用中的新内容不会保存。",
   "task.persistence.corrupt":
