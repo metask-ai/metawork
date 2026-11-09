@@ -1,4 +1,5 @@
 const std = @import("std");
+const credential_match = @import("product_credential_match");
 const builtin = @import("builtin");
 const update = @import("metawork_product_update");
 const product_identity = @import("metawork_product_identity");
@@ -2168,7 +2169,7 @@ pub const Runtime = struct {
 
     fn workspacePathHasCredential(self: *const Runtime, path: []const u8) bool {
         var index: usize = 0;
-        while (index < path.len) : (index += utf8CodepointLen(path, index)) {
+        while (index < path.len) : (index += credential_match.codepointLen(path, index)) {
             if (self.knownCredentialEndAtCodepoint(path, index) != null) return true;
         }
         return false;
@@ -2568,7 +2569,7 @@ pub const Runtime = struct {
                 redacted = true;
                 continue;
             }
-            const codepoint_len = utf8CodepointLen(value, read);
+            const codepoint_len = credential_match.codepointLen(value, read);
             @memcpy(output[write..][0..codepoint_len], value[read..][0..codepoint_len]);
             write += codepoint_len;
             read += codepoint_len;
@@ -2590,7 +2591,7 @@ pub const Runtime = struct {
         while (index < value.len) {
             if (self.knownCredentialMayContinueAtCodepoint(value, index))
                 return index;
-            index += utf8CodepointLen(value, index);
+            index += credential_match.codepointLen(value, index);
         }
         return value.len;
     }
@@ -2600,7 +2601,7 @@ pub const Runtime = struct {
         value: []const u8,
         codepoint_start: usize,
     ) bool {
-        const codepoint_len = utf8CodepointLen(value, codepoint_start);
+        const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
             if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
@@ -7712,7 +7713,7 @@ pub const Runtime = struct {
                 redacted = true;
                 continue;
             }
-            const codepoint_len = utf8CodepointLen(value, read);
+            const codepoint_len = credential_match.codepointLen(value, read);
             @memcpy(
                 projected[write..][0..codepoint_len],
                 value[read..][0..codepoint_len],
@@ -9655,7 +9656,7 @@ pub const Runtime = struct {
         var redacted = false;
         while (read < target.list.items.len) {
             const value = target.list.items;
-            if (credentialEndAtCodepoint(value, read, credential)) |redaction_end| {
+            if (credential_match.matchEnd(value, read, credential)) |redaction_end| {
                 const marker_len = @min(redaction_end - read, 3);
                 @memset(target.list.items[write..][0..marker_len], '*');
                 write += marker_len;
@@ -9663,7 +9664,7 @@ pub const Runtime = struct {
                 redacted = true;
                 continue;
             }
-            if (credentialMayContinueAtCodepoint(value, read, credential)) {
+            if (credential_match.mayContinue(value, read, credential)) {
                 const remaining = value[read..];
                 std.mem.copyForwards(
                     u8,
@@ -9674,7 +9675,7 @@ pub const Runtime = struct {
                 target.committed_len = write;
                 return redacted;
             }
-            const codepoint_len = utf8CodepointLen(value, read);
+            const codepoint_len = credential_match.codepointLen(value, read);
             std.mem.copyForwards(
                 u8,
                 target.list.items[write..][0..codepoint_len],
@@ -9767,7 +9768,7 @@ pub const Runtime = struct {
                         try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, "***"[0..@min(end - index, 3)]);
                         index = end;
                         copied = end;
-                    } else index += utf8CodepointLen(value, index);
+                    } else index += credential_match.codepointLen(value, index);
                 }
                 try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..]);
             }
@@ -9819,7 +9820,7 @@ pub const Runtime = struct {
         value: []const u8,
         codepoint_start: usize,
     ) ?usize {
-        const codepoint_len = utf8CodepointLen(value, codepoint_start);
+        const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         var match_end: usize = 0;
         for (0..codepoint_len) |offset| {
             const credential_len = self.matchedKnownCredentialLen(
@@ -9849,7 +9850,7 @@ pub const Runtime = struct {
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
         while (index < value.len) {
-            if (credentialEndAtCodepoint(value, index, credential)) |redaction_end| {
+            if (credential_match.matchEnd(value, index, credential)) |redaction_end| {
                 _ = writer.splatByte('*', @min(redaction_end - index, 3)) catch
                     return error.SnapshotTooLarge;
                 index = redaction_end;
@@ -11093,8 +11094,8 @@ fn sanitizeInto(destination: []u8, value: []const u8, secrets: []const []const u
     while (read < value.len) {
         var match_end: usize = 0;
         var cursor = read;
-        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
-            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+        while (cursor == read or cursor < match_end) : (cursor += credential_match.codepointLen(value, cursor)) {
+            for (secrets) |secret| if (credential_match.matchEnd(value, cursor, secret)) |end| {
                 match_end = @max(match_end, end);
             };
         }
@@ -11108,7 +11109,7 @@ fn sanitizeInto(destination: []u8, value: []const u8, secrets: []const []const u
             redacted = true;
             continue;
         }
-        const sequence_len = utf8CodepointLen(value, read);
+        const sequence_len = credential_match.codepointLen(value, read);
         if (sequence_len > value.len - read or sequence_len > destination.len - write) break;
         @memcpy(destination[write..][0..sequence_len], value[read..][0..sequence_len]);
         write += sequence_len;
@@ -11141,7 +11142,7 @@ fn redactWorkspaceBytesNoFail(
     var redacted = false;
     while (read < projected_len.*) {
         const projected = storage[0..projected_len.*];
-        if (credentialEndAtCodepoint(projected, read, credential)) |redaction_end| {
+        if (credential_match.matchEnd(projected, read, credential)) |redaction_end| {
             const marker_len = @min(redaction_end - read, 3);
             @memset(storage[write..][0..marker_len], '*');
             write += marker_len;
@@ -11149,7 +11150,7 @@ fn redactWorkspaceBytesNoFail(
             redacted = true;
             continue;
         }
-        const codepoint_len = utf8CodepointLen(projected, read);
+        const codepoint_len = credential_match.codepointLen(projected, read);
         std.mem.copyForwards(
             u8,
             storage[write..][0..codepoint_len],
@@ -11179,13 +11180,6 @@ fn redactFixedWidthNoFail(storage: []u8, credential: []const u8) bool {
 
 const RedactionBounds = struct { start: usize, end: usize };
 
-fn utf8CodepointLen(value: []const u8, start: usize) usize {
-    return @min(
-        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
-        value.len - start,
-    );
-}
-
 fn utf8RedactionBounds(
     value: []const u8,
     match_start: usize,
@@ -11196,49 +11190,6 @@ fn utf8RedactionBounds(
     var end = @min(value.len, match_start + match_len);
     while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
     return .{ .start = start, .end = end };
-}
-
-fn credentialEndAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) ?usize {
-    if (credential.len == 0) return null;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    var match_end: usize = 0;
-    for (0..codepoint_len) |offset| {
-        if (std.mem.startsWith(
-            u8,
-            value[codepoint_start + offset ..],
-            credential,
-        ))
-            match_end = @max(
-                match_end,
-                codepoint_start + offset + credential.len,
-            );
-    }
-    if (match_end == 0) return null;
-    return utf8RedactionBounds(
-        value,
-        codepoint_start,
-        match_end - codepoint_start,
-    ).end;
-}
-
-fn credentialMayContinueAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) bool {
-    if (credential.len == 0) return false;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    for (0..codepoint_len) |offset| {
-        const remaining = value[codepoint_start + offset ..];
-        if (remaining.len < credential.len and
-            std.mem.startsWith(u8, credential, remaining))
-            return true;
-    }
-    return false;
 }
 
 fn kindForResponse(response: UiResponse) UiRecordKind {

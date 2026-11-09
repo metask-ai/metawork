@@ -2048,6 +2048,12 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const credential_match = b.createModule(.{
+        .root_source_file = b.path("src/product/credential_match.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_runtime.addImport("product_credential_match", credential_match);
     task_runtime.addImport("product_task_state", task_state);
     task_runtime.addImport("product_task_approval_job", task_approval_job);
     task_runtime.addImport("product_permission_review", product_permission_review);
@@ -2075,6 +2081,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_execution.addImport("product_credential_match", credential_match);
     task_execution.addImport("metawork_agent", agent);
     task_execution.addImport("product_task_checkpoint_record", checkpoint_record);
     task_execution.addImport("product_task_checkpoint_store", checkpoint_store);
@@ -2264,6 +2271,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_control_runtime.addImport("product_credential_match", credential_match);
     product_control_runtime.addImport("metawork_agent", agent);
     product_control_runtime.addImport("metawork_product_update", product_update);
     product_control_runtime.addImport("metawork_product_identity", product_identity);

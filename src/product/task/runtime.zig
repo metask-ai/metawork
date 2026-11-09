@@ -4,6 +4,7 @@
 //! effects are supplied by composition; they are never retained here.
 
 const std = @import("std");
+const credential_match = @import("product_credential_match");
 const search_casefold = @import("search_casefold.zig");
 const agent = @import("metawork_agent");
 const models_contract = @import("metawork_product_models_contract");
@@ -8064,8 +8065,8 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
         const value = target.list.items;
         var match_end: usize = 0;
         var cursor = read;
-        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
-            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+        while (cursor == read or cursor < match_end) : (cursor += credential_match.codepointLen(value, cursor)) {
+            for (secrets) |secret| if (credential_match.matchEnd(value, cursor, secret)) |end| {
                 match_end = @max(match_end, end);
             };
         }
@@ -8079,7 +8080,7 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
             continue;
         }
         const partial = for (secrets) |secret| {
-            if (credentialMayContinueAtCodepoint(value, read, secret)) break true;
+            if (credential_match.mayContinue(value, read, secret)) break true;
         } else false;
         if (partial) {
             const remaining = value[read..];
@@ -8092,7 +8093,7 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
             target.committed_len = write;
             return redacted;
         }
-        const codepoint_len = utf8CodepointLen(value, read);
+        const codepoint_len = credential_match.codepointLen(value, read);
         std.mem.copyForwards(
             u8,
             target.list.items[write..][0..codepoint_len],
@@ -8104,46 +8105,6 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
     target.list.items.len = write;
     target.committed_len = write;
     return redacted;
-}
-
-fn utf8CodepointLen(value: []const u8, start: usize) usize {
-    return @min(
-        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
-        value.len - start,
-    );
-}
-
-fn credentialEndAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) ?usize {
-    if (credential.len == 0) return null;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    var match_end: usize = 0;
-    for (0..codepoint_len) |offset| {
-        if (std.mem.startsWith(u8, value[codepoint_start + offset ..], credential))
-            match_end = @max(match_end, codepoint_start + offset + credential.len);
-    }
-    if (match_end == 0) return null;
-    var end = @min(value.len, match_end);
-    while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
-    return end;
-}
-
-fn credentialMayContinueAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) bool {
-    if (credential.len == 0) return false;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    for (0..codepoint_len) |offset| {
-        const remaining = value[codepoint_start + offset ..];
-        if (remaining.len < credential.len and
-            std.mem.startsWith(u8, credential, remaining)) return true;
-    }
-    return false;
 }
 
 fn releaseExecutionValueNoFail(
