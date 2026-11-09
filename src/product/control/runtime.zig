@@ -396,15 +396,7 @@ pub const AppDirectories = struct {
     testing_automatic_workspace_root: ?*product_workspace.AutomaticRoot = null,
 };
 
-pub const AutomaticWorkspaceRootConfigurationView = struct {
-    generation: u64,
-    mode: ?product_workspace.AutomaticRootConfigurationMode,
-    canonical_root: ?[]const u8,
-    health: product_workspace.AutomaticRootConfigurationHealth,
-    can_choose: bool,
-    can_reset: bool,
-    can_retry: bool,
-};
+pub const AutomaticWorkspaceRootConfigurationView = product_workspace.AutomaticRootView;
 
 pub const SkillManagementHealth = skill_runtime.ManagementHealth;
 pub const SkillManagementConfiguration = skill_runtime.ManagementConfiguration;
@@ -1330,9 +1322,6 @@ pub const Runtime = struct {
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     workspace: product_workspace.Runtime,
-    automatic_root_configuration: product_workspace.AutomaticRootConfigurationRuntime,
-    automatic_workspace_system_root: ?[]u8,
-    automatic_workspace_configuration_store: ?*product_workspace.AutomaticRootConfigurationFileStore,
     attachments: product_attachment.Runtime,
     task_runtime: task_runtime.Runtime,
     task_persistence: TaskPersistence,
@@ -1478,76 +1467,6 @@ pub const Runtime = struct {
             break :home_copy try allocator.dupe(u8, home);
         } else null;
         errdefer if (canonical_user_home) |home| allocator.free(home);
-        const automatic_workspace_system_root = if (configuration.directories.automatic_workspace_system_root) |root| copy: {
-            if (root.len == 0 or
-                !std.fs.path.isAbsolute(root) or
-                !std.unicode.utf8ValidateSlice(root) or
-                std.mem.indexOfScalar(u8, root, 0) != null or
-                root.len > product_workspace.automatic_root_configuration.max_root_bytes)
-                return error.InvalidWorkspace;
-            break :copy try allocator.dupe(u8, root);
-        } else null;
-        errdefer if (automatic_workspace_system_root) |root| allocator.free(root);
-        if (configuration.directories.testing_automatic_workspace_root != null and
-            (automatic_workspace_system_root != null or
-                configuration.directories.automatic_workspace_configuration_store != null))
-            return error.InvalidWorkspace;
-        var automatic_root_configuration = if (configuration.directories.testing_automatic_workspace_root) |root|
-            product_workspace.AutomaticRootConfigurationRuntime{
-                .allocator = allocator,
-                .configuration = try product_workspace.AutomaticRootConfiguration.custom(
-                    allocator,
-                    root.canonicalPath(),
-                ),
-                .health = .ready,
-            }
-        else
-            try product_workspace.AutomaticRootConfigurationRuntime.bootstrap(
-                allocator,
-                configuration.directories.automatic_workspace_configuration_store,
-            );
-        errdefer automatic_root_configuration.deinit();
-        var opened_automatic_root: ?product_workspace.AutomaticRoot = null;
-        errdefer if (opened_automatic_root) |*root| root.deinit();
-        const automatic_root_capability = if (configuration.directories.testing_automatic_workspace_root) |root|
-            root
-        else opened: {
-            const effective_root = automatic_root_configuration.effectiveRoot(
-                automatic_workspace_system_root,
-            ) orelse {
-                if (automatic_root_configuration.configuration != null and
-                    (automatic_root_configuration.health == .ready or
-                        automatic_root_configuration.health == .write_failed))
-                    automatic_root_configuration.health = .path_unavailable;
-                break :opened null;
-            };
-            const mode = automatic_root_configuration.configuration.?.mode;
-            opened_automatic_root = switch (mode) {
-                .system_default => product_workspace.AutomaticRoot.open(
-                    io,
-                    allocator,
-                    effective_root,
-                ),
-                .custom => product_workspace.AutomaticRoot.openExisting(
-                    io,
-                    allocator,
-                    effective_root,
-                ),
-            } catch {
-                automatic_root_configuration.health = .path_unavailable;
-                break :opened null;
-            };
-            if (mode == .custom and !product_workspace.automaticPathEqual(
-                effective_root,
-                opened_automatic_root.?.canonicalPath(),
-            )) {
-                opened_automatic_root.?.deinit();
-                opened_automatic_root = null;
-                automatic_root_configuration.health = .path_unavailable;
-                break :opened null;
-            }
-            break :opened &opened_automatic_root.?;
-        };
         const workspace_capacity = workspaceRecordCapacity(limits) orelse
             return error.ProjectionCapacity;
         var workspace = try product_workspace.Runtime.init(
@@ -1556,7 +1475,11 @@ pub const Runtime = struct {
             limits.max_workspaces,
             limits.max_tasks,
             limits.max_workspace_bytes,
-            automatic_root_capability,
+            .{
+                .system_path = configuration.directories.automatic_workspace_system_root,
+                .store = if (configuration.directories.automatic_workspace_configuration_store) |store| store.persistence() else null,
+                .testing_root = configuration.directories.testing_automatic_workspace_root,
+            },
         );
         errdefer workspace.deinitEmpty();
         var attachments = try product_attachment.Runtime.init(allocator, .{
@@ -1714,9 +1637,6 @@ pub const Runtime = struct {
             .agent_runtime = agent_runtime,
             .limits = limits,
             .workspace = workspace,
-            .automatic_root_configuration = automatic_root_configuration,
-            .automatic_workspace_system_root = automatic_workspace_system_root,
-            .automatic_workspace_configuration_store = configuration.directories.automatic_workspace_configuration_store,
             .attachments = attachments,
             .task_runtime = product_tasks,
             .task_persistence = configuration.task_persistence,
@@ -1771,12 +1691,7 @@ pub const Runtime = struct {
                 }
             }
         }
-        if (control.workspace.automaticRootPath()) |root| {
-            control.workspace.validateAutomaticRootCandidate(root) catch {
-                control.workspace.disableAutomaticRoot();
-                control.automatic_root_configuration.health = .path_unavailable;
-            };
-        }
+        control.workspace.validateRestoredAutomaticRoot();
         control.task_persistence.restore_fn = null;
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
@@ -2846,204 +2761,31 @@ pub const Runtime = struct {
             self.skill.identitySourceTrusted();
     }
 
-    pub fn automaticWorkspaceRootConfiguration(
-        self: *const Runtime,
-    ) AutomaticWorkspaceRootConfigurationView {
-        const configuration = self.automatic_root_configuration.configuration;
-        const canonical_root = switch (self.automatic_root_configuration.health) {
-            .ready => self.workspace.automaticRootPath(),
-            .path_unavailable, .write_failed => self.automatic_root_configuration.committedRoot(
-                self.automatic_workspace_system_root,
-            ),
-            .persistence_unavailable,
-            .read_failed,
-            .corrupt,
-            .outcome_unknown,
-            => null,
-        };
-        const mode: ?product_workspace.AutomaticRootConfigurationMode = if (canonical_root != null)
-            if (configuration) |value| value.mode else null
-        else
-            null;
-        const store_available = self.automatic_workspace_configuration_store != null and
-            !self.shutting_down;
-        return .{
-            .generation = self.automatic_root_configuration.generation,
-            .mode = mode,
-            .canonical_root = canonical_root,
-            .health = self.automatic_root_configuration.health,
-            .can_choose = store_available,
-            .can_reset = store_available and
-                self.automatic_workspace_system_root != null and
-                (configuration == null or
-                    configuration.?.mode != .system_default or
-                    self.automatic_root_configuration.health != .ready),
-            .can_retry = !self.shutting_down and
-                self.automatic_root_configuration.health == .path_unavailable and
-                canonical_root != null,
-        };
+    pub fn automaticWorkspaceRootConfiguration(self: *const Runtime) AutomaticWorkspaceRootConfigurationView {
+        return self.workspace.automaticRootView(self.shutting_down);
     }
 
-    pub fn chooseAutomaticWorkspaceRoot(
-        self: *Runtime,
-        expected_generation: u64,
-        canonical_root: []const u8,
-    ) Error!void {
+    pub fn chooseAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64, canonical_root: []const u8) Error!void {
+        try self.changeAutomaticWorkspaceRoot(expected_generation, .{ .choose = canonical_root });
+    }
+
+    pub fn resetAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64) Error!void {
+        try self.changeAutomaticWorkspaceRoot(expected_generation, .reset);
+    }
+
+    pub fn retryAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64) Error!void {
+        try self.changeAutomaticWorkspaceRoot(expected_generation, .retry);
+    }
+
+    fn changeAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64, change: product_workspace.AutomaticRootChange) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.requireAutomaticRootGeneration(expected_generation);
-        var configuration = product_workspace.AutomaticRootConfiguration.custom(
-            self.allocator,
-            canonical_root,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidWorkspace,
+        const previous_health = self.workspace.automaticRootView(false).health;
+        self.workspace.changeAutomaticRoot(expected_generation, change) catch |err| {
+            if (err == error.AutomaticWorkspaceRootPersistenceOutcomeUnknown or
+                self.workspace.automaticRootView(false).health != previous_health) self.bumpRevision();
+            return err;
         };
-        defer configuration.deinit();
-        try self.installAutomaticWorkspaceRoot(&configuration, canonical_root, false);
-    }
-
-    pub fn resetAutomaticWorkspaceRoot(
-        self: *Runtime,
-        expected_generation: u64,
-    ) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.requireAutomaticRootGeneration(expected_generation);
-        const root = self.automatic_workspace_system_root orelse
-            return error.WorkspaceUnavailable;
-        var configuration = product_workspace.AutomaticRootConfiguration.systemDefault(
-            self.allocator,
-        );
-        defer configuration.deinit();
-        try self.installAutomaticWorkspaceRoot(&configuration, root, true);
-    }
-
-    pub fn retryAutomaticWorkspaceRoot(
-        self: *Runtime,
-        expected_generation: u64,
-    ) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.requireAutomaticRootGeneration(expected_generation);
-        if (self.automatic_root_configuration.health != .path_unavailable)
-            return error.WorkspaceUnavailable;
-        const root_path = self.automatic_root_configuration.committedRoot(
-            self.automatic_workspace_system_root,
-        ) orelse return error.WorkspaceUnavailable;
-        const mode = self.automatic_root_configuration.configuration.?.mode;
-        var root = switch (mode) {
-            .system_default => product_workspace.AutomaticRoot.open(
-                self.io,
-                self.allocator,
-                root_path,
-            ),
-            .custom => product_workspace.AutomaticRoot.openExisting(
-                self.io,
-                self.allocator,
-                root_path,
-            ),
-        } catch return error.WorkspaceUnavailable;
-        defer root.deinit();
-        if (mode == .custom and !product_workspace.automaticPathEqual(
-            root_path,
-            root.canonicalPath(),
-        )) return error.InvalidWorkspace;
-        try self.workspace.validateAutomaticRootCandidate(root.canonicalPath());
-        self.workspace.replaceAutomaticRoot(&root);
-        self.automatic_root_configuration.health = .ready;
-        self.automatic_root_configuration.advanceGeneration();
         self.bumpRevision();
-    }
-
-    fn requireAutomaticRootGeneration(
-        self: *const Runtime,
-        expected_generation: u64,
-    ) Error!void {
-        if (expected_generation == 0 or
-            expected_generation != self.automatic_root_configuration.generation)
-            return error.AutomaticWorkspaceRootGenerationMismatch;
-    }
-
-    fn installAutomaticWorkspaceRoot(
-        self: *Runtime,
-        configuration: *const product_workspace.AutomaticRootConfiguration,
-        candidate_path: []const u8,
-        create: bool,
-    ) Error!void {
-        const store = self.automatic_workspace_configuration_store orelse
-            return error.AutomaticWorkspaceRootPersistenceUnavailable;
-        var root = if (create)
-            product_workspace.AutomaticRoot.open(
-                self.io,
-                self.allocator,
-                candidate_path,
-            ) catch return error.WorkspaceUnavailable
-        else
-            product_workspace.AutomaticRoot.openExisting(
-                self.io,
-                self.allocator,
-                candidate_path,
-            ) catch return error.WorkspaceUnavailable;
-        defer root.deinit();
-        if (!product_workspace.automaticPathEqual(
-            candidate_path,
-            root.canonicalPath(),
-        )) return error.InvalidWorkspace;
-        try self.workspace.validateAutomaticRootCandidate(root.canonicalPath());
-        var encoded_storage: [product_workspace.automatic_root_configuration.max_store_bytes]u8 = undefined;
-        const encoded = product_workspace.automatic_root_configuration.encode(
-            &encoded_storage,
-            configuration,
-        ) catch return error.InvalidWorkspace;
-        var replacement = try configuration.clone();
-        var replacement_owned = true;
-        defer if (replacement_owned) replacement.deinit();
-        const recovering = self.automatic_root_configuration.recovery_required;
-        if (recovering)
-            store.recover(encoded) catch |err| return self.failAutomaticRootPersistence(err)
-        else
-            store.commit(encoded) catch |err| return self.failAutomaticRootPersistence(err);
-
-        if (self.automatic_root_configuration.configuration) |*current| current.deinit();
-        self.automatic_root_configuration.configuration = replacement;
-        replacement_owned = false;
-        self.automatic_root_configuration.health = .ready;
-        self.automatic_root_configuration.recovery_required = false;
-        self.workspace.replaceAutomaticRoot(&root);
-        self.automatic_root_configuration.advanceGeneration();
-        self.bumpRevision();
-    }
-
-    fn failAutomaticRootPersistence(
-        self: *Runtime,
-        err: product_workspace.automatic_root_configuration.FileStoreError,
-    ) Error {
-        switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.PersistenceOutcomeUnknown => {
-                self.workspace.disableAutomaticRoot();
-                self.automatic_root_configuration.health = .outcome_unknown;
-                self.automatic_root_configuration.recovery_required = true;
-                self.bumpRevision();
-                return error.AutomaticWorkspaceRootPersistenceOutcomeUnknown;
-            },
-            else => {
-                if (!self.automatic_root_configuration.recovery_required) {
-                    switch (self.automatic_root_configuration.health) {
-                        .ready => {
-                            self.automatic_root_configuration.health = .write_failed;
-                            self.bumpRevision();
-                        },
-                        .write_failed,
-                        .path_unavailable,
-                        .persistence_unavailable,
-                        .read_failed,
-                        .corrupt,
-                        .outcome_unknown,
-                        => {},
-                    }
-                }
-                return error.AutomaticWorkspaceRootPersistenceFailed;
-            },
-        }
     }
 
     pub fn stageAttachments(
@@ -7876,8 +7618,6 @@ pub const Runtime = struct {
             ));
         }
         self.workspace.deinit(self.workspaceStorage());
-        self.automatic_root_configuration.deinit();
-        if (self.automatic_workspace_system_root) |root| self.allocator.free(root);
         self.schedule.deinit();
         self.skill.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
@@ -9480,18 +9220,13 @@ pub const Runtime = struct {
 
     fn prepareAutomaticWorkspace(self: *Runtime) Error!PreparedAutomaticBinding {
         try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
+        const had_root = self.workspace.automaticRootAvailable();
         var preparation = self.workspace.prepareAutomatic(
             "",
             self.workspaceStorage(),
             self.skill.identitySourceTrusted(),
         ) catch |err| {
-            if (err == error.WorkspaceUnavailable and
-                self.workspace.automaticRootAvailable())
-            {
-                self.workspace.disableAutomaticRoot();
-                self.automatic_root_configuration.health = .path_unavailable;
-                self.bumpRevision();
-            }
+            if (had_root and !self.workspace.automaticRootAvailable()) self.bumpRevision();
             return err;
         };
         errdefer if (preparation.isActive()) {
@@ -12870,6 +12605,8 @@ test "automatic Workspace root configuration swaps only future allocations and f
         &custom_storage,
     );
     const default_root = default_storage[0..default_len];
+    const configured_default = try std.fs.path.join(std.testing.allocator, &.{ std.fs.path.dirname(default_root).?, ".", "default" });
+    defer std.testing.allocator.free(configured_default);
     const custom_root = custom_storage[0..custom_len];
     var store: product_workspace.AutomaticRootConfigurationFileStore = .{
         .io = std.testing.io,
@@ -12881,7 +12618,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
         &test_agent_runtime,
         testLimits(),
         .{ .directories = .{
-            .automatic_workspace_system_root = default_root,
+            .automatic_workspace_system_root = configured_default,
             .automatic_workspace_configuration_store = &store,
         } },
     );
@@ -12998,8 +12735,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
     try std.testing.expectEqualStrings(default_root, recovered.canonical_root.?);
     try std.testing.expect(control.automaticWorkspacesAvailable());
 
-    control.workspace.disableAutomaticRoot();
-    control.automatic_root_configuration.health = .path_unavailable;
+    product_workspace.testing.invalidateAutomaticRoot(&control.workspace);
     product_workspace.automatic_root_configuration.testing.setCommitFault(
         &store,
         .write_failed,
@@ -13018,7 +12754,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
         unavailable_after_write_failure.mode.?,
     );
     try std.testing.expectEqualStrings(
-        default_root,
+        configured_default,
         unavailable_after_write_failure.canonical_root.?,
     );
     product_workspace.automatic_root_configuration.testing.setCommitFault(

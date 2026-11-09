@@ -2227,6 +2227,7 @@ fn wireAgentCore(
         "product_workspace_automatic_root",
         product_workspace_automatic_root,
     );
+    product_workspace_runtime.addImport("product_workspace_configuration", product_workspace_configuration);
     const product_workspace_view = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/view.zig"),
         .target = target,

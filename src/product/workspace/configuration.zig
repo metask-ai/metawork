@@ -36,6 +36,27 @@ pub const Error = std.mem.Allocator.Error || error{
     StoreEncodeFailed,
 };
 
+pub const PersistenceError = FileStoreError;
+
+pub const Persistence = struct {
+    context: *anyopaque,
+    load_fn: *const fn (*anyopaque, std.mem.Allocator) PersistenceError!?[]u8,
+    commit_fn: *const fn (*anyopaque, []const u8) PersistenceError!void,
+    recover_fn: *const fn (*anyopaque, []const u8) PersistenceError!void,
+
+    fn loadAlloc(self: Persistence, allocator: std.mem.Allocator) PersistenceError!?[]u8 {
+        return self.load_fn(self.context, allocator);
+    }
+
+    pub fn commit(self: Persistence, bytes: []const u8) PersistenceError!void {
+        return self.commit_fn(self.context, bytes);
+    }
+
+    pub fn recover(self: Persistence, bytes: []const u8) PersistenceError!void {
+        return self.recover_fn(self.context, bytes);
+    }
+};
+
 pub const Configuration = struct {
     allocator: std.mem.Allocator,
     mode: Mode,
@@ -95,7 +116,7 @@ pub const Runtime = struct {
 
     pub fn bootstrap(
         allocator: std.mem.Allocator,
-        store: ?*FileStore,
+        store: ?Persistence,
     ) std.mem.Allocator.Error!Runtime {
         const persistence = store orelse return .{
             .allocator = allocator,
@@ -284,6 +305,25 @@ pub const FileStore = struct {
     dir: std.Io.Dir,
     commit_fault: CommitFault = .none,
     recovery_fault: RecoveryFault = .none,
+
+    pub fn persistence(self: *FileStore) Persistence {
+        return .{ .context = self, .load_fn = loadEffect, .commit_fn = commitEffect, .recover_fn = recoverEffect };
+    }
+
+    fn loadEffect(context: *anyopaque, allocator: std.mem.Allocator) PersistenceError!?[]u8 {
+        const self: *FileStore = @ptrCast(@alignCast(context));
+        return self.loadAlloc(allocator);
+    }
+
+    fn commitEffect(context: *anyopaque, bytes: []const u8) PersistenceError!void {
+        const self: *FileStore = @ptrCast(@alignCast(context));
+        return self.commit(bytes);
+    }
+
+    fn recoverEffect(context: *anyopaque, bytes: []const u8) PersistenceError!void {
+        const self: *FileStore = @ptrCast(@alignCast(context));
+        return self.recover(bytes);
+    }
 
     pub fn init(
         io: std.Io,
@@ -728,7 +768,7 @@ test "automatic root bootstrap initializes only a missing canonical store" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    var runtime = try Runtime.bootstrap(std.testing.allocator, &store);
+    var runtime = try Runtime.bootstrap(std.testing.allocator, store.persistence());
     defer runtime.deinit();
     try std.testing.expectEqual(Health.ready, runtime.health);
     try std.testing.expectEqual(@as(u64, 1), runtime.generation);
@@ -751,7 +791,7 @@ test "automatic root bootstrap fails closed for unavailable corrupt and uncertai
     defer corrupt_tmp.cleanup();
     var corrupt_store: FileStore = .{ .io = std.testing.io, .dir = corrupt_tmp.dir };
     try corrupt_store.commit("{\"schema_version\":2}");
-    var corrupt = try Runtime.bootstrap(std.testing.allocator, &corrupt_store);
+    var corrupt = try Runtime.bootstrap(std.testing.allocator, corrupt_store.persistence());
     defer corrupt.deinit();
     try std.testing.expectEqual(Health.corrupt, corrupt.health);
     try std.testing.expect(corrupt.configuration == null);
@@ -760,7 +800,7 @@ test "automatic root bootstrap fails closed for unavailable corrupt and uncertai
     defer uncertain_tmp.cleanup();
     var uncertain_store: FileStore = .{ .io = std.testing.io, .dir = uncertain_tmp.dir };
     testing.setCommitFault(&uncertain_store, .outcome_unknown_after_install);
-    var uncertain = try Runtime.bootstrap(std.testing.allocator, &uncertain_store);
+    var uncertain = try Runtime.bootstrap(std.testing.allocator, uncertain_store.persistence());
     defer uncertain.deinit();
     try std.testing.expectEqual(Health.outcome_unknown, uncertain.health);
     try std.testing.expect(uncertain.configuration == null);
@@ -776,7 +816,7 @@ test "automatic root bootstrap distinguishes read and definite write failures" {
     );
     empty.close(std.testing.io);
     var read_store: FileStore = .{ .io = std.testing.io, .dir = read_tmp.dir };
-    var read_failed = try Runtime.bootstrap(std.testing.allocator, &read_store);
+    var read_failed = try Runtime.bootstrap(std.testing.allocator, read_store.persistence());
     defer read_failed.deinit();
     try std.testing.expectEqual(Health.read_failed, read_failed.health);
 
@@ -784,7 +824,7 @@ test "automatic root bootstrap distinguishes read and definite write failures" {
     defer write_tmp.cleanup();
     var write_store: FileStore = .{ .io = std.testing.io, .dir = write_tmp.dir };
     testing.setCommitFault(&write_store, .write_failed);
-    var write_failed = try Runtime.bootstrap(std.testing.allocator, &write_store);
+    var write_failed = try Runtime.bootstrap(std.testing.allocator, write_store.persistence());
     defer write_failed.deinit();
     try std.testing.expectEqual(Health.write_failed, write_failed.health);
     try std.testing.expect(write_failed.configuration == null);
