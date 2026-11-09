@@ -2049,9 +2049,7 @@ pub const Runtime = struct {
     /// Message acceptance is Task-local and independent of execution readiness.
     pub fn receiveInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects) RunError!Submission {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting or
-            !failedDeletionCanBeAbandoned(task))
-            return error.TaskClosing;
+        if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
         if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
         for (operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidInput;
         for (task.input_submissions.items) |record| if (std.mem.eql(u8, operation_id, record.submission.operationId())) return error.InvalidInput;
@@ -2171,6 +2169,63 @@ pub const Runtime = struct {
         const record = self.pendingInput(task_id, index) orelse return false;
         if (record.state != .waiting or record.preparation_attempted) return false;
         record.preparation_attempted = true;
+        return true;
+    }
+
+    pub const WaitingInputEffects = struct {
+        pub const RestoreFailure = struct { reason: SendInputReason, blocking_task_id: ?u64 = null };
+        pub const RunAdmission = union(enum) { admitted: u64, retry, rejected: SendInputReason };
+
+        context: *anyopaque,
+        restore_fn: *const fn (*anyopaque, u64, u64) ?RestoreFailure,
+        run_fn: *const fn (*anyopaque, u64, u64, usize) RunAdmission,
+        history_blocked: bool,
+        release: ReleaseEffects,
+    };
+
+    pub fn advanceWaitingInput(
+        self: *Runtime,
+        task_id: u64,
+        index: usize,
+        projection: ProjectionEffects,
+        effects: WaitingInputEffects,
+    ) bool {
+        const task = self.find(task_id) orelse return false;
+        if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked) return false;
+        const authority = projection.authority(projectionAuthorityQuery(task));
+        const continuation = self.recoveryProjectionWithAuthority(task, authority).continuation;
+        if (authority.shutting_down or task_policy.taskLifecycle(task) != .open or
+            !task_policy.continuationAvailable(continuation))
+        {
+            if (continuation == .unavailable) switch (continuation.unavailable) {
+                .session_recovery_required, .session_recovery_failed, .runtime_unavailable => {
+                    if (self.beginInputPreparation(task_id, index)) {
+                        const failure = effects.restore_fn(effects.context, task_id, task.durable.binding_epoch) orelse return false;
+                        self.failWaitingInput(task_id, index, failure.reason, failure.blocking_task_id);
+                        return true;
+                    }
+                },
+                else => {},
+            };
+            self.failWaitingInput(task_id, index, .binding_unavailable, null);
+            return true;
+        }
+
+        const previous_run = task_policy.runHistoryHighWater(task);
+        const outcome = effects.run_fn(effects.context, task_id, task.durable.binding_epoch, index);
+        // A failed effect may already have published a real Run with a terminal outcome.
+        if (outcome != .admitted) {
+            const latest_run = task_policy.runHistoryHighWater(task);
+            if (latest_run > previous_run) {
+                self.finishWaitingInput(task_id, index, latest_run, null, effects.release);
+                return true;
+            }
+        }
+        switch (outcome) {
+            .admitted => |id| self.finishWaitingInput(task_id, index, id, null, effects.release),
+            .retry => return false,
+            .rejected => |reason| self.failWaitingInput(task_id, index, reason, null),
+        }
         return true;
     }
 
@@ -5680,8 +5735,7 @@ pub const Runtime = struct {
 
     fn inputAcceptanceReason(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, max_pending: usize) ?SendInputReason {
         if (authority.shutting_down) return .shutting_down;
-        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting or
-            !failedDeletionCanBeAbandoned(task)) return .task_unavailable;
+        if (!acceptsOrdinaryInput(task)) return .task_unavailable;
         if (!authority.workspace_identity_exact or !authority.automatic_owner_exact) return .workspace_unavailable;
         var pending: usize = 0;
         for (task.input_submissions.items) |record| if (record.state == .waiting) {
@@ -8792,6 +8846,11 @@ fn exportRecoveryCheckpoint(job: *recovery_job.Job, access: *task_agent_session.
         }, .poisoned = failure.restore_required } },
         .none, .history, .retired => unreachable,
     };
+}
+
+fn acceptsOrdinaryInput(task: *const task_state.Task) bool {
+    return task.read_only_history == null and !task.durable.archived and task.deletion != .deleting and
+        failedDeletionCanBeAbandoned(task);
 }
 
 fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {

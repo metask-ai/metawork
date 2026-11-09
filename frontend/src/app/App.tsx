@@ -4285,7 +4285,9 @@ export default function App() {
         unavailable={Boolean(
           activeTask &&
           activeTask.lifecycle === "open" &&
-          !activeTask.continuationAvailable,
+          !activeTask.continuationAvailable &&
+          (activeTask.continuationUnavailableReason !== "runtime_unavailable" ||
+            !activeTask.inputAcceptance.available),
         )}
         unavailableReason={activeTask?.continuationUnavailableReason ?? null}
         draft={currentComposerDraft}

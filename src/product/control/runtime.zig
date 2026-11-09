@@ -5759,7 +5759,14 @@ pub const Runtime = struct {
                         if (receipt.outcome == .rejected) break;
                     },
                     .start => |index| {
-                        if (!self.startWaitingInput(task.durable.id, index)) break;
+                        if (!self.task_runtime.advanceWaitingInput(task.durable.id, index, self.taskRuntimeProjectionEffects(), .{
+                            .context = self,
+                            .restore_fn = restoreWaitingInput,
+                            .run_fn = admitWaitingInput,
+                            .history_blocked = self.approvalHistoryBlocked(),
+                            .release = self.taskRuntimeReleaseEffects(),
+                        })) break;
+                        self.bumpRevision();
                     },
                 }
             }
@@ -5777,43 +5784,22 @@ pub const Runtime = struct {
         };
     }
 
-    fn startWaitingInput(self: *Runtime, task_id: u64, index: usize) bool {
-        const task = self.task_runtime.find(task_id) orelse return false;
-        if (task.model_intent_prepared or task.approval_change != null or self.approvalHistoryBlocked()) return false;
-        if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) {
-            const capability = self.task_runtime.continuationProjection(task_id, self.taskRuntimeProjectionEffects());
-            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed or capability.?.unavailable == .runtime_unavailable) and self.task_runtime.beginInputPreparation(task_id, index)) {
-                _ = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch |err| {
-                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null);
-                    self.bumpRevision();
-                    return true;
-                };
-                return false;
-            }
-            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable, null);
-            self.bumpRevision();
-            return true;
-        }
-        var previous: u64 = 0;
-        for (task.durable.runs) |entry| if (entry) |run| {
-            previous = @max(previous, run.id);
+    fn restoreWaitingInput(context: *anyopaque, task_id: u64, binding_epoch: u64) ?task_runtime.Runtime.WaitingInputEffects.RestoreFailure {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        _ = self.restoreTaskConversation(task_id, binding_epoch) catch |err| return .{
+            .reason = sendInputRejection(err),
+            .blocking_task_id = if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null,
         };
-        const id = self.admitTaskRunInternal(task_id, task.durable.binding_epoch, .{ .queued = index }, null) catch |err| {
-            for (task.durable.runs) |entry| if (entry) |run| if (run.id > previous) {
-                self.task_runtime.finishWaitingInput(task_id, index, run.id, null, self.taskRuntimeReleaseEffects());
-                self.bumpRevision();
-                return true;
-            };
-            switch (err) {
-                error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => return false,
-                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), null),
-            }
-            self.bumpRevision();
-            return true;
+        return null;
+    }
+
+    fn admitWaitingInput(context: *anyopaque, task_id: u64, binding_epoch: u64, index: usize) task_runtime.Runtime.WaitingInputEffects.RunAdmission {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const id = self.admitTaskRunInternal(task_id, binding_epoch, .{ .queued = index }, null) catch |err| return switch (err) {
+            error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => .retry,
+            else => .{ .rejected = sendInputRejection(err) },
         };
-        self.task_runtime.finishWaitingInput(task_id, index, id, null, self.taskRuntimeReleaseEffects());
-        self.bumpRevision();
-        return true;
+        return .{ .admitted = id };
     }
 
     fn advanceInputContinuation(self: *Runtime, task_id: u64) bool {

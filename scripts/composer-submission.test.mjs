@@ -1591,6 +1591,19 @@ test("App sends while the Run is not ready and keeps later drafts independent", 
   assert.equal(fixture.inputs.length, 2);
 });
 
+test("App keeps the ordinary Composer prompt when the Runtime can accept input for recovery", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.task.continuationAvailable = false;
+  fixture.task.continuationRecoveryAvailable = false;
+  fixture.task.continuationUnavailableReason = "runtime_unavailable";
+  await fixture.publish();
+  assert.equal(fixture.textarea.placeholder, "Enter your instructions…");
+  fireEvent.change(fixture.textarea, { target: { value: "Continue" } });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle();
+});
+
 function finishWithPendingContinuation(fixture) {
   const run = fixture.task.runs[0];
   Object.assign(run, {
