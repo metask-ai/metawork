@@ -1126,7 +1126,6 @@ pub const FileChangeDiffAdmission = union(enum) {
 
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
 const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
-const RunTerminationDispatch = if (builtin.is_test) task_test_state.RunTerminationDispatch else void;
 const RunInputRecord = if (builtin.is_test) task_test_state.RunInputRecord else void;
 const TestRunRecord = if (builtin.is_test) task_test_state.RunRecord else void;
 const AutomaticTitleState = if (builtin.is_test) task_test_state.AutomaticTitleState else void;
@@ -1146,9 +1145,6 @@ const compactTerminalPayload = if (builtin.is_test) task_test_state.compactTermi
 const activeCompactPhase = if (builtin.is_test) task_test_state.activeCompactPhase else void;
 const isTerminalPhase = if (builtin.is_test) task_test_state.isTerminalPhase else void;
 const findRun = if (builtin.is_test) task_test_state.findRun else void;
-const pendingInterruption = if (builtin.is_test) task_test_policy.pendingInterruption else void;
-const pendingTerminationSignal = if (builtin.is_test) task_test_policy.pendingTerminationSignal else void;
-const closeFailureCompletion = if (builtin.is_test) task_test_policy.closeFailureCompletion else void;
 const hasActiveOperation = if (builtin.is_test) task_test_policy.hasActiveOperation else void;
 const continuationAvailable = if (builtin.is_test) task_test_policy.continuationAvailable else void;
 const automaticTitleCandidate = if (builtin.is_test) task_test_policy.automaticTitleCandidate else void;
@@ -9358,14 +9354,6 @@ pub const Runtime = struct {
         );
     }
 
-    fn checkpointMutationPending(
-        self: *const Runtime,
-        task: *const TestTask,
-    ) bool {
-        return self.checkpoint_store_health.load(.acquire) != .unavailable and
-            task.runtime.worker_leases.hasLive();
-    }
-
     test "automatic title fallback extracts text and skill display names" {
         var text_input: RunInputRecord = .{ .text = .{
             .value = @constCast("\n```text\nignored\n```\n### Review the AgentCore lifecycle\nmore detail"),
@@ -10859,33 +10847,6 @@ fn controlSetScheduleBackgroundAvailable(context: *anyopaque, available: bool) v
     controlOwner(context).setScheduleBackgroundAvailableNoFail(available);
 }
 
-fn closeWorker(
-    completion_out: *std.atomic.Value(CloseCompletion),
-    binding: *task_test_agent_session.Binding,
-    notifier: ChangeNotifier,
-) void {
-    const completion: CloseCompletion = close: {
-        switch (binding.state()) {
-            .owned => switch (binding.closeOutcome(.session_close)) {
-                .closed => {},
-                .failure => |failure| break :close closeFailureCompletion(
-                    failure.session_disposition,
-                ),
-            },
-            // A previous close succeeded but Runtime slot release failed.
-            // Retry only that remaining linear obligation.
-            .closed => {},
-            .released, .relinquished, .moved, .fixture, .abandoned => unreachable,
-        }
-        binding.releaseClosed() catch
-            break :close .failed_closing;
-        break :close .closed;
-    };
-    completion_out.store(completion, .release);
-    _ = notifier.notify();
-}
-
-const publishAutomaticTitleFallback = if (builtin.is_test) task_test_execution.publishAutomaticTitleFallback else void;
 const cancelPreparedRunOrPanic = taskWorkerCancelPreparedRun;
 const cancelPreparedCompactOrPanic = taskWorkerCancelPreparedCompact;
 fn taskWorkerCancelPreparedRun(
@@ -10932,45 +10893,6 @@ fn commitCompactProductTerminal(
         source_diagnostic_truncated,
         false,
     );
-}
-
-fn requestRunTermination(
-    run: *TestRunRecord,
-    interruption: lifecycle.ExternalInterruption,
-) RunTerminationDispatch {
-    const pending = pendingInterruption(interruption);
-    _ = run.pending_termination.cmpxchgStrong(.none, pending, .acq_rel, .acquire);
-    switch (run.agent_handoff.load(.acquire)) {
-        .queued, .starting => return .pending,
-        .finishing => return .already_finishing,
-        .running => {},
-    }
-    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse return .already_finishing;
-    var lease = lease_value;
-    defer lease.deinit();
-    return switch (lease.requestTermination(pendingTerminationSignal(run))) {
-        .requested => .requested,
-        .already_requested => .already_requested,
-        .already_terminal => .already_terminal,
-        .stale_run => .stale_run,
-        .session_closing => .session_closing,
-    };
-}
-
-fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) void {
-    switch (dispatch) {
-        .pending,
-        .requested,
-        .already_requested,
-        .already_finishing,
-        .already_terminal,
-        .session_closing,
-        => {},
-        .stale_run => std.debug.panic(
-            "active lifecycle Run {d} published a stale RunControl",
-            .{run_id},
-        ),
-    }
 }
 
 fn noChangeNotification(_: ?*anyopaque) bool {
@@ -11077,36 +10999,6 @@ fn commitTerminal(
     return false;
 }
 
-fn commitBeginFailure(run: *TestRunRecord, failure: lifecycle.BeginRunFailure) void {
-    const decision = task_test_policy.classifyBeginFailure(run, failure);
-    _ = commitTerminal(
-        run,
-        decision.phase,
-        decision.outcome,
-        decision.cause,
-        failure.session_disposition,
-        "",
-        false,
-    );
-}
-
-fn cancelTaskCheckpoints(task: *TestTask) void {
-    for (task.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        switch (run.checkpoint.state.load(.acquire)) {
-            .none, .exporting => run.checkpoint.cancelled.store(true, .release),
-            else => {},
-        }
-    }
-    for (task.durable.compacts) |*entry| {
-        const compact = &(entry.* orelse continue);
-        switch (compact.checkpoint.state.load(.acquire)) {
-            .none, .exporting => compact.checkpoint.cancelled.store(true, .release),
-            else => {},
-        }
-    }
-}
-
 test "approval checkpoint restores before the first Run independently of the Task model and rejects a future approval anchor" {
     var source = try testRuntime();
     defer source.deinit();
@@ -11163,15 +11055,6 @@ test "approval checkpoint restores before the first Run independently of the Tas
             try std.testing.expect(restored.task_runtime.find(3) == null);
             try std.testing.expectEqual(.degraded, restored.task_persistence_health);
         }
-    }
-}
-
-fn cancelTaskAutomaticTitles(task: *TestTask) void {
-    for (task.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        const execution = run.execution orelse continue;
-        execution.automatic_title.cancel_requested.store(true, .release);
-        publishAutomaticTitleFallback(run);
     }
 }
 
