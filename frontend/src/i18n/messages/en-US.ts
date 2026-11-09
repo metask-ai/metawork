@@ -994,8 +994,7 @@ export const enUS = {
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
   "run.placeholder_closing": "This task is ending",
-  "run.placeholder_unavailable":
-    "This conversation cannot continue right now. Check recovery status and try again",
+  "run.placeholder_unavailable": "This task cannot continue right now",
   "run.placeholder_execution_rebind_required":
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.placeholder_history_read_only":
@@ -1727,7 +1726,7 @@ export const enUS = {
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",
   "cause.app_shutdown": "Workbench closed",
-  "cause.event_pipeline_failure": "Activity delivery failed",
+  "cause.event_pipeline_failure": "The run did not complete normally.",
   "cause.event_payload_too_large":
     "A single execution result exceeded the size limit",
   "cause.queue_capacity_failure":

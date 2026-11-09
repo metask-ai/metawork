@@ -3761,6 +3761,7 @@ test("supplemental model errors retain the primary failure and do not offer acco
       },
     }),
   );
+  assert.ok(screen.getByText("The run did not complete normally."));
   assert.equal(
     screen.queryByRole("button", { name: "Open account settings" }),
     null,

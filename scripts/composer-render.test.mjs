@@ -938,16 +938,14 @@ test("only non-composable Task states disable the Composer", () => {
   assert.doesNotMatch(markup, />Claude Sonnet 4</);
 });
 
-test("a poisoned Task explains why continuation is unavailable", () => {
+test("a poisoned Session shows a neutral unavailable Composer placeholder", () => {
   const markup = render({
     unavailable: true,
+    unavailableReason: "session_poisoned",
     composeDisabled: true,
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(
-    markup,
-    /This conversation cannot continue right now\. Check recovery status and try again/,
-  );
+  assert.match(markup, /This task cannot continue right now/);
   assert.doesNotMatch(markup, /End this task and start a new one/);
 });
 

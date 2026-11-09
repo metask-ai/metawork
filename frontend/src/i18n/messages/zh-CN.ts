@@ -869,7 +869,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_no_task": "请先开始一个任务",
   "run.placeholder_archived": "恢复此任务后才能继续",
   "run.placeholder_closing": "此任务正在结束",
-  "run.placeholder_unavailable": "当前会话暂时无法继续，请检查恢复状态后重试",
+  "run.placeholder_unavailable": "当前任务暂时无法继续",
   "run.placeholder_execution_rebind_required":
     "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
   "run.placeholder_history_read_only":
@@ -1506,7 +1506,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",
   "cause.app_shutdown": "工作台已关闭",
-  "cause.event_pipeline_failure": "活动传递失败",
+  "cause.event_pipeline_failure": "本轮未能正常完成",
   "cause.event_payload_too_large": "单次执行结果超过大小限制",
   "cause.queue_capacity_failure": "执行队列容量不足，任务未能继续",
   "cause.ui_pipeline_failure": "回复传递失败",
