@@ -125,4 +125,14 @@ test("a Task with no model intent lists every ready source without inferring its
     taskModelCandidates(models, null).map((option) => option.modelRef.sourceId),
     ["metask"],
   );
+
+  models.customProviders[0].enabled = true;
+  models.customProviders[0].state = "configuring";
+  models.customProviders[0].models[0].ready = false;
+  assert.deepEqual(
+    taskModelCandidates(models, { sourceId: "other", modelId: model.id }),
+    [],
+  );
+  models.persistenceHealth = "recovery_required";
+  assert.deepEqual(taskModelCandidates(models, null), []);
 });

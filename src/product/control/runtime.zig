@@ -8201,21 +8201,34 @@ pub const Runtime = struct {
         if (task.read_only_history != null or task.durable.archived or task.deletion != .idle or task.runtime.close_requested)
             return .task_unavailable;
         const models = self.modelsView();
-        if (models.availability != .ready) return .catalog_unavailable;
+        if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
+        const source_scope = scope: {
+            const intent = task.durable.model_intent orelse break :scope null;
+            for (models.providers) |provider|
+                if (std.mem.eql(u8, provider.id, intent.source_id)) break :scope intent.source_id;
+            for (models.custom_providers) |provider|
+                if (std.mem.eql(u8, provider.id, intent.source_id)) break :scope intent.source_id;
+            break :scope null;
+        };
         for (models.custom_providers) |provider| {
-            if (provider.enabled and provider.credential_status == .ready)
-                for (provider.models) |model| {
-                    if (model.ready) return .available;
-                };
+            if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
+            if (provider.state != .ready or !provider.enabled or provider.credential_status != .ready or
+                provider.source_generation == 0 or provider.catalog_generation == 0) continue;
+            for (provider.models) |model| {
+                if (model.ready) return .available;
+            }
         }
         var loading = false;
-        for (models.providers) |provider| switch (provider.catalog_state) {
-            .ready => {
-                if (provider.models.len != 0) return .available;
-            },
-            .loading, .choosing => loading = true,
-            else => {},
-        };
+        for (models.providers) |provider| {
+            if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
+            switch (provider.catalog_state) {
+                .ready => {
+                    if (provider.source_generation != 0 and provider.catalog_generation != 0 and provider.models.len != 0) return .available;
+                },
+                .loading, .choosing => loading = true,
+                else => {},
+            }
+        }
         return if (loading) .catalog_loading else .catalog_unavailable;
     }
 
@@ -16076,8 +16089,19 @@ test "busy Task model selection commits the last intent without changing install
 test "Product Control publishes Task model selection availability from cross-owner authority" {
     var control = try testRuntime();
     defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestCustomProviderVault = .{};
+    control.stopCustomProviders();
+    try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
+    defer control.stopCustomProviders();
+    const custom = try createReadyTestCustomProvider(&control);
+    try TestSupport.configureMetaskSource(&control, 17);
 
     const task = control.task_runtime.tasks[0].?;
+    _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     var query: task_runtime.ProjectionAuthorityQuery = .{
         .task_id = task.durable.id,
         .workspace_id = task.durable.workspace_id,
@@ -16102,6 +16126,9 @@ test "Product Control publishes Task model selection availability from cross-own
         product_task.ModelSelectionAvailability.catalog_loading,
         control.taskModelSelectionAvailability(query),
     );
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"modelSelectionAvailability\":\"catalog_loading\"") != null);
     control.failMetaskCatalogRefresh(
         preparation.attempt_id,
         preparation.authorization_generation,
@@ -16138,6 +16165,32 @@ test "Product Control publishes Task model selection availability from cross-own
         product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
+    const provider = control.modelsView().custom_providers[0];
+    _ = try control.selectTaskModel(task.durable.id, .{
+        .target = .{ .source_id = custom.source_id, .model_id = "gpt-5" },
+        .expected_selection_revision = 1,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    });
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .update = .{
+        .selection = .{ .source_id = custom.source_id, .expected_provider_revision = provider.provider_revision },
+        .spec = .{
+            .display_name = "OpenAI",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://example.com/v1/responses",
+        },
+    } }).accepted);
+    const configuring = control.modelsView().custom_providers[0];
+    try std.testing.expectEqual(models_contract.CustomProviderCredentialStatus.ready, configuring.credential_status);
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .remove = .{
+        .source_id = custom.source_id,
+        .expected_provider_revision = configuring.provider_revision,
+    } }).accepted);
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.available, control.taskModelSelectionAvailability(query));
+    control.custom_providers.store_healthy = false;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    control.custom_providers.store_healthy = true;
     task.durable.archived = true;
     try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));
     task.durable.archived = false;
