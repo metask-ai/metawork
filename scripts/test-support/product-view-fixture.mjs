@@ -34,6 +34,7 @@ export function taskSummary(task) {
   const summary = {};
   for (const key of [
     "id",
+    "signal",
     "recentOrder",
     "title",
     "workspaceId",
@@ -59,6 +60,21 @@ export function taskSummary(task) {
     ? { outcome: terminal.outcome, cause: terminal.cause }
     : null;
   return summary;
+}
+
+function fixtureSignal(task, terminal) {
+  if (task.currentRunPhase === "waiting_ui")
+    return task.permissionReviewState === "reviewing" ? "running" : "attention";
+  if (
+    task.currentRunPhase ||
+    ["compact", "restore"].includes(task.activeOperation?.kind)
+  )
+    return "running";
+  if (task.deletionStatus === "failed") return "failed";
+  if (terminal?.outcome === "interrupted") return "interrupted";
+  if (["failed", "dependency_contract_failure"].includes(terminal?.outcome))
+    return "failed";
+  return null;
 }
 
 export function productViewFixture(
@@ -173,7 +189,14 @@ export function productStateFixture(
   state,
   scope = { ...initialViewScope, taskId: state.tasks[0]?.id ?? null },
 ) {
-  const wire = productViewFixture(state, scope);
+  const tasks = state.tasks.map((task) => ({
+    ...task,
+    signal: fixtureSignal(
+      task,
+      task.runs.findLast((run) => run.terminal)?.terminal,
+    ),
+  }));
+  const wire = productViewFixture({ ...state, tasks }, scope);
   return {
     ...wire.context,
     revision: wire.revision,

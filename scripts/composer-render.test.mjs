@@ -259,6 +259,7 @@ function renderCompletedSurface(
               cause: null,
               diagnosticDisposition: "absent",
               recordingIncomplete,
+              feedback: { guidance: "none", offerInputPreparation: false },
               modelError: null,
             },
         usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
@@ -564,6 +565,7 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
 test("a completed response with a recording gap shows the Host warning once", () => {
   const markup = renderCompletedSurface("Release is ready", undefined, [], {
     recordingIncomplete: true,
+    feedback: { guidance: "none", offerInputPreparation: false },
   });
   assert.match(markup, /Release is ready/);
   assert.equal(
@@ -1060,10 +1062,70 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
   );
 });
 
+test("project and recent rows consume the Host navigation signal", () => {
+  const cases = [
+    {
+      latestTerminal: { outcome: "stopped", cause: "resource_limit" },
+      signal: null,
+    },
+    {
+      latestTerminal: { outcome: "cancelled", cause: "timeout" },
+      signal: null,
+    },
+    {
+      latestTerminal: { outcome: "interrupted", cause: "session_close" },
+      signal: "interrupted",
+    },
+    {
+      latestTerminal: { outcome: "completed", cause: null },
+      lastCompactPhase: "failed",
+      signal: null,
+    },
+  ];
+  for (const facts of cases) {
+    const markup = renderTaskList(
+      [
+        {
+          id: "3",
+          workspaceId: "1",
+          recentOrder: "1",
+          title: "Review task",
+          archived: false,
+          currentRunPhase: null,
+          activeOperation: null,
+          unreadCompletionRunId: null,
+          activeCompactPhase: null,
+          ...facts,
+        },
+      ],
+      {
+        workspaces: [
+          {
+            id: "1",
+            kind: "manual",
+            displayName: "Project",
+            canonicalRoot: "/project",
+            recentOrder: "1",
+          },
+        ],
+      },
+    );
+    assert.equal((markup.match(/data-task-id="3"/g) ?? []).length, 2);
+    assert.equal(
+      (markup.match(/data-signal="interrupted"/g) ?? []).length,
+      facts.signal === "interrupted" ? 2 : 0,
+    );
+    assert.doesNotMatch(markup, /data-signal="failed"/);
+    if (facts.signal === "interrupted")
+      assert.match(markup, /aria-label="Interrupted"/);
+  }
+});
+
 test("Manual projects repeat their tasks while automatic tasks stay global", () => {
   const task = (id, workspaceId, overrides = {}) => ({
     id,
     title: `Task ${id}`,
+    signal: null,
     workspaceId,
     archived: false,
     unreadCompletionRunId: null,
@@ -1108,10 +1170,11 @@ test("Manual projects repeat their tasks while automatic tasks stay global", () 
   const tasks = [
     task("1", "automatic"),
     task("2", "alpha", {
+      signal: "attention",
       currentRunPhase: "waiting_ui",
       permissionReviewState: "needs_user",
     }),
-    task("3", "alpha", { currentRunPhase: "running" }),
+    task("3", "alpha", { signal: "running", currentRunPhase: "running" }),
     task("4", "alpha"),
     task("5", "beta", { archived: true }),
     task("6", "alpha", { unreadCompletionRunId: "9" }),

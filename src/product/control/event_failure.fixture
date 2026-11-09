@@ -4,13 +4,15 @@
     "cause": "event_payload_too_large",
     "diagnosticDisposition": "absent",
     "modelError": null,
-    "recordingIncomplete": false
+    "recordingIncomplete": false,
+    "feedback": { "guidance": "none", "offerInputPreparation": true }
   },
   {
     "outcome": "failed",
     "cause": "queue_capacity_failure",
     "diagnosticDisposition": "absent",
     "modelError": null,
-    "recordingIncomplete": false
+    "recordingIncomplete": false,
+    "feedback": { "guidance": "none", "offerInputPreparation": true }
   }
 ]

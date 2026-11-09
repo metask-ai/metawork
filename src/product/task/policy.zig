@@ -274,11 +274,57 @@ fn effectiveTerminationSignal(result: *const agent.TerminalResult) ?agent.Termin
     };
 }
 
-pub const ModelErrorRecovery = enum { account_settings, model_settings, review_context, revise_instruction, wait, prepare_retry, none };
+pub const RunGuidance = enum {
+    none,
+    account_settings,
+    model_settings,
+    review_context,
+    revise_instruction,
+    wait,
+    prepare_retry,
+    review_changes,
+    review_permissions,
+    review_image_input,
+};
+
+pub const RunFeedback = struct { guidance: RunGuidance, offer_input_preparation: bool };
 
 /// Advice never grants execution, login, payment, or model mutation authority.
-pub fn modelErrorRecovery(detail: *const task_state.RunModelError, cause: ?task_state.RunCause) ModelErrorRecovery {
-    if (cause != .provider_failure) return .none;
+pub fn runFeedback(
+    outcome: task_state.RunOutcome,
+    cause: ?task_state.RunCause,
+    detail: ?*const task_state.RunModelError,
+) RunFeedback {
+    const guidance: RunGuidance = switch (outcome) {
+        .completed, .dependency_contract_failure => .none,
+        .cancelled => if (cause == .timeout) .prepare_retry else .none,
+        .stopped => if (cause) |reason| switch (reason) {
+            .resource_limit => .revise_instruction,
+            .tool_failure => .review_changes,
+            .permission_required => .review_permissions,
+            else => .none,
+        } else .none,
+        .interrupted => .prepare_retry,
+        .failed => if (cause) |reason| switch (reason) {
+            .provider_failure => if (detail) |observed| providerGuidance(observed) else .prepare_retry,
+            .agent_failure => .prepare_retry,
+            .tool_failure => .review_changes,
+            .image_input_unsupported => .review_image_input,
+            else => .none,
+        } else .none,
+    };
+    return .{
+        .guidance = guidance,
+        .offer_input_preparation = switch (outcome) {
+            .completed => false,
+            .cancelled => cause == .timeout,
+            .stopped => cause == .resource_limit or cause == .tool_failure,
+            .interrupted, .failed, .dependency_contract_failure => true,
+        },
+    };
+}
+
+fn providerGuidance(detail: *const task_state.RunModelError) RunGuidance {
     return switch (detail.detail.category) {
         .authentication, .payment_required => if (detail.source == .metask) .account_settings else .model_settings,
         .permission, .not_found, .invalid_request => .model_settings,
@@ -301,17 +347,35 @@ test "model recovery advice respects exact source and primary cause without gran
     inline for (.{ agent.ModelError.Category.authentication, .payment_required }) |category| {
         detail.detail.category = category;
         detail.source = .metask;
-        try std.testing.expectEqual(.account_settings, modelErrorRecovery(&detail, .provider_failure));
+        try std.testing.expectEqual(.account_settings, runFeedback(.failed, .provider_failure, &detail).guidance);
         detail.source = .custom_provider;
-        try std.testing.expectEqual(.model_settings, modelErrorRecovery(&detail, .provider_failure));
+        try std.testing.expectEqual(.model_settings, runFeedback(.failed, .provider_failure, &detail).guidance);
         detail.source = null;
-        try std.testing.expectEqual(.model_settings, modelErrorRecovery(&detail, .provider_failure));
+        try std.testing.expectEqual(.model_settings, runFeedback(.failed, .provider_failure, &detail).guidance);
     }
     detail.source = .metask;
-    try std.testing.expectEqual(.none, modelErrorRecovery(&detail, .dependency_contract_failure));
-    try std.testing.expectEqual(.none, modelErrorRecovery(&detail, .event_pipeline_failure));
+    try std.testing.expectEqual(.none, runFeedback(.dependency_contract_failure, .dependency_contract_failure, &detail).guidance);
+    try std.testing.expectEqual(.none, runFeedback(.failed, .event_pipeline_failure, &detail).guidance);
     detail.detail.category = .context_window;
-    try std.testing.expectEqual(.review_context, modelErrorRecovery(&detail, .provider_failure));
+    try std.testing.expectEqual(.review_context, runFeedback(.failed, .provider_failure, &detail).guidance);
+    for ([_]struct { category: agent.ModelError.Category, guidance: RunGuidance }{
+        .{ .category = .permission, .guidance = .model_settings },
+        .{ .category = .not_found, .guidance = .model_settings },
+        .{ .category = .invalid_request, .guidance = .model_settings },
+        .{ .category = .unknown, .guidance = .model_settings },
+        .{ .category = .output_limit, .guidance = .revise_instruction },
+        .{ .category = .rate_limited, .guidance = .wait },
+        .{ .category = .overloaded, .guidance = .wait },
+        .{ .category = .server_error, .guidance = .prepare_retry },
+        .{ .category = .timeout, .guidance = .prepare_retry },
+        .{ .category = .connection, .guidance = .prepare_retry },
+        .{ .category = .stream_interrupted, .guidance = .prepare_retry },
+    }) |case| {
+        detail.detail.category = case.category;
+        const feedback = runFeedback(.failed, .provider_failure, &detail);
+        try std.testing.expectEqual(case.guidance, feedback.guidance);
+        try std.testing.expect(feedback.offer_input_preparation);
+    }
 }
 
 pub fn classifyCompactTerminal(
@@ -477,6 +541,27 @@ pub fn currentRunProjection(
 pub fn currentRunPhase(task: *const task_state.Task) ?task_state.RunPhase {
     const projection = currentRunProjection(task) orelse return null;
     return projection.phase;
+}
+
+pub const NavigationSignal = enum { attention, running, failed, interrupted };
+
+pub fn navigationSignal(task: *const task_state.Task) ?NavigationSignal {
+    if (currentRunPhase(task)) |phase| return switch (phase) {
+        .waiting_ui => if (task.permissionReviewPhase() == .reviewing) .running else .attention,
+        .queued, .running, .stopping => .running,
+        else => unreachable,
+    };
+    switch (task.runtime.active_operation) {
+        .compact, .restore => return .running,
+        .none, .run => {},
+    }
+    if (task.deletion == .failed) return .failed;
+    const run = latestTerminalRun(task.durable.runs) orelse return null;
+    return switch (task_state.productTerminalFacts(run).?.outcome) {
+        .failed, .dependency_contract_failure => .failed,
+        .interrupted => .interrupted,
+        .completed, .stopped, .cancelled => null,
+    };
 }
 
 pub fn hasActiveOperation(task: *const task_state.Task) bool {

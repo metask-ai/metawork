@@ -3950,28 +3950,10 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id or task.durable.archived) continue;
-            if (task_policy.currentRunPhase(task)) |phase| {
-                switch (phase) {
-                    .waiting_ui => if (task.permissionReviewPhase() == .reviewing) {
-                        signals.running +|= 1;
-                    } else {
-                        signals.attention +|= 1;
-                    },
-                    .queued, .running, .stopping => signals.running +|= 1,
-                    else => unreachable,
-                }
-                continue;
-            }
-            if (switch (task.runtime.active_operation) {
-                .compact => true,
-                .none, .run, .restore => false,
-            }) {
-                signals.running +|= 1;
-                continue;
-            }
-            if (task_policy.lastTerminalFacts(task.durable.runs)) |terminal| switch (terminal.outcome) {
-                .failed, .interrupted, .dependency_contract_failure => signals.failed_or_interrupted +|= 1,
-                .completed, .stopped, .cancelled => {},
+            if (task_policy.navigationSignal(task)) |signal| switch (signal) {
+                .running => signals.running +|= 1,
+                .attention => signals.attention +|= 1,
+                .failed, .interrupted => signals.failed_or_interrupted +|= 1,
             };
         }
         return signals;

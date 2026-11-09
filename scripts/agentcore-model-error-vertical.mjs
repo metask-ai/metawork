@@ -182,7 +182,8 @@ export async function runModelErrorVertical({
   assert.equal(detail.category, "authentication");
   assert.equal(detail.httpStatus, 401);
   assert.equal(detail.source, "custom_provider");
-  assert.equal(detail.recovery, "model_settings");
+  assert.equal(run.terminal.feedback.guidance, "model_settings");
+  assert.equal(run.terminal.feedback.offerInputPreparation, true);
   assert.equal(
     detail.hostRedacted,
     true,
@@ -377,6 +378,10 @@ export async function runModelErrorVertical({
   await restart();
   const restored = await readTask();
   assert.deepEqual(restored.runs.at(-1).terminal.modelError, detail);
+  assert.deepEqual(
+    restored.runs.at(-1).terminal.feedback,
+    run.terminal.feedback,
+  );
   assert.deepEqual(await readFile(legacyPath), retiredBytes);
   assert.equal(
     provider.served,
@@ -471,7 +476,7 @@ export async function runModelErrorVertical({
   if (provider.error) throw provider.error;
   assert.equal(paymentRun.terminal.modelError.category, "payment_required");
   assert.equal(paymentRun.terminal.modelError.source, "custom_provider");
-  assert.equal(paymentRun.terminal.modelError.recovery, "model_settings");
+  assert.equal(paymentRun.terminal.feedback.guidance, "model_settings");
   assert.deepEqual(paymentRun.fileChanges, {
     observation: "complete",
     changes: [],

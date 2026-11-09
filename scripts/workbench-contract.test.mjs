@@ -571,9 +571,52 @@ function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
     cause,
     diagnosticDisposition,
     recordingIncomplete: false,
+    feedback: { guidance: "none", offerInputPreparation: false },
     modelError: null,
   };
 }
+
+test("Task navigation requires a known signal consistent with the frozen page", () => {
+  const value = productViewFixture(fixture);
+  assert.equal(decodeScopedSnapshot(value).taskPage.task.signal, "running");
+  const task = value.taskPage.task;
+  delete task.signal;
+  assert.throws(() => decodeScopedSnapshot(value), /expected keys/);
+  task.signal = "future";
+  assert.throws(() => decodeScopedSnapshot(value), /signal/);
+  task.signal = null;
+  assert.throws(
+    () => decodeScopedSnapshot(value),
+    /Task header disagrees with index/,
+  );
+});
+
+test("Run feedback cannot disagree between a visible Run and its manifest", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  Object.assign(task, {
+    signal: null,
+    activeOperation: null,
+    currentRunId: "0",
+    currentRunPhase: null,
+  });
+  Object.assign(task.runs[0], {
+    phase: "stopped",
+    activity: null,
+    terminal: {
+      ...terminal("stopped", "tool_failure"),
+      feedback: { guidance: "review_changes", offerInputPreparation: true },
+    },
+  });
+  const view = productViewFixture(value);
+  assert.doesNotThrow(() => decodeScopedSnapshot(view));
+  const manifestRun = view.taskPage.runManifest[0];
+  manifestRun.terminal = {
+    ...manifestRun.terminal,
+    feedback: { guidance: "review_changes", offerInputPreparation: false },
+  };
+  assert.throws(() => decodeScopedSnapshot(view), /manifest/);
+});
 
 test("model error details accept the Host fixture and reject malformed or authority-expanding shapes", () => {
   const detail = JSON.parse(
@@ -593,6 +636,7 @@ test("model error details accept the Host fixture and reject malformed or author
   run.terminal = {
     ...terminal("failed", "provider_failure"),
     modelError: detail,
+    feedback: { guidance: "account_settings", offerInputPreparation: true },
   };
   assert.deepEqual(
     decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal.modelError,
@@ -610,19 +654,32 @@ test("model error details accept the Host fixture and reject malformed or author
     { httpStatus: -1 },
     { retry: "yes" },
     { hostRedacted: "true" },
-    { source: "custom_provider", recovery: "account_settings" },
+    { recovery: "account_settings" },
     { extra: true },
   ]) {
     run.terminal.modelError = { ...detail, ...patch };
     assert.throws(() => decodeWorkbenchSnapshot(value), /modelError/);
   }
+  run.terminal.modelError = { ...detail, source: "custom_provider" };
+  assert.throws(() => decodeWorkbenchSnapshot(value), /Metask/);
   run.terminal = {
-    ...terminal("failed", "event_pipeline_failure"),
-    modelError: { ...detail, recovery: "none" },
+    ...terminal("failed", "agent_failure"),
+    modelError: detail,
+    feedback: { guidance: "prepare_retry", offerInputPreparation: true },
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
-  run.terminal.modelError.recovery = "account_settings";
-  assert.throws(() => decodeWorkbenchSnapshot(value), /supplemental/);
+  run.terminal.feedback.guidance = "account_settings";
+  assert.throws(() => decodeWorkbenchSnapshot(value), /primary model error/);
+  for (const feedback of [
+    { guidance: "unknown", offerInputPreparation: false },
+    { guidance: "none", offerInputPreparation: 1 },
+    { guidance: "none" },
+  ]) {
+    run.terminal.feedback = feedback;
+    assert.throws(() => decodeWorkbenchSnapshot(value), /feedback/);
+  }
+  delete run.terminal.feedback;
+  assert.throws(() => decodeWorkbenchSnapshot(value), /expected keys/);
   run.terminal = terminal("failed", "provider_failure");
   delete run.terminal.modelError;
   assert.throws(() => decodeWorkbenchSnapshot(value), /expected keys/);

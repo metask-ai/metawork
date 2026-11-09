@@ -542,7 +542,7 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 | Active operation     | `none / run / compact / restore`                      | 当前占用唯一 Session operation 槽的操作种类  |
 | Active Run phase     | `none / queued / running / waiting_user / stopping`   | `run` operation 的调度、工作或等待状态       |
 | Active compact phase | `none / queued / compacting / stopping`               | `compact` operation 的调度、工作或取消状态   |
-| Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task    |
+| Last Run outcome     | `none / completed / stopped / cancelled / failed / interrupted / dependency_contract_failure` | 最近一次 terminal Run 的结果，不关闭 Task    |
 | View sync            | `ready / syncing / failed`                            | 当前连接已确认、最近一次合格读取成功且无故障 |
 
 `draft` 是未创建真实Task的Renderer临时页面，不进入Host生命周期；持有Automatic或Manual Workspace intent与runtime-only完整模型选择。没有草稿选择时显示Host起始偏好，发送始终提交非空明确目标及对应来源/目录generation，不使用全局默认执行配置。
@@ -574,6 +574,8 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 启动时收到的数据格式不符合预期，主提示使用“无法加载 MetaWork”等用户能够理解的描述，不把“工作台视图”作为需要用户理解的技术对象。原因说明只陈述已观察到的数据异常；对象路径和有界字段差异收入可折叠技术详情，不在主提示罗列内部字段，也不推断版本错配。该文案不改变既有拒绝与显式恢复边界。
 
 没有 active Run 且 execution binding 为 `rebind_required` 或 `unavailable` 时，左栏仍保留最近一次 Run 的 outcome；Composer 区域另外显示 `需要确认执行配置` 或 `当前无法继续`。不得用 binding 问题把历史结果改标成 Failed，也不得继续显示可发送输入造成错误暗示。
+
+项目和最近任务行消费 Host 派生的导航信号。失败与中断分别使用准确的可访问名称。Run 停止或取消的原因留在该轮，历史 Compact 失败在所属操作位置查阅。完成未读和归档沿用各自的标记规则。
 
 ### 6.4 跨重启 Conversation 恢复与 execution rebind
 
@@ -756,8 +758,8 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - Host 明确标记记录不完整时，在所属 Run 的唯一终态 notice 中说明“部分过程或回复未完整保留”；即使真实结果为 completed 且有 final response 也须可见。与已有失败原因或 partial 提示合并，不改称执行失败，不推断缺失的是最终回复，也不据此自动重试。
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 无结构化详情时显示“模型服务请求失败”，有合法详情时按 category 表达凭据拒绝、服务权限、支付状态、上下文/输出限制、限流、服务繁忙、超时或连接/流中断。不能根据 code、message 或 HTTP status 推断业务状态。`tool_failure` 与 `image_input_unsupported` 保持各自原因和恢复建议，不展示 provider raw body；
-- `provider_failure` 有结构化详情时，主区 notice 直接用一句话说明 Product 已知的原因；部分回复把未完成与原因合并表达，不追加重复标题、恢复建议段落或内容已保留说明。凭据与付款问题分别说明，不把付款分类解释成余额不足、登录失效或充值后必然恢复，也不承诺设置页提供不存在的支付状态查询。不据 Tool 数量、完成状态或 `isError` 推断业务操作已经完成；工具证据保留自己的入口。Account/模型设置按钮只导航到当前产品入口，后续登录、充值或修改继续由对应 owner 校验，不直接触发。补充模型错误只放入运行诊断，不覆盖 pipeline、权限或 dependency failure 的主提示；
-- 恢复动作的主次由 Product 的 `recovery` 决定，不推断当前问题是否已解决：设置建议突出对应设置入口，填回输入框作为次要动作；准备再次发送建议可突出填回输入框，等待或调整指令建议不把再次发送承诺为有效恢复。设置导航可以保留在历史 Run，执行准备仍受当前 Task 资格约束，不机械共用最新 Run 限制；
+- `provider_failure` 有结构化详情时，主区 notice 直接用一句话说明 Product 已知的原因；部分回复把未完成与原因合并表达，不追加重复标题或内容已保留说明。适用的处理建议在同一 notice 内简短呈现。凭据与付款问题分别说明，不把付款分类解释成余额不足、登录失效或充值后必然恢复，也不承诺设置页提供不存在的支付状态查询。不据 Tool 数量、完成状态或 `isError` 推断业务操作已经完成；工具证据保留自己的入口。Account/模型设置按钮只导航到当前产品入口，后续登录、充值或修改继续由对应 owner 校验，不直接触发。补充模型错误只放入运行诊断，不覆盖 pipeline、权限或 dependency failure 的主提示；
+- 恢复动作的主次由 Product 的 `feedback` 决定，不推断当前问题是否已解决：设置建议突出对应设置入口，填回输入框作为次要动作；准备再次发送建议可突出填回输入框，等待建议为主时，合格的填回入口仍为次要动作。调整指令时只承诺准备草稿。设置导航可以保留在历史 Run，执行准备仍受当前 Task 资格约束，不机械共用最新 Run 限制；
 - 失败 Run 的诊断经所属轮次的低频运行菜单进入，不在日常错误旁常驻“详情”按钮；仅用户打开时挂载正文，关闭后卸载。按精确 Run 的 model、protocol、Product Run ID 和 Agent 执行 ID 展示 provenance；结构化详情使用普通文本，安全换行，不执行 HTML、命令或上游链接。区分上游截断、Host 清洗和 Host 截断；正文被完全清除时给出固定隐私占位。独立 diagnostic 的 absent/withheld 不得被描述成模型错误详情也不可见。没有结构化详情时不得猜测鉴权、限流或网络分类。设置入口在断连时禁用；只有当前轮且 Task 可继续时才提供既有准备重试或查看待保留草稿动作，文字明确只把指令填入 Composer；打开诊断本身不执行恢复动作；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。同步失败或 Bridge 不可用时，保留已有内容，但 active Run 的唯一状态改为“状态尚未同步”、停止活动动效并暂停耗时外推；恢复后以新 Host Snapshot 为准，不因静默时长推断 Agent 卡死，也不自动终止或重跑。停止命令请求中及已受理、等待 Host 事实期间显示“正在请求停止”，同一目标不得重复请求；只有结果未知才显示停止结果尚未确认。应答不等于终态，正式 stopping/terminal 仍由 Host 确认，失败沿用当前 Task 的操作反馈。
 - 停止反馈记录点击时的连接代次、Task 与可取得的目标 Run 身份。同一目标 Run 被可信状态确认为 `stopping` 或任一终态后解除结果待确认；只描述其真实结局，完成不能称为停止成功。其他轮次、当前轮次变更或普通同步成功不能代替确认，目标暂未加载不等于结束。没有 Run 或 Compact 时，记录当时的 restore 身份与 Host 中处于 waiting 的输入 identity；原 restore 结束且这些输入均有已取消、失败或中断的可信记录后结束等待，不要求创建 Run。若原输入明确进入 Run，则沿该 Run 的状态继续确认；缺少原输入记录或只有后续输入的结果均不能代替确认。记录反馈目标不改变 Task stop 命令的业务作用范围。首次提交尚未交付时按本地取消事实表达；取得 Task 后沿原提交会话衔接，只有明确的提交关联才能取得目标 Run，不把后来任意一轮认作旧操作的结果。停止前已有输入与停止后的新输入保持隔离；

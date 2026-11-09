@@ -198,6 +198,12 @@ export async function runScheduledTasksVertical({
   }, "canonical noninteractive permission stop");
   assert.equal(stopped.item.failureReason, "permission_required");
   assert.equal(stopped.task.runs.at(-1).terminal.cause, "permission_required");
+  assert.equal(stopped.task.runs.at(-1).terminal.outcome, "stopped");
+  assert.deepEqual(stopped.task.runs.at(-1).terminal.feedback, {
+    guidance: "review_permissions",
+    offerInputPreparation: false,
+  });
+  assert.equal(stopped.task.signal, null);
   assert.equal(stopped.task.pendingUi, null);
   const stoppedRoot = stopped.state.workspaces.find(
     (item) => item.id === stopped.task.workspaceId,

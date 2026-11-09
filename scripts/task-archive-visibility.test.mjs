@@ -309,6 +309,35 @@ async function renderApp(
   };
 }
 
+test("a stopped tool loop prepares a local draft and preserves existing edits", async (ctx) => {
+  const run = {
+    ...structuredClone(initialSnapshot.tasks[0].runs[0]),
+    phase: "stopped",
+    activity: null,
+    terminal: {
+      outcome: "stopped",
+      cause: "tool_failure",
+      diagnosticDisposition: "absent",
+      modelError: null,
+      recordingIncomplete: false,
+      feedback: { guidance: "review_changes", offerInputPreparation: true },
+    },
+  };
+  const { user } = await renderApp(ctx, { historyRuns: [run] });
+  await user.click(taskRows("3")[0]);
+  await user.click(
+    await screen.findByRole("button", { name: "Copy to input box" }),
+  );
+  const editor = document.querySelector(".ai-composer textarea");
+  await waitFor(() => assert.equal(editor.value, run.input.text));
+  fireEvent.change(editor, { target: { value: "My existing draft" } });
+  await user.click(
+    await screen.findByRole("button", { name: "Review current draft" }),
+  );
+  await waitFor(() => assert.equal(document.activeElement, editor));
+  assert.equal(editor.value, "My existing draft");
+});
+
 test("Composer recalls only the current Task's saved text after remount and pages without moving the conversation reader", async (ctx) => {
   const historyRuns = ["one", "two", "three", "four", "four", "six"].map(
     (text, index) => ({
@@ -320,6 +349,7 @@ test("Composer recalls only the current Task's saved text after remount and page
         cause: null,
         diagnosticDisposition: "absent",
         recordingIncomplete: false,
+        feedback: { guidance: "none", offerInputPreparation: false },
         modelError: null,
       },
       input: { kind: "text", text, redacted: false },
