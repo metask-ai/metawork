@@ -5710,7 +5710,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0;
 }
 
-.mcp-import {
+.mcp-installation-card {
   display: grid;
   gap: 10px;
   min-width: 0;
@@ -5718,15 +5718,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 12px;
   border: 1px solid var(--ui-border);
   border-radius: 10px;
-}
-
-.mcp-import > div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  overflow-wrap: anywhere;
 }
 
 .mcp-structured-command {

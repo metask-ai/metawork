@@ -41,9 +41,6 @@ import {
   parseMcpCommandLine,
   validMcpArgv,
   validMcpHttpEndpoint,
-  parseMcpConfiguration,
-  type McpImportEntry,
-  type McpImportResult,
 } from "./configuration-input.ts";
 export {
   parseMcpCommandLine,
@@ -572,19 +569,10 @@ export function McpPage({
   const [timeoutMs, setTimeoutMs] = useState("30000");
   const [commandLine, setCommandLine] = useState("");
   const [structuredArgv, setStructuredArgv] = useState<string[] | null>(null);
-  const [importOpen, setImportOpen] = useState(false);
-  const [importBatch, setImportBatch] = useState<McpImportResult | null>(null);
-  const [importStatus, setImportStatus] = useState("");
-  const [importedDraft, setImportedDraft] = useState(false);
-  const [importedSecrets, setImportedSecrets] = useState<
-    Record<string, string>
-  >({});
-  const captureOperation = useRef<{ generations: Set<string> } | null>(null);
-  const currentManagement = useRef(management);
-  currentManagement.current = management;
+  const saveOperation = useRef<symbol | null>(null);
   useEffect(
     () => () => {
-      captureOperation.current = null;
+      saveOperation.current = null;
     },
     [],
   );
@@ -596,11 +584,10 @@ export function McpPage({
       disabled
     ) {
       previousGeneration.current = management.desiredGeneration;
-      clearImportSecrets();
       if (sensitiveEndpoint) setEndpoint("");
     }
     if (management.managementHealth !== "ready" || disabled)
-      captureOperation.current = null;
+      saveOperation.current = null;
   }, [management.desiredGeneration, management.managementHealth, disabled]);
   const [cwd, setCwd] = useState("");
   const [environmentNames, setEnvironmentNames] = useState<string[]>([]);
@@ -684,10 +671,6 @@ export function McpPage({
       ? selected.connection.tokenEndpointAuthMethod
       : null;
   const addValid =
-    Object.values(importedSecrets).every(
-      (value) =>
-        new TextEncoder().encode(value).length <= capabilities.secretMaxBytes,
-    ) &&
     validMcpDisplayName(displayName) &&
     /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
     (transport === "stdio"
@@ -729,7 +712,6 @@ export function McpPage({
   }, [selected?.id, selected?.displayName]);
 
   function openServer(server: McpServer, trigger: HTMLElement) {
-    clearImportSecrets();
     paneTrigger.current = trigger;
     setConfirmation(null);
     setNotice(null);
@@ -744,8 +726,6 @@ export function McpPage({
     setTimeoutMs("30000");
     setCommandLine("");
     setStructuredArgv(null);
-    setImportedSecrets({});
-    setImportedDraft(false);
     setCwd("");
     setEnvironmentNames([]);
     setStdioAuthMode("none");
@@ -760,59 +740,7 @@ export function McpPage({
     setPaneState({ kind: "add" });
   }
 
-  function clearImportSecrets() {
-    setImportedSecrets({});
-    setImportBatch(
-      (batch) =>
-        batch && {
-          ...batch,
-          entries: batch.entries.map((entry) => ({ ...entry, secrets: {} })),
-        },
-    );
-  }
-
-  function prefillImported(entry: McpImportEntry, trigger: HTMLElement) {
-    if (paneState !== null || mutationLocked) return;
-    openAdd(trigger);
-    const draft = entry.draft;
-    setDisplayName(draft.displayName);
-    setTransport(draft.transport);
-    setNegotiation(draft.negotiation);
-    setTimeoutMs(String(draft.timeoutMs));
-    setImportedSecrets(entry.secrets);
-    setImportedDraft(true);
-    // The selected form owns the only retained secret values.
-    setImportBatch(
-      (batch) =>
-        batch && {
-          ...batch,
-          entries: batch.entries.map((item) => ({ ...item, secrets: {} })),
-        },
-    );
-    if (draft.transport === "stdio") {
-      setStructuredArgv([draft.command, ...draft.arguments]);
-      setCwd(draft.cwd ?? "");
-      setEnvironmentNames(draft.environmentNames);
-      setStdioAuthMode(draft.environmentNames.length ? "static" : "none");
-    } else {
-      setEndpoint(draft.endpoint);
-      setAuthMode(draft.authMode);
-      setHeaderNames(draft.headerNames);
-    }
-    if (entry.ignoredPermissions || entry.publicValueOverlap)
-      setNotice({
-        tone: "attention",
-        text: [
-          entry.ignoredPermissions ? t("mcp.import.permissions_ignored") : "",
-          entry.publicValueOverlap ? t("mcp.import.review_values") : "",
-        ]
-          .filter(Boolean)
-          .join(" "),
-      });
-  }
-
   function openReplacement(server: McpServer) {
-    clearImportSecrets();
     const connection = server.connection;
     if (connection === null) return;
     setDisplayName(server.displayName);
@@ -887,8 +815,7 @@ export function McpPage({
   function closePane() {
     setEndpoint("");
     setSensitiveEndpoint(false);
-    clearImportSecrets();
-    captureOperation.current = null;
+    saveOperation.current = null;
     const trigger = paneTrigger.current;
     setPaneState(null);
     setConfirmation(null);
@@ -957,13 +884,8 @@ export function McpPage({
   async function createServer() {
     const generation = management.desiredGeneration;
     if (!generation || mutationLocked || !addValid || createPending) return;
-    const operation = { generations: new Set([generation]) };
-    captureOperation.current = operation;
-    const secretValues = Object.entries(importedSecrets).filter(
-      ([, value]) => value.length > 0,
-    );
-    let saved = false;
-    clearImportSecrets();
+    const operation = Symbol();
+    saveOperation.current = operation;
     setCreatePending(true);
     setNotice(null);
     try {
@@ -1023,9 +945,8 @@ export function McpPage({
             ? await onCreateStdio(generation, input as McpStdioConnectionInput)
             : await onCreateHttp(generation, input as McpHttpConnectionInput);
       mutationNotice(result);
-      if (captureOperation.current !== operation) return;
+      if (saveOperation.current !== operation) return;
       if (result.outcome === "saved") {
-        saved = true;
         const serverId =
           paneState?.kind === "replace" && selected
             ? selected.id
@@ -1033,49 +954,15 @@ export function McpPage({
         if (!serverId || !result.desiredGeneration)
           throw Error("missing create receipt");
         savedServer.current = { id: serverId };
-        let expected = result.desiredGeneration;
-        operation.generations.add(expected);
-        while (secretValues.length && captureOperation.current === operation) {
-          const current = currentManagement.current;
-          if (
-            !current.desiredGeneration ||
-            !operation.generations.has(current.desiredGeneration) ||
-            current.managementHealth !== "ready"
-          )
-            throw Error("stale capture");
-          const [name, secret] = secretValues.shift()!;
-          const names =
-            transport === "stdio"
-              ? (input as McpStdioConnectionInput).environmentNames
-              : (input as McpHttpConnectionInput).headerNames;
-          if (!names.includes(name)) continue;
-          if (!capabilities.secretCapture) throw Error("capture unavailable");
-          const capture = await onCaptureSecret(
-            expected,
-            serverId,
-            {
-              kind: transport === "stdio" ? "stdio_environment" : "http_header",
-              name,
-            },
-            secret,
-          );
-          if (captureOperation.current !== operation) break;
-          if (capture.outcome !== "saved" || !capture.desiredGeneration)
-            throw Error("capture failed");
-          expected = capture.desiredGeneration;
-          operation.generations.add(expected);
-        }
       } else if (result.outcome === "saved_recovery_required") closePane();
     } catch {
       setNotice({
         tone: "attention",
-        text: t(saved ? "mcp.import.capture_failed" : "mcp.mutation.failed"),
+        text: t("mcp.mutation.failed"),
       });
     } finally {
       if (sensitiveEndpoint) setEndpoint("");
-      secretValues.length = 0;
-      if (captureOperation.current === operation)
-        captureOperation.current = null;
+      if (saveOperation.current === operation) saveOperation.current = null;
       setCreatePending(false);
     }
   }
@@ -1590,42 +1477,30 @@ export function McpPage({
               </h1>
               <p>{t("mcp.subtitle")}</p>
             </div>
-            <div className="mcp-header-actions">
-              <Button
-                variant="secondary"
-                disabled={mutationLocked || paneState !== null}
-                onClick={() => {
-                  clearImportSecrets();
-                  setImportOpen((value) => !value);
-                }}
-              >
-                {t("mcp.import.title")}
-              </Button>
-              {!empty && (
-                <>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={refreshLocked}
-                    onClick={() => void refreshCatalog()}
-                  >
-                    <Icon name="refresh" />
-                    {refreshPending || management.operation === "refreshing"
-                      ? t("mcp.refresh.refreshing")
-                      : t("mcp.refresh.action")}
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={mutationLocked}
-                    onClick={(event) => openAdd(event.currentTarget)}
-                  >
-                    <Icon name="plus" />
-                    {t("mcp.add.action")}
-                  </Button>
-                </>
-              )}
-            </div>
+            {!empty && (
+              <div className="mcp-header-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={refreshLocked}
+                  onClick={() => void refreshCatalog()}
+                >
+                  <Icon name="refresh" />
+                  {refreshPending || management.operation === "refreshing"
+                    ? t("mcp.refresh.refreshing")
+                    : t("mcp.refresh.action")}
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={mutationLocked}
+                  onClick={(event) => openAdd(event.currentTarget)}
+                >
+                  <Icon name="plus" />
+                  {t("mcp.add.action")}
+                </Button>
+              </div>
+            )}
           </header>
 
           {installationOperations
@@ -1662,59 +1537,6 @@ export function McpPage({
             </p>
           )}
 
-          {importOpen && (
-            <section className="mcp-import" aria-label={t("mcp.import.title")}>
-              <label>
-                <span>{t("mcp.import.paste")}</span>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  value=""
-                  disabled={mutationLocked || paneState !== null}
-                  onChange={() => {}}
-                  onPaste={(event) => {
-                    event.preventDefault();
-                    try {
-                      const parsed = parseMcpConfiguration(
-                        event.clipboardData.getData("text"),
-                        capabilities.secretMaxBytes,
-                      );
-                      setImportBatch(parsed);
-                      setImportStatus("");
-                    } catch {
-                      setImportBatch(null);
-                      setImportStatus(t("mcp.import.invalid"));
-                    } finally {
-                      event.currentTarget.value = "";
-                    }
-                  }}
-                />
-              </label>
-              <small>{t("mcp.import.help")}</small>
-              {importStatus && <p role="status">{importStatus}</p>}
-              {importBatch?.entries.map((entry, index) => (
-                <div key={index}>
-                  <span>
-                    {entry.draft.displayName} · {entry.draft.transport}
-                  </span>
-                  <Button
-                    variant="secondary"
-                    disabled={mutationLocked || paneState !== null}
-                    onClick={(event) =>
-                      prefillImported(entry, event.currentTarget)
-                    }
-                  >
-                    {t("mcp.import.review")}
-                  </Button>
-                </div>
-              ))}
-              {importBatch?.issues.map((issue, index) => (
-                <p key={index}>
-                  {issue.name}: {t(`mcp.import.${issue.code}`)}
-                </p>
-              ))}
-            </section>
-          )}
           {!unavailable && !frozenWithoutDesired && !empty && (
             <div className="mcp-toolbar">
               <SearchField
@@ -1857,28 +1679,6 @@ export function McpPage({
                       </span>
                     </button>
                   </fieldset>
-                  {importedDraft &&
-                    (transport === "stdio"
-                      ? environmentNames
-                      : headerNames
-                    ).map((name) => (
-                      <label key={name}>
-                        <span>
-                          {t("mcp.import.credential")} {name}
-                        </span>
-                        <Input
-                          type="password"
-                          autoComplete="off"
-                          value={importedSecrets[name] ?? ""}
-                          onChange={(event) =>
-                            setImportedSecrets((current) => ({
-                              ...current,
-                              [name]: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                    ))}
                   <label>
                     <span>{t("mcp.add.name")}</span>
                     <Input

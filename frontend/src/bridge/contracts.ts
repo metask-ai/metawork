@@ -1806,9 +1806,6 @@ export type McpMutationResult = {
   desiredGeneration: string | null;
 };
 export type McpCreateResult = McpMutationResult & { serverId: string | null };
-export type McpInstallDraft =
-  | ({ transport: "stdio" } & McpStdioConnectionInput)
-  | ({ transport: "streamable_http" } & McpHttpConnectionInput);
 export const mcpInstallationPhases = [
   "preparing",
   "needs_authorization",

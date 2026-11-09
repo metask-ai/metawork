@@ -79,7 +79,7 @@ export function McpInstallationCard({
   }
   return (
     <section
-      className="mcp-import"
+      className="mcp-installation-card"
       aria-label={t("mcp.install.title")}
       aria-live="polite"
     >

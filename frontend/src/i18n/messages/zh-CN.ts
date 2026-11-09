@@ -397,8 +397,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.add_argument": "添加参数",
   "mcp.add.remove_argument": "删除参数",
   "mcp.add.edit_command_line": "编辑完整启动命令",
-  "mcp.import.review_values":
-    "部分环境变量或标头值也出现在公开连接字段中，请在添加前核对。",
   "mcp.proposal.title": "MCP 服务提议",
   "mcp.proposal.body":
     "查看公开配置后添加服务、完成认证并选择工具。后续新任务可以使用选定工具。",
@@ -409,19 +407,6 @@ export const zhCN: Record<MessageId, string> = {
     "提议已失效，未自动重试。请关闭表单，核对实际保存的连接后再添加。",
   "mcp.proposal.rejected":
     "MCP 提议未能接纳。请核对公开配置，凭据仅通过密码字段或 OAuth 提交。",
-  "mcp.import.title": "粘贴配置",
-  "mcp.import.paste": "在此粘贴 mcpServers JSON",
-  "mcp.import.help":
-    "粘贴严格 JSON。凭据仅留在本次表单中，逐个查看并添加服务。",
-  "mcp.import.review": "查看并添加",
-  "mcp.import.invalid": "配置无效，请重新粘贴严格 JSON。",
-  "mcp.import.unsupported": "不支持的配置字段或传输方式。",
-  "mcp.import.variables": "请提供具体值，不支持配置插值表达式。",
-  "mcp.import.permissions_ignored":
-    "未采用导入的权限设置。连接后请选择允许的工具。",
-  "mcp.import.credential": "凭据",
-  "mcp.import.capture_failed":
-    "服务已保存，但剩余凭据未能保存。请在连接详情中重新填写。",
   "mcp.add.command": "启动命令",
   "mcp.add.command_help":
     "粘贴你通常会执行的命令。MetaWork 不会执行管道、重定向或变量替换。",
