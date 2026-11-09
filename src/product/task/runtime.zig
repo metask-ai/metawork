@@ -3360,14 +3360,14 @@ pub const Runtime = struct {
         return self.pending_model_intent != null;
     }
 
-    pub fn beginModelIntent(
+    pub fn prepareModelIntent(
         self: *Runtime,
         task_id: u64,
         expected_revision: u64,
         target: models_contract.ModelRef,
     ) ModelIntentError!u64 {
         if (self.modelIntentPending()) return error.TaskBusy;
-        const prepared = try self.prepareModelIntent(task_id, expected_revision, target);
+        const prepared = try self.prepareModelIntentOverlay(task_id, expected_revision, target);
         self.pending_model_intent = prepared;
         return prepared.task.durable.model_intent.?.revision;
     }
@@ -3385,7 +3385,7 @@ pub const Runtime = struct {
         return task_id;
     }
 
-    fn prepareModelIntent(
+    fn prepareModelIntentOverlay(
         self: *Runtime,
         task_id: u64,
         expected_revision: u64,
@@ -10015,35 +10015,35 @@ test "Task model intent transaction uses its own revision and rolls back without
         runtime.tasks[0] = null;
     }
     const target = models_contract.ModelRef{ .source_id = "provider-b", .model_id = "same-model" };
-    try std.testing.expectError(error.UnknownTask, runtime.prepareModelIntent(2, 0, target));
-    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntent(1, 1, target));
+    try std.testing.expectError(error.UnknownTask, runtime.prepareModelIntentOverlay(2, 0, target));
+    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntentOverlay(1, 1, target));
     try std.testing.expect(task.durable.model_intent == null);
-    var first = try runtime.prepareModelIntent(1, 0, target);
+    var first = try runtime.prepareModelIntentOverlay(1, 0, target);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
-    try std.testing.expectError(error.TaskBusy, runtime.prepareModelIntent(1, 1, target));
+    try std.testing.expectError(error.TaskBusy, runtime.prepareModelIntentOverlay(1, 1, target));
     first.rollback();
     try std.testing.expect(task.durable.model_intent == null);
     try std.testing.expect(!task.model_intent_prepared);
 
-    first = try runtime.prepareModelIntent(1, 0, target);
+    first = try runtime.prepareModelIntentOverlay(1, 0, target);
     first.complete();
     try std.testing.expect(!task.model_intent_prepared);
     const original_source = task.durable.model_intent.?.source_id.ptr;
-    var second = try runtime.prepareModelIntent(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
+    var second = try runtime.prepareModelIntentOverlay(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
     try std.testing.expectEqual(@as(u64, 2), task.durable.model_intent.?.revision);
     second.rollback();
     try std.testing.expectEqual(original_source, task.durable.model_intent.?.source_id.ptr);
     try std.testing.expectEqualStrings("provider-b", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
-    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntent(1, 0, target));
-    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, 1, .{ .source_id = "bad\nsource", .model_id = "model" }));
+    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntentOverlay(1, 0, target));
+    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntentOverlay(1, 1, .{ .source_id = "bad\nsource", .model_id = "model" }));
 
     // The same transaction is legal while a Run is active. It neither obtains
     // Session access nor changes the Run/permission/installed binding facts.
     task.runtime.active_operation = .{ .run = 12 };
     task.runtime.active_run_id = 12;
     task.runtime.pending_ui_request_id = 33;
-    second = try runtime.prepareModelIntent(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
+    second = try runtime.prepareModelIntentOverlay(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
     second.complete();
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 2), task.durable.model_intent.?.revision);
@@ -10057,10 +10057,10 @@ test "Task model intent transaction uses its own revision and rolls back without
     try std.testing.expect(task.runtime.attachment == .detached);
 
     task.durable.archived = true;
-    try std.testing.expectError(error.TaskClosing, runtime.prepareModelIntent(1, 2, target));
+    try std.testing.expectError(error.TaskClosing, runtime.prepareModelIntentOverlay(1, 2, target));
     task.durable.archived = false;
     task.durable.model_intent.?.revision = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, std.math.maxInt(u64), target));
+    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntentOverlay(1, std.math.maxInt(u64), target));
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
 }
 
@@ -10179,7 +10179,7 @@ test "Task model intent allocation failure preserves the exact committed identit
             }
             task.durable.model_intent = try task_state.ModelIntent.init(allocator, .{ .source_id = "source", .model_id = "model" }, 5);
             const previous = task.durable.model_intent.?;
-            var prepared = runtime.prepareModelIntent(1, 5, .{ .source_id = "new-source", .model_id = "new-model" }) catch |err| {
+            var prepared = runtime.prepareModelIntentOverlay(1, 5, .{ .source_id = "new-source", .model_id = "new-model" }) catch |err| {
                 try std.testing.expectEqual(previous.source_id.ptr, task.durable.model_intent.?.source_id.ptr);
                 try std.testing.expectEqual(previous.model_id.ptr, task.durable.model_intent.?.model_id.ptr);
                 try std.testing.expectEqual(@as(u64, 5), task.durable.model_intent.?.revision);

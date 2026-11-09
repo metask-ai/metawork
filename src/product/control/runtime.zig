@@ -4709,7 +4709,7 @@ pub const Runtime = struct {
         }))
             return error.StaleCatalog;
         if (self.approvalHistoryBlocked() or self.task_runtime.approvalChangePending()) return error.TaskBusy;
-        const revision = try self.task_runtime.beginModelIntent(task_id, input.expected_selection_revision, input.target);
+        const revision = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
         var rollback = true;
         defer if (rollback) {
             _ = self.task_runtime.settleModelIntent(false);
