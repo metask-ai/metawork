@@ -4119,56 +4119,38 @@ pub const Runtime = struct {
     }
 
     fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64, approval_revision: ?u64) Error!u64 {
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
-        if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
-        const attached = task.runtime.hasAttachedSession();
-        if (task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
-        if (!attached) _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
+        const facts = try self.task_runtime.modelRebindFacts(task_id);
+        if (!facts.attached) _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
             error.McpRestoreBusy => return if (approval_revision != null) err else error.RecoveryUnavailable,
             else => return err,
         };
-        if (attached and (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready))
+        if (facts.attached and (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready))
             return error.RecoveryUnavailable;
-        const workspace = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
+        const workspace = try self.workspace.taskRunAuthority(facts.workspace_id, facts.workspace_epoch);
         const binding = self.workspace.recoveryBinding(workspace.id) orelse return error.RecoveryUnavailable;
         const home = self.canonical_user_home orelse return error.RecoveryUnavailable;
-        const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
+        if (!facts.has_model_intent) return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         try self.validateTaskMetaskAuthorization(task_id);
         try self.prepareTaskCredential(target.input().api_key);
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
-        if (attached) {
-            var access = try task.runtime.acquireAccess();
-            defer access.deinit();
-            var original = try access.captureRestoreInputs();
-            var original_owned = true;
-            defer if (original_owned) original.deinit() catch {};
+        if (try self.task_runtime.captureModelRebindInputs(task_id)) |captured| {
+            var original = captured;
+            errdefer original.deinit() catch {};
             const filters = try self.prepareTaskRestoreFilters(task_id, &original);
             capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
-            original_owned = false;
-        } else if (task.runtime.parked_capabilities) |parked| {
-            var original = parked;
-            original.skill = null;
-            original.mcp = null;
-            var original_owned = true;
-            defer if (original_owned) original.deinit() catch {};
-            if (parked.skill) |skill| original.skill = try skill.clone();
-            if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
-            const filters = try self.prepareTaskRestoreFilters(task_id, &original);
-            capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
-            original_owned = false;
         }
         const execution = target.input();
         // A cold restore may reuse an already resolved immutable connection.
         // Only exact full authority permits reuse; an absent or unrelated
         // global default still resolves independently and gets a new identity.
-        const generation = self.nextExecutionGeneration(task.durable.execution_generation) catch return error.ExecutionUnavailable;
+        const generation = self.nextExecutionGeneration(facts.execution_generation) catch return error.ExecutionUnavailable;
         const config: models_contract.ConfigInput = .{ .execution_generation = generation, .target = execution.target, .api_key = execution.api_key };
         const attempt = try self.task_runtime.startRecovery(task_id, .{
             .expected_binding_epoch = expected_binding_epoch,
             .workspace_id = workspace.id,
-            .workspace_epoch = task.durable.workspace_epoch,
+            .workspace_epoch = facts.workspace_epoch,
             .workspace_root = binding.canonical_root,
             .canonical_user_home = home,
             .workspace_trust = switch (binding.trust) {
@@ -4190,7 +4172,7 @@ pub const Runtime = struct {
             .checkpoint_limits = checkpoint_export_limits,
             .notifier = .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake },
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
-            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (capabilities != null) &capabilities else null, .text = self.taskRuntimeTextProjection() },
+            .rebind = .{ .source_id = authority.source_id, .selection_revision = authority.selection_revision, .catalog_generation = authority.catalog_generation, .capabilities = if (capabilities != null) &capabilities else null, .text = self.taskRuntimeTextProjection() },
         });
         self.bumpRevision();
         return attempt;

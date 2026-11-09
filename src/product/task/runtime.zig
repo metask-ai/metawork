@@ -5612,6 +5612,43 @@ pub const Runtime = struct {
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
+    pub fn modelRebindFacts(self: *const Runtime, task_id: u64) error{ UnknownTask, RestoreBusy, RecoveryUnavailable }!struct {
+        attached: bool,
+        workspace_id: u64,
+        workspace_epoch: u64,
+        execution_generation: u64,
+        has_model_intent: bool,
+    } {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
+        if (task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
+        return .{
+            .attached = task.runtime.hasAttachedSession(),
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .execution_generation = task.durable.execution_generation,
+            .has_model_intent = task.durable.model_intent != null,
+        };
+    }
+
+    /// An owned copy survives release of the live Session access.
+    pub fn captureModelRebindInputs(self: *Runtime, task_id: u64) !?agent.SessionRestoreInputs {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.runtime.hasAttachedSession()) {
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            return try access.captureRestoreInputs();
+        }
+        const parked = task.runtime.parked_capabilities orelse return null;
+        var original = parked;
+        original.skill = null;
+        original.mcp = null;
+        errdefer original.deinit() catch {};
+        if (parked.skill) |skill| original.skill = try skill.clone();
+        if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
+        return original;
+    }
+
     pub fn recoveryStartFacts(
         self: *const Runtime,
         task_id: u64,
