@@ -206,6 +206,20 @@ pub const Definition = struct {
     input: []const u8,
     recurrence: Recurrence,
     timezone: ?TimeZone = null,
+
+    pub fn normalizedTitle(value: []const u8, max_bytes: usize) error{InvalidTaskTitle}![]const u8 {
+        const title = std.mem.trim(u8, value, " \t\r\n");
+        if (title.len == 0 or title.len > max_bytes or !std.unicode.utf8ValidateSlice(title)) return error.InvalidTaskTitle;
+        for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
+        return title;
+    }
+
+    pub fn normalizedInstruction(value: []const u8, max_bytes: usize) error{InvalidScheduledTaskInput}![]const u8 {
+        const instruction = std.mem.trim(u8, value, " \t\r\n");
+        if (instruction.len == 0 or instruction.len > max_bytes or !std.unicode.utf8ValidateSlice(instruction))
+            return error.InvalidScheduledTaskInput;
+        return instruction;
+    }
 };
 
 pub const Binding = struct {
@@ -439,6 +453,7 @@ pub const Store = struct {
         const slot = self.emptySlot() orelse return error.ScheduledTaskCapacity;
         if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
             return error.ScheduledTaskIdentityExhausted;
+        if (!validDefinition(definition)) return error.InvalidSchedule;
         const next_run = (try definition.recurrence.firstAtOrAfter(
             now_unix_seconds,
         )) orelse return error.InvalidSchedule;
@@ -472,6 +487,7 @@ pub const Store = struct {
             return error.ScheduledTaskEpochMismatch;
         if (current.epoch == std.math.maxInt(u64))
             return error.ScheduledTaskIdentityExhausted;
+        if (!validDefinition(definition)) return error.InvalidSchedule;
         const preserve_paused = current.health == .paused;
         const next_run = try nextUnconsumedAtOrAfter(current, definition.recurrence, now_unix_seconds);
         var replacement = try self.cloneDefinition(
@@ -884,14 +900,7 @@ fn validDefinition(definition: Definition) bool {
         !std.unicode.utf8ValidateSlice(definition.title))
         return false;
     const binding = definition.binding;
-    if (binding.model_ref.source_id.len == 0 or
-        binding.model_ref.source_id.len > models_contract.Limits.provider_id_bytes or
-        !std.unicode.utf8ValidateSlice(binding.model_ref.source_id) or
-        binding.model_ref.model_id.len == 0 or
-        binding.model_ref.model_id.len > models_contract.Limits.model_id_bytes or
-        !std.unicode.utf8ValidateSlice(binding.model_ref.model_id) or
-        binding.source_generation == 0)
-        return false;
+    if (!binding.model_ref.valid() or binding.source_generation == 0) return false;
     if (definition.input.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.input)) return false;
     return true;
@@ -970,7 +979,7 @@ test "store updates optimistically and a one-time occurrence completes" {
         .max_projection_bytes = 4096,
     });
     defer store.deinit();
-    const id = try store.create(.{
+    const definition: Definition = .{
         .title = "Daily summary",
         .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
@@ -980,7 +989,12 @@ test "store updates optimistically and a one-time occurrence completes" {
         .permission_profile = .approval_required,
         .input = "Summarize the project",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
-    }, 1_000);
+    };
+    var malformed = definition;
+    malformed.binding.model_ref.model_id = "";
+    try std.testing.expectError(error.InvalidSchedule, store.create(malformed, 1_000));
+    const id = try store.create(definition, 1_000);
+    try std.testing.expectError(error.InvalidSchedule, store.update(id, 1, malformed, 1_000));
     const item = store.find(id).?;
     try std.testing.expectEqual(@as(u64, 1), item.epoch);
     try store.claim(item, 2_000, 2_001, .timer);

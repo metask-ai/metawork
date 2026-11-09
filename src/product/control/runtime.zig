@@ -4707,14 +4707,8 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (input.target.source_id.len == 0 or
-            input.target.model_id.len == 0 or
-            input.target.source_id.len > models_contract.Limits.provider_id_bytes or
-            input.target.model_id.len > models_contract.Limits.model_id_bytes or
-            input.expected_source_generation == 0 or
+        if (!input.target.valid() or input.expected_source_generation == 0 or
             input.expected_catalog_generation == 0 or
-            !std.unicode.utf8ValidateSlice(input.target.source_id) or
-            !std.unicode.utf8ValidateSlice(input.target.model_id) or
             self.containsKnownCredential(input.target.source_id) or
             self.containsKnownCredential(input.target.model_id))
             return error.InvalidTaskModel;
@@ -7900,36 +7894,12 @@ pub const Runtime = struct {
         const task = self.task_runtime.findConst(query.task_id) orelse return .task_unavailable;
         if (task.read_only_history != null or task.durable.archived or task.deletion != .idle or task.runtime.close_requested)
             return .task_unavailable;
-        const models = self.modelsView();
-        if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
-        const source_scope = scope: {
-            const intent = task.durable.model_intent orelse break :scope null;
-            for (models.providers) |provider|
-                if (std.mem.eql(u8, provider.id, intent.source_id)) break :scope intent.source_id;
-            for (models.custom_providers) |provider|
-                if (std.mem.eql(u8, provider.id, intent.source_id)) break :scope intent.source_id;
-            break :scope null;
+        const intent_source = if (task.durable.model_intent) |intent| intent.source_id else null;
+        return switch (self.custom_providers.selectionCatalogAvailability(intent_source)) {
+            .available => .available,
+            .catalog_loading => .catalog_loading,
+            .catalog_unavailable => .catalog_unavailable,
         };
-        for (models.custom_providers) |provider| {
-            if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
-            if (provider.state != .ready or !provider.enabled or provider.credential_status != .ready or
-                provider.source_generation == 0 or provider.catalog_generation == 0) continue;
-            for (provider.models) |model| {
-                if (model.ready) return .available;
-            }
-        }
-        var loading = false;
-        for (models.providers) |provider| {
-            if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
-            switch (provider.catalog_state) {
-                .ready => {
-                    if (provider.source_generation != 0 and provider.catalog_generation != 0 and provider.models.len != 0) return .available;
-                },
-                .loading, .choosing => loading = true,
-                else => {},
-            }
-        }
-        return if (loading) .catalog_loading else .catalog_unavailable;
     }
 
     fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
@@ -7977,17 +7947,7 @@ pub const Runtime = struct {
             installed.provider_id["custom_provider:".len..]
         else
             return false;
-        const target: models_contract.ModelRef = .{ .source_id = source, .model_id = installed.model };
-        const models = self.modelsView();
-        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, source)) {
-            if (provider.source_generation != installed.source_generation) return false;
-            if (std.mem.eql(u8, source, models_contract.metask_source_id) and
-                (provider.catalog_state == .loading or provider.catalog_state == .failed or provider.catalog_state == .unavailable)) return true;
-            return self.custom_providers.sourceModelProtocol(target, installed.source_generation, provider.catalog_generation) == installed.protocol;
-        };
-        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, source))
-            return self.custom_providers.sourceModelProtocol(target, installed.source_generation, provider.catalog_generation) == installed.protocol;
-        return false;
+        return self.custom_providers.installedModelAvailable(.{ .source_id = source, .model_id = installed.model }, installed.source_generation, installed.protocol);
     }
 
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
@@ -8147,15 +8107,7 @@ pub const Runtime = struct {
         self: *Runtime,
         selection: NewTaskModelSelectionInput,
     ) bool {
-        if (selection.target.source_id.len == 0 or
-            selection.target.model_id.len == 0 or
-            selection.target.source_id.len > models_contract.Limits.provider_id_bytes or
-            selection.target.model_id.len > models_contract.Limits.model_id_bytes or
-            selection.expected_source_generation == 0 or
-            selection.expected_catalog_generation == 0 or
-            !std.unicode.utf8ValidateSlice(selection.target.source_id) or
-            !std.unicode.utf8ValidateSlice(selection.target.model_id))
-            return false;
+        if (!selection.target.valid()) return false;
         return self.custom_providers.sourceModelProtocol(
             selection.target,
             selection.expected_source_generation,
@@ -8178,39 +8130,31 @@ pub const Runtime = struct {
         };
     }
 
+    fn scheduledModelBinding(self: *Runtime, binding: product_schedule.ModelBinding) models_aggregate.Runtime.BoundModelAvailability {
+        const availability = self.custom_providers.boundModelAvailability(binding.model_ref, binding.source_generation, binding.protocol);
+        if (availability == .ready) _ = self.metaskAuthorizationScope(binding.model_ref.source_id) catch return .unavailable;
+        return availability;
+    }
+
     fn scheduleBindingAvailability(context: ?*anyopaque, binding: product_schedule.ModelBinding) product_schedule.BindingAvailability {
         const self: *Runtime = @ptrCast(@alignCast(context.?));
-        const models = self.modelsView();
-        if (models.availability != .ready) return .unavailable;
-        for (models.providers) |provider| {
-            if (!std.mem.eql(u8, provider.id, binding.model_ref.source_id)) continue;
-            if (provider.catalog_state != .ready) return .unavailable;
-            if (provider.source_generation != binding.source_generation) return .invalid;
-            const protocol = self.custom_providers.sourceModelProtocol(binding.model_ref, binding.source_generation, provider.catalog_generation) orelse return .invalid;
-            if (protocol != binding.protocol) return .invalid;
-            _ = self.metaskAuthorizationScope(provider.id) catch return .unavailable;
-            return .ready;
-        }
-        for (models.custom_providers) |provider| {
-            if (!std.mem.eql(u8, provider.id, binding.model_ref.source_id)) continue;
-            if (!provider.enabled or provider.source_generation != binding.source_generation or provider.protocol != binding.protocol) return .invalid;
-            if (provider.credential_status != .ready) return .unavailable;
-            return if (self.custom_providers.sourceModelProtocol(binding.model_ref, binding.source_generation, provider.catalog_generation) != null) .ready else .invalid;
-        }
-        return .invalid;
+        return switch (self.scheduledModelBinding(binding)) {
+            .ready => .ready,
+            .unavailable => .unavailable,
+            .invalid => .invalid,
+        };
     }
 
     fn scheduledSelection(self: *Runtime, binding: ScheduledTaskBindingInput) Error!NewTaskModelSelectionInput {
         if (self.shutting_down or !self.skill.identitySourceTrusted()) return error.ExecutionUnavailable;
-        if (scheduleBindingAvailability(self, binding) != .ready) return error.ExecutionGenerationMismatch;
-        const models = self.modelsView();
-        for (models.providers) |provider| {
-            if (std.mem.eql(u8, provider.id, binding.model_ref.source_id)) return .{ .target = binding.model_ref, .expected_source_generation = binding.source_generation, .expected_catalog_generation = provider.catalog_generation };
-        }
-        for (models.custom_providers) |provider| {
-            if (std.mem.eql(u8, provider.id, binding.model_ref.source_id)) return .{ .target = binding.model_ref, .expected_source_generation = binding.source_generation, .expected_catalog_generation = provider.catalog_generation };
-        }
-        return error.ExecutionUnavailable;
+        return switch (self.scheduledModelBinding(binding)) {
+            .ready => |catalog_generation| .{
+                .target = binding.model_ref,
+                .expected_source_generation = binding.source_generation,
+                .expected_catalog_generation = catalog_generation,
+            },
+            .invalid, .unavailable => error.ExecutionGenerationMismatch,
+        };
     }
 
     fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
@@ -8363,17 +8307,14 @@ pub const Runtime = struct {
             _ = try self.metaskAuthorizationScope(selection.target.source_id);
             break :selected .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = protocol };
         } else retained orelse return error.InvalidScheduledTaskInput;
-        const title = std.mem.trim(u8, input.title, " \t\r\n");
-        if (title.len == 0 or title.len > self.limits.max_task_title_bytes or !std.unicode.utf8ValidateSlice(title)) return error.InvalidTaskTitle;
-        for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
+        const title = try product_schedule.Definition.normalizedTitle(input.title, self.limits.max_task_title_bytes);
         if (!self.workspace.automaticRootAvailable()) return error.WorkspaceUnavailable;
         const recurrence = if (input.local_recurrence) |local| resolved: {
             if (input.recurrence != null) return error.InvalidSchedule;
             break :resolved try self.schedule.resolveLocalRecurrence(local, id);
         } else input.recurrence orelse return error.InvalidSchedule;
         try recurrence.validate();
-        const instruction = std.mem.trim(u8, input.input, " \t\r\n");
-        if (instruction.len == 0 or instruction.len > self.limits.max_user_message_bytes or !std.unicode.utf8ValidateSlice(instruction)) return error.InvalidScheduledTaskInput;
+        const instruction = try product_schedule.Definition.normalizedInstruction(input.input, self.limits.max_user_message_bytes);
         return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = recurrence, .timezone = input.timezone };
     }
 

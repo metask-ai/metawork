@@ -1075,12 +1075,8 @@ pub const ModelIntent = struct {
     revision: u64,
 
     pub fn valid(model: models_contract.ModelRef, revision: u64) bool {
-        if (revision == 0 or model.source_id.len == 0 or model.model_id.len == 0 or
-            model.source_id.len > models_contract.Limits.provider_id_bytes or
-            model.model_id.len > models_contract.Limits.model_id_bytes)
-            return false;
+        if (revision == 0 or !model.valid()) return false;
         for ([_][]const u8{ model.source_id, model.model_id }) |value| {
-            if (!std.unicode.utf8ValidateSlice(value)) return false;
             for (value) |byte| if (std.ascii.isControl(byte)) return false;
         }
         return true;

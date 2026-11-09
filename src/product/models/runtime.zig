@@ -291,6 +291,84 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn selectionCatalogAvailability(self: *Runtime, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {
+        const models = self.view();
+        if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
+        const source_scope = scope: {
+            const source_id = intent_source orelse break :scope null;
+            for (models.providers) |provider|
+                if (std.mem.eql(u8, provider.id, source_id)) break :scope source_id;
+            for (models.custom_providers) |provider|
+                if (std.mem.eql(u8, provider.id, source_id)) break :scope source_id;
+            break :scope null;
+        };
+        for (models.custom_providers) |provider| {
+            if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
+            if (provider.state != .ready or !provider.enabled or provider.credential_status != .ready or
+                provider.source_generation == 0 or provider.catalog_generation == 0) continue;
+            for (provider.models) |model| {
+                if (model.ready) return .available;
+            }
+        }
+        var loading = false;
+        for (models.providers) |provider| {
+            if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
+            switch (provider.catalog_state) {
+                .ready => {
+                    if (provider.source_generation != 0 and provider.catalog_generation != 0 and provider.models.len != 0) return .available;
+                },
+                .loading, .choosing => loading = true,
+                else => {},
+            }
+        }
+        return if (loading) .catalog_loading else .catalog_unavailable;
+    }
+
+    pub const BoundModelAvailability = union(enum) {
+        ready: u64, // Exact catalog generation for the ready binding.
+        unavailable,
+        invalid,
+    };
+
+    pub fn boundModelAvailability(self: *Runtime, target: contract.ModelRef, source_generation: u64, protocol: contract.Protocol) BoundModelAvailability {
+        const models = self.view();
+        if (models.availability != .ready) return .unavailable;
+        for (models.providers) |provider| {
+            if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
+            if (provider.catalog_state != .ready) return .unavailable;
+            if (provider.source_generation != source_generation) return .invalid;
+            return if (self.sourceModelProtocol(target, source_generation, provider.catalog_generation) == protocol)
+                .{ .ready = provider.catalog_generation }
+            else
+                .invalid;
+        }
+        for (models.custom_providers) |provider| {
+            if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
+            if (!provider.enabled or provider.source_generation != source_generation or provider.protocol != protocol) return .invalid;
+            if (provider.credential_status != .ready) return .unavailable;
+            return if (self.sourceModelProtocol(target, source_generation, provider.catalog_generation) != null)
+                .{ .ready = provider.catalog_generation }
+            else
+                .invalid;
+        }
+        return .invalid;
+    }
+
+    pub fn installedModelAvailable(self: *Runtime, target: contract.ModelRef, source_generation: u64, protocol: contract.Protocol) bool {
+        const models = self.view();
+        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) {
+            if (provider.source_generation != source_generation) return false;
+            // An installed Metask binding can retain its authority while the
+            // catalog refresh is unavailable. Control still checks Account.
+            if (provider.catalog_state == .loading or provider.catalog_state == .failed or provider.catalog_state == .unavailable)
+                return true;
+            return self.sourceModelProtocol(target, source_generation, provider.catalog_generation) == protocol;
+        };
+        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id))
+            return self.sourceModelProtocol(target, source_generation, provider.catalog_generation) == protocol;
+        return false;
+    }
+
     pub fn prepareMetaskCatalogRefresh(
         self: *Runtime,
         principal_ref: []const u8,
