@@ -9404,6 +9404,146 @@ test "approval Core refusal and export failure keep the old mode or restore its 
     }
 }
 
+test "approval recovery owns restore before waiting input" {
+    const Gate = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+
+        fn wait(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.entered.swap(true, .acq_rel)) return;
+            while (!self.released.load(.acquire))
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+
+        fn cancel(_: *anyopaque) void {}
+    };
+    for ([_]enum { recovering, waiting }{ .recovering, .waiting }) |phase| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(1);
+        if (phase == .waiting) fake_core.setNextPlan(.invalid_result_layout);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var history = TaskPersistenceProbe{ .storage = bytes };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+        try waitInitialTaskCatalog(&control, task_id);
+        const task = control.task_runtime.find(task_id).?;
+        var gate: Gate = .{};
+        defer {
+            gate.released.store(true, .release);
+            fake_core.lock();
+            fake_core.session_destroy_probe = null;
+            fake_core.unlock();
+        }
+        if (phase == .waiting) {
+            _ = try runPreparedTask(&control, task_id, .{ .text = "run before approval change" });
+            try waitTaskSnapshot(&control, "\"id\":\"1\"", "\"continuationRecoveryAvailable\":true");
+            try std.testing.expectEqual(.detached, std.meta.activeTag(task.runtime.attachment));
+            try control.executor.enqueue(.{ .identity = &gate, .context = &gate, .execute_fn = Gate.wait, .cancel_fn = Gate.cancel });
+            for (0..2000) |_| {
+                if (gate.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(gate.entered.load(.acquire));
+        } else {
+            fake_core.lock();
+            fake_core.session_destroy_probe = .{ .context = &gate, .observe_fn = Gate.wait };
+            fake_core.unlock();
+        }
+
+        const attempt_before = control.task_runtime.next_restore_attempt_id;
+        const revision = try control.setApprovalMode(task_id, .full_access, task.durable.binding_epoch, 1);
+        if (phase == .recovering) {
+            const baseline = for (control.task_runtime.approval_jobs) |entry| {
+                if (entry) |slot| if (slot.task_id == task_id) break slot.job;
+            } else return error.TestUnexpectedResult;
+            for (0..2000) |_| {
+                if (baseline.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(baseline.completionReady() and baseline.outcome == .checkpoint);
+            fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT);
+            for (0..5000) |_| {
+                control.syncLifecycle();
+                if (gate.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(gate.entered.load(.acquire));
+            fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+        }
+        try std.testing.expectEqualStrings(@tagName(phase), @tagName(task.approval_change.?.phase));
+
+        const operation_id = "approval-queued-input";
+        const accepted = try control.sendInput(operation_id, task_id, .{ .text = "run after approval recovery" });
+        try std.testing.expectEqual(.accepted, accepted.outcome);
+        try std.testing.expectEqual(.waiting, task.input_submissions.items[0].state);
+        if (phase == .recovering) {
+            gate.released.store(true, .release);
+            for (0..5000) |_| {
+                control.syncLifecycle();
+                if (task.runtime.active_operation == .restore or task.approval_change == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+        }
+        try std.testing.expectEqual(.restore, std.meta.activeTag(task.runtime.active_operation));
+        try std.testing.expectEqual(.detached, std.meta.activeTag(task.runtime.attachment));
+        try std.testing.expect(!task.input_submissions.items[0].preparation_attempted);
+        try std.testing.expectEqual(@as(?u64, attempt_before), task.approval_change.?.recovery_attempt_id);
+        try std.testing.expectEqual(attempt_before, task.runtime.active_operation.restore.id);
+        gate.released.store(true, .release);
+
+        const queued_run = completed: {
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                for (task.durable.runs) |*entry| if (entry.*) |*run| {
+                    const submission = run.submission orelse continue;
+                    if (!std.mem.eql(u8, submission.operationId(), operation_id)) continue;
+                    try std.testing.expect(task.approval_change == null);
+                    if (task_state.productTerminalFacts(run)) |terminal| {
+                        try std.testing.expectEqual(.completed, terminal.outcome);
+                        break :completed run;
+                    }
+                };
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqual(attempt_before + 1, control.task_runtime.next_restore_attempt_id);
+        try std.testing.expectEqual(revision, task.approval_result.?.revision);
+        if (phase == .recovering) {
+            try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(.checkpoint_failed, task.approval_result.?.reason.?);
+            try std.testing.expectEqual(.approval_required, queued_run.permission_profile);
+        } else {
+            try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(.full_access, queued_run.permission_profile);
+        }
+    }
+}
+
 test "approval fresh recovery stays queued and one failure never starts an implicit retry" {
     const Blocker = struct {
         entered: std.atomic.Value(bool) = .init(false),

@@ -4373,7 +4373,7 @@ pub const Runtime = struct {
         return true;
     }
 
-    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64) Error!u64 {
+    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64, approval_revision: ?u64) Error!u64 {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
         const attached = task.runtime.hasAttachedSession();
@@ -4434,6 +4434,7 @@ pub const Runtime = struct {
             .execution = config,
             .source_generation = execution.source_generation,
             .continuation_source_id = continuation_source_id,
+            .approval_revision = approval_revision,
             .metask_authorization_scope = try self.metaskAuthorizationScope(execution.target.provider_id),
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = self.checkpoint_store,
@@ -4458,6 +4459,10 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         self.syncLifecycle();
+        return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null);
+    }
+
+    fn admitTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64, approval_revision: ?u64) Error!u64 {
         const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
         if (task.durable.model_intent == null or task.runtime.active_operation != .none)
             return error.RecoveryUnavailable;
@@ -4476,7 +4481,7 @@ pub const Runtime = struct {
         }
         if (target) |*value| if (task.runtime.attachment == .detached or
             (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
-            return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
+            return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null, approval_revision);
         return error.RecoveryUnavailable;
     }
 
@@ -4570,14 +4575,9 @@ pub const Runtime = struct {
     }
 
     fn beginApprovalRecovery(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.find(task_id) orelse return false;
-        var change = task.approval_change orelse return false;
-        task.approval_change = null;
-        defer {
-            task.approval_change = change;
-            task.approval_change.?.binding_epoch = task.durable.binding_epoch;
-        }
-        change.recovery_attempt_id = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch return false;
+        const task = self.task_runtime.findConst(task_id) orelse return false;
+        const change = task.approval_change orelse return false;
+        _ = self.admitTaskConversationRestore(task_id, task.durable.binding_epoch, change.revision) catch return false;
         return true;
     }
 
@@ -5168,7 +5168,7 @@ pub const Runtime = struct {
             if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
                 if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
                     return error.ExecutionUnavailable;
-                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null);
+                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
                 return error.RestoreBusy;
             };
         }
@@ -6070,7 +6070,7 @@ pub const Runtime = struct {
                 defer if (target) |*value| value.deinit();
                 const task = self.task_runtime.findConst(task_id).?;
                 if (target) |*value| if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(value.input())) {
-                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id) catch |err| {
+                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id, null) catch |err| {
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
                         return true;
