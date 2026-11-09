@@ -1245,6 +1245,7 @@ desktopVertical: try {
     process.platform === "win32" && !activeInputOnly
       ? await runApprovalModeVertical({
           invoke: invokeBridge,
+          invokePreparedRun,
           snapshot,
           poll,
           provider,

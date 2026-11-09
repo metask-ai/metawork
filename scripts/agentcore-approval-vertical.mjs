@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 // permission-review quality or replace Core with a fake implementation.
 export async function runApprovalModeVertical({
   invoke,
+  invokePreparedRun,
   snapshot,
   poll,
   provider,
@@ -112,7 +113,7 @@ export async function runApprovalModeVertical({
   const start = async (input, entries) => {
     provider.enqueue(...entries);
     const current = await readTask(taskId);
-    const result = await invoke("metawork.tasks.run", {
+    const result = await invokePreparedRun({
       taskId,
       expectedBindingEpoch: current.binding.epoch,
       input: { kind: "text", text: input },
