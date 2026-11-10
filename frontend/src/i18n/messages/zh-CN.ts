@@ -369,16 +369,47 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.desired.disabled": "已停用",
   "mcp.existing_tasks_note":
     "现有任务不会获得后续新增工具；撤销授权会限制其后续访问。",
-  "mcp.add.action": "添加服务",
+  "mcp.add.action": "手动添加",
   "mcp.add.title": "添加 MCP 服务",
-  "mcp.add.intro":
-    "选择连接方式并保存公开配置。添加操作会同时授权并启用连接，工具仍默认关闭。",
   "mcp.edit.title": "编辑连接配置",
   "mcp.edit.intro":
     "修改已保存的非敏感配置。密钥值不会显示；只有可执行文件或 Endpoint 未改变时，已有密钥才会保留。",
   "mcp.edit.action": "编辑连接",
   "mcp.edit.submit": "保存连接",
   "mcp.add.name": "显示名称",
+  "mcp.add.continue": "继续",
+  "mcp.add.back": "上一步",
+  "mcp.add.confirm_title": "确认添加 MCP 服务",
+  "mcp.add.detected.connected": "已完成 MCP 握手。当前地址无需额外登录。",
+  "mcp.add.detected.authentication_required":
+    "服务需要认证。请按服务的接入说明填写所需请求头。",
+  "mcp.add.detected.access_denied":
+    "服务拒绝了本次访问。请检查服务的授权说明。",
+  "mcp.add.detected.oauth_automatic":
+    "服务需要 OAuth 登录，支持自动注册客户端。",
+  "mcp.add.detected.oauth_existing":
+    "服务需要 OAuth 登录，未提供自动注册地址。",
+  "mcp.add.detected_label": "已检测",
+  "mcp.add.auth_mode.oauth": "OAuth",
+  "mcp.add.auth_mode.none": "不使用 OAuth",
+  "mcp.add.oauth_client": "OAuth 客户端注册方式",
+  "mcp.add.oauth_client.automatic": "自动注册",
+  "mcp.add.oauth_client.existing": "使用自己的客户端",
+  "mcp.add.oauth_after_save": "添加后，可在服务详情中登录并连接。",
+  "mcp.add.oauth_unavailable": "OAuth 暂不可用。",
+  "mcp.add.request_headers": "请求头",
+  "mcp.add.request_header_name": "名称",
+  "mcp.add.request_header_value": "值",
+  "mcp.add.request_header_add": "添加请求头",
+  "mcp.add.final.failed":
+    "最终配置未能完成 MCP 握手。请检查地址和请求头后重试。",
+  "mcp.add.final.busy": "另一个添加操作正在进行，请稍后重试。",
+  "mcp.add.final.unavailable": "暂时无法验证最终配置，请稍后重试。",
+  "mcp.add.probing": "正在验证连接…",
+  "mcp.add.probe.failed": "未能完成 MCP 握手。请核对完整服务地址后重试。",
+  "mcp.add.probe.busy": "另一个连接检测正在进行，请稍后重试。",
+  "mcp.add.probe.rejected": "无法检测这份配置，请检查名称和地址后重试。",
+  "mcp.add.probe.unavailable": "暂时无法检测连接，请稍后重试。",
   "mcp.add.transport": "连接类型",
   "mcp.add.stdio_help": "以结构化参数启动本地进程。",
   "mcp.add.http_help": "连接远程 Streamable HTTP Endpoint。",
@@ -452,7 +483,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.install.cancel": "取消安装",
   "mcp.install.action_failed": "无法确认操作结果，请检查当前状态后重试。",
   "mcp.install.rejected": "无法创建 MCP 配置，请查看 MCP 页面。",
-  "mcp.add.endpoint": "Endpoint",
+  "mcp.add.endpoint": "服务地址",
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息和 fragment。",
   "mcp.add.defaults":
@@ -1701,7 +1732,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.authorization_status.missing_static_secret": "缺少一个或多个密钥",
   "mcp.authorization_status.missing_oauth_client_secret":
     "缺少 OAuth Client Secret",
-  "mcp.authorization_status.client_registration_required": "需要客户端注册",
+  "mcp.authorization_status.client_registration_required": "待登录",
   "mcp.authorization_status.consent_required": "需要用户同意",
   "mcp.authorization_status.authorizing": "正在授权",
   "mcp.authorization_status.ready": "授权已就绪",

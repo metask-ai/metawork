@@ -3505,12 +3505,14 @@ export default function App() {
       throw error;
     }
   }
-  async function commitMcpMutation<T extends McpMutationResult>(
-    mutation: () => Promise<T>,
-  ): Promise<T> {
+  async function commitMcpMutation<
+    T extends
+      McpMutationResult | { outcome: "failed" | "busy" | "unavailable" },
+  >(mutation: () => Promise<T>): Promise<T> {
     try {
       const result = await mutation();
-      if (result.outcome !== "unchanged") await refreshCommittedView();
+      if ("desiredGeneration" in result && result.outcome !== "unchanged")
+        await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -5237,12 +5239,25 @@ export default function App() {
             query={mcpQuery}
             disabled={bridgeUnavailable || !snapshot.capabilities.mcpManagement}
             onQuery={setMcpQuery}
-            onCreateStdio={(generation, input) =>
+            onProbeHttpDraft={(generation, displayName, endpoint) =>
+              client.probeMcpHttpDraft(generation, displayName, endpoint)
+            }
+            onVerifyAndAddHttpDraft={(
+              generation,
+              displayName,
+              endpoint,
+              headers,
+            ) =>
               commitMcpMutation(() =>
-                client.createMcpStdioServer(generation, input),
+                client.verifyAndAddMcpHttpDraft(
+                  generation,
+                  displayName,
+                  endpoint,
+                  headers,
+                ),
               )
             }
-            onCreateHttp={(generation, input) =>
+            onCreateOAuthHttp={(generation, input) =>
               commitMcpMutation(() =>
                 client.createMcpHttpServer(generation, input),
               )

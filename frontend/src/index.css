@@ -5213,7 +5213,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 680;
 }
 
-.mcp-add-form input:where(:not([type="checkbox"], [type="hidden"])),
+.mcp-add-form
+  input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])),
 .mcp-add-form select,
 .mcp-rename-form input {
   width: 100%;
@@ -5454,6 +5455,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.55;
 }
 
+.mcp-address-fields {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-service-dialog[data-adding] {
+  width: min(520px, calc(100vw - 32px));
+}
+
 .mcp-form-pair {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(110px, 0.75fr);
@@ -5637,6 +5647,74 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 680;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.mcp-add-fields > .mcp-connection-summary {
+  margin: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mcp-draft-options,
+.mcp-draft-headers {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mcp-draft-options > legend {
+  margin-bottom: 8px;
+  color: var(--ui-content-primary);
+  font-size: var(--text-control);
+  font-weight: 680;
+}
+
+.mcp-draft-options > .mcp-draft-option {
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-height: 28px;
+  padding-block: 4px;
+  color: var(--ui-content-primary);
+  font-size: var(--text-control);
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.mcp-draft-option > input {
+  width: 14px;
+  height: 14px;
+  margin: 2px 0 0;
+  accent-color: var(--ui-content-primary);
+}
+
+.mcp-draft-options:disabled > .mcp-draft-option {
+  color: var(--ui-content-muted);
+  cursor: default;
+}
+
+.mcp-draft-options small {
+  display: inline-block;
+  margin-inline-start: 4px;
+  font-size: var(--text-micro);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.mcp-draft-headers {
+  margin-top: 12px;
+  justify-items: start;
+}
+
+.mcp-draft-header {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
 }
 
 .mcp-connection-summary dd {
@@ -6281,7 +6359,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-control);
 }
 
-.scheduled-editor label > span {
+.scheduled-editor label > span,
+.mcp-service-dialog[data-adding]
+  .mcp-add-fields
+  label:not(.mcp-draft-option)
+  > span {
   margin: 0;
   color: var(--ui-content-muted);
   font-size: var(--text-control);
@@ -6291,7 +6373,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .scheduled-editor input,
 .scheduled-editor select,
-.scheduled-editor textarea {
+.scheduled-editor textarea,
+.mcp-service-dialog[data-adding]
+  .mcp-add-form
+  input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])) {
   width: 100%;
   min-height: 38px;
   padding: 9px 10px;
@@ -6305,7 +6390,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .scheduled-editor input::placeholder,
-.scheduled-editor textarea::placeholder {
+.scheduled-editor textarea::placeholder,
+.mcp-service-dialog[data-adding] .mcp-add-form input::placeholder {
   color: var(--ui-content-muted);
 }
 
@@ -6490,7 +6576,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-top: 1px solid var(--ui-border);
 }
 
-.mcp-add-form > footer button {
+.mcp-service-dialog:not([data-adding]) .mcp-add-form > footer button {
   width: min(120px, calc((100% - 8px) / 2));
   min-height: 34px;
   font-size: var(--text-control);
@@ -6500,7 +6586,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   opacity: 0.5;
 }
 
-.scheduled-editor > footer button {
+.scheduled-editor > footer button,
+.mcp-service-dialog[data-adding] .mcp-add-form > footer button {
   font-size: var(--text-control);
 }
 

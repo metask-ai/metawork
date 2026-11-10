@@ -429,16 +429,54 @@ export const enUS = {
   "mcp.desired.disabled": "Disabled",
   "mcp.existing_tasks_note":
     "Existing tasks cannot gain newly added tools. Revoked permissions restrict future access.",
-  "mcp.add.action": "Add server",
+  "mcp.add.action": "Add manually",
   "mcp.add.title": "Add an MCP server",
-  "mcp.add.intro":
-    "Choose a transport and save the public connection settings. Adding the server authorizes and enables the connection; tools stay off by default.",
   "mcp.edit.title": "Edit connection settings",
   "mcp.edit.intro":
     "Change the saved non-secret settings. Secret values stay hidden and are preserved only while the executable or endpoint remains unchanged.",
   "mcp.edit.action": "Edit connection",
   "mcp.edit.submit": "Save connection",
   "mcp.add.name": "Display name",
+  "mcp.add.continue": "Continue",
+  "mcp.add.back": "Back",
+  "mcp.add.confirm_title": "Confirm MCP server",
+  "mcp.add.detected.connected":
+    "MCP handshake succeeded. This address needs no additional sign-in.",
+  "mcp.add.detected.authentication_required":
+    "The server requires authentication. Check its setup instructions for the required request headers.",
+  "mcp.add.detected.access_denied":
+    "The server denied access. Check its authorization instructions.",
+  "mcp.add.detected.oauth_automatic":
+    "The server requires OAuth sign-in and supports automatic client registration.",
+  "mcp.add.detected.oauth_existing":
+    "The server requires OAuth sign-in and did not provide a registration endpoint.",
+  "mcp.add.detected_label": "Detected",
+  "mcp.add.auth_mode.oauth": "OAuth",
+  "mcp.add.auth_mode.none": "Without OAuth",
+  "mcp.add.oauth_client": "OAuth client registration",
+  "mcp.add.oauth_client.automatic": "Register automatically",
+  "mcp.add.oauth_client.existing": "Use your own OAuth client",
+  "mcp.add.oauth_after_save":
+    "After adding the server, sign in from its details to connect.",
+  "mcp.add.oauth_unavailable": "OAuth is currently unavailable.",
+  "mcp.add.request_headers": "Request headers",
+  "mcp.add.request_header_name": "Name",
+  "mcp.add.request_header_value": "Value",
+  "mcp.add.request_header_add": "Add header",
+  "mcp.add.final.failed":
+    "The final configuration could not complete the MCP handshake. Check the address and headers and try again.",
+  "mcp.add.final.busy": "Another server is being added. Try again shortly.",
+  "mcp.add.final.unavailable":
+    "The final configuration could not be verified right now. Try again shortly.",
+  "mcp.add.probing": "Checking connection…",
+  "mcp.add.probe.failed":
+    "Couldn't complete the MCP handshake. Check the full server address and try again.",
+  "mcp.add.probe.busy":
+    "Another connection check is in progress. Try again shortly.",
+  "mcp.add.probe.rejected":
+    "Couldn't check this configuration. Review the name and address and try again.",
+  "mcp.add.probe.unavailable":
+    "Connection checks are unavailable right now. Try again shortly.",
   "mcp.add.transport": "Connection type",
   "mcp.add.stdio_help": "Run a local process with structured arguments.",
   "mcp.add.http_help": "Connect to a remote Streamable HTTP endpoint.",
@@ -522,7 +560,7 @@ export const enUS = {
     "The action could not be confirmed. Check the current status and retry.",
   "mcp.install.rejected":
     "MCP configuration could not be created. Check the MCP page.",
-  "mcp.add.endpoint": "Endpoint",
+  "mcp.add.endpoint": "Server address",
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
   "mcp.add.defaults":
@@ -1960,8 +1998,7 @@ export const enUS = {
     "One or more secrets are missing",
   "mcp.authorization_status.missing_oauth_client_secret":
     "OAuth client secret is missing",
-  "mcp.authorization_status.client_registration_required":
-    "Client registration required",
+  "mcp.authorization_status.client_registration_required": "Sign-in required",
   "mcp.authorization_status.consent_required": "Consent required",
   "mcp.authorization_status.authorizing": "Authorization in progress",
   "mcp.authorization_status.ready": "Authorization ready",
