@@ -1321,11 +1321,6 @@ pub const Runtime = struct {
             return error.ApprovalUnavailable;
         if ((current.profile() != target.profile() or !task.runtime.hasAttachedSession()) and !authority.checkpoint_store_ready)
             return error.ApprovalUnavailable;
-        var pending_count: usize = 0;
-        for (self.tasks) |entry| if (entry) |item| if (item.approval_change != null) {
-            pending_count += 1;
-        };
-        if (pending_count >= approval_job.max_operations) return error.TaskBusy;
         if (target == .auto_review and (task.runtime.permission_review.exhausted or
             task.runtime.permission_review.generation == std.math.maxInt(u64)))
             return error.ReviewGenerationExhausted;
@@ -10782,7 +10777,7 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
             return facts.*;
         }
     };
-    var runtime = try Runtime.init(std.testing.allocator, 1);
+    var runtime = try Runtime.init(std.testing.allocator, 1 + approval_job.max_operations);
     defer runtime.deinitStorage();
     var task_fixture: task_state.Task = .{
         .durable = .{
@@ -10847,10 +10842,39 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     try std.testing.expect(task.durable.permission_review_delegated);
     try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
     try std.testing.expect(task.approval_change == null);
-    task.runtime.pending_ui_request_id = 7;
-    _ = try runtime.beginApprovalChange(1, 1, 2, .manual, effects);
-    try std.testing.expectEqual(.needs_user, task.runtime.permission_review.phase);
-    try std.testing.expectEqual(@as(u64, 7), task.runtime.permission_review.settled_request_id);
+    {
+        var other_tasks: [approval_job.max_operations]task_state.Task = @splat(task_fixture);
+        for (&other_tasks, runtime.tasks[1..], 2..) |*other, *slot, id| {
+            other.durable.id = @intCast(id);
+            other.approval_change = .{ .revision = 3, .target = .full_access };
+            slot.* = other;
+        }
+        defer @memset(runtime.tasks[1..], null);
+
+        task.runtime.pending_ui_request_id = 7;
+        const old_review: PermissionReviewIdentity = .{
+            .task_id = 1,
+            .run_id = 1,
+            .run_generation = 1,
+            .execution_generation = 1,
+            .binding_epoch = 1,
+            .workspace_epoch = 1,
+            .route_id = 1,
+            .request_id = 7,
+            .policy_generation = 1,
+            .delegation_generation = task.runtime.permission_review.generation,
+        };
+        task.runtime.permission_review.phase = .reviewing;
+        task.runtime.permission_review.identity = old_review;
+        try std.testing.expect(task.runtime.permission_review.matches(old_review));
+        try std.testing.expectEqual(@as(u64, 3), try runtime.beginApprovalChange(1, 1, 2, .manual, effects));
+        try std.testing.expectEqual(.needs_user, task.runtime.permission_review.phase);
+        try std.testing.expectEqual(@as(u64, 7), task.runtime.permission_review.settled_request_id);
+        try std.testing.expect(!runtime.finishPermissionReview(old_review, .{ .cause = .reviewer_concern }));
+        try std.testing.expect(task.runtime.permission_review.audit == null);
+        try std.testing.expect(task.durable.permission_review_delegated);
+        try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+    }
     task.approval_change.?.phase = .outcome_unknown;
     try std.testing.expect(runtime.approvalHistoryBlocked());
     task.approval_change.?.phase = .mode_commit;
