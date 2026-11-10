@@ -4037,9 +4037,7 @@ pub const Runtime = struct {
             self.bumpRevision();
             return error.SessionReleasing;
         }
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (task.runtime.close_thread != null or task.runtime.close_requested) return error.SessionReleasing;
-        };
+        if (self.task_runtime.pendingSessionCloseTask() != null) return error.SessionReleasing;
         if (self.sessionReleaseFailureTaskId() != null) return error.SessionReleaseFailed;
         return error.SessionCapacity;
     }
@@ -4311,7 +4309,7 @@ pub const Runtime = struct {
     fn startApprovalRecovery(context: *anyopaque, task_id: u64, binding_epoch: u64, revision: u64) task_runtime.ApprovalRecoveryOutcome {
         const self: *Runtime = @ptrCast(@alignCast(context));
         _ = self.admitTaskConversationRestore(task_id, binding_epoch, revision) catch |err| return switch (err) {
-            error.SessionReleasing => if (self.task_runtime.activeSessionCloseTask()) |blocking_id|
+            error.SessionReleasing => if (self.task_runtime.pendingSessionCloseTask()) |blocking_id|
                 .{ .waiting = .{ .session_close = blocking_id } }
             else
                 .failed,

@@ -1700,7 +1700,7 @@ pub const Runtime = struct {
             }
             switch (wait.reason) {
                 .session_close => |blocking_id| if (self.findConst(blocking_id)) |blocking| {
-                    if (blocking.runtime.close_thread != null) return false;
+                    if (sessionClosePending(blocking)) return false;
                     if (blocking.runtime.close_failed and blocking.runtime.liveConst() != null) {
                         self.failApprovalChange(task_id, .recovery_failed, false);
                         return true;
@@ -1718,10 +1718,14 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn activeSessionCloseTask(self: *const Runtime) ?u64 {
+    fn sessionClosePending(task: *const task_state.Task) bool {
+        return task.runtime.close_thread != null or task.runtime.close_requested;
+    }
+
+    pub fn pendingSessionCloseTask(self: *const Runtime) ?u64 {
         for (self.tasks) |entry| {
             const task = entry orelse continue;
-            if (task.runtime.close_thread != null) return task.durable.id;
+            if (sessionClosePending(task)) return task.durable.id;
         }
         return null;
     }
@@ -3410,9 +3414,7 @@ pub const Runtime = struct {
     /// Pressure release uses the ordinary close owner, but never cancels work.
     /// The caller retries admission after completion; no operation is replayed.
     pub fn releaseIdleSession(self: *Runtime, except_task_id: ?u64, notifier: task_execution.Notifier) (agent.Error || std.mem.Allocator.Error || std.Thread.SpawnError)!bool {
-        for (self.tasks) |entry| if (entry) |task| {
-            if (task.runtime.close_thread != null or task.runtime.close_requested) return false;
-        };
+        if (self.pendingSessionCloseTask() != null) return false;
         var candidate: ?*task_state.Task = null;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -10139,17 +10141,21 @@ test "approval recovery waits for the observed blocker before admitting one atte
     defer @memset(runtime.tasks, null);
 
     task.approval_change = .{ .revision = 2, .target = .auto_review };
-    blocker.runtime.close_thread = try std.Thread.spawn(.{}, Harness.finishClose, .{});
-    defer if (blocker.runtime.close_thread) |thread| thread.join();
+    blocker.runtime.close_requested = true;
     var harness = Harness{ .task = &task, .outcome = .{ .waiting = .{ .session_close = 2 } } };
     const effects = Runtime.ApprovalRecoveryEffects{
         .context = &harness,
         .start_fn = Harness.start,
         .mcp_apply_pending_fn = Harness.applyingNow,
     };
-    try std.testing.expectEqual(@as(?u64, 2), runtime.activeSessionCloseTask());
+    try std.testing.expectEqual(@as(?u64, 2), runtime.pendingSessionCloseTask());
     try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
     try std.testing.expect(task.approval_result == null and task.approval_change.?.recovery_attempt_id == null);
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 1), harness.calls);
+    blocker.runtime.close_thread = try std.Thread.spawn(.{}, Harness.finishClose, .{});
+    defer if (blocker.runtime.close_thread) |thread| thread.join();
+    blocker.runtime.close_requested = false;
     try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
     try std.testing.expectEqual(@as(usize, 1), harness.calls);
     blocker.runtime.close_thread.?.join();

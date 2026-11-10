@@ -11784,6 +11784,14 @@ test "file delivery Run authority survives preparation changes until worker and 
 }
 
 test "approval recovery waits for Session pressure and the MCP apply barrier" {
+    try expectApprovalRecoveryWaitsForClose(false);
+}
+
+test "approval recovery waits for a requested Session close before its worker starts" {
+    try expectApprovalRecoveryWaitsForClose(true);
+}
+
+fn expectApprovalRecoveryWaitsForClose(close_running_task: bool) !void {
     fake_core.reset();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11796,7 +11804,7 @@ test "approval recovery waits for Session pressure and the MCP apply barrier" {
     configuration.directories.canonical_user_home = home;
     configuration.task_persistence = history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
-    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = if (close_running_task) 2 else 1 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
@@ -11804,10 +11812,11 @@ test "approval recovery waits for Session pressure and the MCP apply barrier" {
     var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 2,
-        .max_tasks = 2,
+        .max_tasks = if (close_running_task) 3 else 2,
         .max_workspaces = 1,
     }, configuration);
     defer control.deinit();
+    defer fake_core.releaseControlled();
     try installControlExecution(&control);
     var input = productControlTaskInput();
     input.workspace_root = home;
@@ -11836,19 +11845,38 @@ test "approval recovery waits for Session pressure and the MCP apply barrier" {
     try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
 
     runtime.mcp_operation.phase = .idle;
+    const releasing = if (close_running_task) closing: {
+        fake_core.setNextPlan(.controlled);
+        const id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+        try waitInitialTaskCatalog(&control, id);
+        _ = try runPreparedTask(&control, id, .{ .text = "Hold the Session until its requested close can start." });
+        try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
+        try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, id));
+        const task = control.task_runtime.find(id).?;
+        try std.testing.expect(task.runtime.close_requested);
+        try std.testing.expect(task.runtime.close_thread == null);
+        break :closing task;
+    } else other;
     const attempt_before = control.task_runtime.next_restore_attempt_id;
     const revision = try control.setApprovalMode(waiter_id, .auto_review, waiter.durable.binding_epoch, 1);
     try std.testing.expect(waiter.approval_change != null);
     try std.testing.expect(waiter.approval_result == null);
-    try std.testing.expect(other.runtime.close_thread != null);
+    if (close_running_task) {
+        try std.testing.expect(releasing.runtime.close_requested);
+        try std.testing.expect(releasing.runtime.close_thread == null);
+        try std.testing.expect(other.runtime.hasAttachedSession());
+        try std.testing.expect(other.runtime.close_thread == null);
+    } else try std.testing.expect(other.runtime.close_thread != null);
     try std.testing.expectEqual(attempt_before, control.task_runtime.next_restore_attempt_id);
 
     runtime.sessions_mutex.lockUncancelable(std.testing.io);
     runtime.mcp_operation.phase = .apply;
     runtime.sessions_mutex.unlock(std.testing.io);
+    if (close_running_task) fake_core.releaseControlled();
     for (0..5000) |_| {
+        if (close_running_task) try control.drainAgentEvents();
         control.syncLifecycle();
-        if (other.runtime.attachment == .detached) break;
+        if (releasing.runtime.attachment == .detached) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     try std.testing.expect(waiter.approval_change != null);
