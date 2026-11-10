@@ -4190,7 +4190,7 @@ pub const Runtime = struct {
 
     fn checkTaskConversationRestore(self: *Runtime, task_id: u64) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        if (self.task_runtime.modelFacts(task_id)) |facts| if (facts.intent_pending) return error.TaskPersistenceOutcomeUnknown;
     }
 
     fn admitUserTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64) Error!u64 {
@@ -4769,13 +4769,12 @@ pub const Runtime = struct {
         var model_target = try self.resolveTaskRunModel(task_id);
         defer if (model_target) |*target| target.deinit();
         if (model_target) |*target| {
-            const task = self.task_runtime.findConst(task_id).?;
-            if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
+            if (self.task_runtime.installedModelNeedsSourceChange(task_id, target.input())) {
                 if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
                     return error.ExecutionUnavailable;
                 _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
                 return error.RestoreBusy;
-            };
+            }
         }
         if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
@@ -5638,8 +5637,7 @@ pub const Runtime = struct {
                     return true;
                 };
                 defer if (target) |*value| value.deinit();
-                const task = self.task_runtime.findConst(task_id).?;
-                if (target) |*value| if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(value.input())) {
+                if (target) |*value| if (self.task_runtime.installedModelNeedsSourceChange(task_id, value.input())) {
                     _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id, null) catch |err| {
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
@@ -7694,86 +7692,84 @@ pub const Runtime = struct {
     }
 
     fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        const intent = task.durable.model_intent orelse return false;
-        const installed = task.runtime.executionConst() orelse return false;
-        if (installed.model_intent_revision == intent.revision and task.runtime.metask_authorization_scope == 0) return false;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return false;
+        const intent = facts.intent orelse return false;
+        const installed = facts.installed orelse return false;
+        if (installed.intent_revision == intent.revision and facts.metask_scope == 0) return false;
         const authority = self.taskModelIntentAuthority(task_id) orelse return false;
-        const protocol = self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) orelse return false;
-        const provider_matches = if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id))
-            std.mem.eql(u8, installed.provider_id, "metask")
+        const protocol = self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) orelse return false;
+        const is_metask = std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id);
+        const provider_matches = if (installed.target) |target|
+            installed.is_metask == is_metask and std.mem.eql(u8, target.source_id, intent.target.source_id)
         else
-            std.mem.startsWith(u8, installed.provider_id, "custom_provider:") and std.mem.eql(u8, installed.provider_id["custom_provider:".len..], intent.source_id);
+            false;
         if (installed.protocol != protocol or !provider_matches) return true;
         if (installed.source_generation == authority.source_generation) return false;
-        if (task.runtime.metask_authorization_scope == 0) return true;
-        var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
+        if (facts.metask_scope == 0) return true;
+        var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
         defer candidate.deinit();
-        return !installed.matchesTarget(candidate.input());
+        return !self.task_runtime.installedModelMatchesTarget(task_id, candidate.input());
     }
 
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
-        const task = self.task_runtime.findConst(task_id) orelse return null;
-        const intent = task.durable.model_intent orelse return null;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return null;
+        const intent = facts.intent orelse return null;
         // Account identity replacement revokes new Metask credential use.
         // Independent Custom Providers do not inherit that Account gate.
-        if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id)) {
+        if (std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)) {
             self.validateTaskMetaskAuthorization(task_id) catch return null;
         }
-        const models = self.modelsView();
-        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
-            return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
-        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
-            return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
-        return null;
+        const generations = self.custom_providers.sourceGenerations(intent.target.source_id) orelse return null;
+        return .{
+            .source_id = intent.target.source_id,
+            .selection_revision = intent.revision,
+            .source_generation = generations.source,
+            .catalog_generation = generations.catalog,
+        };
     }
 
     fn installedTaskModelAvailable(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        const installed = task.runtime.executionConst() orelse return false;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return false;
+        const installed = facts.installed orelse return false;
         self.validateTaskMetaskAuthorization(task_id) catch return false;
-        const source = if (std.mem.eql(u8, installed.provider_id, models_contract.metask_source_id))
-            models_contract.metask_source_id
-        else if (std.mem.startsWith(u8, installed.provider_id, "custom_provider:"))
-            installed.provider_id["custom_provider:".len..]
-        else
-            return false;
-        return self.custom_providers.installedModelAvailable(.{ .source_id = source, .model_id = installed.model }, installed.source_generation, installed.protocol);
+        const target = installed.target orelse return false;
+        return self.custom_providers.installedModelAvailable(target, installed.source_generation, installed.protocol);
     }
 
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
-        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
-        if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
+        if (facts.intent_pending) return error.TaskPersistenceOutcomeUnknown;
         try self.validateTaskMetaskAuthorization(task_id);
-        const intent = task.durable.model_intent orelse {
+        const intent = facts.intent orelse {
             if (!self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
             return null;
         };
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        if (task.runtime.executionConst()) |installed|
-            if (installed.model_intent_revision == intent.revision) {
+        if (facts.installed) |installed|
+            if (installed.intent_revision == intent.revision) {
                 // Membership is checked against current source authority. A
                 // renewed Metask credential must reach the renewal path below,
                 // rather than being rejected for the old owned generation.
-                if (self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == null and
+                if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null and
                     !self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
-                if (task.runtime.metask_authorization_scope == 0) return null;
+                if (facts.metask_scope == 0) return null;
                 const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-                if (!task.runtime.credential_update_failed and installed.source_generation == current.source_generation) return null;
+                if (!facts.credential_update_failed and installed.source_generation == current.source_generation) return null;
             };
-        if (self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == null)
+        if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null)
             return error.ExecutionUnavailable;
-        var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
+        var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
-        try self.prepareTaskCredential(candidate.input().api_key);
-        if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.matchesTarget(candidate.input())) {
+        const input = candidate.input();
+        try self.prepareTaskCredential(input.api_key);
+        if (facts.installed) |installed| if (facts.metask_scope != 0 and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
             const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
             const current = check.current() orelse return error.ExecutionUnavailable;
-            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, candidate.input().api_key, true) catch |err| {
-                self.failMetaskCredentialUpdate(task_id, current.generation, err);
+            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, input.api_key, input.source_generation) catch |err| {
+                self.task_runtime.failMetaskCredentialUpdate(task_id, current.generation, err, self.taskRuntimeOperationEffects());
                 return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionUnavailable;
             };
             switch (renewal) {
@@ -7781,14 +7777,12 @@ pub const Runtime = struct {
                 .deferred => return error.TaskBusy,
                 .updated, .unchanged => {},
             }
-            self.task_runtime.find(task_id).?.runtime.execution().?.source_generation = candidate.input().source_generation;
-            if (installed.model_intent_revision == intent.revision) {
+            if (installed.intent_revision == intent.revision) {
                 candidate.deinit();
                 return null;
             }
         };
-        if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.model_intent_revision == intent.revision) {
-            const input = candidate.input();
+        if (facts.installed) |installed| if (facts.metask_scope != 0 and installed.intent_revision == intent.revision) {
             if (installed.protocol != input.target.protocol or !std.mem.eql(u8, installed.base_url, input.target.base_url))
                 return error.ExecutionUnavailable;
         };
@@ -9877,12 +9871,7 @@ pub const Runtime = struct {
 
     fn needsDeferredMetaskCredential(context: *anyopaque, authority: control_ports.MetaskAuthorization) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (!self.currentRenewalAuthority(authority)) return false;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (!task.runtime.credential_renewal_deferred or self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
-            if (task.runtime.active_operation != .compact) return true;
-        };
-        return false;
+        return self.currentRenewalAuthority(authority) and self.task_runtime.needsDeferredMetaskCredential(authority.scope);
     }
 
     fn renewMetaskExecutionCredentials(context: *anyopaque, authority: control_ports.MetaskAuthorization, credential: ?[]const u8) void {
@@ -9892,58 +9881,28 @@ pub const Runtime = struct {
             const previous = self.learned_renewal;
             if (previous == null or previous.?.scope != authority.scope or previous.?.generation != authority.generation) {
                 self.prepareTaskCredential(value) catch {
-                    for (self.task_runtime.tasks) |entry| if (entry) |task| {
-                        if (self.task_runtime.metaskCredentialScope(task.durable.id) == authority.scope)
-                            task.runtime.credential_renewal_deferred = true;
-                    };
+                    self.task_runtime.deferMetaskCredentialRenewals(authority.scope);
                     self.bumpRevision();
                     return;
                 };
                 self.learned_renewal = authority;
             }
         }
-        var changed = false;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            changed = self.task_runtime.renewMetaskImages(task.durable.id, authority.scope, authority.generation, credential) or changed;
-            if (self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
-            const value = credential orelse {
-                self.task_runtime.failCredentialRenewal(task.durable.id, authority.generation, true, false);
-                changed = true;
-                continue;
-            };
-            const outcome = self.task_runtime.renewMetaskCredential(task.durable.id, authority.scope, authority.generation, value, false) catch |err| {
-                self.failMetaskCredentialUpdate(task.durable.id, authority.generation, err);
-                changed = true;
-                continue;
-            };
-            changed = changed or outcome == .updated;
-        };
+        const changed = self.task_runtime.renewMetaskExecutions(authority.scope, authority.generation, credential, self.taskRuntimeOperationEffects());
         self.retireQuiescentCredentials();
         if (changed) self.bumpRevision();
     }
 
-    fn failMetaskCredentialUpdate(self: *Runtime, task_id: u64, generation: u64, err: anyerror) void {
-        self.task_runtime.failCredentialRenewal(task_id, generation, err == error.OutOfMemory or err == error.CredentialUpdateResourceLimit, err == error.CredentialUpdateContract);
-        // A poisoned idle Session cannot accept any new work. Give it to the
-        // ordinary close owner; an explicit later admission can restore it.
-        if ((err == error.CredentialUpdateContract or err == error.SessionPoisoned) and !self.task_runtime.taskHasActiveOperation(task_id))
-            _ = self.task_runtime.beginDetach(task_id, self.taskRuntimeOperationEffects()) catch false;
+    fn retireQuiescentCredentials(self: *Runtime) void {
+        self.task_runtime.retireQuiescentCredentials(self.taskRuntimeReleaseEffects(), taskHasPendingReview);
     }
 
-    fn retireQuiescentCredentials(self: *Runtime) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            const reviewing = for (self.permission_jobs) |job| {
-                if (job != null and job.?.prepared.identity.task_id == task.durable.id) break true;
-            } else false;
-            if (reviewing) continue;
-            while (self.task_runtime.retiredCredential(task.durable.id)) |value| {
-                if (!prepareTaskRuntimeCredentialRelease(self, value)) break;
-                self.retireProjectionCredential(value);
-                // Unfinished history maintenance owns its own secret copy.
-                // Do not reissue retirement and its wake on every drain.
-                self.task_runtime.releaseRetiredCredential(task.durable.id);
-            }
+    fn taskHasPendingReview(context: *anyopaque, task_id: u64) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        for (self.permission_jobs) |entry| if (entry) |job| {
+            if (job.prepared.identity.task_id == task_id) return true;
         };
+        return false;
     }
 
     fn metaskAuthorizationScope(self: *Runtime, provider_id: []const u8) Error!u64 {
@@ -9962,11 +9921,13 @@ pub const Runtime = struct {
     }
 
     fn validateTaskMetaskAuthorization(self: *Runtime, task_id: u64) Error!void {
-        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
-        const provider_id = if (task.durable.model_intent) |intent| intent.source_id else if (task.runtime.executionConst()) |execution| execution.provider_id else return;
-        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
-        const scope = try self.metaskAuthorizationScope(provider_id);
-        if (task.runtime.metask_authorization_scope != 0 and task.runtime.metask_authorization_scope != scope)
+        const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
+        const uses_metask = if (facts.intent) |intent|
+            std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
+        else if (facts.installed) |installed| installed.is_metask else false;
+        if (!uses_metask) return;
+        const scope = try self.metaskAuthorizationScope(models_contract.metask_source_id);
+        if (facts.metask_scope != 0 and facts.metask_scope != scope)
             return error.ExecutionUnavailable;
     }
 

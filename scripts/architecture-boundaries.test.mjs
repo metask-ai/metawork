@@ -1668,6 +1668,10 @@ test("Product Task kernels have one physical home without taking the executor", 
     projection,
     /fn restoreWaitingInput\([^\n]*\{\s*const self:[^\n]*\n\s*_ = self\.admitUserTaskConversationRestore\(/,
   );
+  const modelAuthority = projection.match(/fn taskModelIntentAuthority\([^\n]*\{([\s\S]*?)\n    \}/);
+  assert.ok(modelAuthority);
+  assert.doesNotMatch(modelAuthority[1], /\bmodelsView\(/);
+  assert.doesNotMatch(projection, /\.task_runtime\.find\([^\n]*\.source_generation\s*=/);
   assert.doesNotMatch(
     projection,
     /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution|product_task_(?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime|persistence|checkpoint_record|checkpoint_store))/,

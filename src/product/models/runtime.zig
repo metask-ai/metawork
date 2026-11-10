@@ -291,6 +291,21 @@ pub const Runtime = struct {
         };
     }
 
+    pub const SourceGenerations = struct { source: u64, catalog: u64 };
+
+    pub fn sourceGenerations(self: *Runtime, source_id: []const u8) ?SourceGenerations {
+        self.assertMainThread();
+        if (std.mem.eql(u8, source_id, contract.metask_source_id)) {
+            const source = self.registry.metaskSource();
+            return .{
+                .source = if (source) |value| value.source_generation else 0,
+                .catalog = self.metask_catalog_generation,
+            };
+        }
+        const provider = findProviderView(self.registry.views(), source_id) orelse return null;
+        return .{ .source = provider.source_generation, .catalog = provider.catalog_generation };
+    }
+
     pub fn selectionCatalogAvailability(models: contract.ModelsView, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {
         if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
         const source_scope = scope: {

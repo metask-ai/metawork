@@ -3965,6 +3965,51 @@ pub const Runtime = struct {
 
     pub const CredentialRenewal = enum { unrelated, unchanged, updated, deferred };
 
+    pub const ModelFacts = struct {
+        intent: ?struct { target: models_contract.ModelRef, revision: u64 },
+        intent_pending: bool,
+        installed: ?struct {
+            target: ?models_contract.ModelRef,
+            is_metask: bool,
+            intent_revision: u64,
+            source_generation: u64,
+            protocol: models_contract.Protocol,
+            base_url: []const u8,
+        },
+        metask_scope: u64,
+        credential_update_failed: bool,
+    };
+
+    pub fn modelFacts(self: *const Runtime, task_id: u64) ?ModelFacts {
+        const task = self.findConst(task_id) orelse return null;
+        return .{
+            .intent = if (task.durable.model_intent) |intent| .{ .target = intent.modelRef(), .revision = intent.revision } else null,
+            .intent_pending = task.model_intent_prepared,
+            .installed = if (task.runtime.executionConst()) |execution| .{
+                .target = execution.modelRef(),
+                .is_metask = std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id),
+                .intent_revision = execution.model_intent_revision,
+                .source_generation = execution.source_generation,
+                .protocol = execution.protocol,
+                .base_url = execution.base_url,
+            } else null,
+            .metask_scope = task.runtime.metask_authorization_scope,
+            .credential_update_failed = task.runtime.credential_update_failed,
+        };
+    }
+
+    pub fn installedModelMatchesTarget(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesTarget(candidate);
+    }
+
+    pub fn installedModelNeedsSourceChange(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return !execution.matchesSource(candidate);
+    }
+
     pub fn metaskCredentialScope(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         if (task.runtime.restore_job != null) return null;
@@ -3975,12 +4020,12 @@ pub const Runtime = struct {
 
     /// Account authority is checked by Product Control. This owner enforces
     /// the Task's original scope and owns the Session/Host atomic handoff.
-    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: []const u8, explicit_retry: bool) !CredentialRenewal {
+    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: []const u8, resolved_source_generation: ?u64) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;
         const execution = task.runtime.execution() orelse return .unrelated;
         if (task.runtime.credential_update_failed and task.runtime.credential_failed_generation == generation and
-            !explicit_retry) return .unrelated;
+            resolved_source_generation == null) return .unrelated;
         task.runtime.credential_renewal_deferred = false;
         if (scope == 0 or task.runtime.metask_authorization_scope != scope or
             !std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return .unrelated;
@@ -3989,7 +4034,10 @@ pub const Runtime = struct {
             task.runtime.credential_renewal_deferred = true;
             return .deferred;
         }
-        if (!task.runtime.credential_update_failed and execution.credential_generation == generation) return .unchanged;
+        if (!task.runtime.credential_update_failed and execution.credential_generation == generation) {
+            if (resolved_source_generation) |source| execution.source_generation = source;
+            return .unchanged;
+        }
         var access = try task.runtime.acquireAccess();
         defer access.deinit();
         switch (access.sessionState()) {
@@ -4005,6 +4053,7 @@ pub const Runtime = struct {
             execution.credential_generation = generation;
             if (execution.credential_source) |source| source.replace(value);
             task.runtime.credential_update_failed = false;
+            if (resolved_source_generation) |source| execution.source_generation = source;
             return .unchanged;
         }
         const replacement = try execution.prepareCredential(value);
@@ -4034,7 +4083,51 @@ pub const Runtime = struct {
             record.credential_views.appendAssumeCapacity(replacement);
         }
         task.runtime.credential_update_failed = false;
+        if (resolved_source_generation) |source| execution.source_generation = source;
         return .updated;
+    }
+
+    pub fn needsDeferredMetaskCredential(self: *const Runtime, scope: u64) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.credential_renewal_deferred and task.runtime.active_operation != .compact and
+                self.metaskCredentialScope(task.durable.id) == scope) return true;
+        };
+        return false;
+    }
+
+    pub fn deferMetaskCredentialRenewals(self: *Runtime, scope: u64) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (self.metaskCredentialScope(task.durable.id) == scope)
+                task.runtime.credential_renewal_deferred = true;
+        };
+    }
+
+    pub fn renewMetaskExecutions(self: *Runtime, scope: u64, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
+        var changed = false;
+        for (self.tasks) |entry| if (entry) |task| {
+            const id = task.durable.id;
+            changed = self.renewMetaskImages(id, scope, generation, credential) or changed;
+            if (self.metaskCredentialScope(id) != scope) continue;
+            const value = credential orelse {
+                self.failCredentialRenewal(id, generation, true, false);
+                changed = true;
+                continue;
+            };
+            const outcome = self.renewMetaskCredential(id, scope, generation, value, null) catch |err| {
+                self.failMetaskCredentialUpdate(id, generation, err, effects);
+                changed = true;
+                continue;
+            };
+            changed = changed or outcome == .updated;
+        };
+        return changed;
+    }
+
+    pub fn failMetaskCredentialUpdate(self: *Runtime, task_id: u64, generation: u64, err: anyerror, effects: OperationEffects) void {
+        self.failCredentialRenewal(task_id, generation, err == error.OutOfMemory or err == error.CredentialUpdateResourceLimit, err == error.CredentialUpdateContract);
+        // Poisoned idle Sessions belong to the ordinary close owner.
+        if ((err == error.CredentialUpdateContract or err == error.SessionPoisoned) and !self.taskHasActiveOperation(task_id))
+            _ = self.beginDetach(task_id, effects) catch false;
     }
 
     pub fn failCredentialRenewal(self: *Runtime, task_id: u64, generation: u64, resource: bool, contract: bool) void {
@@ -4108,6 +4201,19 @@ pub const Runtime = struct {
             execution.retired_credentials.deinit(execution.allocator);
             execution.retired_credentials = .empty;
         }
+    }
+
+    pub fn retireQuiescentCredentials(self: *Runtime, effects: ReleaseEffects, reviewing: *const fn (*anyopaque, u64) bool) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            const id = task.durable.id;
+            if (reviewing(effects.context, id)) continue;
+            while (self.retiredCredential(id)) |value| {
+                if (!effects.prepareCredentialRelease(value)) break;
+                effects.redactAll(value);
+                // Unfinished history maintenance owns its own secret copy.
+                self.releaseRetiredCredential(id);
+            }
+        };
     }
 
     pub fn runExecutionIdentity(
