@@ -4998,90 +4998,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   scrollbar-gutter: stable;
 }
 
-.mcp-connection-trace {
-  display: grid;
-  padding: 0;
-  margin: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+.mcp-detail-body > :first-child {
+  margin-top: 0;
 }
 
-.mcp-connection-trace > div {
-  position: relative;
-  display: grid;
-  min-width: 0;
-  padding: 12px 12px 12px 42px;
-  border: 1px solid var(--ui-border);
-  border-radius: 10px;
-  background: var(--ui-surface-panel);
-}
-
-.mcp-connection-trace > div::after {
-  position: absolute;
-  top: 24px;
-  left: calc(100% + 1px);
-  width: 10px;
-  height: 1px;
-  background: var(--ui-border);
-  content: "";
-}
-
-.mcp-connection-trace > div:last-child::after {
-  display: none;
-}
-
-.mcp-connection-trace > div > span {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border: 1px solid var(--ui-border);
-  border-radius: 999px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  font-weight: 720;
-}
-
-.mcp-connection-trace strong {
-  overflow: hidden;
-  color: var(--ui-content-primary);
-  font-size: var(--text-label);
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mcp-connection-trace small {
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--ui-content-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mcp-connection-trace > div[data-state="complete"] > span {
-  border-color: color-mix(
-    in srgb,
-    var(--metask-state-complete) 32%,
-    transparent
-  );
-  color: var(--metask-state-complete);
-  background: color-mix(in srgb, var(--metask-state-complete) 8%, transparent);
-}
-
-.mcp-connection-trace > div[data-state="active"] > span {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 36%, transparent);
-  color: var(--ui-action-primary);
-  background: color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
-}
-
-.mcp-connection-trace > div[data-state="attention"] > span {
-  color: var(--ui-content-warning);
+.mcp-detail-body > :is(.mcp-detail-section, .mcp-tool-catalog):first-child {
+  padding-top: 0;
+  border-top: 0;
 }
 
 .mcp-next-action {
@@ -6012,6 +5935,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.6;
 }
 
+.mcp-empty-state p {
+  margin: 0;
+}
+
+.mcp-empty-state p + p {
+  margin-top: 4px;
+}
+
 .mcp-groups,
 .scheduled-groups {
   display: grid;
@@ -6679,14 +6610,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     justify-self: start;
     text-align: left;
     white-space: normal;
-  }
-
-  .mcp-connection-trace {
-    grid-template-columns: 1fr;
-  }
-
-  .mcp-connection-trace > div::after {
-    display: none;
   }
 
   .mcp-state-banner {

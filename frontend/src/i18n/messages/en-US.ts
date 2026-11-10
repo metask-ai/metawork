@@ -370,10 +370,6 @@ export const enUS = {
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
   "mcp.tool_access_summary": "{available}/{total} tools available",
-  "mcp.trace.label": "Connection progress",
-  "mcp.trace.connection": "Connection",
-  "mcp.trace.handshake": "MCP handshake",
-  "mcp.trace.tools": "Choose tools",
   "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
   "mcp.access.restart_required": "Connecting",
@@ -410,13 +406,14 @@ export const enUS = {
   "mcp.unavailable_body":
     "MetaWork cannot load MCP management right now. Reopen the app to recover the server list.",
   "mcp.empty_title": "No MCP servers yet",
+  "mcp.empty_agent_hint":
+    "Have a setup guide? Share its link with the agent in a task to connect the server.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
   "mcp.detail.new_tasks": "New tasks",
   "mcp.detail.tool_permissions": "Tool permissions",
   "mcp.detail.connection_test": "Connection test",
   "mcp.detail.tools_available": "{count} tools available",
-  "mcp.detail.allowed_count": "Allowed {allowed}/{total}",
   "mcp.detail.connection_and_auth": "Connection and authentication",
   "mcp.detail.advanced": "Advanced settings",
   "mcp.detail.display_name": "Display name",
@@ -488,7 +485,7 @@ export const enUS = {
   "mcp.add.executable": "Executable",
   "mcp.add.argument": "Argument",
   "mcp.add.add_argument": "Add argument",
-  "mcp.add.remove_argument": "Remove argument",
+  "mcp.add.remove_argument": "Remove argument {index}",
   "mcp.add.edit_command_line": "Edit as launch command",
   "mcp.proposal.title": "MCP server suggestion",
   "mcp.proposal.body":
@@ -603,6 +600,8 @@ export const enUS = {
   "mcp.next.credentials.body":
     "Add the required credential to connect and load available tools.",
   "mcp.next.configure_credentials": "Set credentials",
+  "mcp.next.apply_failed.body":
+    "The settings are saved. The server has not loaded.",
   "mcp.next.retry_connection.body":
     "Retry the saved connection to update tools and new-task access.",
   "mcp.next.retry_connection.action": "Retry connection",

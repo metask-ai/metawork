@@ -166,17 +166,6 @@ function serverVisualStatus(server: McpServer, applying: boolean) {
   return server.runtimeStatus;
 }
 
-function serverCanApply(server: McpServer) {
-  return (
-    server.connection !== null &&
-    server.approvalStatus === "approved" &&
-    server.desiredEnabled &&
-    ["not_required", "ready"].includes(server.authorizationStatus) &&
-    server.applyStatus !== "waiting_auth" &&
-    server.applyStatus !== "unknown"
-  );
-}
-
 function serverStateIcon(server: McpServer, applying: boolean) {
   if (applying) return "refresh" as const;
   if (serverNeedsAttention(server, false)) return "warning" as const;
@@ -1288,6 +1277,7 @@ export function McpPage({
     setNotice(null);
     try {
       const result = await onApply(serverId);
+      if (!serverId || result.outcome !== "started")
         setNotice({
           tone: result.outcome === "started" ? "quiet" : "attention",
           text: t(`mcp.apply.${result.outcome}`),
@@ -1479,7 +1469,7 @@ export function McpPage({
         t("mcp.detail.connection_unavailable_help"),
       );
 
-    if (management.configurationApply === "applying")
+    if (isServerApplying(server))
       return nextActionCard(
         t("mcp.banner.applying.title"),
         t("mcp.banner.applying.body"),
@@ -1604,11 +1594,16 @@ export function McpPage({
       const needsApply =
         server.runtimeStatus === "not_loaded" &&
         ["pending", "rejected", "failed"].includes(server.applyStatus);
+      const diagnostic =
+        server.safeDiagnostic ===
+        "Configuration changes were not applied. Retry the connection."
+          ? t("mcp.next.apply_failed.body")
+          : server.safeDiagnostic;
       return nextActionCard(
         t(`mcp.status.${server.runtimeStatus}`),
         server.runtimeStatus === "invalid_catalog"
           ? t("mcp.next.invalid_catalog.body")
-          : t("mcp.next.retry_connection.body"),
+          : diagnostic || t("mcp.next.retry_connection.body"),
         server.runtimeStatus === "invalid_catalog" ? undefined : (
           <>
             <Button
@@ -1672,6 +1667,10 @@ export function McpPage({
     refreshing ? "mcp.refresh.refreshing" : "mcp.refresh.action",
   );
   const showAddressHelp = !adding || (endpoint.length > 0 && !addressValid);
+  const nextAction =
+    paneState?.kind === "server" && selected
+      ? renderNextAction(selected)
+      : null;
   const oauthClientFields = (
     <>
       <label>
@@ -1930,7 +1929,10 @@ export function McpPage({
               <p>{t("mcp.unavailable_body")}</p>
             </div>
           ) : frozenWithoutDesired ? null : empty ? (
-            <p className="mcp-empty-state">{t("mcp.empty_title")}</p>
+            <div className="mcp-empty-state">
+              <p>{t("mcp.empty_title")}</p>
+              <p>{t("mcp.empty_agent_hint")}</p>
+            </div>
           ) : noResults ? (
             <div className="mcp-placeholder">
               <span>
@@ -1968,7 +1970,7 @@ export function McpPage({
                       ? t("mcp.edit.title")
                       : selected?.displayName}
                 </Dialog.Title>
-                {selected && (
+                {selected && !nextAction && (
                   <Dialog.Description>
                     {paneState.kind === "replace"
                       ? selected.displayName
@@ -2290,6 +2292,14 @@ export function McpPage({
                               <Button
                                 type="button"
                                 variant="ghost"
+                                size="icon"
+                                aria-label={t("mcp.add.remove_argument", {
+                                  index: index + 1,
+                                })}
+                                title={t("mcp.add.remove_argument", {
+                                  index: index + 1,
+                                })}
+                                disabled={createPending}
                                 onClick={() =>
                                   setStructuredArgv(
                                     structuredArgv.filter(
@@ -2298,20 +2308,22 @@ export function McpPage({
                                   )
                                 }
                               >
-                                {t("mcp.add.remove_argument")}
+                                <Icon name="trash" />
                               </Button>
                             </div>
                           ))}
-                          <Button
+                          <button
                             type="button"
-                            variant="secondary"
-                            disabled={structuredArgv.length > 128}
+                            className="mcp-add-row focus-ring"
+                            disabled={
+                              createPending || structuredArgv.length > 128
+                            }
                             onClick={() =>
                               setStructuredArgv([...structuredArgv, ""])
                             }
                           >
-                            {t("mcp.add.add_argument")}
-                          </Button>
+                            <Icon name="plus" /> {t("mcp.add.add_argument")}
+                          </button>
                           <Button
                             type="button"
                             variant="ghost"
@@ -2482,80 +2494,20 @@ export function McpPage({
             ) : selected ? (
               <div className="mcp-detail-body">
                 {operationNotice}
-                <section
-                  className="mcp-connection-trace"
-                  aria-label={t("mcp.trace.label")}
-                >
-                  {(
-                    [
-                      [
-                        "connection",
-                        selected.transport === "stdio"
-                          ? selected.connection?.kind === "stdio"
-                            ? selected.connection.command
-                            : t("mcp.detail.connection_unavailable")
-                          : selected.connection?.kind === "streamable_http"
-                            ? selected.connection.endpoint
-                            : t("mcp.detail.connection_unavailable"),
-                        recoveringAuthorization(selected)
-                          ? "active"
-                          : serverCanApply(selected)
-                            ? "complete"
-                            : "attention",
-                      ],
-                      [
-                        "handshake",
-                        t(`mcp.status.${selected.runtimeStatus}`),
-                        selected.runtimeStatus === "ready"
-                          ? "complete"
-                          : isServerApplying(selected)
-                            ? "active"
-                            : serverCanApply(selected)
-                              ? "attention"
-                              : "pending",
-                      ],
-                      [
-                        "tools",
-                        t("mcp.detail.allowed_count", {
-                          allowed: selected.tools.filter(
-                            (tool) => tool.desiredAllowed,
-                          ).length,
-                          total: selected.tools.length,
-                        }),
-                        selected.newTaskAccess === "available"
-                          ? "complete"
-                          : selected.runtimeStatus === "ready" &&
-                              selected.tools.some((tool) => tool.discovered)
-                            ? "active"
-                            : "pending",
-                      ],
-                    ] as const
-                  ).map(([step, summary, state], index) => (
-                    <div key={step} data-state={state}>
-                      <span aria-hidden="true">
-                        {state === "complete" ? "✓" : index + 1}
-                      </span>
-                      <strong>{t(`mcp.trace.${step}`)}</strong>
-                      <small>{summary}</small>
-                    </div>
-                  ))}
-                </section>
-
+                {nextAction}
                 {!selected.desiredEnabled &&
                   selected.taskReferenceCount > 0 && (
                     <p className="mcp-operation-notice">
                       {t("mcp.retained.disabled_body")}
                     </p>
                   )}
-                {renderNextAction(selected)}
 
-                {selected.safeDiagnostic &&
-                  !recoveringAuthorization(selected) && (
-                    <section className="mcp-diagnostic">
-                      <h3>{t("mcp.detail.diagnostic")}</h3>
-                      <p>{selected.safeDiagnostic}</p>
-                    </section>
-                  )}
+                {!nextAction && selected.safeDiagnostic && (
+                  <section className="mcp-diagnostic">
+                    <h3>{t("mcp.detail.diagnostic")}</h3>
+                    <p>{selected.safeDiagnostic}</p>
+                  </section>
+                )}
                 {management.redacted && (
                   <p className="mcp-redaction-notice">
                     <Icon name="warning" />
@@ -2563,105 +2515,108 @@ export function McpPage({
                   </p>
                 )}
 
-                <section className="mcp-tool-catalog" ref={toolSection}>
-                  <header>
-                    <div>
-                      <h3>{t("mcp.detail.tool_permissions")}</h3>
-                      <p>{t("mcp.detail.tool_help")}</p>
-                    </div>
-                    <span>
-                      {
-                        selected.tools.filter((tool) => tool.desiredAllowed)
-                          .length
-                      }
-                      /{selected.tools.length}
-                    </span>
-                  </header>
-                  {selected.tools.length === 0 ? (
-                    <p className="mcp-no-tools">{t("mcp.detail.no_tools")}</p>
-                  ) : (
-                    <ul>
-                      {selected.tools.map((tool) => (
-                        <li key={tool.name}>
-                          <div>
-                            <code>{tool.name}</code>
-                            <p>
-                              {!tool.discovered
-                                ? t("mcp.tool.not_discovered")
-                                : tool.availableToNewTasks
-                                  ? t("mcp.tool.available_to_new_tasks")
-                                  : tool.desiredAllowed
-                                    ? t("mcp.tool.allowed_not_available")
-                                    : t("mcp.tool.not_allowed")}
-                            </p>
-                          </div>
-                          <label className="mcp-tool-toggle">
-                            <span className="sr-only">
-                              {t("mcp.tool.toggle", { name: tool.name })}
-                            </span>
-                            <Checkbox.Root
-                              className="size-[18px] rounded-[5px]"
-                              checked={tool.desiredAllowed}
-                              disabled={
-                                mutationLocked ||
-                                pendingServerId !== null ||
-                                selectedOperationBusy ||
-                                selected.connection === null
-                              }
-                              onCheckedChange={() => {
-                                const names = selected.tools
-                                  .filter((candidate) =>
-                                    candidate.name === tool.name
-                                      ? !tool.desiredAllowed
-                                      : candidate.desiredAllowed,
-                                  )
-                                  .map((candidate) => candidate.name);
-                                void mutateServer(selected, (generation) =>
-                                  onSetAllowedTools(
-                                    generation,
-                                    selected.id,
-                                    names,
-                                  ),
-                                );
-                              }}
-                            >
-                              <Checkbox.Indicator>✓</Checkbox.Indicator>
-                            </Checkbox.Root>
-                          </label>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {selected.tools.some(
-                    (tool) => tool.discovered && !tool.desiredAllowed,
-                  ) && (
-                    <div className="mcp-tool-actions">
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={
-                          mutationLocked ||
-                          pendingServerId !== null ||
-                          selectedOperationBusy ||
-                          selected.connection === null
+                {(selected.tools.length > 0 ||
+                  selected.runtimeStatus === "ready") && (
+                  <section className="mcp-tool-catalog" ref={toolSection}>
+                    <header>
+                      <div>
+                        <h3>{t("mcp.detail.tool_permissions")}</h3>
+                        <p>{t("mcp.detail.tool_help")}</p>
+                      </div>
+                      <span>
+                        {
+                          selected.tools.filter((tool) => tool.desiredAllowed)
+                            .length
                         }
-                        onClick={(event) =>
-                          openConfirmation(
-                            "allow_all",
-                            selected,
-                            event.currentTarget,
-                          )
-                        }
-                      >
-                        {t("mcp.detail.allow_all", {
-                          count: selected.tools.filter(
-                            (tool) => tool.discovered && !tool.desiredAllowed,
-                          ).length,
-                        })}
-                      </Button>
-                    </div>
-                  )}
-                </section>
+                        /{selected.tools.length}
+                      </span>
+                    </header>
+                    {selected.tools.length === 0 ? (
+                      <p className="mcp-no-tools">{t("mcp.detail.no_tools")}</p>
+                    ) : (
+                      <ul>
+                        {selected.tools.map((tool) => (
+                          <li key={tool.name}>
+                            <div>
+                              <code>{tool.name}</code>
+                              <p>
+                                {!tool.discovered
+                                  ? t("mcp.tool.not_discovered")
+                                  : tool.availableToNewTasks
+                                    ? t("mcp.tool.available_to_new_tasks")
+                                    : tool.desiredAllowed
+                                      ? t("mcp.tool.allowed_not_available")
+                                      : t("mcp.tool.not_allowed")}
+                              </p>
+                            </div>
+                            <label className="mcp-tool-toggle">
+                              <span className="sr-only">
+                                {t("mcp.tool.toggle", { name: tool.name })}
+                              </span>
+                              <Checkbox.Root
+                                className="size-[18px] rounded-[5px]"
+                                checked={tool.desiredAllowed}
+                                disabled={
+                                  mutationLocked ||
+                                  pendingServerId !== null ||
+                                  selectedOperationBusy ||
+                                  selected.connection === null
+                                }
+                                onCheckedChange={() => {
+                                  const names = selected.tools
+                                    .filter((candidate) =>
+                                      candidate.name === tool.name
+                                        ? !tool.desiredAllowed
+                                        : candidate.desiredAllowed,
+                                    )
+                                    .map((candidate) => candidate.name);
+                                  void mutateServer(selected, (generation) =>
+                                    onSetAllowedTools(
+                                      generation,
+                                      selected.id,
+                                      names,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <Checkbox.Indicator>✓</Checkbox.Indicator>
+                              </Checkbox.Root>
+                            </label>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {selected.tools.some(
+                      (tool) => tool.discovered && !tool.desiredAllowed,
+                    ) && (
+                      <div className="mcp-tool-actions">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={
+                            mutationLocked ||
+                            pendingServerId !== null ||
+                            selectedOperationBusy ||
+                            selected.connection === null
+                          }
+                          onClick={(event) =>
+                            openConfirmation(
+                              "allow_all",
+                              selected,
+                              event.currentTarget,
+                            )
+                          }
+                        >
+                          {t("mcp.detail.allow_all", {
+                            count: selected.tools.filter(
+                              (tool) => tool.discovered && !tool.desiredAllowed,
+                            ).length,
+                          })}
+                        </Button>
+                      </div>
+                    )}
+                  </section>
+                )}
 
                 <section className="mcp-detail-section" ref={connectionSection}>
                   <header>
@@ -2669,7 +2624,9 @@ export function McpPage({
                       <h3>{t("mcp.detail.connection_and_auth")}</h3>
                       <p>
                         {t(`mcp.transport.${selected.transport}`)} ·{" "}
-                        {t(`mcp.auth.${selected.authMode}`)}
+                        {selected.authMode === "none"
+                          ? t("mcp.authorization_status.not_required")
+                          : t(`mcp.auth.${selected.authMode}`)}
                       </p>
                     </div>
                     <div className="mcp-connection-actions">
@@ -2724,46 +2681,37 @@ export function McpPage({
                           <code>{selected.connection.endpoint}</code>
                         </span>
                       </div>
-                    ) : (
-                      <div data-tone="attention">
-                        <Icon name="warning" />
-                        <span>
-                          <strong>
-                            {t("mcp.detail.connection_unavailable")}
-                          </strong>
-                          <small>
-                            {t("mcp.detail.connection_unavailable_help")}
-                          </small>
-                        </span>
-                      </div>
-                    )}
-                    <div
-                      data-tone={
-                        ["not_required", "ready"].includes(
-                          selected.authorizationStatus,
-                        )
-                          ? "ready"
-                          : "attention"
-                      }
-                    >
-                      <Icon
-                        name={
-                          ["not_required", "ready"].includes(
-                            selected.authorizationStatus,
-                          )
-                            ? "check"
-                            : "warning"
-                        }
-                      />
-                      <span>
-                        <strong>{t("mcp.detail.authorization")}</strong>
-                        <small>
-                          {t(
-                            `mcp.authorization_status.${selected.authorizationStatus}`,
-                          )}
-                        </small>
-                      </span>
-                    </div>
+                    ) : null}
+                    {selected.connection !== null &&
+                      selected.authMode !== "none" && (
+                        <div
+                          data-tone={
+                            ["not_required", "ready"].includes(
+                              selected.authorizationStatus,
+                            )
+                              ? "ready"
+                              : "attention"
+                          }
+                        >
+                          <Icon
+                            name={
+                              ["not_required", "ready"].includes(
+                                selected.authorizationStatus,
+                              )
+                                ? "check"
+                                : "warning"
+                            }
+                          />
+                          <span>
+                            <strong>{t("mcp.detail.authorization")}</strong>
+                            <small>
+                              {t(
+                                `mcp.authorization_status.${selected.authorizationStatus}`,
+                              )}
+                            </small>
+                          </span>
+                        </div>
+                      )}
                     {selected.connectionTest.status !== "untested" && (
                       <div
                         data-tone={
@@ -3034,12 +2982,11 @@ export function McpPage({
                           </>
                         ) : null}
                       </dl>
+                      <p className="mcp-existing-task-note">
+                        {t("mcp.existing_tasks_note")}
+                      </p>
                     </div>
                   </details>
-
-                  <p className="mcp-existing-task-note">
-                    {t("mcp.existing_tasks_note")}
-                  </p>
                 </section>
 
                 <section className="mcp-server-controls">

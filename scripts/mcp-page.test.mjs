@@ -705,11 +705,7 @@ test("MCP keeps choosing tools as the final setup step", () => {
       "2 tools were discovered. Choose which ones new tasks may use.",
     ),
   );
-  assert.equal(
-    dialog.querySelector(".mcp-connection-trace > div:last-child")?.dataset
-      .state,
-    "active",
-  );
+  assert.ok(within(dialog).getByRole("heading", { name: "Tool permissions" }));
 });
 
 test("MCP keeps a missing connection read-only instead of guessing repair data", () => {
@@ -920,6 +916,7 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
     }),
   );
   assert.ok(screen.getByText("No MCP servers yet"));
+  assert.ok(screen.getByText(/Share its link with the agent in a task/));
   assert.ok(screen.getByRole("button", { name: "Add manually" }));
   assert.equal(
     screen.queryByRole("button", { name: "Paste configuration" }),
@@ -941,6 +938,10 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
     ),
   );
   assert.ok(screen.getByText("No matching servers or tools"));
+  assert.equal(
+    screen.queryByText(/Share its link with the agent in a task/),
+    null,
+  );
   assert.ok(screen.getByRole("button", { name: "Add manually" }));
   assert.equal(
     screen.queryByRole("button", { name: "Paste configuration" }),
@@ -1949,6 +1950,10 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
   let dialog = screen.getByRole("dialog");
   assert.equal(within(dialog).queryByText("Cannot connect"), null);
   assert.ok(within(dialog).getByText(pending.safeDiagnostic));
+  assert.equal(
+    within(dialog).queryByRole("heading", { name: "Tool permissions" }),
+    null,
+  );
   fireEvent.click(
     within(dialog).getByRole("button", { name: "Retry connection" }),
   );
@@ -1960,7 +1965,14 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
         configurationApply: "failed",
         runtimeAlignment: "restart_required",
         applyFailureCount: 1,
-        servers: [{ ...pending, applyStatus: "rejected" }],
+        servers: [
+          {
+            ...pending,
+            applyStatus: "rejected",
+            safeDiagnostic:
+              "Configuration changes were not applied. Retry the connection.",
+          },
+        ],
       },
       "",
       handlers,
@@ -1971,6 +1983,13 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
     within(dialog).getByRole("button", { name: "Retry connection" }),
   );
   await waitFor(() => assert.deepEqual(calls, ["refresh", "apply"]));
+  assert.ok(
+    within(dialog).getByText(
+      "The settings are saved. The server has not loaded.",
+    ),
+  );
+  assert.equal(within(dialog).queryByText(/^Connection requested\./), null);
+  assert.equal(within(dialog).queryByText("Needs attention"), null);
   assert.ok(screen.getByText("Connection changes were not applied"));
   assert.equal(screen.queryByText("Cannot connect"), null);
 });
@@ -2435,9 +2454,6 @@ test("MCP distinguishes authorization waiting and refreshing without offering ca
       within(dialog).queryByRole("button", { name: "Cancel authorization" }),
       null,
     );
-    const stages = dialog.querySelectorAll(".mcp-connection-trace > div");
-    assert.equal(stages[0].dataset.state, "active");
-    assert.equal(stages[1].dataset.state, "pending");
     assert.equal(dialog.querySelector(".mcp-diagnostic"), null);
 
     cleanup();
