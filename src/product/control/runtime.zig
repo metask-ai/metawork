@@ -4222,11 +4222,10 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const revision = try self.task_runtime.beginApprovalChange(task_id, expected_binding_epoch, expected_revision, target, self.taskRuntimeRecoveryAdmissionEffects());
-        const task = self.task_runtime.find(task_id).?;
-        if (task.approval_change == null) return revision;
-        if (task.durable.permission_profile != target.profile() and task.runtime.active_operation == .run) {
-            _ = self.task_runtime.cancelRun(task_id, task.runtime.active_operation.run, self.taskRuntimeOperationEffects()) catch {
-                self.failApprovalChange(task_id, .cancelled, false);
+        const change = self.task_runtime.approvalChangeRun(task_id) orelse return revision;
+        if (change.cancel_run) |run_id| {
+            _ = self.task_runtime.cancelRun(task_id, run_id, self.taskRuntimeOperationEffects()) catch {
+                self.task_runtime.rejectApprovalChange(self.approvalEffects(), task_id, .cancelled, false);
                 self.bumpRevision();
                 return revision;
             };
@@ -4237,6 +4236,7 @@ pub const Runtime = struct {
         self.syncPermissionReviews();
         self.bumpRevision();
         _ = self.syncApprovalChanges();
+        self.flushApprovalProjectionNoFail();
         return revision;
     }
 
@@ -4259,16 +4259,27 @@ pub const Runtime = struct {
     }
 
     fn approvalHistoryBlocked(self: *const Runtime) bool {
-        return self.ordinary_history_unknown != null or self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
+        return self.ordinary_history_unknown != null or self.backgroundHistoryBlocked();
     }
 
-    fn captureApprovalCandidate(self: *Runtime, task_id: u64) Error!task_persistence.OwnedCandidate {
-        const prepared = try self.task_runtime.prepareApprovalCommit(task_id);
-        defer prepared.rollback();
-        return self.captureTaskHistoryCandidate(if (prepared.checkpoint) |record|
-            .{ .task_id = task_id, .record = record, .anchor = .available }
-        else
-            null);
+    fn backgroundHistoryBlocked(self: *const Runtime) bool {
+        return self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
+    }
+
+    fn resolveOrdinaryHistoryCommit(self: *Runtime) bool {
+        const token = self.ordinary_history_unknown orelse return true;
+        self.syncHistoryCredentials(null, null);
+        if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return false;
+        self.ordinary_history_unknown = null;
+        return true;
+    }
+
+    fn requiredHistoryBlocked(self: *Runtime) bool {
+        if (self.backgroundHistoryBlocked()) return true;
+        if (self.ordinary_history_unknown == null) return false;
+        if (!self.resolveOrdinaryHistoryCommit()) return true;
+        if (!self.shutting_down) _ = self.change_notifier.notify();
+        return false;
     }
 
     fn captureTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error!task_persistence.OwnedCandidate {
@@ -4280,6 +4291,7 @@ pub const Runtime = struct {
     }
 
     fn queueApprovalProjection(self: *Runtime, resolve_only: bool) !void {
+        if (!self.task_runtime.approvalJobCapacityAvailable()) return error.QueueFull;
         if (resolve_only and !self.task_runtime.approvalHistoryWorkerActive()) self.syncHistoryCredentials(null, null);
         var input: task_runtime.HistoryInput = if (resolve_only)
             .{ .resolution = self.approval_history_unknown orelse return error.TaskBusy }
@@ -4288,22 +4300,6 @@ pub const Runtime = struct {
         errdefer input.deinit();
         try self.task_runtime.queueApprovalProjection(input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
         if (!resolve_only) self.approval_history_dirty = false;
-    }
-
-    fn failApprovalChange(self: *Runtime, task_id: u64, reason: task_runtime.ApprovalFailureReason, restore_required: bool) void {
-        const task = self.task_runtime.find(task_id) orelse return;
-        const change = task.approval_change orelse return;
-        const rejected = if (change.candidate) |record| record.blob else null;
-        const canonical = if (task.durable.checkpoint) |record| record.blob else null;
-        self.task_runtime.failApprovalChange(task_id, reason, restore_required);
-        // Callers have proved a rejection, including an explicit unknown
-        // readback of the old canonical frame. Never retire the recovery point
-        // still named by that frame, or infer rejection from an unknown result.
-        if (!self.shutting_down) if (rejected) |identity| {
-            if (canonical) |old| if (std.meta.eql(old, identity)) return;
-            if (self.checkpoint_store) |store|
-                self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
-        };
     }
 
     fn startApprovalRecovery(context: *anyopaque, task_id: u64, binding_epoch: u64, revision: u64) task_runtime.ApprovalRecoveryOutcome {
@@ -4319,192 +4315,110 @@ pub const Runtime = struct {
         return .started;
     }
 
-    fn advanceDetachedApprovalRecovery(self: *Runtime, task_id: u64) bool {
-        return self.task_runtime.advanceDetachedApprovalRecovery(task_id, .{
-            .context = self,
-            .start_fn = startApprovalRecovery,
-            .mcp_apply_pending_fn = approvalMcpApplyPending,
-        });
-    }
-
     fn approvalMcpApplyPending(context: *anyopaque) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.mcp) |*mcp| if (mcp.configurationApplyInProgress()) return true;
         return self.agent_runtime.restoreAdmission(null) == .mcp_busy;
     }
 
+    fn finishApprovalProjection(context: *anyopaque, completion: task_runtime.Runtime.ApprovalProjectionCompletion) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (completion.commit) |result| switch (result) {
+            .committed, .failed => {
+                if (completion.readback) {
+                    if (self.task_runtime.settleModelIntent(result == .committed)) |task_id| {
+                        self.rememberTaskModelPreference(task_id);
+                    }
+                    self.approval_history_unknown = null;
+                    self.approval_history_dirty = true;
+                }
+                if (completion.readback or result == .committed)
+                    self.task_persistence_health = .ready
+                else {
+                    self.approval_history_dirty = true;
+                    self.markTaskPersistenceWriteFailed();
+                }
+            },
+            .outcome_unknown => {
+                if (!completion.readback) {
+                    std.debug.assert(self.approval_history_unknown == null);
+                    self.approval_history_unknown = completion.token;
+                }
+                self.approval_history_dirty = true;
+                self.task_persistence_health = .outcome_unknown;
+            },
+        } else if (!completion.readback) {
+            self.approval_history_dirty = true;
+            if (!self.shutting_down) self.markTaskPersistenceWriteFailed();
+        }
+    }
+
+    fn approvalHistoryHealth(context: *anyopaque, health: task_runtime.Runtime.ApprovalHistoryHealth) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        switch (health) {
+            .ready => self.task_persistence_health = .ready,
+            .write_failed => self.markTaskPersistenceWriteFailed(),
+            .outcome_unknown => self.task_persistence_health = .outcome_unknown,
+        }
+    }
+
+    fn approvalEffects(self: *Runtime) task_runtime.Runtime.ApprovalEffects {
+        return .{
+            .context = self,
+            .executor = self.approvalExecutor(),
+            .notifier = self.approvalNotifier(),
+            .persistence = self.task_persistence,
+            .recovery = .{ .context = self, .start_fn = startApprovalRecovery, .mcp_apply_pending_fn = approvalMcpApplyPending },
+            .shutting_down = self.shutting_down,
+            .operation_fn = approvalOperationEffects,
+            .history_blocked_fn = approvalWriterBlocked,
+            .capture_history_fn = captureApprovalHistory,
+            .projection_finished_fn = finishApprovalProjection,
+            .history_health_fn = approvalHistoryHealth,
+            .publish_fn = publishApprovalChange,
+            .retire_fn = retireRecoveryCheckpoint,
+        };
+    }
+
+    fn approvalOperationEffects(context: *anyopaque) task_runtime.OperationEffects {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.taskRuntimeOperationEffects();
+    }
+
+    fn approvalWriterBlocked(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.approvalHistoryBlocked();
+    }
+
+    fn captureApprovalHistory(context: *anyopaque, checkpoint: ?CheckpointPersistenceOverride) anyerror!task_persistence.OwnedCandidate {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.captureTaskHistoryCandidate(checkpoint);
+    }
+
+    fn publishApprovalChange(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.bumpRevision();
+    }
+
     fn syncApprovalChanges(self: *Runtime) bool {
         if (self.approval_syncing) return false;
         self.approval_syncing = true;
         defer self.approval_syncing = false;
-        var changed = false;
-        var history_confirmed = false;
-        // Reap every completed worker before admitting another store write.
-        for (&self.task_runtime.approval_jobs) |*entry| {
-            const slot = entry.* orelse continue;
-            if (!slot.job.completionReady()) continue;
-            const task_id = switch (slot.recipient) {
-                .checkpoint_retirement => {
-                    slot.job.deinit();
-                    entry.* = null;
-                    continue;
-                },
-                .history_projection => {
-                    const readback = slot.job.work.history.input == .resolution;
-                    switch (slot.job.outcome) {
-                        .history => |result| switch (result) {
-                            .committed, .failed => {
-                                if (readback) {
-                                    if (self.task_runtime.settleModelIntent(result == .committed)) |task_id| {
-                                        self.rememberTaskModelPreference(task_id);
-                                    }
-
-                                    self.approval_history_unknown = null;
-                                    self.approval_history_dirty = true;
-                                }
-                                if (readback or result == .committed)
-                                    self.task_persistence_health = .ready
-                                else {
-                                    self.approval_history_dirty = true;
-                                    self.markTaskPersistenceWriteFailed();
-                                }
-                            },
-                            .outcome_unknown => {
-                                if (!readback) {
-                                    std.debug.assert(self.approval_history_unknown == null);
-                                    self.approval_history_unknown = slot.job.historyToken();
-                                }
-                                self.approval_history_dirty = true;
-                                self.task_persistence_health = .outcome_unknown;
-                            },
-                        },
-                        .none, .failure, .checkpoint, .retired => if (!readback) {
-                            self.approval_history_dirty = true;
-                            if (!self.shutting_down) self.markTaskPersistenceWriteFailed();
-                        },
-                    }
-                    changed = true;
-                    slot.job.deinit();
-                    entry.* = null;
-                    continue;
-                },
-                .recovery => |identity| {
-                    switch (self.task_runtime.finishRecoveryHistory(identity.task_id, identity.attempt_id, slot.job)) {
-                        .unchanged => {},
-                        .ready => self.task_persistence_health = .ready,
-                        .write_failed => if (!self.shutting_down or slot.job.outcome == .history) self.markTaskPersistenceWriteFailed(),
-                        .outcome_unknown => self.task_persistence_health = .outcome_unknown,
-                    }
-                    slot.job.deinit();
-                    entry.* = null;
-                    changed = true;
-                    continue;
-                },
-                .approval => |id| id,
-            };
-            const task = self.task_runtime.find(task_id) orelse unreachable;
-            const change = task.approval_change.?;
-            const mode_commit = if (change.phase == .outcome_unknown) if (change.unknown_history) |history| history.mode_commit else false else change.phase == .mode_commit;
-            const phase = change.phase;
-            const outcome = slot.job.outcome;
-            const unknown_bytes = if (outcome == .history and outcome.history == .outcome_unknown and slot.job.work.history.input != .resolution)
-                slot.job.historyToken()
-            else
-                null;
-            const record = slot.job.takeCheckpoint();
-            slot.job.deinit();
-            entry.* = null;
-            changed = true;
-            switch (outcome) {
-                .checkpoint => self.task_runtime.recordApprovalCheckpoint(task_id, record.?),
-                .history => |result| switch (result) {
-                    .committed => {
-                        self.task_runtime.resumeApprovalConfirmation(task_id) catch {
-                            self.task_runtime.markApprovalUnknown(task_id, null);
-                            continue;
-                        };
-                        const retired = self.task_runtime.acceptApprovalCommit(task_id) catch {
-                            self.task_runtime.markApprovalUnknown(task_id, null);
-                            continue;
-                        };
-                        history_confirmed = true;
-                        // Canonical mode is installed and admission is reopened
-                        // before a separate worker retires the superseded blob.
-                        self.bumpRevision();
-                        if (!self.shutting_down) if (retired) |identity| if (self.checkpoint_store) |store| {
-                            self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
-                        };
-                    },
-                    .failed => {
-                        if (phase == .outcome_unknown) history_confirmed = true;
-                        self.failApprovalChange(task_id, .persistence_failed, mode_commit and task.approval_change.?.candidate != null);
-                    },
-                    .outcome_unknown => {
-                        self.task_persistence_health = .outcome_unknown;
-                        self.task_runtime.markApprovalUnknown(task_id, unknown_bytes);
-                    },
-                },
-                .failure => |failure| if (phase == .outcome_unknown)
-                    self.task_runtime.markApprovalUnknown(task_id, null)
-                else
-                    self.failApprovalChange(task_id, failure.reason, failure.restore_required or (phase == .mode_commit and task.approval_change.?.candidate != null)),
-                .none, .retired => if (phase == .outcome_unknown)
-                    self.task_runtime.markApprovalUnknown(task_id, null)
-                else
-                    self.failApprovalChange(task_id, .dependency_contract, phase == .mutation_export),
-            }
-        }
-        if (history_confirmed) self.task_persistence_health = .ready;
-        if (self.shutting_down) for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
-            if (restore.binding_commit != .outcome_unknown) continue;
-            // No readback is implied by shutdown. Retain the canonical witness
-            // barrier while allowing the candidate Session and lease to close.
+        const effects = self.approvalEffects();
+        var changed = self.task_runtime.reapApprovalJobs(effects);
+        if (self.shutting_down) if (self.task_runtime.takeShutdownRestoreWitness()) |token| {
             std.debug.assert(self.approval_history_unknown == null);
-            self.approval_history_unknown = restore.unknown_history;
-            restore.unknown_history = null;
-            restore.binding_commit = .failed;
+            self.approval_history_unknown = token;
         };
-        for (self.task_runtime.tasks) |*entry| {
-            const task = entry.* orelse continue;
-            const change = task.approval_change orelse continue;
-            if (self.task_runtime.approvalJobFor(task.durable.id)) continue;
-            if (self.shutting_down) continue;
-            switch (change.phase) {
-                .waiting, .recovering => switch (self.task_runtime.advanceApprovalAttachment(task.durable.id)) {
-                    .wait => {},
-                    .changed => changed = true,
-                    .detached => changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed,
-                    .detach => {
-                        _ = self.task_runtime.beginDetach(task.durable.id, self.taskRuntimeOperationEffects()) catch |err| switch (err) {
-                            error.CloseInProgress => {},
-                            else => self.task_runtime.failApprovalRecovery(task.durable.id),
-                        };
-                        changed = true;
-                    },
-                    .checkpoint => |baseline_confirmed| {
-                        const resources = self.taskRuntimeOperationEffects().worker.checkpoint;
-                        self.task_runtime.queueApprovalCheckpoint(task.durable.id, baseline_confirmed, resources, self.approvalExecutor(), self.approvalNotifier()) catch {
-                            self.failApprovalChange(task.durable.id, .checkpoint_failed, false);
-                        };
-                        changed = true;
-                    },
-                },
-                .baseline_commit, .mode_commit => {
-                    if (self.approvalHistoryBlocked()) continue;
-                    var candidate = self.captureApprovalCandidate(task.durable.id) catch {
-                        self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
-                        changed = true;
-                        continue;
-                    };
-                    self.task_runtime.queueApprovalHistory(task.durable.id, candidate, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch {
-                        candidate.deinit();
-                        self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
-                    };
-                    changed = true;
-                },
-                .baseline_export, .mutation_export, .outcome_unknown => {},
-            }
-        }
+        if (!self.shutting_down) if (self.checkpoint_store) |store| {
+            self.task_runtime.flushCheckpointRetirements(store, effects.executor, effects.notifier);
+        };
+        changed = self.task_runtime.advanceApprovalChanges(effects) or changed;
+        if (changed) self.bumpRevision();
+        return changed;
+    }
+
+    fn flushApprovalProjectionNoFail(self: *Runtime) void {
         if (self.approval_history_dirty and !self.shutting_down and
             self.task_persistence_health.operational() and !self.approvalHistoryBlocked())
         {
@@ -4513,8 +4427,6 @@ pub const Runtime = struct {
                 else => self.markTaskPersistenceWriteFailed(),
             };
         }
-        if (changed) self.bumpRevision();
-        return changed;
     }
 
     pub fn runTask(
@@ -4689,7 +4601,7 @@ pub const Runtime = struct {
             .expected_catalog_generation = input.expected_catalog_generation,
         }))
             return error.StaleCatalog;
-        if (self.approvalHistoryBlocked() or self.task_runtime.approvalChangePending()) return error.TaskBusy;
+        if (self.approvalHistoryBlocked()) return error.TaskBusy;
         const revision = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
         var rollback = true;
         defer if (rollback) {
@@ -5203,20 +5115,14 @@ pub const Runtime = struct {
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         ) catch |err| switch (err) {
-            error.PreviousTaskActive => error.TaskBusy,
+            error.PreviousTaskActive, error.TaskHistoryWriterBusy => error.TaskBusy,
             else => return @errorCast(err),
         };
     }
 
     pub fn onScheduledTaskTimer(self: *Runtime) void {
-        defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return;
-        self.syncLifecycle();
-        self.schedule.onTimer(
-            self.scheduleExecutionBinding(),
-            self.scheduleRedaction(),
-            self.scheduleTaskEffects(),
-        );
+        self.syncLifecycleWithScheduleTimer(true);
     }
 
     pub fn setTaskArchived(self: *Runtime, task_id: u64, archived: bool) Error!void {
@@ -5300,13 +5206,11 @@ pub const Runtime = struct {
         if (expected_revision != self.revision) return .stale_revision;
         // An approval candidate owns the indeterminate history transaction.
         // Resolve it on the bounded executor; never quarantine or rewrite it.
-        var resolved_pending = false;
-        if (self.ordinary_history_unknown) |token| {
-            self.syncHistoryCredentials(null, null);
-            if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return .outcome_unknown;
-            self.ordinary_history_unknown = null;
-            resolved_pending = true;
-        }
+        const resolved_pending = self.ordinary_history_unknown != null;
+        if (!self.resolveOrdinaryHistoryCommit()) return .outcome_unknown;
+        defer if (resolved_pending and !self.approvalHistoryBlocked()) {
+            _ = self.change_notifier.notify();
+        };
         if (self.approval_history_unknown != null) {
             self.queueApprovalProjection(true) catch return .unavailable;
             self.bumpRevision();
@@ -5318,22 +5222,9 @@ pub const Runtime = struct {
             return .outcome_unknown;
         }
         if (self.approvalHistoryBlocked()) {
-            for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
-                if (restore.binding_commit != .outcome_unknown) continue;
-                const token = restore.unknown_history orelse return .unavailable;
-                self.task_runtime.queueRecoveryHistory(task.durable.id, .{ .resolution = token }, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch {
-                    return .unavailable;
-                };
-                self.bumpRevision();
-                return .outcome_unknown;
-            };
-            for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change) |change| {
-                if (change.phase != .outcome_unknown) continue;
-                self.task_runtime.queueApprovalResolution(task.durable.id, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch return .unavailable;
-                self.bumpRevision();
-                return .outcome_unknown;
-            };
-            return .unavailable;
+            self.task_runtime.queueTaskHistoryReadback(self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch return .unavailable;
+            self.bumpRevision();
+            return .outcome_unknown;
         }
         if (!self.taskHistoryRecoveryAvailable()) return switch (self.task_persistence_health) {
             .ready, .degraded => .not_required,
@@ -5566,7 +5457,11 @@ pub const Runtime = struct {
     /// Reconciles worker-owned lifecycle state into the main-thread product
     /// projection, then schedules/reaps independently owned permission reviews.
     pub fn syncLifecycle(self: *Runtime) void {
-        const mcp_refresh_needed = self.syncLifecycleFacts();
+        self.syncLifecycleWithScheduleTimer(false);
+    }
+
+    fn syncLifecycleWithScheduleTimer(self: *Runtime, timer_elapsed: bool) void {
+        const mcp_refresh_needed = self.syncLifecycleFactsWithScheduleTimer(timer_elapsed);
         self.advanceTaskInputs();
         self.syncPermissionReviews();
         self.retireQuiescentCredentials();
@@ -5576,6 +5471,10 @@ pub const Runtime = struct {
     /// Lifecycle facts alone never accept or start a reviewer decision. The
     /// manual-response entry point uses this before Task's acceptance boundary.
     fn syncLifecycleFacts(self: *Runtime) bool {
+        return self.syncLifecycleFactsWithScheduleTimer(false);
+    }
+
+    fn syncLifecycleFactsWithScheduleTimer(self: *Runtime, timer_elapsed: bool) bool {
         self.scrubPublishedTerminalData();
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
@@ -5627,12 +5526,25 @@ pub const Runtime = struct {
                 } else if (!pending) source.input_continuation_schedule_gate = false;
             }
         };
-        if (self.schedule.takeChanged()) changed = true;
-        if (durable_changed) self.commitTaskStateNoFail();
+        if (durable_changed) self.approval_history_dirty = true;
         if (self.task_runtime.syncDeletions(
             self.checkpoint_store_health.load(.acquire) != .unavailable,
             self.taskRuntimeDeletionEffects(),
         ).changed) changed = true;
+        const schedule_was_waiting = !self.shutting_down and self.schedule.hasTaskHistoryWaits() and
+            !self.requiredHistoryBlocked() and self.schedule.releaseTaskHistoryWaits();
+        if (!self.shutting_down and (timer_elapsed or schedule_was_waiting)) {
+            self.schedule.onTimer(
+                self.scheduleExecutionBinding(),
+                self.scheduleRedaction(),
+                self.scheduleTaskEffects(),
+            );
+        }
+        if (self.schedule.takeChanged()) changed = true;
+        // Required history commits get this wake before an opportunistic projection.
+        // A confirmed full snapshot already includes the ordinary lifecycle facts.
+        if (durable_changed and self.approval_history_dirty) self.commitTaskStateNoFail();
+        self.flushApprovalProjectionNoFail();
         if (changed) self.bumpRevision();
         return task_sync.mcp_refresh_needed;
     }
@@ -8090,6 +8002,7 @@ pub const Runtime = struct {
 
     fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.requiredHistoryBlocked()) return error.TaskHistoryWriterBusy;
         try self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
@@ -8594,17 +8507,8 @@ pub const Runtime = struct {
         };
     }
 
-    fn commitTaskRuntimeCandidate(context: *anyopaque) task_runtime.DurableCommit {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        self.commitTaskStateIfConfigured() catch |err| return switch (err) {
-            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
-            else => .failed,
-        };
-        return .committed;
-    }
-
     fn commitPreparedScheduleCandidate(self: *Runtime) task_runtime.DurableCommit {
-        self.commitTaskState() catch |err| return switch (err) {
+        self.commitTaskStateWithCheckpoint(null, .required) catch |err| return switch (err) {
             error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
             else => .failed,
         };
@@ -8616,7 +8520,7 @@ pub const Runtime = struct {
         checkpoint_override: ?task_persistence.CheckpointPersistenceOverride,
     ) task_runtime.DurableCommit {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.commitTaskStateWithCheckpoint(checkpoint_override) catch |err| return switch (err) {
+        self.commitTaskStateWithCheckpoint(checkpoint_override, .projection) catch |err| return switch (err) {
             error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
             else => .failed,
         };
@@ -8654,10 +8558,20 @@ pub const Runtime = struct {
     fn commitTaskRuntimeWithoutTask(
         context: *anyopaque,
         workspace_id: u64,
-    ) task_runtime.DurableCommit {
+    ) error{TaskBusy}!task_runtime.DurableCommit {
         const self: *Runtime = @ptrCast(@alignCast(context));
         var removed_workspace = self.workspace.takeAutomatic(workspace_id);
-        const outcome = commitTaskRuntimeCandidate(context);
+        const outcome: task_runtime.DurableCommit = outcome: {
+            self.commitTaskStateIfConfigured(.required) catch |err| break :outcome switch (err) {
+                error.TaskBusy => {
+                    if (removed_workspace) |*removed| self.workspace.rollbackAutomatic(removed);
+                    return error.TaskBusy;
+                },
+                error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+                else => .failed,
+            };
+            break :outcome .committed;
+        };
         switch (outcome) {
             .committed => if (removed_workspace) |*removed| {
                 std.debug.assert(self.skill.unregisterWorkspace(
@@ -8880,6 +8794,7 @@ pub const Runtime = struct {
             return .committed;
         if (!self.task_persistence_health.operational()) return .failed;
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
+        if (!self.task_runtime.approvalJobCapacityAvailable()) return error.QueueFull;
         var input: task_runtime.HistoryInput = .{ .candidate = try self.captureTaskHistoryCandidate(null) };
         errdefer input.deinit();
         try self.task_runtime.queueRecoveryHistory(task_id, input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
@@ -8894,6 +8809,7 @@ pub const Runtime = struct {
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
             .refresh_capabilities_fn = refreshModelRestoreCapabilities,
             .retire_checkpoint_fn = retireRecoveryCheckpoint,
+            .shutting_down = self.shutting_down,
         };
     }
 
@@ -8901,19 +8817,21 @@ pub const Runtime = struct {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.shutting_down) return;
         if (self.checkpoint_store) |store|
-            self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
+            self.task_runtime.retireCheckpoint(store, identity, self.approvalExecutor(), self.approvalNotifier());
     }
 
-    fn commitTaskStateIfConfigured(self: *Runtime) Error!void {
+    const HistoryWritePurpose = enum { projection, required };
+
+    fn commitTaskStateIfConfigured(self: *Runtime, purpose: HistoryWritePurpose) Error!void {
         if (self.task_persistence_health == .unavailable and
             !self.task_persistence.enabled and
             !self.task_persistence.restore_failed)
             return;
-        return self.commitTaskState();
+        return self.commitTaskStateWithCheckpoint(null, purpose);
     }
 
     fn commitTaskStateBestEffort(self: *Runtime) Error!void {
-        self.commitTaskStateIfConfigured() catch |err| return switch (err) {
+        self.commitTaskStateIfConfigured(.projection) catch |err| return switch (err) {
             error.TaskBusy => {},
             error.TaskPersistenceOutcomeUnknown,
             error.TaskPersistenceUnavailable,
@@ -8924,7 +8842,7 @@ pub const Runtime = struct {
     }
 
     fn commitTaskStateNoFail(self: *Runtime) void {
-        self.commitTaskStateIfConfigured() catch |err| switch (err) {
+        self.commitTaskStateIfConfigured(.projection) catch |err| switch (err) {
             error.TaskBusy => {},
             error.TaskPersistenceOutcomeUnknown,
             error.TaskPersistenceUnavailable,
@@ -8946,26 +8864,24 @@ pub const Runtime = struct {
     }
 
     fn commitTaskState(self: *Runtime) Error!void {
-        return self.commitTaskStateWithCheckpoint(null);
+        return self.commitTaskStateWithCheckpoint(null, .projection);
     }
 
     fn commitTaskStateWithCheckpoint(
         self: *Runtime,
         checkpoint_override: ?CheckpointPersistenceOverride,
+        purpose: HistoryWritePurpose,
     ) Error!void {
-        if (self.ordinary_history_unknown) |token| {
-            self.syncHistoryCredentials(null, null);
-            if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return error.TaskPersistenceOutcomeUnknown;
-            self.ordinary_history_unknown = null;
-        }
+        if (purpose == .required and self.requiredHistoryBlocked()) return error.TaskBusy;
+        const resolved_pending = self.ordinary_history_unknown != null;
+        if (!self.resolveOrdinaryHistoryCommit()) return error.TaskPersistenceOutcomeUnknown;
+        defer if (resolved_pending and !self.shutting_down and !self.approvalHistoryBlocked()) {
+            _ = self.change_notifier.notify();
+        };
         // During an approval transaction, ordinary lifecycle facts join the
         // existing bounded history writer. Even a gap between its jobs must
         // not turn cancel/terminal reconciliation into synchronous disk I/O.
-        if (self.task_runtime.approvalChangePending()) {
-            self.approval_history_dirty = true;
-            return error.TaskBusy;
-        }
-        if (self.approvalHistoryBlocked()) {
+        if (purpose == .projection and (self.task_runtime.approvalChangePending() or self.approvalHistoryBlocked())) {
             self.approval_history_dirty = true;
             return error.TaskBusy;
         }
@@ -10477,7 +10393,7 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     /// Exercises the writer while a test deliberately holds lifecycle reconciliation.
     pub fn commitTaskHistory(control: *Runtime) Error!void {
-        return control.commitTaskStateIfConfigured();
+        return control.commitTaskStateIfConfigured(.projection);
     }
 
     pub fn taskPermissionReviewText(control: *Runtime) task_runtime.TextProjection {
@@ -12041,6 +11957,38 @@ const TestTaskPersistence = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.recoveries += 1;
         return commit(context, candidate);
+    }
+};
+
+const TestHeldApprovalJob = struct {
+    job: ?*anyopaque = null,
+    execute_fn: ?*const fn (*anyopaque) void = null,
+
+    fn enqueue(context: *anyopaque, _: *anyopaque, job: *anyopaque, execute: *const fn (*anyopaque) void, _: *const fn (*anyopaque) void) error{ ExecutorShuttingDown, QueueFull }!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.debug.assert(self.job == null);
+        self.job = job;
+        self.execute_fn = execute;
+    }
+
+    fn cancel(_: *anyopaque, _: *anyopaque) bool {
+        return false;
+    }
+
+    fn executor(self: *@This()) product_task.ApprovalExecutor {
+        return .{ .context = self, .enqueue_fn = enqueue, .cancel_fn = cancel };
+    }
+
+    fn hold(self: *@This(), control: *Runtime) !void {
+        var input: task_runtime.HistoryInput = .{ .candidate = try control.captureTaskHistoryCandidate(null) };
+        errdefer input.deinit();
+        try control.task_runtime.queueApprovalProjection(input, control.task_persistence, self.executor(), control.approvalNotifier());
+    }
+
+    fn finish(self: *@This()) void {
+        const job = self.job orelse return;
+        self.job = null;
+        self.execute_fn.?(job);
     }
 };
 
@@ -13799,6 +13747,122 @@ test "Task persistence failure rolls back deletion before physical release" {
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
+test "idle history writer admits unrelated model selection and deletion during approval" {
+    var source = try testRuntime();
+    defer source.deinit();
+    var scratch = try source.buildTaskStateWire();
+    defer scratch.deinit();
+    var other = scratch.state.tasks[0];
+    other.id = 4;
+    other.recent_order = 2;
+    other.runs = &.{};
+    other.next_run_generation = 0;
+    other.active_operation = null;
+    var tasks = [_]task_persistence.TaskWire{ scratch.state.tasks[0], other };
+    var state = scratch.state;
+    state.tasks = &tasks;
+    state.next_task_id = 5;
+    state.next_task_recent_order = 3;
+
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestTaskPersistence = .{ .storage = storage };
+    var encoded: [128 * 1024]u8 = undefined;
+    const restored = try task_persistence.encode(&encoded, state, source.taskPersistenceLimits());
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .task_persistence = persistence.capability(restored),
+    });
+    defer control.deinit();
+    try installTestExecution(&control);
+
+    // A has local checkpoint work in progress, without a history writer.
+    const pending = control.task_runtime.find(3).?;
+    pending.approval_change = .{ .revision = 2, .target = .full_access, .phase = .baseline_export };
+    try std.testing.expect(!control.approvalHistoryBlocked());
+    const before = persistence.commits;
+    _ = try control.selectTaskModel(4, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    try control.deleteTask(4);
+    try std.testing.expect(control.task_runtime.find(4) == null);
+    try std.testing.expect(pending.approval_change != null);
+    try std.testing.expectEqual(before + 2, persistence.commits);
+}
+
+test "writer release advances pending deletion before deferred history projection" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestTaskPersistence = .{ .storage = storage };
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const task = control.task_runtime.find(3).?;
+    task.runtime.active_run_id = 0;
+    _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&control);
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+
+    var held: TestHeldApprovalJob = .{};
+    try held.hold(&control);
+    defer held.finish();
+    try control.deleteTask(3);
+    try std.testing.expectEqual(.deleting, control.task_runtime.find(3).?.deletion);
+    try std.testing.expect(!control.approval_history_dirty);
+    try std.testing.expectEqual(@as(usize, 0), persistence.commits);
+
+    control.approval_history_dirty = true;
+    held.finish();
+    control.syncLifecycle();
+    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+    try std.testing.expect(!control.approval_history_dirty);
+    try std.testing.expect(!control.approvalHistoryBlocked());
+    control.syncLifecycle();
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+}
+
+test "pending Task deletion reads back an earlier ordinary history write" {
+    var source = try testRuntime();
+    defer source.deinit();
+    var scratch = try source.buildTaskStateWire();
+    defer scratch.deinit();
+    var idle = scratch.state.tasks[0];
+    idle.runs = &.{};
+    idle.next_run_generation = 0;
+    idle.active_operation = null;
+    var state = scratch.state;
+    var tasks = [_]task_persistence.TaskWire{idle};
+    state.tasks = &tasks;
+    var encoded: [128 * 1024]u8 = undefined;
+    const restored = try task_persistence.encode(&encoded, state, source.taskPersistenceLimits());
+
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestTaskPersistence = .{ .storage = storage, .result = .outcome_unknown };
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .task_persistence = persistence.capability(restored),
+    });
+    defer control.deinit();
+
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.commitTaskState());
+    const token = control.ordinary_history_unknown.?;
+    persistence.result = .committed;
+    try control.deleteTask(3);
+    try std.testing.expectEqual(.deleting, control.task_runtime.find(3).?.deletion);
+    try std.testing.expectEqual(token, control.ordinary_history_unknown.?);
+    try std.testing.expectEqual(@as(usize, 1), persistence.resolutions);
+    try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+    try std.testing.expect(!control.approval_history_dirty);
+
+    persistence.resolution_result = .committed;
+    control.syncLifecycle();
+    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expectEqual(@as(usize, 2), persistence.resolutions);
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+    try std.testing.expect(control.ordinary_history_unknown == null);
+}
+
 test "Task persistence failure keeps Workspace state and retries later" {
     test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
@@ -13925,6 +13989,9 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
 }
 
 test "Scheduled Task custom binding validates source identity and rejects stale authority" {
+    const task_history_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(task_history_storage);
+    var task_history: TestTaskPersistence = .{ .storage = task_history_storage };
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, .{
         .max_tasks = 1,
@@ -13992,10 +14059,79 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     const occurrences = control.schedule.store.find(id).?.occurrences();
     try std.testing.expectEqual(@as(usize, 1), occurrences.len);
     try std.testing.expectEqual(@as(u64, 2000), occurrences[0].planned_at_unix_seconds);
-    // This fixture has no Task persistence, so admission rejects after the claim.
+    // The fixture has no available Agent Session. Its launch still follows a durable claim.
     try std.testing.expect(occurrences[0].result == .rejected);
     try std.testing.expectEqual(product_schedule.FailureReason.task_start_failed, occurrences[0].reason.?);
     try std.testing.expectEqual(commits + 2, persistence.commits);
+
+    control.task_persistence = task_history.capability(null);
+    control.task_persistence_health = .ready;
+    const readback_id = try control.createScheduledTask(.{
+        .title = "Wait for history readback",
+        .model_selection = try control.scheduledSelection(binding),
+        .permission_profile = .approval_required,
+        .input = "Inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2500 } },
+    });
+    task_history.result = .outcome_unknown;
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.commitTaskState());
+    task_history.result = .committed;
+    const before_readback_claim = persistence.commits;
+    const before_readback = task_history.resolutions;
+
+    clock.now = 2500;
+    control.onScheduledTaskTimer();
+    const pending = control.schedule.store.find(readback_id).?;
+    try std.testing.expect(pending.waiting_for_task_history);
+    try std.testing.expectEqual(@as(?u64, 2500), pending.next_run_at_unix_seconds);
+    try std.testing.expectEqual(@as(usize, 0), pending.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+    try std.testing.expectEqual(before_readback_claim, persistence.commits);
+    try std.testing.expectEqual(before_readback + 1, task_history.resolutions);
+
+    task_history.resolution_result = .failed;
+    control.syncLifecycle();
+    const admitted = control.schedule.store.find(readback_id).?;
+    try std.testing.expect(!admitted.waiting_for_task_history);
+    try std.testing.expectEqual(@as(usize, 1), admitted.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 2500), admitted.occurrences()[0].planned_at_unix_seconds);
+    try std.testing.expectEqual(before_readback_claim + 2, persistence.commits);
+    try std.testing.expectEqual(before_readback + 2, task_history.resolutions);
+    try std.testing.expect(control.ordinary_history_unknown == null);
+
+    control.task_persistence_health = .ready;
+    const waiting_id = try control.createScheduledTask(.{
+        .title = "Wait for history",
+        .model_selection = try control.scheduledSelection(binding),
+        .permission_profile = .approval_required,
+        .input = "Inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 3000 } },
+    });
+    var held: TestHeldApprovalJob = .{};
+    try held.hold(&control);
+    defer held.finish();
+
+    clock.now = 3000;
+    const before_claim = persistence.commits;
+    try std.testing.expectError(error.TaskBusy, control.runScheduledTaskNow(waiting_id, 1));
+    control.onScheduledTaskTimer();
+    const waiting = control.schedule.store.find(waiting_id).?;
+    try std.testing.expectEqual(@as(usize, 0), waiting.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, 3000), waiting.next_run_at_unix_seconds);
+    try std.testing.expect(waiting.waiting_for_task_history);
+    try std.testing.expectEqual(before_claim, persistence.commits);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+
+    control.approval_history_dirty = true;
+    held.finish();
+    control.syncLifecycle();
+    const resumed = control.schedule.store.find(waiting_id).?;
+    try std.testing.expectEqual(@as(usize, 1), resumed.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 3000), resumed.occurrences()[0].planned_at_unix_seconds);
+    try std.testing.expectEqual(.rejected, resumed.occurrences()[0].result);
+    try std.testing.expectEqual(product_schedule.FailureReason.task_start_failed, resumed.occurrences()[0].reason.?);
+    try std.testing.expect(!resumed.waiting_for_task_history);
+    try std.testing.expectEqual(before_claim + 2, persistence.commits);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
@@ -21261,6 +21397,64 @@ test "MCP startup activation failure stays globally unavailable without inventin
     control.shutting_down = true;
     control.syncLifecycle();
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
+}
+
+test "full approval lane keeps confirmation pending and retires confirmed blob after wake" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store = try checkpoint_store.FileStore.init(std.testing.io, home);
+    defer store.deinit();
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var history: TestTaskPersistence = .{ .storage = storage };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.checkpoint_store = &store;
+    control.task_persistence = history.capability(null);
+    control.task_persistence_health = .ready;
+
+    const blob = "unreferenced checkpoint";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(blob, &digest, .{});
+    var writer = try store.begin(3, blob.len);
+    defer writer.deinit();
+    try writer.write(blob);
+    const retired = try writer.commit(1, digest, blob.len);
+    const nonexistent: checkpoint_store.Identity = .{
+        .task_id = 3,
+        .generation = 2,
+        .digest = digest,
+        .byte_size = blob.len,
+    };
+    var held: [product_task.approval_capacity]TestHeldApprovalJob = @splat(.{});
+    defer for (&held) |*job| job.finish();
+    for (&held) |*job| {
+        try control.task_runtime.queueApprovalRetirement(&store, nonexistent, job.executor(), control.approvalNotifier());
+    }
+
+    const task = control.task_runtime.find(3).?;
+    task.approval_change = .{ .revision = 2, .target = .auto_review, .phase = .mode_commit };
+    Runtime.retireRecoveryCheckpoint(&control, retired);
+    try store.verify(retired);
+    try std.testing.expectEqual(retired, task.pending_checkpoint_retirements[0].?);
+    try std.testing.expectError(error.QueueFull, control.queueApprovalProjection(false));
+    _ = control.syncApprovalChanges();
+    try std.testing.expectEqual(.mode_commit, task.approval_change.?.phase);
+    try std.testing.expect(task.approval_result == null);
+    try std.testing.expectEqual(@as(usize, 0), history.commits);
+
+    for (&held) |*job| job.finish();
+    for (0..2000) |_| {
+        _ = control.syncApprovalChanges();
+        if (task.approval_result != null) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+    try std.testing.expect(task.pending_checkpoint_retirements[0] == null);
+    try std.testing.expectError(error.BlobMissing, store.verify(retired));
+    try std.testing.expectEqual(@as(usize, 1), history.commits);
 }
 
 test "approval shutdown settles joined history outcomes before releasing Task resources" {

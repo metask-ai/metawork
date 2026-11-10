@@ -1215,6 +1215,9 @@ pub const Task = struct {
     skills_unavailable: bool = false,
     approval_change: ?ApprovalChange = null,
     approval_result: ?ApprovalResult = null,
+    /// One recovery step may retire its candidate plus the three finishRecovery
+    /// records. Further checkpoint transitions wait for this batch to enqueue.
+    pending_checkpoint_retirements: [4]?@FieldType(checkpoint_record.Record, "blob") = @splat(null),
     deletion: task_deletion.State = .idle,
     /// Original history frame of a Task restored by ignoring unknown fields.
     /// Such a Task is read-only and commits write this frame back unchanged.

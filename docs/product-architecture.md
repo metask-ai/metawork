@@ -198,9 +198,9 @@ Product Control 拥有全局的新 Task 默认 `ApprovalMode`，在 create admis
 
 Product Task 持有当前 effective profile、是否采用自动评审、interaction fact 与单调 approval revision；每个 Run 保留创建时的 profile 与 interaction provenance。`ApprovalMode` 从 Task 的唯一 profile 和评审事实派生，不建立平行的模式或委托真源；自动评审选择随 Task 持久化恢复。显式切换在同一 interactive Task、Workspace、Session 和 Conversation 中完成，Manual 与 Automatic Workspace 都适用；noninteractive Scheduled occurrence 不开放切换。新 Task 默认模式仍由 create transaction 独立拥有，已有 Task 切换不改变默认值。模式的产品语义及 Core profile 映射见[产品需求](requirements.md#55-审批与输入)。
 
-审批切换 admission 同时校验 Task identity、binding epoch 与 approval revision，拒绝 stale、并发 mutation、归档、删除和 shutdown。相同模式无副作用；真正提交推进 approval revision，防止 A→B→A 使旧意图重新有效。人工与自动评审共享同一 Core profile：切到自动评审可以为当前未回答 request 启动一次评审，切回人工立即使旧 review identity 失效并请求取消，保留当前 request，不能等待审核线程退出或接纳已排队的旧结果。涉及 Core profile 的切换先按需取消 Run，再等待真实 terminal、event drain、callback、abort 与 checkpoint 静止；不能把取消受理当作静止，也不得重放挂起工具或自动发送下一条输入。
+审批切换 admission 同时校验 Task identity、binding epoch 与 approval revision，拒绝 stale、并发 mutation、归档、删除和 shutdown。每个 Task 最多持有一个待处理切换意图；共享后台作业容量独立约束实际入队的作业。相同模式无副作用；真正提交推进 approval revision，防止 A→B→A 使旧意图重新有效。人工与自动评审共享同一 Core profile：切到自动评审可以为当前未回答 request 启动一次评审，切回人工立即使旧 review identity 失效并请求取消，保留当前 request，不能等待审核线程退出或接纳已排队的旧结果。涉及 Core profile 的切换先按需取消 Run，再等待真实 terminal、event drain、callback、abort 与 checkpoint 静止；不能把取消受理当作静止，也不得重放挂起工具或自动发送下一条输入。
 
-Product Control 拥有审批事务与有界 worker；Agent 是官方 Session mode mutator 的唯一消费者。切换前先确认覆盖当前 Conversation 的旧 checkpoint；Core 成功后写入新 immutable blob，再原子确认 Task 当前模式、revision 与 checkpoint reference，确认后才开放下一 Run 并异步退休旧恢复点。mutation 前失败保持旧模式；mutation 后导出或 metadata 明确失败必须关闭变更后的 attachment，再按已确认旧基线与旧模式恢复，禁止用反向 mutation 回滚已撤销的 Session grant。结果未知时保留旧恢复点、candidate 与原 history packet，阻止冲突写入和执行，只以显式 canonical readback 决定采用哪份事实；取消或 shutdown 不得隐式重写、读回或重放。detached Task 先按已提交模式恢复 attachment，再执行此次切换，不能以目标模式 restore 模拟 mutation。已明确拒绝且不被 canonical checkpoint 引用的 candidate blob 交由同一有界 retirement owner 清理；结果仍未知时不得删除 candidate 或旧恢复点。
+Product Control 拥有审批事务与有界 worker；Agent 是官方 Session mode mutator 的唯一消费者。切换前先确认覆盖当前 Conversation 的旧 checkpoint；Core 成功后写入新 immutable blob，再原子确认 Task 当前模式、revision 与 checkpoint reference，确认后才开放下一 Run 并异步退休旧恢复点。mutation 前失败保持旧模式；mutation 后导出或 metadata 明确失败必须关闭变更后的 attachment，再按已确认旧基线与旧模式恢复，禁止用反向 mutation 回滚已撤销的 Session grant。结果未知时保留旧恢复点、candidate 与原 history packet，阻止冲突写入和执行，只以显式 canonical readback 决定采用哪份事实；取消或 shutdown 不得隐式重写、读回或重放。detached Task 先按已提交模式恢复 attachment，再执行此次切换，不能以目标模式 restore 模拟 mutation。已明确拒绝且不被 canonical checkpoint 引用的 candidate blob 交由同一有界 retirement owner 清理；暂时没有作业容量时保留可退休 identity，容量释放后继续清理。审批阶段在尚未入队的作业容量暂满时保留进度，等待完成唤醒。结果仍未知时不得删除 candidate 或旧恢复点。
 
 权限诊断是 Product Task history 的有界审计投影，不是第二个 policy engine。Pending request 与 resolved occurrence 可以投影 AgentCore 已提供的 canonical arguments digest、policy generation 和 candidate/rule identity，并与既有 tool identity、decision source、Session rule 命中和 restore 结果共同用于解释重复请求。Product 不记录原始参数、credential 或可重放 response，不从 digest/tool text 推断 effect，也不自行匹配或生成 grant。
 
@@ -220,7 +220,7 @@ Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Produ
 
 Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Product Control 在每次 mutation 的明确改选及 occurrence 前按该项来源、模型、source generation、目录 membership、授权与 protocol 校验并 resolve；不比较起始偏好、不保存 Product execution generation。更新请求的 modelSelection 必填但可为 null，null 精确表示保留该 item epoch 下的原绑定；创建必须为非空目标。timer readiness与绑定reconciliation按每项计算，失效项不阻塞其他项。
 
-完整 resolve 的瞬态拒绝只为该计划设置进程内重试时间，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划。Host timer 自动重试仍符合准入条件的计划，恢复后按既有规则仅接纳最新的到期点。来源或授权事实刷新、明确编辑可清除重试等待。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。中断恢复必须处理全部未收口 claim；恢复准备失败也不得重新开放 timer。
+完整 resolve 的瞬态拒绝只为该计划设置进程内重试时间，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划。Host timer 自动重试仍符合准入条件的计划，恢复后按既有规则仅接纳最新的到期点。来源或授权事实刷新、明确编辑可清除重试等待。共享 Task 历史 writer 暂不可写时，自动触发在 claim 前等待 writer 恢复，不消费到期点或重置其他准入退避；立即运行返回暂忙，由用户显式重试。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。中断恢复必须处理全部未收口 claim；恢复准备失败也不得重新开放 timer。
 
 日历时间的产品语义以[产品需求](requirements.md#511-定时任务)为准。Schedule 以 Gregorian 本地时间计算，支持 Unix seconds `1..253402300799`（截至 9999 年）；各平台使用同一 checksum-pinned IANA 数据和时间库，不读取系统规则计算计划，也不从系统时区推断或伪造创建 identity。canonical schema 1 以可选创建时区和独立 calendar recurrence 扩展，原有 once/interval 的字段及语义保持有效。自动 occurrence 的消费边界必须独立于有界历史持久化并保持单调；编辑、规则变更、暂停恢复及重启不得让未来游标回到已消费边界以内，已消费的单次计划不能因改名或恢复再次计时。旧记录缺少独立边界时，只依据仍保留的 timer occurrence 恢复边界，并纠正旧编辑/恢复路径回退的游标，不能据此丢弃定义。平台相对 timer 必须定期复核 wall clock。
 
@@ -468,6 +468,8 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 | 产品可用性  | interactive mutation、durable save、自动执行、权限/approval admission、cleanup 与显式 recovery 分别由 owner 决定；其中一个不可用不能伪造其他能力不可用，也不能冻结无关 aggregate                |
 
 对外 wire 可以在不需要不同用户动作时合并内部诊断，但不得用更强的词误导用户；一旦不同事实需要不同迁移、文案或恢复动作，Bridge 必须先增加相应 typed contract，Renderer 不从诊断文本或文件名猜测。`unavailable` 表示能力或物理 store 没有建立，不等于空数据、损坏或首次启动。
+
+待处理的审批意图只约束对应 Task。普通历史投影可合并到后台 writer；需要确认的提交按实际 writer 和未决结果准入。writer 释放后先推进已就绪的确认型事务，再补写未被已确认快照覆盖的普通投影。Task 删除遇到尚未尝试写入的暂忙时保留删除状态和资源，在 writer 恢复后继续；暂忙不发布持久化失败，也不登记投影变化。
 
 具体格式演进、迁移、恢复单位和 replace transaction 只由各 aggregate 的既有章节与实现拥有；本节不建立跨 owner 的通用恢复算法。尚未形成一致合同或真实能力的机制登记在[验证规范](validation.md)中，不得从本节推导新的 wire、磁盘布局或用户操作。
 

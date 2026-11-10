@@ -106,7 +106,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - automatic root 配置缺失时初始化为 system default；读取失败、损坏或未知 schema、配置提交结果不确定、以及已保存路径不可用时必须保留原事实并 fail closed，不得静默回退到 system default。这些故障只关闭 `automaticWorkspaces` capability 并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
 - bounded Task/Workspace 产品历史跨 Host 重启恢复，但恢复后的 Task 只读且不得伪造 Agent Session 或 Conversation；Run、Task 删除、shutdown 和重启后 Automatic Workspace 目录保留，但不扫描目录恢复或猜测 Task/Workspace，目录浏览和磁盘清理属于后续独立能力；
-- Task/Workspace 历史持久化是交互式主流程的 best-effort projection：历史读取、解码或写入失败时保留原文件与诊断，当前进程仍允许 Workspace 选择、新建 Task、Run、权限响应、取消与后续 mutation；读取或解码失败后本进程不覆盖不可信 store，明确写失败或结果不确定则在后续完整 snapshot 时重新尝试保存。Host 必须为非健康 store 发布 Product-owned 显式恢复动作；用户确认后，Application 只把当前 canonical 文件改名保留为 recovery copy，并原子写入 Product 编码的当前内存 snapshot，不读取、迁移或删除旧格式。只有 Task 物理删除和 Scheduled occurrence 等明确要求 durable-before-release/effect 的局部事务可以因本次提交失败而拒绝，拒绝不得冻结其他 Product Task 或整个 Workbench；
+- Task/Workspace 历史持久化是交互式主流程的 best-effort projection：历史读取、解码或写入失败时保留原文件与诊断，当前进程仍允许 Workspace 选择、新建 Task、Run、权限响应、取消与后续 mutation；读取或解码失败后本进程不覆盖不可信 store，明确写失败或结果不确定则在后续完整 snapshot 时重新尝试保存。Host 必须为非健康 store 发布 Product-owned 显式恢复动作；用户确认后，Application 只把当前 canonical 文件改名保留为 recovery copy，并原子写入 Product 编码的当前内存 snapshot，不读取、迁移或删除旧格式。只有 Task 物理删除和 Scheduled occurrence 等明确要求 durable-before-release/effect 的局部事务可以因本次提交失败而拒绝，拒绝不得冻结其他 Product Task 或整个 Workbench。历史 writer 暂忙时，已受理的 Task 删除等待可写后继续，确认后释放资源；
 - 文件和工具能力最终必须受 Workspace 与显式权限约束；
 - UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。
@@ -326,7 +326,7 @@ New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以
 - 时间规则支持一次性绝对时间、由明确起点开始的固定秒数间隔，以及指定 IANA 时区的每日、每周多个星期、每月多个日期的日历周期；已有每小时、每年规则继续保持原语义，不在新建菜单提供。日历周期保持起始 instant 对应的本地时间；不存在的本地时刻或日期跳过（如短月的 31 日、非闰年的 2 月 29 日），重复时刻只采用较早 instant，一次唤醒仍只接纳最新到期点。Host 保存 canonical Unix time、locale-independent recurrence 与显式提交的创建时 timezone identity，编辑不改变创建时区，旧定义缺失时保留 unknown；固定间隔不得自动转成日历周期。Renderer 只负责本地化显示和结构化编辑，不用本地 timer 推进产品状态；
 - 每次自动或手动触发创建一个新的真实 Task。计划定义不复用旧 Conversation、不把结果复制成第二份聊天历史，也不绕过既有 Task/Run admission；
 - 同一 Scheduled Task 的上一次 Task 仍有 non-terminal Run 时，自动触发必须跳过本次；不得并发重放同一计划或自动终止已有 Run。若历史中的 Task 已永久不可用，Schedule 必须把该 occurrence 收口为 `unavailable` 并继续检查其他待收口 occurrence，不能形成队头阻塞；
-- 自动触发使用 `(scheduledTaskId, plannedAt)` 形成跨 Host 恢复稳定的 occurrence identity；后台 Host 延迟、休眠或重启恢复时最多接纳一个最新的到期 occurrence，过去的多个时间点不批量补跑，并在 occurrence history 中明确标记 delayed/skipped；
+- 自动触发使用 `(scheduledTaskId, plannedAt)` 形成跨 Host 恢复稳定的 occurrence identity；后台 Host 延迟、休眠或重启恢复时最多接纳一个最新的到期 occurrence，过去的多个时间点不批量补跑，并在 occurrence history 中明确标记 delayed/skipped。Task 历史 writer 暂忙时，自动触发在认领前等待可写；立即运行返回暂忙，允许用户显式重试；
 - Scheduled Task 定义、触发游标和有界 occurrence history 由 Workbench 原子持久化，canonical `schema_version = 1` 严格保存 `ModelRef + source_generation + protocol`，不保存 global selection revision。被 hard cut 替代的旧格式先将原文件 exact bytes quarantine，再原子安装空的当前 store 继续，不迁移、双读或重放旧计划；隔离或安装失败发布真实 I/O/持久化错误，不得假报成功。当前格式的普通提交、结果不确定及显式恢复继续由 Schedule owner 处理。每个计划按自身绑定验证，单个来源失效不得停止其他有效计划；偏好变化不参与 timer 或计划资格。
 - 主窗口关闭使用后台/托盘形态而不是销毁 Host；后台 Host 继续 timer、Run、通知与待处理事实，托盘提供重新打开和显式退出。显式退出可以停止本机后台执行，但下次启动仍恢复定义并执行上述单次 missed-run reconciliation；
 - 执行配置、Workspace authority、容量或 shutdown gate 不再满足时，计划进入明确的 `needs_attention`，停止继续计时并保留 typed 原因；用户必须编辑并确认当前事实后才能恢复；

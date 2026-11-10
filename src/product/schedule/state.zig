@@ -256,6 +256,7 @@ pub const Item = struct {
     occurrence_count: usize = 0,
     /// Earliest retry after a transient resolve failure. Process-local only.
     preflight_retry_at_unix_seconds: ?u64 = null,
+    waiting_for_task_history: bool = false,
 
     pub fn occurrences(self: *const Item) []const Occurrence {
         return self.occurrence_history[0..self.occurrence_count];
@@ -358,6 +359,7 @@ pub const Store = struct {
             });
             const copied = result.find(item.id).?;
             copied.preflight_retry_at_unix_seconds = item.preflight_retry_at_unix_seconds;
+            copied.waiting_for_task_history = item.waiting_for_task_history;
             copied.title_redacted = item.title_redacted;
             copied.input.redacted = item.input.redacted;
         }

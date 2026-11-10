@@ -1026,7 +1026,7 @@ pub const ExecutorCancellation = struct {
 pub const DeletionEffects = struct {
     context: *anyopaque,
     release_session_fn: *const fn (*anyopaque, u64) SessionReleaseOutcome,
-    commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
+    commit_without_task_fn: *const fn (*anyopaque, u64) error{TaskBusy}!DurableCommit,
     resources_quiescent_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
     task_deleted_fn: ?*const fn (*anyopaque, u64) void = null,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
@@ -1038,7 +1038,7 @@ pub const DeletionEffects = struct {
         return self.release_session_fn(self.context, task_id);
     }
 
-    fn commitWithoutTask(self: DeletionEffects, workspace_id: u64) DurableCommit {
+    fn commitWithoutTask(self: DeletionEffects, workspace_id: u64) error{TaskBusy}!DurableCommit {
         return self.commit_without_task_fn(self.context, workspace_id);
     }
 
@@ -1086,6 +1086,7 @@ pub const RecoveryEffects = struct {
     executor: ?ExecutorPort = null,
     refresh_capabilities_fn: ?*const fn (*anyopaque, u64) bool = null,
     retire_checkpoint_fn: ?*const fn (*anyopaque, checkpoint_store.Identity) void = null,
+    shutting_down: bool = false,
 
     fn authority(
         self: RecoveryEffects,
@@ -1320,11 +1321,6 @@ pub const Runtime = struct {
             return error.ApprovalUnavailable;
         if ((current.profile() != target.profile() or !task.runtime.hasAttachedSession()) and !authority.checkpoint_store_ready)
             return error.ApprovalUnavailable;
-        var pending_count: usize = 0;
-        for (self.tasks) |entry| if (entry) |item| if (item.approval_change != null) {
-            pending_count += 1;
-        };
-        if (pending_count >= approval_job.max_operations) return error.TaskBusy;
         if (target == .auto_review and (task.runtime.permission_review.exhausted or
             task.runtime.permission_review.generation == std.math.maxInt(u64)))
             return error.ReviewGenerationExhausted;
@@ -1366,9 +1362,13 @@ pub const Runtime = struct {
         return revision;
     }
 
-    fn approvalJobSlot(self: *Runtime) error{QueueFull}!usize {
+    fn approvalJobSlot(self: *const Runtime) error{QueueFull}!usize {
         for (self.approval_jobs, 0..) |entry, index| if (entry == null) return index;
         return error.QueueFull;
+    }
+
+    pub fn approvalJobCapacityAvailable(self: *const Runtime) bool {
+        return if (self.approvalJobSlot()) |_| true else |_| false;
     }
 
     pub fn approvalJobFor(self: *const Runtime, task_id: u64) bool {
@@ -1561,6 +1561,38 @@ pub const Runtime = struct {
             return err;
         };
         self.approval_jobs[slot] = .{ .recipient = .checkpoint_retirement, .job = job };
+    }
+
+    pub fn retireCheckpoint(self: *Runtime, store: *checkpoint_store.FileStore, identity: checkpoint_store.Identity, executor: ExecutorPort, notifier: task_execution.Notifier) void {
+        self.queueApprovalRetirement(store, identity, executor, notifier) catch |err| {
+            if (err != error.QueueFull) return;
+            const task = self.find(identity.task_id) orelse unreachable;
+            for (task.pending_checkpoint_retirements) |entry| {
+                if (entry) |pending| if (checkpointIdentityEqual(pending, identity)) return;
+            }
+            for (&task.pending_checkpoint_retirements) |*entry| {
+                if (entry.* != null) continue;
+                entry.* = identity;
+                return;
+            }
+            unreachable; // No new transition for this Task can accumulate another batch.
+        };
+    }
+
+    pub fn flushCheckpointRetirements(self: *Runtime, store: *checkpoint_store.FileStore, executor: ExecutorPort, notifier: task_execution.Notifier) void {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (&task.pending_checkpoint_retirements) |*pending| {
+                const identity = pending.* orelse continue;
+                self.queueApprovalRetirement(store, identity, executor, notifier) catch return;
+                pending.* = null;
+            }
+        }
+    }
+
+    fn checkpointRetirementWaiting(task: *const task_state.Task) bool {
+        for (task.pending_checkpoint_retirements) |entry| if (entry != null) return true;
+        return false;
     }
 
     pub const PreparedApprovalCommit = struct {
@@ -1774,6 +1806,228 @@ pub const Runtime = struct {
             task.approval_change = null;
         }
         return old_identity;
+    }
+
+    pub const ApprovalProjectionCompletion = struct {
+        readback: bool,
+        commit: ?DurableCommit,
+        token: ?task_persistence.CommitToken,
+    };
+
+    pub const ApprovalHistoryHealth = enum { ready, write_failed, outcome_unknown };
+
+    pub const ApprovalEffects = struct {
+        context: *anyopaque,
+        executor: ExecutorPort,
+        notifier: task_execution.Notifier,
+        persistence: task_persistence.Capability,
+        recovery: ApprovalRecoveryEffects,
+        shutting_down: bool,
+        operation_fn: *const fn (*anyopaque) OperationEffects,
+        history_blocked_fn: *const fn (*anyopaque) bool,
+        capture_history_fn: *const fn (*anyopaque, ?task_persistence.CheckpointPersistenceOverride) anyerror!task_persistence.OwnedCandidate,
+        projection_finished_fn: *const fn (*anyopaque, ApprovalProjectionCompletion) void,
+        history_health_fn: *const fn (*anyopaque, ApprovalHistoryHealth) void,
+        publish_fn: *const fn (*anyopaque) void,
+        retire_fn: *const fn (*anyopaque, checkpoint_store.Identity) void,
+    };
+
+    pub fn rejectApprovalChange(self: *Runtime, effects: ApprovalEffects, task_id: u64, reason: task_state.ApprovalFailureReason, restore_required: bool) void {
+        const task = self.find(task_id) orelse return;
+        const change = task.approval_change orelse return;
+        const rejected = if (change.candidate) |record| record.blob else null;
+        const canonical = if (task.durable.checkpoint) |record| record.blob else null;
+        self.failApprovalChange(task_id, reason, restore_required);
+        // Only a confirmed rejection allows retirement of a noncanonical candidate.
+        if (rejected) |identity| {
+            if (canonical) |old| if (std.meta.eql(old, identity)) return;
+            effects.retire_fn(effects.context, identity);
+        }
+    }
+
+    fn captureApprovalCandidate(self: *Runtime, effects: ApprovalEffects, task_id: u64) !task_persistence.OwnedCandidate {
+        const prepared = try self.prepareApprovalCommit(task_id);
+        defer prepared.rollback();
+        return effects.capture_history_fn(effects.context, if (prepared.checkpoint) |record|
+            .{ .task_id = task_id, .record = record, .anchor = .available }
+        else
+            null);
+    }
+
+    pub fn approvalChangeRun(self: *const Runtime, task_id: u64) ?struct { cancel_run: ?u64 } {
+        const task = self.findConst(task_id) orelse return null;
+        const change = task.approval_change orelse return null;
+        return .{ .cancel_run = if (task.durable.permission_profile != change.target.profile() and task.runtime.active_operation == .run)
+            task.runtime.active_operation.run
+        else
+            null };
+    }
+
+    pub fn queueTaskHistoryReadback(self: *Runtime, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        for (self.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
+            if (restore.binding_commit != .outcome_unknown) continue;
+            const token = restore.unknown_history orelse return error.ApprovalUnavailable;
+            return self.queueRecoveryHistory(task.durable.id, .{ .resolution = token }, capability, executor, notifier);
+        };
+        for (self.tasks) |entry| if (entry) |task| if (task.approval_change) |change| {
+            if (change.phase == .outcome_unknown)
+                return self.queueApprovalResolution(task.durable.id, capability, executor, notifier);
+        };
+        return error.ApprovalUnavailable;
+    }
+
+    pub fn takeShutdownRestoreWitness(self: *Runtime) ?task_persistence.CommitToken {
+        var witness: ?task_persistence.CommitToken = null;
+        for (self.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
+            if (restore.binding_commit != .outcome_unknown) continue;
+            // Keep the canonical witness without reading back during shutdown.
+            std.debug.assert(witness == null);
+            witness = restore.unknown_history;
+            restore.unknown_history = null;
+            restore.binding_commit = .failed;
+        };
+        return witness;
+    }
+
+    pub fn reapApprovalJobs(self: *Runtime, effects: ApprovalEffects) bool {
+        var changed = false;
+        var history_confirmed = false;
+        // Reap every completed worker before admitting another store write.
+        for (&self.approval_jobs) |*entry| {
+            const slot = entry.* orelse continue;
+            if (!slot.job.completionReady()) continue;
+            const task_id = switch (slot.recipient) {
+                .checkpoint_retirement => {
+                    slot.job.deinit();
+                    entry.* = null;
+                    continue;
+                },
+                .history_projection => {
+                    effects.projection_finished_fn(effects.context, .{
+                        .readback = slot.job.work.history.input == .resolution,
+                        .commit = if (slot.job.outcome == .history) slot.job.outcome.history else null,
+                        .token = slot.job.historyToken(),
+                    });
+                    changed = true;
+                    slot.job.deinit();
+                    entry.* = null;
+                    continue;
+                },
+                .recovery => |identity| {
+                    switch (self.finishRecoveryHistory(identity.task_id, identity.attempt_id, slot.job)) {
+                        .unchanged => {},
+                        .ready => effects.history_health_fn(effects.context, .ready),
+                        .write_failed => if (!effects.shutting_down or slot.job.outcome == .history)
+                            effects.history_health_fn(effects.context, .write_failed),
+                        .outcome_unknown => effects.history_health_fn(effects.context, .outcome_unknown),
+                    }
+                    slot.job.deinit();
+                    entry.* = null;
+                    changed = true;
+                    continue;
+                },
+                .approval => |id| id,
+            };
+            const task = self.find(task_id) orelse unreachable;
+            const change = task.approval_change.?;
+            const mode_commit = if (change.phase == .outcome_unknown) if (change.unknown_history) |history| history.mode_commit else false else change.phase == .mode_commit;
+            const phase = change.phase;
+            const outcome = slot.job.outcome;
+            const unknown_bytes = if (outcome == .history and outcome.history == .outcome_unknown and slot.job.work.history.input != .resolution)
+                slot.job.historyToken()
+            else
+                null;
+            const record = slot.job.takeCheckpoint();
+            slot.job.deinit();
+            entry.* = null;
+            changed = true;
+            switch (outcome) {
+                .checkpoint => self.recordApprovalCheckpoint(task_id, record.?),
+                .history => |result| switch (result) {
+                    .committed => {
+                        self.resumeApprovalConfirmation(task_id) catch {
+                            self.markApprovalUnknown(task_id, null);
+                            continue;
+                        };
+                        const retired = self.acceptApprovalCommit(task_id) catch {
+                            self.markApprovalUnknown(task_id, null);
+                            continue;
+                        };
+                        history_confirmed = true;
+                        // Canonical mode is installed and admission is reopened
+                        // before a separate worker retires the superseded blob.
+                        effects.publish_fn(effects.context);
+                        if (retired) |identity| effects.retire_fn(effects.context, identity);
+                    },
+                    .failed => {
+                        if (phase == .outcome_unknown) history_confirmed = true;
+                        self.rejectApprovalChange(effects, task_id, .persistence_failed, mode_commit and task.approval_change.?.candidate != null);
+                    },
+                    .outcome_unknown => {
+                        effects.history_health_fn(effects.context, .outcome_unknown);
+                        self.markApprovalUnknown(task_id, unknown_bytes);
+                    },
+                },
+                .failure => |failure| if (phase == .outcome_unknown)
+                    self.markApprovalUnknown(task_id, null)
+                else
+                    self.rejectApprovalChange(effects, task_id, failure.reason, failure.restore_required or (phase == .mode_commit and task.approval_change.?.candidate != null)),
+                .none, .retired => if (phase == .outcome_unknown)
+                    self.markApprovalUnknown(task_id, null)
+                else
+                    self.rejectApprovalChange(effects, task_id, .dependency_contract, phase == .mutation_export),
+            }
+        }
+        if (history_confirmed) effects.history_health_fn(effects.context, .ready);
+        return changed;
+    }
+
+    pub fn advanceApprovalChanges(self: *Runtime, effects: ApprovalEffects) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = entry.* orelse continue;
+            const change = task.approval_change orelse continue;
+            if (self.approvalJobFor(task.durable.id) or checkpointRetirementWaiting(task)) continue;
+            if (effects.shutting_down) continue;
+            switch (change.phase) {
+                .waiting, .recovering => switch (self.advanceApprovalAttachment(task.durable.id)) {
+                    .wait => {},
+                    .changed => changed = true,
+                    .detached => changed = self.advanceDetachedApprovalRecovery(task.durable.id, effects.recovery) or changed,
+                    .detach => {
+                        _ = self.beginDetach(task.durable.id, effects.operation_fn(effects.context)) catch |err| switch (err) {
+                            error.CloseInProgress => {},
+                            else => self.failApprovalRecovery(task.durable.id),
+                        };
+                        changed = true;
+                    },
+                    .checkpoint => |baseline_confirmed| {
+                        const resources = effects.operation_fn(effects.context).worker.checkpoint;
+                        self.queueApprovalCheckpoint(task.durable.id, baseline_confirmed, resources, effects.executor, effects.notifier) catch |err| {
+                            if (err == error.QueueFull) continue;
+                            self.rejectApprovalChange(effects, task.durable.id, .checkpoint_failed, false);
+                        };
+                        changed = true;
+                    },
+                },
+                .baseline_commit, .mode_commit => {
+                    if (effects.history_blocked_fn(effects.context) or !self.approvalJobCapacityAvailable()) continue;
+                    var candidate = self.captureApprovalCandidate(effects, task.durable.id) catch {
+                        self.rejectApprovalChange(effects, task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
+                        changed = true;
+                        continue;
+                    };
+                    self.queueApprovalHistory(task.durable.id, candidate, effects.persistence, effects.executor, effects.notifier) catch |err| {
+                        candidate.deinit();
+                        if (err == error.QueueFull) continue;
+                        self.rejectApprovalChange(effects, task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
+                    };
+                    changed = true;
+                },
+                .baseline_export, .mutation_export, .outcome_unknown => {},
+            }
+        }
+        return changed;
     }
 
     pub fn searchRevision(self: *const Runtime) u64 {
@@ -4077,7 +4331,11 @@ pub const Runtime = struct {
                     const workspace_id = task.durable.workspace_id;
                     const removed = task;
                     entry.* = null;
-                    switch (effects.commitWithoutTask(workspace_id)) {
+                    const commit = effects.commitWithoutTask(workspace_id) catch {
+                        entry.* = removed;
+                        continue;
+                    };
+                    switch (commit) {
                         .committed => {
                             if (effects.task_deleted_fn) |deleted| deleted(effects.context, task_id);
                             effects.deleteCheckpointTask(task_id);
@@ -6651,6 +6909,7 @@ pub const Runtime = struct {
         while (true) {
             const job = task.runtime.restore_job orelse break;
             if (!job.completionReady()) break;
+            if (!effects.shutting_down and checkpointRetirementWaiting(task)) break;
             if (job.rebind != null) switch (self.syncRebindPreparation(task, job, effects, release, notifier)) {
                 .waiting => break,
                 .finished => {
@@ -10518,7 +10777,7 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
             return facts.*;
         }
     };
-    var runtime = try Runtime.init(std.testing.allocator, 1);
+    var runtime = try Runtime.init(std.testing.allocator, 1 + approval_job.max_operations);
     defer runtime.deinitStorage();
     var task_fixture: task_state.Task = .{
         .durable = .{
@@ -10583,10 +10842,39 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     try std.testing.expect(task.durable.permission_review_delegated);
     try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
     try std.testing.expect(task.approval_change == null);
-    task.runtime.pending_ui_request_id = 7;
-    _ = try runtime.beginApprovalChange(1, 1, 2, .manual, effects);
-    try std.testing.expectEqual(.needs_user, task.runtime.permission_review.phase);
-    try std.testing.expectEqual(@as(u64, 7), task.runtime.permission_review.settled_request_id);
+    {
+        var other_tasks: [approval_job.max_operations]task_state.Task = @splat(task_fixture);
+        for (&other_tasks, runtime.tasks[1..], 2..) |*other, *slot, id| {
+            other.durable.id = @intCast(id);
+            other.approval_change = .{ .revision = 3, .target = .full_access };
+            slot.* = other;
+        }
+        defer @memset(runtime.tasks[1..], null);
+
+        task.runtime.pending_ui_request_id = 7;
+        const old_review: PermissionReviewIdentity = .{
+            .task_id = 1,
+            .run_id = 1,
+            .run_generation = 1,
+            .execution_generation = 1,
+            .binding_epoch = 1,
+            .workspace_epoch = 1,
+            .route_id = 1,
+            .request_id = 7,
+            .policy_generation = 1,
+            .delegation_generation = task.runtime.permission_review.generation,
+        };
+        task.runtime.permission_review.phase = .reviewing;
+        task.runtime.permission_review.identity = old_review;
+        try std.testing.expect(task.runtime.permission_review.matches(old_review));
+        try std.testing.expectEqual(@as(u64, 3), try runtime.beginApprovalChange(1, 1, 2, .manual, effects));
+        try std.testing.expectEqual(.needs_user, task.runtime.permission_review.phase);
+        try std.testing.expectEqual(@as(u64, 7), task.runtime.permission_review.settled_request_id);
+        try std.testing.expect(!runtime.finishPermissionReview(old_review, .{ .cause = .reviewer_concern }));
+        try std.testing.expect(task.runtime.permission_review.audit == null);
+        try std.testing.expect(task.durable.permission_review_delegated);
+        try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+    }
     task.approval_change.?.phase = .outcome_unknown;
     try std.testing.expect(runtime.approvalHistoryBlocked());
     task.approval_change.?.phase = .mode_commit;
