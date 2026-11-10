@@ -1305,7 +1305,13 @@ pub const Coordinator = struct {
                 if (self.flow == null) _ = try self.authorizeOauth(observed.generation, &id);
                 return false;
             },
-            .advance => |phase| return self.installationPhase(phase, null),
+            .advance => |phase| {
+                if (phase == .needs_credentials or phase == .preparing) {
+                    var parsed = try self.installationRequest(operation.request_refs);
+                    parsed.deinit();
+                }
+                return self.installationPhase(phase, null);
+            },
             .fail => |failure| {
                 try self.failInstallation(failure);
                 return true;
