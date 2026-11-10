@@ -220,7 +220,7 @@ Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Produ
 
 Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Product Control 在每次 mutation 的明确改选及 occurrence 前按该项来源、模型、source generation、目录 membership、授权与 protocol 校验并 resolve；不比较起始偏好、不保存 Product execution generation。更新请求的 modelSelection 必填但可为 null，null 精确表示保留该 item epoch 下的原绑定；创建必须为非空目标。timer readiness与绑定reconciliation按每项计算，失效项不阻塞其他项。
 
-完整 resolve 的瞬态拒绝只为该计划设置进程内重试时间，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划。Host timer 自动重试仍符合准入条件的计划，恢复后按既有规则仅接纳最新的到期点。来源或授权事实刷新、明确编辑可清除重试等待。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。中断恢复必须处理全部未收口 claim；恢复准备失败也不得重新开放 timer。
+完整 resolve 的瞬态拒绝只为该计划设置进程内重试时间，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划。Host timer 自动重试仍符合准入条件的计划，恢复后按既有规则仅接纳最新的到期点。来源或授权事实刷新、明确编辑可清除重试等待。共享 Task 历史 writer 暂不可写时，自动触发在 claim 前等待 writer 恢复，不消费到期点或重置其他准入退避；立即运行返回暂忙，由用户显式重试。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。中断恢复必须处理全部未收口 claim；恢复准备失败也不得重新开放 timer。
 
 日历时间的产品语义以[产品需求](requirements.md#511-定时任务)为准。Schedule 以 Gregorian 本地时间计算，支持 Unix seconds `1..253402300799`（截至 9999 年）；各平台使用同一 checksum-pinned IANA 数据和时间库，不读取系统规则计算计划，也不从系统时区推断或伪造创建 identity。canonical schema 1 以可选创建时区和独立 calendar recurrence 扩展，原有 once/interval 的字段及语义保持有效。自动 occurrence 的消费边界必须独立于有界历史持久化并保持单调；编辑、规则变更、暂停恢复及重启不得让未来游标回到已消费边界以内，已消费的单次计划不能因改名或恢复再次计时。旧记录缺少独立边界时，只依据仍保留的 timer occurrence 恢复边界，并纠正旧编辑/恢复路径回退的游标，不能据此丢弃定义。平台相对 timer 必须定期复核 wall clock。
 
@@ -468,6 +468,8 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 | 产品可用性  | interactive mutation、durable save、自动执行、权限/approval admission、cleanup 与显式 recovery 分别由 owner 决定；其中一个不可用不能伪造其他能力不可用，也不能冻结无关 aggregate                |
 
 对外 wire 可以在不需要不同用户动作时合并内部诊断，但不得用更强的词误导用户；一旦不同事实需要不同迁移、文案或恢复动作，Bridge 必须先增加相应 typed contract，Renderer 不从诊断文本或文件名猜测。`unavailable` 表示能力或物理 store 没有建立，不等于空数据、损坏或首次启动。
+
+待处理的审批意图只约束对应 Task。普通历史投影可合并到后台 writer；需要确认的提交按实际 writer 和未决结果准入。writer 释放后先推进已就绪的确认型事务，再补写未被已确认快照覆盖的普通投影。Task 删除遇到尚未尝试写入的暂忙时保留删除状态和资源，在 writer 恢复后继续；暂忙不发布持久化失败，也不登记投影变化。
 
 具体格式演进、迁移、恢复单位和 replace transaction 只由各 aggregate 的既有章节与实现拥有；本节不建立跨 owner 的通用恢复算法。尚未形成一致合同或真实能力的机制登记在[验证规范](validation.md)中，不得从本节推导新的 wire、磁盘布局或用户操作。
 

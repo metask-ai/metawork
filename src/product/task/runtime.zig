@@ -1026,7 +1026,7 @@ pub const ExecutorCancellation = struct {
 pub const DeletionEffects = struct {
     context: *anyopaque,
     release_session_fn: *const fn (*anyopaque, u64) SessionReleaseOutcome,
-    commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
+    commit_without_task_fn: *const fn (*anyopaque, u64) error{TaskBusy}!DurableCommit,
     resources_quiescent_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
     task_deleted_fn: ?*const fn (*anyopaque, u64) void = null,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
@@ -1038,7 +1038,7 @@ pub const DeletionEffects = struct {
         return self.release_session_fn(self.context, task_id);
     }
 
-    fn commitWithoutTask(self: DeletionEffects, workspace_id: u64) DurableCommit {
+    fn commitWithoutTask(self: DeletionEffects, workspace_id: u64) error{TaskBusy}!DurableCommit {
         return self.commit_without_task_fn(self.context, workspace_id);
     }
 
@@ -4297,7 +4297,11 @@ pub const Runtime = struct {
                     const workspace_id = task.durable.workspace_id;
                     const removed = task;
                     entry.* = null;
-                    switch (effects.commitWithoutTask(workspace_id)) {
+                    const commit = effects.commitWithoutTask(workspace_id) catch {
+                        entry.* = removed;
+                        continue;
+                    };
+                    switch (commit) {
                         .committed => {
                             if (effects.task_deleted_fn) |deleted| deleted(effects.context, task_id);
                             effects.deleteCheckpointTask(task_id);

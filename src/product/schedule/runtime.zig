@@ -586,6 +586,8 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
+            } else if (err == error.TaskHistoryWriterBusy) {
+                self.store.find(due.id).?.waiting_for_task_history = true;
             } else if (self.persistence_health != .ready or
                 self.store.find(due.id).?.preflight_retry_at_unix_seconds == null)
             {
@@ -597,6 +599,18 @@ pub const Runtime = struct {
             }
         };
         _ = self.rearmNoFail(binding, redaction);
+    }
+
+    /// Only release waits established before a claim by the Task history writer.
+    pub fn releaseTaskHistoryWaits(self: *Runtime) bool {
+        var released = false;
+        for (self.store.items) |*entry| {
+            if (entry.*) |*item| if (item.waiting_for_task_history) {
+                item.waiting_for_task_history = false;
+                released = true;
+            };
+        }
+        return released;
     }
 
     pub fn reconcileNoFail(
@@ -883,7 +897,6 @@ pub const Runtime = struct {
     ) anyerror!u64 {
         const blocking_task_id = try self.activeTaskId(id, tasks);
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
-        item.preflight_retry_at_unix_seconds = null;
         if (blocking_task_id == 0) {
             const binding = item.bindingView();
             // Control resolves the complete source authority before the
@@ -896,12 +909,15 @@ pub const Runtime = struct {
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
             }) catch |err| {
+                if (err == error.TaskHistoryWriterBusy) return err;
+                item.preflight_retry_at_unix_seconds = null;
                 if (err == error.ExecutionUnavailable or err == error.ExecutionInUse or
                     err == error.ExecutionGenerationMismatch)
                     item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
                 return err;
             };
         }
+        item.preflight_retry_at_unix_seconds = null;
         const begin = try self.beginOccurrence(
             id,
             planned_at_unix_seconds,
@@ -1087,6 +1103,7 @@ pub const Runtime = struct {
         for (self.store.items) |*entry| {
             const item = if (entry.*) |*value| value else continue;
             if (!item.enabled or item.health != .ready or item.next_run_at_unix_seconds == null or
+                item.waiting_for_task_history or
                 authority.status(item.bindingView()) != .ready) continue;
             if (earliest == null or timerDueAt(item) < timerDueAt(earliest.?)) earliest = item;
         }
