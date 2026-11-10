@@ -291,9 +291,7 @@ pub const Runtime = struct {
         };
     }
 
-    pub const SourceGenerations = struct { source: u64, catalog: u64 };
-
-    pub fn sourceGenerations(self: *Runtime, source_id: []const u8) ?SourceGenerations {
+    pub fn sourceGenerations(self: *const Runtime, source_id: []const u8) ?registry_impl.Registry.SourceGenerations {
         self.assertMainThread();
         if (std.mem.eql(u8, source_id, contract.metask_source_id)) {
             const source = self.registry.metaskSource();
@@ -302,8 +300,7 @@ pub const Runtime = struct {
                 .catalog = self.metask_catalog_generation,
             };
         }
-        const provider = findProviderView(self.registry.views(), source_id) orelse return null;
-        return .{ .source = provider.source_generation, .catalog = provider.catalog_generation };
+        return self.registry.sourceGenerations(source_id);
     }
 
     pub fn selectionCatalogAvailability(models: contract.ModelsView, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {

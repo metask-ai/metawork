@@ -1249,7 +1249,7 @@ const image_product = struct {
     }
 
     fn finish(control: *control_api.Runtime, task_id: u64, id: u64, stop_effects: ?*Effects) !void {
-        const task = control.task_runtime.find(task_id).?;
+        const task = control.testTask(task_id).?;
         var answered: ?u64 = null;
         var stopped = false;
         for (0..10000) |_| {
@@ -1378,15 +1378,15 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     {
-        var access = try control.task_runtime.find(task_id).?.runtime.acquireAccess();
+        var access = try control.testTask(task_id).?.runtime.acquireAccess();
         defer access.deinit();
         try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
     }
-    try std.testing.expect(std.mem.startsWith(u8, control.task_runtime.find(task_id).?.runtime.executionConst().?.provider_id, "custom_provider:"));
+    try std.testing.expect(std.mem.startsWith(u8, control.testTask(task_id).?.runtime.executionConst().?.provider_id, "custom_provider:"));
     const projection_epoch = control.projectionSecurityEpoch();
     const first_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
     if (!logout_after_admission and !rotate_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
     // The Core cannot send the image request before manual once approval.
     try std.testing.expectEqual(@as(usize, 0), effects.image_calls.load(.acquire));
@@ -1512,7 +1512,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     coordinator.setCompletionTransport(effects.imageTransport());
     coordinator_live = true;
     control.setImageRunPreparation(coordinator.imageRunPreparation());
-    const recovered = control.task_runtime.find(task_id).?;
+    const recovered = control.testTask(task_id).?;
     try std.testing.expect(!recovered.runtime.hasAttachedSession());
     try std.testing.expect(recovered.durable.runs[0].?.image_execution == null);
     _ = try control.restoreTaskConversation(task_id, recovered.durable.binding_epoch);
@@ -1605,7 +1605,7 @@ test "model image declarations reach canonical Core create restore and set_model
 }
 
 fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtime, task_id: u64, run_id: u64) !void {
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     var reference: ?[]const u8 = null;
     for (task.durable.runs[0].?.tools) |entry| {
         const tool = entry orelse continue;
@@ -1972,7 +1972,7 @@ fn canonicalProductDelivery(content: []const u8, checked: ?CheckedXlsxReport, st
     }
     const id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Explicitly deliver the finished file." });
     try image_product.finish(&control, task_id, id, null);
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     const run = &task.durable.runs[0].?;
     try std.testing.expectEqualStrings(locator, run.outputs[0].?.locator);
     try std.testing.expectEqual(content.len + @intFromBool(stale), run.outputs[0].?.size_bytes);
@@ -2012,7 +2012,7 @@ fn canonicalProductDelivery(content: []const u8, checked: ?CheckedXlsxReport, st
     typed_history.fixture_restore = saved;
     control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
     control_live = true;
-    const restored = control.task_runtime.find(task_id).?;
+    const restored = control.testTask(task_id).?;
     try std.testing.expect(!restored.runtime.hasAttachedSession());
     const recovered = &restored.durable.runs[0].?;
     try std.testing.expect(recovered.file_delivery == null);
@@ -2067,7 +2067,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     const streaming_search = control.task_runtime.searchRevision();
     try image_product.finish(&control, first, run_id, null);
     try std.testing.expect(control.task_runtime.searchRevision() > streaming_search);
-    const task = control.task_runtime.find(first).?;
+    const task = control.testTask(first).?;
     for (0..5000) |_| {
         control.syncLifecycle();
         if (task.durable.runs[0].?.execution == null) break;
@@ -2100,7 +2100,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     try std.testing.expect(failed.payload == null);
     for (0..5000) |_| {
         control.syncLifecycle();
-        if (control.task_runtime.find(second).?.runtime.attachment == .detached) break;
+        if (control.testTask(second).?.runtime.attachment == .detached) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     // Closing the other Session must not replay the failed message.
@@ -2117,6 +2117,6 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     try std.testing.expect(task.runtime.last_restore_report != null);
     try std.testing.expectEqualSlices(u8, &receipt, &task.durable.runs[0].?.outputs[0].?.id);
     try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
-    try std.testing.expect(control.task_runtime.find(second) != null);
+    try std.testing.expect(control.testTask(second) != null);
     try std.testing.expect(task.durable.checkpoint != null);
 }

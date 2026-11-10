@@ -191,7 +191,7 @@ const SlowHistory = struct {
 };
 
 fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8) !void {
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     var answered: ?u64 = null;
     var cancelled = false;
     for (0..15000) |_| {
@@ -341,13 +341,13 @@ fn qualify(mode: []const u8) !void {
             }
             try std.testing.expect(ready);
             try std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
-            const task = control.task_runtime.find(task_id).?;
+            const task = control.testTask(task_id).?;
             try std.testing.expect(runtime.pendingEventCount(task.runtime.routeId()) != 0);
             try std.testing.expect(state.terminalPayload(state.findRun(task.durable.runs, id).?) == null);
         }
         var stop_started: ?std.Io.Timestamp = null;
         if (std.mem.eql(u8, mode, "slow-stop")) {
-            const task = control.task_runtime.find(task_id).?;
+            const task = control.testTask(task_id).?;
             for (0..10000) |_| {
                 if (runtime.pendingEventCount(task.runtime.routeId()) >= 100) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -508,7 +508,7 @@ test "Skill resource context reads a managed import through tool and typed input
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.SkillCatalogTimeout;
         const task_id = try control.createTask(.{ .workspace_root = work, .trust = .explicitly_trusted, .approval_mode = .full_access }, try control_api.TestSupport.fixtureModelSelection(&control));
-        const task = control.task_runtime.find(task_id).?;
+        const task = control.testTask(task_id).?;
         const workspace_id = task.durable.workspace_id;
         for (0..5000) |_| {
             try control.drainAgentEvents();

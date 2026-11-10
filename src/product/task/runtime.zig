@@ -1266,6 +1266,20 @@ pub const Runtime = struct {
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
     pending_model_intent: ?PreparedModelIntent = null,
 
+    pub const testing = if (@import("builtin").is_test) struct {
+        pub fn findTask(self: *Runtime, task_id: u64) ?*task_state.Task {
+            return self.find(task_id);
+        }
+
+        pub fn findTaskConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
+            return self.findConst(task_id);
+        }
+
+        pub fn slots(self: *const Runtime) []?*task_state.Task {
+            return self.tasks;
+        }
+    } else struct {};
+
     const ApprovalJobRecipient = union(enum) {
         approval: u64,
         recovery: struct { task_id: u64, attempt_id: u64 },
@@ -2065,7 +2079,7 @@ pub const Runtime = struct {
         self.* = undefined;
     }
 
-    pub fn find(self: *Runtime, task_id: u64) ?*task_state.Task {
+    fn find(self: *Runtime, task_id: u64) ?*task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -2134,7 +2148,7 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
+    fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -2653,7 +2667,15 @@ pub const Runtime = struct {
 
     /// Task decides when an original is cancelled or handed to a real Run;
     /// composition executes that resource action in the attachment owner.
-    pub fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
+    pub fn settleInputResources(self: *Runtime, context: *anyopaque, settle: *const fn (*anyopaque, u64, u64, bool) void) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            const id = task.durable.id;
+            while (self.takeInputResourceAction(id)) |action|
+                settle(context, id, action.resource_id, action.keep_original);
+        };
+    }
+
+    fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
         const task = self.find(task_id) orelse return null;
         for (task.input_submissions.items) |*record| {
             if (record.state == .waiting or record.input != .multimodal) continue;
@@ -2684,6 +2706,12 @@ pub const Runtime = struct {
     }
 
     /// Freeze the current batch by changing its records, never a sticky Task flag.
+    pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            _ = self.cancelWaitingInputs(task.durable.id, .shutting_down);
+        };
+    }
+
     pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
         const task = self.find(task_id) orelse return false;
         task.skill_preparation = null;
@@ -3317,6 +3345,21 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn stopOperation(self: *Runtime, task_id: u64, effects: OperationEffects) ControlError!void {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        switch (task.runtime.active_operation) {
+            .run => |id| _ = try self.cancelRun(task_id, id, effects),
+            .compact => |id| _ = try self.cancelCompact(task_id, id, .user_cancel, effects),
+            .restore => self.cancelInputPreparation(task_id, effects),
+            .none => {},
+        }
+    }
+
+    pub fn checkStopInputs(self: *const Runtime, task_id: u64) error{ UnknownTask, TaskClosing }!void {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
+    }
+
     pub fn cancelCompact(
         self: *Runtime,
         task_id: u64,
@@ -3891,6 +3934,45 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn taskExists(self: *const Runtime, task_id: u64) bool {
+        return self.findConst(task_id) != null;
+    }
+
+    pub fn workspaceFileTaskMatches(self: *const Runtime, task_id: u64, workspace_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.deletion == .idle and !task.runtime.close_requested and task.durable.workspace_id == workspace_id;
+    }
+
+    pub fn runAdmissionFacts(self: *const Runtime, task_id: u64) error{ UnknownTask, TaskClosing }!struct {
+        workspace_id: u64,
+        workspace_epoch: u64,
+        validate_binding: bool,
+    } {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.durable.archived or task.read_only_history != null or task.deletion != .idle or
+            task.runtime.close_failed or task.runtime.close_requested or task.runtime.hasClosingSession()) return error.TaskClosing;
+        const attached = task.runtime.attachedConst();
+        if (attached) |value| if (value.health != .available) return error.TaskClosing;
+        return .{
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .validate_binding = attached != null,
+        };
+    }
+
+    /// Takes the owned revision prepared before automatic Task creation.
+    pub fn installInitialPersonalCatalog(self: *Runtime, task_id: u64, revision: []u8, selection_revision: u64) void {
+        const task = self.find(task_id) orelse unreachable;
+        std.debug.assert(task.initial_personal_catalog == null);
+        task.initial_personal_catalog = .{ .revision = revision, .selection_revision = selection_revision };
+    }
+
+    pub fn matchesInitialPersonalCatalog(self: *const Runtime, task_id: u64, revision: []const u8, selection_revision: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const initial = task.initial_personal_catalog orelse return false;
+        return std.mem.eql(u8, initial.revision, revision) and initial.selection_revision == selection_revision;
+    }
+
     pub fn taskWorkspaceId(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         return task.durable.workspace_id;
@@ -4317,6 +4399,22 @@ pub const Runtime = struct {
         task.initial_catalog_preparation = if (loading) .loading else .unavailable;
     }
 
+    pub fn skillPreparationGeneration(self: *const Runtime, task_id: u64, binding_epoch: u64) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        const preparation = task.skill_preparation orelse return null;
+        return if (preparation.binding_epoch == binding_epoch) preparation.generation else null;
+    }
+
+    pub fn setSkillPreparation(self: *Runtime, task_id: u64, binding_epoch: u64, generation: u64) void {
+        const task = self.find(task_id) orelse unreachable;
+        task.skill_preparation = .{ .generation = generation, .binding_epoch = binding_epoch };
+    }
+
+    pub fn clearSkillPreparation(self: *Runtime, task_id: u64) void {
+        const task = self.find(task_id) orelse unreachable;
+        task.skill_preparation = null;
+    }
+
     pub fn catalogRefreshFacts(
         self: *const Runtime,
         task_id: u64,
@@ -4481,6 +4579,18 @@ pub const Runtime = struct {
             return false;
         task.durable.completion_seen_run_id = run_id;
         return true;
+    }
+
+    pub fn markDeletionStopFailed(self: *Runtime, task_id: u64) void {
+        const task = self.find(task_id) orelse unreachable;
+        task.deletion = .failed;
+    }
+
+    pub fn sessionReleaseFailureTaskId(self: *const Runtime) ?u64 {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_failed and task.runtime.liveConst() != null) return task.durable.id;
+        };
+        return null;
     }
 
     pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {

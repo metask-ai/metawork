@@ -98,7 +98,7 @@ fn measureFixture(comptime fixture: Fixture) !void {
         defer std.testing.allocator.free(output);
         // The fixture has 50 Tasks x 16 Runs, 16 Manual Workspaces and 34 owned
         // Automatic Workspaces. All text allocations share the real 1.5 MiB budget.
-        try std.testing.expectEqual(@as(usize, if (sparse) 1 else 50), runtime.task_runtime.tasks.len);
+        try std.testing.expectEqual(@as(usize, if (sparse) 1 else 50), runtime.testTaskSlots().len);
         try std.testing.expectEqual(runtime.limits.max_projection_bytes, runtime.projection_bytes);
         var delivery = try bridge.ProductDelivery.init(std.testing.allocator);
         defer delivery.deinitOwnedBuffers();
@@ -144,7 +144,7 @@ fn measureFixture(comptime fixture: Fixture) !void {
             for (&durations, 0..) |*duration, sample_index| {
                 if (cold) runtime.encoded_views.clear(std.testing.allocator);
                 if (scenario.value == @intFromEnum(Scenario.targeted_update)) {
-                    const run = &runtime.task_runtime.tasks[0].?.durable.runs[if (sparse) 0 else 15].?;
+                    const run = &runtime.testTaskSlots()[0].?.durable.runs[if (sparse) 0 else 15].?;
                     run.input.text.value[0] = if (run.input.text.value[0] == 'a') 'b' else 'a';
                     run.projection_content_version += 1;
                     runtime.encoded_views.invalidateEvent(1, run.id);

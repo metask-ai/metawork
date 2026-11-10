@@ -8414,7 +8414,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const payload = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("send").?, .{});
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     _ = Host.dispatch(native, source, &output, commands.send_input, payload);
     try std.testing.expect(task.durable.runs[0].?.additional_inputs[0] == null);
     _ = Host.dispatch(native, source, &output, commands.connect, "{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}");
