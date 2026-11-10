@@ -1659,6 +1659,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     /pub const (?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime) =/,
   );
   assert.match(projection, /@import\("metawork_product_task"\)/);
+  assert.doesNotMatch(projection, /\.task_runtime\.(?:adoptTerminalReceipts|finishRetainedOutput)\(/);
   assert.doesNotMatch(
     projection,
     /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution|product_task_(?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime|persistence|checkpoint_record|checkpoint_store))/,

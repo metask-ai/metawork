@@ -5831,30 +5831,13 @@ pub const Runtime = struct {
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
     }
 
-    /// Workers hold immutable initial/request snapshots. A response may contain
-    /// a later token, so acquire its publication and scrub against the complete
-    /// Host set before Task observes or persists any terminal text.
     fn scrubPublishedTerminalData(self: *Runtime) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
-                if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
-                const changed = self.redactWithKnownCredentialsNoFail(run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
-                run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
-                if (run.terminal_payload.model_error) |observation| {
-                    const message = &observation.detail.message;
-                    observation.host_redacted = self.redactWithKnownCredentialsNoFail(message.bytes[0..message.len]) or observation.host_redacted;
-                    inline for (.{ "code", "type", "request_id" }) |field| {
-                        if (@field(observation.detail, field)) |*text|
-                            observation.host_redacted = self.redactWithKnownCredentialsNoFail(text.bytes[0..text.len]) or observation.host_redacted;
-                    }
-                }
-            };
-            for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
-                if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
-                const changed = self.redactWithKnownCredentialsNoFail(compact.terminal_diagnostic[0..compact.terminal_payload.diagnostic_len]);
-                compact.terminal_payload.diagnostic_redacted = changed or compact.terminal_payload.diagnostic_redacted;
-            };
-        };
+        self.task_runtime.scrubPublishedTerminalData(self, redactTerminalText);
+    }
+
+    fn redactTerminalText(context: *const anyopaque, value: []u8) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.redactWithKnownCredentialsNoFail(value);
     }
 
     fn mcpInstallationValueSensitive(self: *const Runtime, value: std.json.Value) bool {
@@ -6487,31 +6470,12 @@ pub const Runtime = struct {
     }
 
     fn finalizeTerminalRunsAfterDrain(self: *Runtime, events: task_runtime.EventDrainStatus) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (events.pending(task.runtime.routeId()) != 0) continue;
-            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
-                if (!run.terminal_event_drain_marked) continue;
-                self.task_runtime.finishRetainedOutput(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| {
-                    switch (err) {
-                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
-                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
-                    }
-                };
-                const execution = run.execution orelse continue;
-                if (execution.terminal_receipts.isEmpty()) continue;
-                const changed = self.task_runtime.adoptTerminalReceipts(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| failed: {
-                    switch (err) {
-                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
-                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
-                    }
-                    // No borrowed receipt or Agent pointer outlives this fact.
-                    // Physical allocation failures retain the real Host failure.
-                    execution.terminal_receipts = .{};
-                    break :failed true;
-                };
-                if (changed) self.encoded_views.invalidateEvent(task.durable.id, run.id);
-            };
-        };
+        self.task_runtime.settleTerminalOutputAfterEventDrain(events, .{
+            .context = self,
+            .event = self.taskEventEffects(),
+            .publish_failure_fn = publishTerminalOutputFailure,
+            .invalidate_event_fn = invalidateTerminalOutputEvent,
+        });
         const finished_at_ms = self.run_clock.now();
         const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
@@ -6523,6 +6487,17 @@ pub const Runtime = struct {
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
+    }
+
+    fn publishTerminalOutputFailure(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    fn invalidateTerminalOutputEvent(context: *anyopaque, task_id: u64, run_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.encoded_views.invalidateEvent(task_id, run_id);
     }
 
     // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.

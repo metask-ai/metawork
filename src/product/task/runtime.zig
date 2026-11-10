@@ -4741,7 +4741,7 @@ pub const Runtime = struct {
 
     /// Main loop only, after terminal acquisition and this Session's queue
     /// barrier. A worker never writes these facts into the durable aggregate.
-    pub fn adoptTerminalReceipts(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!bool {
+    fn adoptTerminalReceipts(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!bool {
         const task = self.findByRouteId(route_id) orelse return false;
         const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
         if (!run.terminal_event_drain_marked or task_state.terminalPayload(run) == null) return false;
@@ -4764,7 +4764,7 @@ pub const Runtime = struct {
         return changed;
     }
 
-    pub fn finishRetainedOutput(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!void {
+    fn finishRetainedOutput(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!void {
         const task = self.findByRouteId(route_id) orelse return;
         const run = task_state.findRun(task.durable.runs, run_id) orelse return;
         var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
@@ -4904,6 +4904,35 @@ pub const Runtime = struct {
         return rejection;
     }
 
+    /// Workers may publish text containing a credential acquired after admission.
+    /// Scrub after acquiring publication, before observing or saving terminal facts.
+    pub fn scrubPublishedTerminalData(
+        self: *Runtime,
+        context: *const anyopaque,
+        redact: *const fn (*const anyopaque, []u8) bool,
+    ) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
+                const changed = redact(context, run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
+                run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
+                if (run.terminal_payload.model_error) |observation| {
+                    const message = &observation.detail.message;
+                    observation.host_redacted = redact(context, message.bytes[0..message.len]) or observation.host_redacted;
+                    inline for (.{ "code", "type", "request_id" }) |field| {
+                        if (@field(observation.detail, field)) |*text|
+                            observation.host_redacted = redact(context, text.bytes[0..text.len]) or observation.host_redacted;
+                    }
+                }
+            };
+            for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
+                if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
+                const changed = redact(context, compact.terminal_diagnostic[0..compact.terminal_payload.diagnostic_len]);
+                compact.terminal_payload.diagnostic_redacted = changed or compact.terminal_payload.diagnostic_redacted;
+            };
+        };
+    }
+
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {
@@ -4919,6 +4948,43 @@ pub const Runtime = struct {
             changed = task_state.markTerminalRunsBeforeEventDrain(task) or changed;
         }
         return changed;
+    }
+
+    pub const TerminalOutputEffects = struct {
+        context: *anyopaque,
+        event: EventEffects,
+        publish_failure_fn: *const fn (*anyopaque) void,
+        invalidate_event_fn: *const fn (*anyopaque, u64, u64) void,
+    };
+
+    pub fn settleTerminalOutputAfterEventDrain(self: *Runtime, events: EventDrainStatus, effects: TerminalOutputEffects) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            const route_id = task.runtime.routeId();
+            if (events.pending(route_id) != 0) continue;
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (!run.terminal_event_drain_marked) continue;
+                self.finishRetainedOutput(route_id, run.id, effects.event) catch |err| {
+                    self.recordTerminalOutputFailure(route_id, run.id, err, effects);
+                };
+                const execution = run.execution orelse continue;
+                if (execution.terminal_receipts.isEmpty()) continue;
+                const changed = self.adoptTerminalReceipts(route_id, run.id, effects.event) catch |err| failed: {
+                    self.recordTerminalOutputFailure(route_id, run.id, err, effects);
+                    // No borrowed receipt outlives this fact.
+                    execution.terminal_receipts = .{};
+                    break :failed true;
+                };
+                if (changed) effects.invalidate_event_fn(effects.context, task.durable.id, run.id);
+            };
+        };
+    }
+
+    fn recordTerminalOutputFailure(self: *Runtime, route_id: u64, run_id: u64, err: task_state.EventProjectionError, effects: TerminalOutputEffects) void {
+        const changed = switch (err) {
+            error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(route_id, run_id),
+            else => self.recordEventPipelineFailure(route_id, run_id),
+        };
+        if (changed) effects.publish_failure_fn(effects.context);
     }
 
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(
