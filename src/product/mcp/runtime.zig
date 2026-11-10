@@ -2933,7 +2933,7 @@ fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, re
     return runtime;
 }
 
-fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8) !void {
+fn testMcpProjection(runtime: *const Runtime, bytes: []u8) ![]const u8 {
     const Text = struct {
         fn contains(_: *const anyopaque, _: []const u8) bool {
             return false;
@@ -2942,11 +2942,16 @@ fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8
             std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
         }
     };
-    var bytes: [32 * 1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&bytes);
+    var writer = std.Io.Writer.fixed(bytes);
     try writeProjection(runtime, &writer, .{ .context = runtime, .contains_sensitive_fn = Text.contains, .write_json_fn = Text.write });
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "new-access-token") == null);
-    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    return writer.buffered();
+}
+
+fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8) !void {
+    var bytes: [32 * 1024]u8 = undefined;
+    const projection = try testMcpProjection(runtime, &bytes);
+    try std.testing.expect(std.mem.indexOf(u8, projection, "new-access-token") == null);
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, projection, .{});
     defer actual.deinit();
     const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("testdata/oauth-recovery-view.json"), .{});
     defer expected.deinit();
@@ -3966,6 +3971,13 @@ test "Product MCP composition capacity failure is processed and does not starve 
     const c = configuration.RuntimeApplyTarget.init("c", servers[2], .add);
     try std.testing.expect(ledger.handled(c));
     try std.testing.expectEqual(.capacity, ledger.results.items[0].outcome);
+    var projection_bytes: [8192]u8 = undefined;
+    const projection = try std.json.parseFromSlice(std.json.Value, allocator, try testMcpProjection(&runtime, &projection_bytes), .{});
+    defer projection.deinit();
+    const blocked_server = projection.value.object.get("servers").?.array.items[0].object;
+    try std.testing.expectEqualStrings("c", blocked_server.get("id").?.string);
+    try std.testing.expectEqualStrings("capacity", blocked_server.get("applyStatus").?.string);
+    try std.testing.expectEqual(@as(i64, 1), projection.value.object.get("applyFailureCount").?.integer);
     try std.testing.expect(runtime.takeChanged());
     try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
     try std.testing.expect((try runtime.prepareConfigurationStep(2, .automatic)) == null);

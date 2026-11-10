@@ -1891,6 +1891,28 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
   await waitFor(() => assert.deepEqual(calls, ["refresh", "apply"]));
   assert.ok(screen.getByText("Connection changes were not applied"));
   assert.equal(screen.queryByText("Cannot connect"), null);
+
+  view.rerender(
+    pageElement(
+      {
+        ...management,
+        configurationApply: "failed",
+        runtimeAlignment: "restart_required",
+        applyFailureCount: 1,
+        servers: [{ ...pending, applyStatus: "capacity" }],
+      },
+      "",
+      handlers,
+    ),
+  );
+  drawer = screen.getByRole("dialog");
+  assert.ok(
+    within(drawer).getByText("Close unused tasks, then retry the connection."),
+  );
+  fireEvent.click(
+    within(drawer).getByRole("button", { name: "Retry connection" }),
+  );
+  await waitFor(() => assert.deepEqual(calls, ["refresh", "apply", "apply"]));
 });
 
 test("MCP password input submits once and clears drafts on cancel, byte limit, revision and close", async () => {

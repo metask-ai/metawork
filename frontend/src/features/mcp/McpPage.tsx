@@ -123,7 +123,9 @@ function serverNeedsAttention(server: McpServer, applying: boolean) {
   if (applying || recoveringAuthorization(server)) return false;
   return (
     !["not_required", "ready"].includes(server.authorizationStatus) ||
-    ["pending", "rejected", "failed", "unknown"].includes(server.applyStatus) ||
+    ["pending", "rejected", "failed", "capacity", "unknown"].includes(
+      server.applyStatus,
+    ) ||
     attentionStatuses.has(server.runtimeStatus) ||
     server.newTaskAccess === "unavailable"
   );
@@ -140,7 +142,11 @@ function serverStateKey(server: McpServer, applying: boolean) {
   if (server.applyStatus === "waiting_auth")
     return "mcp.apply_status.waiting_auth" as const;
   if (applying) return "mcp.status.connecting" as const;
-  if (["pending", "rejected", "failed", "unknown"].includes(server.applyStatus))
+  if (
+    ["pending", "rejected", "failed", "capacity", "unknown"].includes(
+      server.applyStatus,
+    )
+  )
     return `mcp.apply_status.${server.applyStatus}` as const;
   if (server.runtimeStatus !== "ready")
     return `mcp.status.${server.runtimeStatus}` as const;
@@ -1510,6 +1516,20 @@ export function McpPage({
         ) : undefined,
       );
     }
+
+    if (server.applyStatus === "capacity")
+      return nextActionCard(
+        t("mcp.apply_status.capacity"),
+        t("mcp.next.capacity.body"),
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={applyPending || mutationLocked}
+          onClick={() => void applyConfiguration(server.id)}
+        >
+          {t("mcp.next.retry_connection.action")}
+        </Button>,
+      );
 
     if (server.runtimeStatus !== "ready") {
       const needsApply =

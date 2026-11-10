@@ -10,7 +10,7 @@ const policy = @import("product_mcp_policy");
 pub const Error = error{SnapshotTooLarge};
 
 const McpAvailability = enum { unavailable, ready, degraded };
-const McpApplyStatus = enum { current, pending, waiting_auth, applying, rejected, failed, unknown };
+const McpApplyStatus = enum { current, pending, waiting_auth, applying, rejected, failed, capacity, unknown };
 const McpRuntimeStatus = enum {
     not_loaded,
     ready,
@@ -138,19 +138,11 @@ fn serverApplyStatus(mcp: *const mcp_state.McpProductState, server: mcp_configur
             .pending => .applying,
             .waiting_auth => .waiting_auth,
             .rejected => .rejected,
-            .failed, .capacity => .failed,
+            .failed => .failed,
+            .capacity => .capacity,
         };
     };
     return .pending;
-}
-
-fn serverCapacityBlocked(mcp: *const mcp_state.McpProductState, server: mcp_configuration.ServerWire) bool {
-    if (serverApplyStatus(mcp, server) != .failed) return false;
-    const management = if (mcp.management) |*value| value else return false;
-    for (management.convergence.results.items) |result| {
-        if (std.mem.eql(u8, result.target.id(), server.id)) return result.outcome == .capacity;
-    }
-    return false;
 }
 
 fn retainedMemberCount(mcp: *const mcp_state.McpProductState) usize {
@@ -596,6 +588,7 @@ pub fn writeProjection(
     for (servers, 0..) |server, index| {
         if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         const status = mcpDesiredServerRuntimeStatus(mcp, server);
+        const apply_status = serverApplyStatus(mcp, server);
         const problem = mcp_configuration.serverProblem(server, management.limits);
         const connection_safe = !mcpConnectionContainsSensitiveText(input.text, server) and
             (problem == null or problem.? == .invalid_connection_approval);
@@ -652,11 +645,11 @@ pub fn writeProjection(
         }) catch return error.SnapshotTooLarge;
         try input.text.writeJson(writer, if (mcp.runtime_uncertain)
             "Runtime configuration outcome is unknown."
-        else if (serverApplyStatus(mcp, server) == .waiting_auth)
+        else if (apply_status == .waiting_auth)
             "Authorization recovery is pending. The connection will retry automatically."
-        else if (serverCapacityBlocked(mcp, server))
+        else if (apply_status == .capacity)
             "MCP connection capacity is full."
-        else if ((status == .@"unreachable" or (status == .not_loaded and (serverApplyStatus(mcp, server) == .failed or serverApplyStatus(mcp, server) == .rejected))) and processDiagnostic(mcp, server) != null)
+        else if ((status == .@"unreachable" or (status == .not_loaded and (apply_status == .failed or apply_status == .rejected))) and processDiagnostic(mcp, server) != null)
             processDiagnostic(mcp, server).?
         else if (mcp.refresh_schedule_failed)
             "Automatic refresh could not be scheduled."
@@ -665,7 +658,7 @@ pub fn writeProjection(
         else if (mcp.admission == .ready and !mcp.admissionFresh())
             "Tool catalog expired"
         else switch (status) {
-            .not_loaded => if (serverApplyStatus(mcp, server) == .failed or serverApplyStatus(mcp, server) == .rejected)
+            .not_loaded => if (apply_status == .failed or apply_status == .rejected)
                 "Configuration changes were not applied."
             else if (mcp.activation_failed)
                 "Tool catalog is unavailable."
@@ -721,7 +714,7 @@ pub fn writeProjection(
                 try writeMcpTool(writer, input.text, mcp, server, tool.name, true);
             }
         };
-        writer.print("],\"taskReferenceCount\":{d},\"applyStatus\":\"{s}\"}}", .{ taskReferenceCount(mcp, server.id), @tagName(serverApplyStatus(mcp, server)) }) catch return error.SnapshotTooLarge;
+        writer.print("],\"taskReferenceCount\":{d},\"applyStatus\":\"{s}\"}}", .{ taskReferenceCount(mcp, server.id), @tagName(apply_status) }) catch return error.SnapshotTooLarge;
     }
     writer.print("],\"retainedMemberCount\":{d},\"applyFailureCount\":{d},\"runtimeUncertain\":{},\"runtimeTimeoutLimitMs\":{d}}}", .{ if (trusted) retainedMemberCount(mcp) else 0, if (trusted) applyFailureCount(mcp) else 0, trusted and mcp.runtime_uncertain, mcp_configuration.max_management_timeout_ms }) catch return error.SnapshotTooLarge;
 }

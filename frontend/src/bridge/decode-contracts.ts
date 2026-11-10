@@ -5125,7 +5125,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     fail(path, "retained members must include referenced disabled servers");
   if (
     servers.filter((server) =>
-      ["rejected", "failed"].includes(server.applyStatus),
+      ["rejected", "failed", "capacity"].includes(server.applyStatus),
     ).length > applyFailureCount
   )
     fail(path, "apply failure count must include published failures");

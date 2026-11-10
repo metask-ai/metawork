@@ -1664,6 +1664,7 @@ export const mcpApplyStatusValues = [
   "applying",
   "rejected",
   "failed",
+  "capacity",
   "unknown",
 ] as const;
 export const mcpConfigurationApplyValues = [

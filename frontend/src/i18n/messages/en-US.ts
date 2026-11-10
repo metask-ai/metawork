@@ -635,6 +635,8 @@ export const enUS = {
   "mcp.apply_status.pending": "Waiting to connect",
   "mcp.apply_status.rejected": "Change rejected",
   "mcp.apply_status.failed": "Change not applied",
+  "mcp.apply_status.capacity": "MCP connection capacity is full",
+  "mcp.next.capacity.body": "Close unused tasks, then retry the connection.",
   "mcp.apply_status.unknown": "Unconfirmed",
   "mcp.apply_status.current": "Processed",
   "mcp.apply_status.applying": "Connecting",

@@ -1939,6 +1939,10 @@ test("MCP management is capability-gated and identity checked", () => {
   assert.throws(() => decodeWorkbenchSnapshot(failed), /failure count/);
   failed.mcp.applyFailureCount = 1;
   assert.deepEqual(decodeWorkbenchSnapshot(failed), failed);
+  failed.mcp.servers[0].applyStatus = "capacity";
+  assert.deepEqual(decodeWorkbenchSnapshot(failed), failed);
+  failed.mcp.applyFailureCount = 0;
+  assert.throws(() => decodeWorkbenchSnapshot(failed), /failure count/);
   const recoveryProjections = JSON.parse(
     readFileSync(
       new URL(
