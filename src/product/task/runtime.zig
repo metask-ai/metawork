@@ -1253,6 +1253,7 @@ pub const Runtime = struct {
     search_revision: u64 = 1,
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
+    advancing_inputs: bool = false,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
     /// Deterministic caller-path coverage without exhausting OS thread limits.
@@ -2502,10 +2503,23 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn pendingInput(self: *Runtime, task_id: u64, index: usize) ?*InputSubmission {
+    fn pendingInput(self: *Runtime, task_id: u64, index: usize) ?*InputSubmission {
         const task = self.find(task_id) orelse return null;
         if (index >= task.input_submissions.items.len) return null;
         return &task.input_submissions.items[index];
+    }
+
+    pub const WaitingInput = struct {
+        input: RunInput,
+        skill_selection: ?task_state.SkillSelection,
+    };
+
+    /// Borrows only the payload needed by synchronous Run preparation.
+    pub fn borrowWaitingInput(self: *Runtime, task_id: u64, index: usize) ?WaitingInput {
+        const record = self.pendingInput(task_id, index) orelse return null;
+        if (record.state != .waiting) return null;
+        const payload = record.payload orelse return null;
+        return .{ .input = payload.input, .skill_selection = payload.skill_selection };
     }
 
     pub fn beginInputPreparation(self: *Runtime, task_id: u64, index: usize) bool {
@@ -2522,11 +2536,68 @@ pub const Runtime = struct {
         context: *anyopaque,
         restore_fn: *const fn (*anyopaque, u64, u64) ?RestoreFailure,
         run_fn: *const fn (*anyopaque, u64, u64, usize) RunAdmission,
-        history_blocked: bool,
+        history_blocked_fn: *const fn (*anyopaque) bool,
         release: ReleaseEffects,
     };
 
-    pub fn advanceWaitingInput(
+    pub const InputQueueEffects = struct {
+        waiting: WaitingInputEffects,
+        projection: ProjectionEffects,
+        operation: OperationEffects,
+        check_workspace_fn: *const fn (*anyopaque, u64, u64) ?SendInputReason,
+        continue_fn: *const fn (*anyopaque, u64) bool,
+        rejection_reason_fn: *const fn (anyerror) SendInputReason,
+        changed_fn: *const fn (*anyopaque) void,
+    };
+
+    pub fn advanceInputQueue(self: *Runtime, shutting_down: bool, effects: InputQueueEffects) void {
+        if (self.advancing_inputs) return;
+        self.advancing_inputs = true;
+        defer self.advancing_inputs = false;
+        const context = effects.waiting.context;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const id = task.durable.id;
+            if (shutting_down) {
+                _ = self.cancelWaitingInputs(id, .shutting_down);
+                _ = self.cancelInputContinuation(id, null, .shutting_down);
+                continue;
+            }
+            for (0..effects.operation.limits.max_pending_inputs_per_task + 1) |_| {
+                switch (self.inputAction(id)) {
+                    .none, .wait => break,
+                    .fail => |action| {
+                        self.failWaitingInput(id, action.index, action.reason, null);
+                        effects.changed_fn(context);
+                    },
+                    .continuation => if (!effects.continue_fn(context, id)) break,
+                    .submit => |action| {
+                        if (effects.check_workspace_fn(context, task.durable.workspace_id, task.durable.workspace_epoch)) |reason| {
+                            self.failWaitingInput(id, action.index, reason, null);
+                            effects.changed_fn(context);
+                            continue;
+                        }
+                        const receipt = self.submitWaitingInput(id, action.index, action.run_id, effects.operation) catch |err| {
+                            switch (err) {
+                                error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
+                                else => self.failWaitingInput(id, action.index, effects.rejection_reason_fn(err), null),
+                            }
+                            effects.changed_fn(context);
+                            continue;
+                        };
+                        effects.changed_fn(context);
+                        if (receipt.outcome == .rejected) break;
+                    },
+                    .start => |index| {
+                        if (!self.advanceWaitingInput(id, index, effects.projection, effects.waiting)) break;
+                        effects.changed_fn(context);
+                    },
+                }
+            }
+        }
+    }
+
+    fn advanceWaitingInput(
         self: *Runtime,
         task_id: u64,
         index: usize,
@@ -2534,7 +2605,7 @@ pub const Runtime = struct {
         effects: WaitingInputEffects,
     ) bool {
         const task = self.find(task_id) orelse return false;
-        if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked) return false;
+        if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked_fn(effects.context)) return false;
         const authority = projection.authority(projectionAuthorityQuery(task));
         const continuation = self.recoveryProjectionWithAuthority(task, authority).continuation;
         if (authority.shutting_down or task_policy.taskLifecycle(task) != .open or
@@ -2694,7 +2765,7 @@ pub const Runtime = struct {
         return self.submitInputImpl(task_id, binding_epoch, run_id, text, effects, null);
     }
 
-    pub fn submitWaitingInput(self: *Runtime, task_id: u64, index: usize, run_id: u64, effects: OperationEffects) RunError!SendInputResult {
+    fn submitWaitingInput(self: *Runtime, task_id: u64, index: usize, run_id: u64, effects: OperationEffects) RunError!SendInputResult {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const record = self.pendingInput(task_id, index) orelse return error.InvalidInput;
         const input = (record.payload orelse return error.InvalidInput).input;
@@ -2837,7 +2908,11 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
+    pub fn hasInputContinuation(self: *Runtime, task_id: u64) bool {
+        return self.inputContinuation(task_id) != null;
+    }
+
+    fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
         const task = self.find(task_id) orelse return null;
         const slot = inputContinuationSlot(task) orelse return null;
         return &task.durable.runs[slot].?;

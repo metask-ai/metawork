@@ -10690,7 +10690,7 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
         // Retiring the source worker can precede event/checkpoint finalization.
         // A continuation or accepted waiting message is still work while idle.
         if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none and
-            scenario.control.task_runtime.inputContinuation(scenario.task_id) == null and
+            !scenario.control.task_runtime.hasInputContinuation(scenario.task_id) and
             scenario.control.task_runtime.inputAction(scenario.task_id) == .none) return;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }

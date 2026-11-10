@@ -1360,7 +1360,6 @@ pub const Runtime = struct {
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
-    advancing_task_inputs: bool = false,
     executor_shutdown: bool = false,
     attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
@@ -4184,9 +4183,18 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
     ) Error!u64 {
+        try self.checkTaskConversationRestore(task_id);
+        self.syncLifecycle();
+        return self.admitUserTaskConversationRestore(task_id, expected_binding_epoch);
+    }
+
+    fn checkTaskConversationRestore(self: *Runtime, task_id: u64) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
-        self.syncLifecycle();
+    }
+
+    fn admitUserTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64) Error!u64 {
+        try self.checkTaskConversationRestore(task_id);
         return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null) catch |err| switch (err) {
             error.McpRestoreBusy => error.RecoveryUnavailable,
             else => err,
@@ -4746,7 +4754,7 @@ pub const Runtime = struct {
 
     fn admitTaskRunInternal(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: AdmissionInput, source: ?u64) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.inputContinuation(task_id) != null) return error.TaskBusy;
+        if (self.task_runtime.hasInputContinuation(task_id)) return error.TaskBusy;
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
@@ -4792,21 +4800,17 @@ pub const Runtime = struct {
         var staged: StagedTaskInput = .{};
         var acceptance_context: AttachmentRunAcceptanceContext = undefined;
         defer if (staged.borrow) |*borrow| borrow.rollback();
-        const original_input = switch (input) {
+        const prepared_input: task_runtime.Runtime.WaitingInput = switch (input) {
             .command => |command| blk: {
                 const value = try self.borrowTaskInput(task_id, command, &staged);
                 if (value == .multimodal) for (staged.items[0..value.multimodal.attachments.len]) |*item| {
                     item.resource_id = 0;
                 };
-                break :blk value;
+                break :blk .{ .input = value, .skill_selection = command_selection };
             },
-            .queued => |index| (self.task_runtime.pendingInput(task_id, index) orelse return error.InvalidInput).payload.?.input,
+            .queued => |index| self.task_runtime.borrowWaitingInput(task_id, index) orelse return error.InvalidInput,
         };
-        const selection = switch (input) {
-            .queued => |index| self.task_runtime.pendingInput(task_id, index).?.payload.?.skill_selection,
-            .command => command_selection,
-        };
-        const task_input = try task_runtime.compileSkillInput(original_input, selection, try self.taskCatalog(task_id));
+        const task_input = try task_runtime.compileSkillInput(prepared_input.input, prepared_input.skill_selection, try self.taskCatalog(task_id));
         var order_preparation = if (workspace.kind == .manual)
             try self.workspace.prepareOrder(workspace.id)
         else
@@ -5549,57 +5553,43 @@ pub const Runtime = struct {
     }
 
     fn advanceTaskInputs(self: *Runtime) void {
-        if (self.advancing_task_inputs) return;
-        self.advancing_task_inputs = true;
-        defer self.advancing_task_inputs = false;
         defer self.reapTaskInputResources();
-        for (self.task_runtime.tasks) |*entry| {
-            const task = entry.* orelse continue;
-            if (self.shutting_down) {
-                _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
-                _ = self.task_runtime.cancelInputContinuation(task.durable.id, null, .shutting_down);
-                continue;
-            }
-            for (0..self.limits.max_pending_inputs_per_task + 1) |_| {
-                switch (self.task_runtime.inputAction(task.durable.id)) {
-                    .none, .wait => break,
-                    .fail => |action| {
-                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason, null);
-                        self.bumpRevision();
-                    },
-                    .continuation => {
-                        if (!self.advanceInputContinuation(task.durable.id)) break;
-                    },
-                    .submit => |action| {
-                        _ = self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch) catch |err| {
-                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null);
-                            self.bumpRevision();
-                            continue;
-                        };
-                        const receipt = self.task_runtime.submitWaitingInput(task.durable.id, action.index, action.run_id, self.taskRuntimeOperationEffects()) catch |err| {
-                            switch (err) {
-                                error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
-                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null),
-                            }
-                            self.bumpRevision();
-                            continue;
-                        };
-                        self.bumpRevision();
-                        if (receipt.outcome == .rejected) break;
-                    },
-                    .start => |index| {
-                        if (!self.task_runtime.advanceWaitingInput(task.durable.id, index, self.taskRuntimeProjectionEffects(), .{
-                            .context = self,
-                            .restore_fn = restoreWaitingInput,
-                            .run_fn = admitWaitingInput,
-                            .history_blocked = self.approvalHistoryBlocked(),
-                            .release = self.taskRuntimeReleaseEffects(),
-                        })) break;
-                        self.bumpRevision();
-                    },
-                }
-            }
-        }
+        self.task_runtime.advanceInputQueue(self.shutting_down, .{
+            .waiting = .{
+                .context = self,
+                .restore_fn = restoreWaitingInput,
+                .run_fn = admitWaitingInput,
+                .history_blocked_fn = waitingInputHistoryBlocked,
+                .release = self.taskRuntimeReleaseEffects(),
+            },
+            .projection = self.taskRuntimeProjectionEffects(),
+            .operation = self.taskRuntimeOperationEffects(),
+            .check_workspace_fn = checkWaitingInputWorkspace,
+            .continue_fn = advanceWaitingInputContinuation,
+            .rejection_reason_fn = sendInputRejection,
+            .changed_fn = publishWaitingInputChange,
+        });
+    }
+
+    fn waitingInputHistoryBlocked(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.approvalHistoryBlocked();
+    }
+
+    fn checkWaitingInputWorkspace(context: *anyopaque, workspace_id: u64, epoch: u64) ?task_runtime.SendInputReason {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        _ = self.workspace.taskRunAuthority(workspace_id, epoch) catch |err| return sendInputRejection(err);
+        return null;
+    }
+
+    fn advanceWaitingInputContinuation(context: *anyopaque, task_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.advanceInputContinuation(task_id);
+    }
+
+    fn publishWaitingInputChange(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.bumpRevision();
     }
 
     fn reapTaskInputResources(self: *Runtime) void {
@@ -5615,7 +5605,7 @@ pub const Runtime = struct {
 
     fn restoreWaitingInput(context: *anyopaque, task_id: u64, binding_epoch: u64) ?task_runtime.Runtime.WaitingInputEffects.RestoreFailure {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        _ = self.restoreTaskConversation(task_id, binding_epoch) catch |err| return .{
+        _ = self.admitUserTaskConversationRestore(task_id, binding_epoch) catch |err| return .{
             .reason = sendInputRejection(err),
             .blocking_task_id = if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null,
         };
@@ -11515,6 +11505,32 @@ fn installTestExecution(control: *Runtime) !void {
 
 fn testRuntime() !Runtime {
     return testRuntimeWith(.{});
+}
+
+test "queued input recovery does not run global lifecycle reconciliation" {
+    const Clock = struct {
+        reads: usize = 0,
+
+        fn now(context: ?*anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.reads += 1;
+            return 1_000;
+        }
+    };
+    var clock: Clock = .{};
+    var control = try testRuntimeWith(.{
+        .schedule_timer = .{ .enabled = true, .context = &clock, .now_unix_seconds = Clock.now },
+    });
+    defer control.deinit();
+    const missing_task = std.math.maxInt(u64);
+    const reads_before = clock.reads;
+    const failure = Runtime.restoreWaitingInput(&control, missing_task, 1).?;
+    try std.testing.expectEqual(.task_unavailable, failure.reason);
+    try std.testing.expectEqual(reads_before, clock.reads);
+
+    // The explicit command still synchronizes other lifecycle facts.
+    try std.testing.expectError(error.UnknownTask, control.restoreTaskConversation(missing_task, 1));
+    try std.testing.expect(clock.reads > reads_before);
 }
 
 test "non-Skill executor completion wakes queued source recovery without a Skill completion" {
@@ -23128,7 +23144,7 @@ test "Product view queued recovery failure preserves the shared Session blocker 
     defer control.deinit();
     const index = control.task_runtime.find(3).?.input_submissions.items.len;
     _ = try control.task_runtime.receiveInput(3, "pressure-send", .{ .text = "Keep my draft" }, control.taskRuntimeOperationEffects());
-    const record = control.task_runtime.pendingInput(3, index).?;
+    const record = &control.task_runtime.find(3).?.input_submissions.items[index];
     record.submission.received_at_unix_ms = null;
     record.submission.presentation_order = null;
     record.submission.anchor_run_id = null;

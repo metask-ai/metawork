@@ -1662,6 +1662,14 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.doesNotMatch(projection, /\.task_runtime\.(?:adoptTerminalReceipts|finishRetainedOutput)\(/);
   assert.doesNotMatch(
     projection,
+    /\.task_runtime\.(?:advanceWaitingInput|submitWaitingInput|inputContinuation|pendingInput)\(/,
+  );
+  assert.match(
+    projection,
+    /fn restoreWaitingInput\([^\n]*\{\s*const self:[^\n]*\n\s*_ = self\.admitUserTaskConversationRestore\(/,
+  );
+  assert.doesNotMatch(
+    projection,
     /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution|product_task_(?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime|persistence|checkpoint_record|checkpoint_store))/,
   );
   assert.doesNotMatch(
