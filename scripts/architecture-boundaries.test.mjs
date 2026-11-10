@@ -1672,6 +1672,9 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.ok(modelAuthority);
   assert.doesNotMatch(modelAuthority[1], /\bmodelsView\(/);
   assert.doesNotMatch(projection, /\.task_runtime\.find\([^\n]*\.source_generation\s*=/);
+  const restoreCoordination = projection.match(/fn prepareTaskRestoreFilters\([\s\S]*?\n    fn beginTaskModelRebind\(/);
+  assert.ok(restoreCoordination);
+  assert.doesNotMatch(restoreCoordination[0], /\b(?:restore_job|pinnedCatalogConst|restore_catalog)\b/);
   assert.doesNotMatch(
     projection,
     /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution|product_task_(?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime|persistence|checkpoint_record|checkpoint_store))/,

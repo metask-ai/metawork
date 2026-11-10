@@ -6160,6 +6160,107 @@ pub const Runtime = struct {
     }
 
     /// An owned copy survives release of the live Session access.
+    pub const RestoreFilters = struct {
+        skill: ?*agent.SkillRestoreInputs,
+        mcp: ?*agent.McpSelection,
+        mcp_catalog_generation: ?u64,
+    };
+
+    pub const RestoreCapabilityEffects = struct {
+        context: *anyopaque,
+        prepare_fn: *const fn (*anyopaque, u64, *const agent.SessionRestoreInputs) anyerror!RestoreFilters,
+        metask_scope_fn: *const fn (*anyopaque, []const u8) ?u64,
+    };
+
+    pub fn restoreSkillFacts(self: *const Runtime, task_id: u64) ?struct {
+        workspace_id: u64,
+        workspace_epoch: u64,
+        catalog: ?product_skill.catalog.CatalogProjection,
+    } {
+        const task = self.findConst(task_id) orelse return null;
+        const pinned = task.runtime.pinnedCatalogConst() orelse
+            if (task.runtime.restore_catalog) |*snapshot| snapshot else null;
+        return .{
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .catalog = if (pinned) |snapshot| snapshot.view() else null,
+        };
+    }
+
+    pub fn modelRestoreCapabilitiesExact(self: *Runtime, task_id: u64, effects: RestoreCapabilityEffects) bool {
+        const task = self.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        if (task.durable.approval_revision != rebind.approval_revision) return false;
+        const execution = if (job.outcome == .candidate) &job.outcome.candidate.execution else &job.attempt.execution;
+        const scope = effects.metask_scope_fn(effects.context, execution.provider_id) orelse return false;
+        const expected_scope = if (rebind.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
+        if (scope != expected_scope) return false;
+        const capabilities = if (rebind.capabilities) |*value| value else return true;
+        const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
+        defer if (current.skill) |value| value.deinit() catch {};
+        defer if (current.mcp) |value| value.deinit();
+        return sameRestoreFilters(capabilities, current);
+    }
+
+    fn sameRestoreFilters(capabilities: *const RestoreCapabilities, current: RestoreFilters) bool {
+        if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
+        const before_ids = if (capabilities.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        const after_ids = if (current.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        if (before_ids.len != after_ids.len) return false;
+        for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
+        const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
+        const after_tools = if (current.mcp) |value| value.selectedTools() else &.{};
+        if (before_tools.len != after_tools.len) return false;
+        for (before_tools, after_tools) |before, after|
+            if (!std.mem.eql(u8, before.server_id, after.server_id) or !std.mem.eql(u8, before.name, after.name)) return false;
+        return true;
+    }
+
+    pub fn refreshModelRestoreCapabilities(self: *Runtime, task_id: u64, effects: RestoreCapabilityEffects) bool {
+        const task = self.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        const capabilities = if (rebind.capabilities) |*value| value else return true;
+        const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
+        if (capabilities.skill) |value| value.deinit() catch {
+            capabilities.skill = null;
+            if (current.skill) |replacement| replacement.deinit() catch {};
+            if (current.mcp) |replacement| replacement.deinit();
+            return false;
+        };
+        if (capabilities.mcp) |value| value.deinit();
+        capabilities.skill = current.skill;
+        capabilities.mcp = current.mcp;
+        capabilities.mcp_catalog_generation = current.mcp_catalog_generation;
+        return true;
+    }
+
+    pub fn restoreAdmissionDetached(self: *const Runtime, task_id: u64) error{ UnknownTask, RecoveryUnavailable }!bool {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.durable.model_intent == null or task.runtime.active_operation != .none)
+            return error.RecoveryUnavailable;
+        return task.runtime.attachment == .detached;
+    }
+
+    pub fn restoreCandidateNeedsRebind(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.runtime.attachment == .detached or
+            (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(candidate));
+    }
+
+    pub fn recoveryReleaseRoute(self: *const Runtime, task_id: u64) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        const attached = task.runtime.attachedConst() orelse return null;
+        return if (attached.health == .available) attached.binding.routeId() else null;
+    }
+
+    pub fn recoveryAuthorizationScope(self: *const Runtime, task_id: u64, original: bool) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        const job = task.runtime.restore_job orelse return 0;
+        return if (original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
+    }
+
     pub fn captureModelRebindInputs(self: *Runtime, task_id: u64) !?agent.SessionRestoreInputs {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.hasAttachedSession()) {
