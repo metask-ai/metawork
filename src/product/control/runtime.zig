@@ -4259,7 +4259,27 @@ pub const Runtime = struct {
     }
 
     fn approvalHistoryBlocked(self: *const Runtime) bool {
-        return self.ordinary_history_unknown != null or self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
+        return self.ordinary_history_unknown != null or self.backgroundHistoryBlocked();
+    }
+
+    fn backgroundHistoryBlocked(self: *const Runtime) bool {
+        return self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
+    }
+
+    fn resolveOrdinaryHistoryCommit(self: *Runtime) bool {
+        const token = self.ordinary_history_unknown orelse return true;
+        self.syncHistoryCredentials(null, null);
+        if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return false;
+        self.ordinary_history_unknown = null;
+        return true;
+    }
+
+    fn requiredHistoryBlocked(self: *Runtime) bool {
+        if (self.backgroundHistoryBlocked()) return true;
+        if (self.ordinary_history_unknown == null) return false;
+        if (!self.resolveOrdinaryHistoryCommit()) return true;
+        if (!self.shutting_down) _ = self.change_notifier.notify();
+        return false;
     }
 
     fn captureTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error!task_persistence.OwnedCandidate {
@@ -5186,16 +5206,11 @@ pub const Runtime = struct {
         if (expected_revision != self.revision) return .stale_revision;
         // An approval candidate owns the indeterminate history transaction.
         // Resolve it on the bounded executor; never quarantine or rewrite it.
-        var resolved_pending = false;
+        const resolved_pending = self.ordinary_history_unknown != null;
+        if (!self.resolveOrdinaryHistoryCommit()) return .outcome_unknown;
         defer if (resolved_pending and !self.approvalHistoryBlocked()) {
             _ = self.change_notifier.notify();
         };
-        if (self.ordinary_history_unknown) |token| {
-            self.syncHistoryCredentials(null, null);
-            if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return .outcome_unknown;
-            self.ordinary_history_unknown = null;
-            resolved_pending = true;
-        }
         if (self.approval_history_unknown != null) {
             self.queueApprovalProjection(true) catch return .unavailable;
             self.bumpRevision();
@@ -5516,8 +5531,8 @@ pub const Runtime = struct {
             self.checkpoint_store_health.load(.acquire) != .unavailable,
             self.taskRuntimeDeletionEffects(),
         ).changed) changed = true;
-        const schedule_was_waiting = !self.shutting_down and !self.approvalHistoryBlocked() and
-            self.schedule.releaseTaskHistoryWaits();
+        const schedule_was_waiting = !self.shutting_down and self.schedule.hasTaskHistoryWaits() and
+            !self.requiredHistoryBlocked() and self.schedule.releaseTaskHistoryWaits();
         if (!self.shutting_down and (timer_elapsed or schedule_was_waiting)) {
             self.schedule.onTimer(
                 self.scheduleExecutionBinding(),
@@ -7987,7 +8002,7 @@ pub const Runtime = struct {
 
     fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (self.approvalHistoryBlocked()) return error.TaskHistoryWriterBusy;
+        if (self.requiredHistoryBlocked()) return error.TaskHistoryWriterBusy;
         try self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
@@ -8857,17 +8872,12 @@ pub const Runtime = struct {
         checkpoint_override: ?CheckpointPersistenceOverride,
         purpose: HistoryWritePurpose,
     ) Error!void {
-        if (purpose == .required and self.approvalHistoryBlocked()) return error.TaskBusy;
-        var resolved_pending = false;
+        if (purpose == .required and self.requiredHistoryBlocked()) return error.TaskBusy;
+        const resolved_pending = self.ordinary_history_unknown != null;
+        if (!self.resolveOrdinaryHistoryCommit()) return error.TaskPersistenceOutcomeUnknown;
         defer if (resolved_pending and !self.shutting_down and !self.approvalHistoryBlocked()) {
             _ = self.change_notifier.notify();
         };
-        if (self.ordinary_history_unknown) |token| {
-            self.syncHistoryCredentials(null, null);
-            if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return error.TaskPersistenceOutcomeUnknown;
-            self.ordinary_history_unknown = null;
-            resolved_pending = true;
-        }
         // During an approval transaction, ordinary lifecycle facts join the
         // existing bounded history writer. Even a gap between its jobs must
         // not turn cancel/terminal reconciliation into synchronous disk I/O.
@@ -13811,6 +13821,48 @@ test "writer release advances pending deletion before deferred history projectio
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
 }
 
+test "pending Task deletion reads back an earlier ordinary history write" {
+    var source = try testRuntime();
+    defer source.deinit();
+    var scratch = try source.buildTaskStateWire();
+    defer scratch.deinit();
+    var idle = scratch.state.tasks[0];
+    idle.runs = &.{};
+    idle.next_run_generation = 0;
+    idle.active_operation = null;
+    var state = scratch.state;
+    var tasks = [_]task_persistence.TaskWire{idle};
+    state.tasks = &tasks;
+    var encoded: [128 * 1024]u8 = undefined;
+    const restored = try task_persistence.encode(&encoded, state, source.taskPersistenceLimits());
+
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestTaskPersistence = .{ .storage = storage, .result = .outcome_unknown };
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .task_persistence = persistence.capability(restored),
+    });
+    defer control.deinit();
+
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.commitTaskState());
+    const token = control.ordinary_history_unknown.?;
+    persistence.result = .committed;
+    try control.deleteTask(3);
+    try std.testing.expectEqual(.deleting, control.task_runtime.find(3).?.deletion);
+    try std.testing.expectEqual(token, control.ordinary_history_unknown.?);
+    try std.testing.expectEqual(@as(usize, 1), persistence.resolutions);
+    try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+    try std.testing.expect(!control.approval_history_dirty);
+
+    persistence.resolution_result = .committed;
+    control.syncLifecycle();
+    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expectEqual(@as(usize, 2), persistence.resolutions);
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+    try std.testing.expect(control.ordinary_history_unknown == null);
+}
+
 test "Task persistence failure keeps Workspace state and retries later" {
     test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
@@ -14013,6 +14065,40 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     try std.testing.expectEqual(commits + 2, persistence.commits);
 
     control.task_persistence = task_history.capability(null);
+    control.task_persistence_health = .ready;
+    const readback_id = try control.createScheduledTask(.{
+        .title = "Wait for history readback",
+        .model_selection = try control.scheduledSelection(binding),
+        .permission_profile = .approval_required,
+        .input = "Inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2500 } },
+    });
+    task_history.result = .outcome_unknown;
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.commitTaskState());
+    task_history.result = .committed;
+    const before_readback_claim = persistence.commits;
+    const before_readback = task_history.resolutions;
+
+    clock.now = 2500;
+    control.onScheduledTaskTimer();
+    const pending = control.schedule.store.find(readback_id).?;
+    try std.testing.expect(pending.waiting_for_task_history);
+    try std.testing.expectEqual(@as(?u64, 2500), pending.next_run_at_unix_seconds);
+    try std.testing.expectEqual(@as(usize, 0), pending.occurrence_count);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+    try std.testing.expectEqual(before_readback_claim, persistence.commits);
+    try std.testing.expectEqual(before_readback + 1, task_history.resolutions);
+
+    task_history.resolution_result = .failed;
+    control.syncLifecycle();
+    const admitted = control.schedule.store.find(readback_id).?;
+    try std.testing.expect(!admitted.waiting_for_task_history);
+    try std.testing.expectEqual(@as(usize, 1), admitted.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 2500), admitted.occurrences()[0].planned_at_unix_seconds);
+    try std.testing.expectEqual(before_readback_claim + 2, persistence.commits);
+    try std.testing.expectEqual(before_readback + 2, task_history.resolutions);
+    try std.testing.expect(control.ordinary_history_unknown == null);
+
     control.task_persistence_health = .ready;
     const waiting_id = try control.createScheduledTask(.{
         .title = "Wait for history",

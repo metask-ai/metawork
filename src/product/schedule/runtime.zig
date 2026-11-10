@@ -601,6 +601,13 @@ pub const Runtime = struct {
         _ = self.rearmNoFail(binding, redaction);
     }
 
+    pub fn hasTaskHistoryWaits(self: *const Runtime) bool {
+        for (self.store.items) |*entry| {
+            if (entry.*) |*item| if (item.waiting_for_task_history) return true;
+        }
+        return false;
+    }
+
     /// Only release waits established before a claim by the Task history writer.
     pub fn releaseTaskHistoryWaits(self: *Runtime) bool {
         var released = false;
