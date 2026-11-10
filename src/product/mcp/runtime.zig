@@ -918,6 +918,10 @@ pub const Runtime = struct {
         }
     }
 
+    pub fn configurationApplyInProgress(self: *const Runtime) bool {
+        return self.state.configuration_apply_state == .applying;
+    }
+
     pub fn beginConfigurationApply(
         self: *Runtime,
         expected_generation: u64,
@@ -1136,6 +1140,153 @@ pub const Runtime = struct {
         try self.state.process_observations.append(self.allocator, owned);
         self.markChanged();
         return true;
+    }
+
+    pub const InstallationAction = union(enum) {
+        none,
+        confirm,
+        fetch_credentials,
+        prepare_connection,
+        authorize_oauth,
+        advance: configuration.InstallationPhase,
+        fail: configuration.InstallationFailure,
+        finish,
+    };
+
+    /// The Application borrows only the data needed to carry out installation effects.
+    pub const InstallationObservation = struct {
+        generation: u64,
+        server_id: [configuration.created_identity_bytes]u8,
+        task_id: u64,
+        run_id: u64,
+        revision: u64,
+        phase: configuration.InstallationPhase,
+        active_elapsed_ms: u32,
+        stop_pending: bool,
+        source_origin: []const u8,
+        endpoint_origin: ?[]const u8,
+        request_refs: []const []const u8,
+        credentials: []const configuration.InstallationCredentialWire,
+        source_available: bool = false,
+        can_replace: bool,
+        connection_phase: configuration.InstallationPhase,
+        action: InstallationAction,
+    };
+
+    pub fn observeInstallation(self: *const Runtime, id: ?[]const u8) ?InstallationObservation {
+        const management = if (self.state.management) |*value| value else return null;
+        const registry = management.desiredRegistry() orelse return null;
+        for (registry.servers) |server| {
+            const operation = server.installation orelse continue;
+            if (id) |value| {
+                if (!std.mem.eql(u8, value, server.id)) continue;
+            } else if (!operation.phase.active() and !operation.stop_pending) continue;
+            const connection_phase: configuration.InstallationPhase =
+                if (std.mem.eql(u8, server.auth.kind, "oauth") and !configuration.serverRuntimeAuthorizationReady(server))
+                    .needs_oauth
+                else
+                    .connecting;
+            return .{
+                .generation = registry.generation,
+                .server_id = server.id[0..configuration.created_identity_bytes].*,
+                .task_id = operation.task_id,
+                .run_id = operation.run_id,
+                .revision = operation.revision,
+                .phase = operation.phase,
+                .active_elapsed_ms = operation.active_elapsed_ms,
+                .stop_pending = operation.stop_pending,
+                .source_origin = operation.source_origin,
+                .endpoint_origin = if (server.transport.sensitive_endpoint) |endpoint| endpoint.origin else null,
+                .request_refs = operation.request_refs,
+                .credentials = operation.credentials,
+                .can_replace = operation.phase.active() and operation.phase != .needs_authorization and operation.phase != .connecting,
+                .connection_phase = connection_phase,
+                .action = switch (operation.phase) {
+                    .needs_authorization => .confirm,
+                    .acquiring_credentials => .{ .fail = .credential_request_interrupted },
+                    .preparing, .needs_credentials => pendingInstallationAction(operation),
+                    .needs_oauth => if (connection_phase == .connecting) .{ .advance = .connecting } else .authorize_oauth,
+                    .connecting => if (self.installationConnectionFailed(server.id)) .{ .fail = .connection_failed } else .finish,
+                    else => .none,
+                },
+            };
+        }
+        return null;
+    }
+
+    fn pendingInstallationAction(operation: configuration.InstallationWire) InstallationAction {
+        var missing_manual = false;
+        for (operation.credentials) |slot| {
+            if (slot.credential_ref != null) continue;
+            if (!slot.manual) return .fetch_credentials;
+            missing_manual = true;
+        }
+        if (missing_manual) return if (operation.phase == .needs_credentials) .none else .{ .advance = .needs_credentials };
+        return if (operation.phase == .needs_credentials) .{ .advance = .preparing } else .prepare_connection;
+    }
+
+    pub const InstallationRetryCandidate = struct {
+        server_id: [configuration.created_identity_bytes]u8,
+        request_refs: []const []const u8,
+    };
+
+    pub fn nextInstallationRetryCandidate(self: *const Runtime, task_id: u64, index: *usize) Error!?InstallationRetryCandidate {
+        const management = if (self.state.management) |*value| value else return null;
+        const inspection = management.inspect();
+        if (inspection.desired_generation == null) return null;
+        if (inspection.health != .ready) return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse return null;
+        while (index.* < registry.servers.len) {
+            const server = registry.servers[index.*];
+            index.* += 1;
+            const operation = server.installation orelse continue;
+            if (operation.task_id != task_id or operation.phase.active() or operation.phase == .ready) continue;
+            return .{ .server_id = server.id[0..configuration.created_identity_bytes].*, .request_refs = operation.request_refs };
+        }
+        return null;
+    }
+
+    pub fn startPendingInstallation(self: *Runtime, id: u64, request: agent.McpInstallRequest, source_message: ?u64, requires_confirmation: bool, existing: ?[]const u8) Error!configuration.CreateResult {
+        const pending = self.pendingInstallation() orelse return .{ .outcome = .rejected };
+        if (pending.id != id) return .{ .outcome = .rejected };
+        const d = request.connection;
+        const source_url = std.mem.sliceTo(request.sourceUrl, '#');
+        const origin = configuration.endpointOrigin(source_url, 4096) orelse return .{ .outcome = .rejected };
+        var needs_authorization = requires_confirmation;
+        const destination = if (d.endpoint) |endpoint| configuration.endpointOrigin(endpoint, 4096) orelse return .{ .outcome = .rejected } else null;
+        var slots: [16]configuration.InstallationCredentialWire = undefined;
+        for (request.credentials, 0..) |plan, i| {
+            slots[i] = .{ .name = plan.slot, .manual = plan.kind == .user_input };
+            if (plan.url) |url| {
+                const credential_origin = configuration.endpointOrigin(url, 4096) orelse return .{ .outcome = .rejected };
+                if (!std.mem.eql(u8, credential_origin, origin) or (destination != null and !std.mem.eql(u8, credential_origin, destination.?))) needs_authorization = true;
+            }
+        }
+        const connection: configuration.InstallationConnection = if (std.mem.eql(u8, d.transport, "stdio")) .{ .stdio = .{
+            .display_name = d.displayName,
+            .command = d.command.?,
+            .arguments = d.arguments,
+            .cwd = d.cwd,
+            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
+            .environment_names = d.environmentNames,
+        } } else if (std.mem.eql(u8, d.authMode, "oauth")) .{ .oauth = .{ .display_name = d.displayName, .url = d.endpoint.?, .client = .dynamic_registration } } else .{ .http = .{
+            .display_name = d.displayName,
+            .url = d.endpoint.?,
+            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
+            .header_names = d.headerNames,
+        } };
+        const management = if (self.state.management) |*value| value else return .{ .outcome = .rejected };
+        const inspection = management.inspect();
+        return self.startInstallation(inspection.desired_generation orelse 0, connection, .{
+            .task_id = pending.task_id,
+            .run_id = pending.run_id,
+            .source_message_id = source_message orelse pending.run_id,
+            .source_origin = origin,
+            .phase = if (needs_authorization) .needs_authorization else .preparing,
+            .request = pending.json,
+            .existing_server_id = request.serverId orelse existing,
+            .credentials = slots[0..request.credentials.len],
+        });
     }
 
     pub fn startInstallation(self: *Runtime, expected_generation: u64, connection: configuration.InstallationConnection, input: configuration.InstallationStart) Error!configuration.CreateResult {
@@ -2782,7 +2933,7 @@ fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, re
     return runtime;
 }
 
-fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8) !void {
+fn testMcpProjection(runtime: *const Runtime, bytes: []u8) ![]const u8 {
     const Text = struct {
         fn contains(_: *const anyopaque, _: []const u8) bool {
             return false;
@@ -2791,11 +2942,16 @@ fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8
             std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
         }
     };
-    var bytes: [32 * 1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&bytes);
+    var writer = std.Io.Writer.fixed(bytes);
     try writeProjection(runtime, &writer, .{ .context = runtime, .contains_sensitive_fn = Text.contains, .write_json_fn = Text.write });
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "new-access-token") == null);
-    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    return writer.buffered();
+}
+
+fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8) !void {
+    var bytes: [32 * 1024]u8 = undefined;
+    const projection = try testMcpProjection(runtime, &bytes);
+    try std.testing.expect(std.mem.indexOf(u8, projection, "new-access-token") == null);
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, projection, .{});
     defer actual.deinit();
     const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("testdata/oauth-recovery-view.json"), .{});
     defer expected.deinit();
@@ -3815,6 +3971,13 @@ test "Product MCP composition capacity failure is processed and does not starve 
     const c = configuration.RuntimeApplyTarget.init("c", servers[2], .add);
     try std.testing.expect(ledger.handled(c));
     try std.testing.expectEqual(.capacity, ledger.results.items[0].outcome);
+    var projection_bytes: [8192]u8 = undefined;
+    const projection = try std.json.parseFromSlice(std.json.Value, allocator, try testMcpProjection(&runtime, &projection_bytes), .{});
+    defer projection.deinit();
+    const blocked_server = projection.value.object.get("servers").?.array.items[0].object;
+    try std.testing.expectEqualStrings("c", blocked_server.get("id").?.string);
+    try std.testing.expectEqualStrings("capacity", blocked_server.get("applyStatus").?.string);
+    try std.testing.expectEqual(@as(i64, 1), projection.value.object.get("applyFailureCount").?.integer);
     try std.testing.expect(runtime.takeChanged());
     try std.testing.expect(runtime.failConfigurationApply(2, .preparation));
     try std.testing.expect((try runtime.prepareConfigurationStep(2, .automatic)) == null);

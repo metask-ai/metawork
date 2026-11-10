@@ -1,6 +1,9 @@
 import { decodeWorkbenchSnapshot } from "../../frontend/src/bridge/decode-contracts.ts";
 import { productViewFixture } from "./product-view-fixture.mjs";
 import { initialViewScope } from "../../frontend/src/bridge/contracts.ts";
+
+const wireFields = { deriveTaskActions: false };
+
 export function decodeProductStateFixture(state) {
   if (!Array.isArray(state.tasks)) return decodeWorkbenchSnapshot(state);
   const ids = state.tasks.map((task) => task.id);
@@ -12,11 +15,15 @@ export function decodeProductStateFixture(state) {
   const tasks = [];
   for (const taskId of ids) {
     const decoded = decodeWorkbenchSnapshot(
-      productViewFixture(state, {
-        ...initialViewScope,
-        taskId,
-        management: "skills",
-      }),
+      productViewFixture(
+        state,
+        {
+          ...initialViewScope,
+          taskId,
+          management: "skills",
+        },
+        wireFields,
+      ),
     );
     base = decoded;
     skillManagement = decoded.skillManagement;
@@ -28,11 +35,15 @@ export function decodeProductStateFixture(state) {
       let cursor = decoded.taskPage.nextBeforeRunId;
       while (cursor) {
         const older = decodeWorkbenchSnapshot(
-          productViewFixture(state, {
-            ...initialViewScope,
-            taskId,
-            beforeRunId: cursor,
-          }),
+          productViewFixture(
+            state,
+            {
+              ...initialViewScope,
+              taskId,
+              beforeRunId: cursor,
+            },
+            wireFields,
+          ),
         );
         task.runs.unshift(...older.historyPage.runs);
         cursor = older.historyPage.nextBeforeRunId;
@@ -41,10 +52,18 @@ export function decodeProductStateFixture(state) {
     }
   }
   mcp = decodeWorkbenchSnapshot(
-    productViewFixture(state, { ...initialViewScope, management: "mcp" }),
+    productViewFixture(
+      state,
+      { ...initialViewScope, management: "mcp" },
+      wireFields,
+    ),
   ).mcp;
   scheduledTasks = decodeWorkbenchSnapshot(
-    productViewFixture(state, { ...initialViewScope, management: "schedules" }),
+    productViewFixture(
+      state,
+      { ...initialViewScope, management: "schedules" },
+      wireFields,
+    ),
   ).scheduledTasks;
   const {
     scope,

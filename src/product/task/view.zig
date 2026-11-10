@@ -198,6 +198,15 @@ pub const PendingUiProjection = struct {
     }
 };
 
+pub const ActionBlocker = enum {
+    busy,
+    closing,
+    deleting,
+    history_read_only,
+    no_history,
+    unavailable,
+};
+
 pub const Input = struct {
     now_ms: ?u64 = null,
     task: *const task_state.Task,
@@ -206,6 +215,7 @@ pub const Input = struct {
     available_approval_modes: []const task_state.ApprovalMode = &.{},
     shutting_down: bool,
     input_acceptance_reason: ?task_state.SendInputReason = null,
+    compact_blocker: ?ActionBlocker,
     text: TextProjection,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
@@ -218,10 +228,12 @@ pub const Input = struct {
 /// Navigation facts deliberately contain no Run text, Tool data, catalog,
 /// pending input, or execution configuration. Inspecting terminal headers is
 /// bounded by the Task's retained Run slots and never visits their payloads.
-pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: TextProjection) Error!void {
+pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: TextProjection, archive_blocker: ?ActionBlocker, delete_blocker: ?ActionBlocker) Error!void {
     writer.print("{{\"id\":\"{d}\",\"recentOrder\":\"{d}\",\"title\":", .{ task.durable.id, task.durable.recent_order }) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, task.durable.title);
     try writeNavigationSignal(writer, task);
+    try writeActionBlocker(writer, "archiveBlocker", archive_blocker);
+    try writeActionBlocker(writer, "deleteBlocker", delete_blocker);
     writer.print(",\"workspaceId\":\"{d}\",\"archived\":{},\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"historyReadOnly\":{},\"permissionReviewState\":\"{s}\",\"currentRunPhase\":", .{
         task.durable.workspace_id, task.durable.archived, @tagName(task_policy.taskLifecycle(task)), @tagName(task.deletion), task.read_only_history != null, @tagName(task.permissionReviewPhase()),
     }) catch return error.SnapshotTooLarge;
@@ -256,6 +268,13 @@ pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: 
     writer.writeAll(",\"unreadCompletionRunId\":") catch return error.SnapshotTooLarge;
     if (task_policy.unreadCompletionRunId(task)) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn writeActionBlocker(writer: *std.Io.Writer, comptime field: []const u8, blocker: ?ActionBlocker) Error!void {
+    writer.writeAll(",\"" ++ field ++ "\":") catch return error.SnapshotTooLarge;
+    if (blocker) |reason| {
+        jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
 }
 
 fn writeNavigationSignal(writer: *std.Io.Writer, task: *const task_state.Task) Error!void {
@@ -361,6 +380,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.title);
     try writeNavigationSignal(writer, task);
+    try writeActionBlocker(writer, "compactBlocker", input.compact_blocker);
     writer.print(",\"approvalRevision\":\"{d}\",\"availableApprovalModes\":[", .{task.durable.approval_revision}) catch return error.SnapshotTooLarge;
     for (input.available_approval_modes, 0..) |mode, index| {
         if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;

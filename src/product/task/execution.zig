@@ -4,6 +4,7 @@
 //! never retain a composition aggregate or Task runtime pointer.
 
 const std = @import("std");
+const credential_match = @import("product_credential_match");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
@@ -70,7 +71,7 @@ pub fn projectSanitized(
             redacted = true;
             continue;
         }
-        const sequence_len = utf8CodepointLen(value, read);
+        const sequence_len = credential_match.codepointLen(value, read);
         if (sequence_len > value.len - read or sequence_len > destination.len - write)
             break;
         @memcpy(
@@ -87,19 +88,12 @@ pub fn projectSanitized(
     };
 }
 
-fn utf8CodepointLen(value: []const u8, start: usize) usize {
-    return @min(
-        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
-        value.len - start,
-    );
-}
-
 fn credentialsEndAtCodepoint(value: []const u8, start: usize, secrets: []const []const u8) ?usize {
     var end: usize = 0;
     var cursor = start;
     // Merge overlaps using the original bytes, never a previously masked copy.
-    while (cursor == start or cursor < end) : (cursor += utf8CodepointLen(value, cursor)) {
-        for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |match_end| {
+    while (cursor == start or cursor < end) : (cursor += credential_match.codepointLen(value, cursor)) {
+        for (secrets) |secret| if (credential_match.matchEnd(value, cursor, secret)) |match_end| {
             end = @max(end, match_end);
         };
     }
@@ -115,30 +109,6 @@ test "image Run projection masks both credentials and their overlapping original
     const short = projectSanitized(output[0..2], "image-token", &.{"image-token"});
     try std.testing.expect(short.truncated);
     try std.testing.expectEqual(@as(usize, 0), short.len);
-}
-
-fn credentialEndAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) ?usize {
-    if (credential.len == 0) return null;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    var match_end: usize = 0;
-    for (0..codepoint_len) |offset| {
-        if (std.mem.startsWith(
-            u8,
-            value[codepoint_start + offset ..],
-            credential,
-        )) match_end = @max(
-            match_end,
-            codepoint_start + offset + credential.len,
-        );
-    }
-    if (match_end == 0) return null;
-    var end = @min(value.len, match_end);
-    while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
-    return end;
 }
 
 pub const TextProjector = struct {

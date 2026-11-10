@@ -1,4 +1,5 @@
 const std = @import("std");
+const credential_match = @import("product_credential_match");
 const builtin = @import("builtin");
 const update = @import("metawork_product_update");
 const product_identity = @import("metawork_product_identity");
@@ -116,6 +117,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     CatalogUnavailable,
     McpManagementUnavailable,
     McpManagementBusy,
+    McpRestoreBusy,
     McpOauthScopeCapacity,
     CatalogRequestGenerationExhausted,
     StaleCatalog,
@@ -395,15 +397,7 @@ pub const AppDirectories = struct {
     testing_automatic_workspace_root: ?*product_workspace.AutomaticRoot = null,
 };
 
-pub const AutomaticWorkspaceRootConfigurationView = struct {
-    generation: u64,
-    mode: ?product_workspace.AutomaticRootConfigurationMode,
-    canonical_root: ?[]const u8,
-    health: product_workspace.AutomaticRootConfigurationHealth,
-    can_choose: bool,
-    can_reset: bool,
-    can_retry: bool,
-};
+pub const AutomaticWorkspaceRootConfigurationView = product_workspace.AutomaticRootView;
 
 pub const SkillManagementHealth = skill_runtime.ManagementHealth;
 pub const SkillManagementConfiguration = skill_runtime.ManagementConfiguration;
@@ -1133,7 +1127,6 @@ pub const FileChangeDiffAdmission = union(enum) {
 
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
 const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
-const RunTerminationDispatch = if (builtin.is_test) task_test_state.RunTerminationDispatch else void;
 const RunInputRecord = if (builtin.is_test) task_test_state.RunInputRecord else void;
 const TestRunRecord = if (builtin.is_test) task_test_state.RunRecord else void;
 const AutomaticTitleState = if (builtin.is_test) task_test_state.AutomaticTitleState else void;
@@ -1153,9 +1146,6 @@ const compactTerminalPayload = if (builtin.is_test) task_test_state.compactTermi
 const activeCompactPhase = if (builtin.is_test) task_test_state.activeCompactPhase else void;
 const isTerminalPhase = if (builtin.is_test) task_test_state.isTerminalPhase else void;
 const findRun = if (builtin.is_test) task_test_state.findRun else void;
-const pendingInterruption = if (builtin.is_test) task_test_policy.pendingInterruption else void;
-const pendingTerminationSignal = if (builtin.is_test) task_test_policy.pendingTerminationSignal else void;
-const closeFailureCompletion = if (builtin.is_test) task_test_policy.closeFailureCompletion else void;
 const hasActiveOperation = if (builtin.is_test) task_test_policy.hasActiveOperation else void;
 const continuationAvailable = if (builtin.is_test) task_test_policy.continuationAvailable else void;
 const automaticTitleCandidate = if (builtin.is_test) task_test_policy.automaticTitleCandidate else void;
@@ -1329,9 +1319,6 @@ pub const Runtime = struct {
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     workspace: product_workspace.Runtime,
-    automatic_root_configuration: product_workspace.AutomaticRootConfigurationRuntime,
-    automatic_workspace_system_root: ?[]u8,
-    automatic_workspace_configuration_store: ?*product_workspace.AutomaticRootConfigurationFileStore,
     attachments: product_attachment.Runtime,
     task_runtime: task_runtime.Runtime,
     task_persistence: TaskPersistence,
@@ -1342,7 +1329,6 @@ pub const Runtime = struct {
     approval_history_dirty: bool = false,
     approval_history_unknown: ?task_persistence.CommitToken = null,
     ordinary_history_unknown: ?task_persistence.CommitToken = null,
-    pending_model_intent: ?task_runtime.PreparedModelIntent = null,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
     /// the Stop-barrier investigation; never persisted or published.
@@ -1477,76 +1463,6 @@ pub const Runtime = struct {
             break :home_copy try allocator.dupe(u8, home);
         } else null;
         errdefer if (canonical_user_home) |home| allocator.free(home);
-        const automatic_workspace_system_root = if (configuration.directories.automatic_workspace_system_root) |root| copy: {
-            if (root.len == 0 or
-                !std.fs.path.isAbsolute(root) or
-                !std.unicode.utf8ValidateSlice(root) or
-                std.mem.indexOfScalar(u8, root, 0) != null or
-                root.len > product_workspace.automatic_root_configuration.max_root_bytes)
-                return error.InvalidWorkspace;
-            break :copy try allocator.dupe(u8, root);
-        } else null;
-        errdefer if (automatic_workspace_system_root) |root| allocator.free(root);
-        if (configuration.directories.testing_automatic_workspace_root != null and
-            (automatic_workspace_system_root != null or
-                configuration.directories.automatic_workspace_configuration_store != null))
-            return error.InvalidWorkspace;
-        var automatic_root_configuration = if (configuration.directories.testing_automatic_workspace_root) |root|
-            product_workspace.AutomaticRootConfigurationRuntime{
-                .allocator = allocator,
-                .configuration = try product_workspace.AutomaticRootConfiguration.custom(
-                    allocator,
-                    root.canonicalPath(),
-                ),
-                .health = .ready,
-            }
-        else
-            try product_workspace.AutomaticRootConfigurationRuntime.bootstrap(
-                allocator,
-                configuration.directories.automatic_workspace_configuration_store,
-            );
-        errdefer automatic_root_configuration.deinit();
-        var opened_automatic_root: ?product_workspace.AutomaticRoot = null;
-        errdefer if (opened_automatic_root) |*root| root.deinit();
-        const automatic_root_capability = if (configuration.directories.testing_automatic_workspace_root) |root|
-            root
-        else opened: {
-            const effective_root = automatic_root_configuration.effectiveRoot(
-                automatic_workspace_system_root,
-            ) orelse {
-                if (automatic_root_configuration.configuration != null and
-                    (automatic_root_configuration.health == .ready or
-                        automatic_root_configuration.health == .write_failed))
-                    automatic_root_configuration.health = .path_unavailable;
-                break :opened null;
-            };
-            const mode = automatic_root_configuration.configuration.?.mode;
-            opened_automatic_root = switch (mode) {
-                .system_default => product_workspace.AutomaticRoot.open(
-                    io,
-                    allocator,
-                    effective_root,
-                ),
-                .custom => product_workspace.AutomaticRoot.openExisting(
-                    io,
-                    allocator,
-                    effective_root,
-                ),
-            } catch {
-                automatic_root_configuration.health = .path_unavailable;
-                break :opened null;
-            };
-            if (mode == .custom and !product_workspace.automaticPathEqual(
-                effective_root,
-                opened_automatic_root.?.canonicalPath(),
-            )) {
-                opened_automatic_root.?.deinit();
-                opened_automatic_root = null;
-                automatic_root_configuration.health = .path_unavailable;
-                break :opened null;
-            }
-            break :opened &opened_automatic_root.?;
-        };
         const workspace_capacity = workspaceRecordCapacity(limits) orelse
             return error.ProjectionCapacity;
         var workspace = try product_workspace.Runtime.init(
@@ -1555,7 +1471,11 @@ pub const Runtime = struct {
             limits.max_workspaces,
             limits.max_tasks,
             limits.max_workspace_bytes,
-            automatic_root_capability,
+            .{
+                .system_path = configuration.directories.automatic_workspace_system_root,
+                .store = if (configuration.directories.automatic_workspace_configuration_store) |store| store.persistence() else null,
+                .testing_root = configuration.directories.testing_automatic_workspace_root,
+            },
         );
         errdefer workspace.deinitEmpty();
         var attachments = try product_attachment.Runtime.init(allocator, .{
@@ -1713,9 +1633,6 @@ pub const Runtime = struct {
             .agent_runtime = agent_runtime,
             .limits = limits,
             .workspace = workspace,
-            .automatic_root_configuration = automatic_root_configuration,
-            .automatic_workspace_system_root = automatic_workspace_system_root,
-            .automatic_workspace_configuration_store = configuration.directories.automatic_workspace_configuration_store,
             .attachments = attachments,
             .task_runtime = product_tasks,
             .task_persistence = configuration.task_persistence,
@@ -1770,12 +1687,7 @@ pub const Runtime = struct {
                 }
             }
         }
-        if (control.workspace.automaticRootPath()) |root| {
-            control.workspace.validateAutomaticRootCandidate(root) catch {
-                control.workspace.disableAutomaticRoot();
-                control.automatic_root_configuration.health = .path_unavailable;
-            };
-        }
+        control.workspace.validateRestoredAutomaticRoot();
         control.task_persistence.restore_fn = null;
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
@@ -2257,7 +2169,7 @@ pub const Runtime = struct {
 
     fn workspacePathHasCredential(self: *const Runtime, path: []const u8) bool {
         var index: usize = 0;
-        while (index < path.len) : (index += utf8CodepointLen(path, index)) {
+        while (index < path.len) : (index += credential_match.codepointLen(path, index)) {
             if (self.knownCredentialEndAtCodepoint(path, index) != null) return true;
         }
         return false;
@@ -2657,7 +2569,7 @@ pub const Runtime = struct {
                 redacted = true;
                 continue;
             }
-            const codepoint_len = utf8CodepointLen(value, read);
+            const codepoint_len = credential_match.codepointLen(value, read);
             @memcpy(output[write..][0..codepoint_len], value[read..][0..codepoint_len]);
             write += codepoint_len;
             read += codepoint_len;
@@ -2679,7 +2591,7 @@ pub const Runtime = struct {
         while (index < value.len) {
             if (self.knownCredentialMayContinueAtCodepoint(value, index))
                 return index;
-            index += utf8CodepointLen(value, index);
+            index += credential_match.codepointLen(value, index);
         }
         return value.len;
     }
@@ -2689,7 +2601,7 @@ pub const Runtime = struct {
         value: []const u8,
         codepoint_start: usize,
     ) bool {
-        const codepoint_len = utf8CodepointLen(value, codepoint_start);
+        const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
             if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
@@ -2845,204 +2757,31 @@ pub const Runtime = struct {
             self.skill.identitySourceTrusted();
     }
 
-    pub fn automaticWorkspaceRootConfiguration(
-        self: *const Runtime,
-    ) AutomaticWorkspaceRootConfigurationView {
-        const configuration = self.automatic_root_configuration.configuration;
-        const canonical_root = switch (self.automatic_root_configuration.health) {
-            .ready => self.workspace.automaticRootPath(),
-            .path_unavailable, .write_failed => self.automatic_root_configuration.committedRoot(
-                self.automatic_workspace_system_root,
-            ),
-            .persistence_unavailable,
-            .read_failed,
-            .corrupt,
-            .outcome_unknown,
-            => null,
-        };
-        const mode: ?product_workspace.AutomaticRootConfigurationMode = if (canonical_root != null)
-            if (configuration) |value| value.mode else null
-        else
-            null;
-        const store_available = self.automatic_workspace_configuration_store != null and
-            !self.shutting_down;
-        return .{
-            .generation = self.automatic_root_configuration.generation,
-            .mode = mode,
-            .canonical_root = canonical_root,
-            .health = self.automatic_root_configuration.health,
-            .can_choose = store_available,
-            .can_reset = store_available and
-                self.automatic_workspace_system_root != null and
-                (configuration == null or
-                    configuration.?.mode != .system_default or
-                    self.automatic_root_configuration.health != .ready),
-            .can_retry = !self.shutting_down and
-                self.automatic_root_configuration.health == .path_unavailable and
-                canonical_root != null,
-        };
+    pub fn automaticWorkspaceRootConfiguration(self: *const Runtime) AutomaticWorkspaceRootConfigurationView {
+        return self.workspace.automaticRootView(self.shutting_down);
     }
 
-    pub fn chooseAutomaticWorkspaceRoot(
-        self: *Runtime,
-        expected_generation: u64,
-        canonical_root: []const u8,
-    ) Error!void {
+    pub fn chooseAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64, canonical_root: []const u8) Error!void {
+        try self.changeAutomaticWorkspaceRoot(expected_generation, .{ .choose = canonical_root });
+    }
+
+    pub fn resetAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64) Error!void {
+        try self.changeAutomaticWorkspaceRoot(expected_generation, .reset);
+    }
+
+    pub fn retryAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64) Error!void {
+        try self.changeAutomaticWorkspaceRoot(expected_generation, .retry);
+    }
+
+    fn changeAutomaticWorkspaceRoot(self: *Runtime, expected_generation: u64, change: product_workspace.AutomaticRootChange) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.requireAutomaticRootGeneration(expected_generation);
-        var configuration = product_workspace.AutomaticRootConfiguration.custom(
-            self.allocator,
-            canonical_root,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidWorkspace,
+        const previous_health = self.workspace.automaticRootView(false).health;
+        self.workspace.changeAutomaticRoot(expected_generation, change) catch |err| {
+            if (err == error.AutomaticWorkspaceRootPersistenceOutcomeUnknown or
+                self.workspace.automaticRootView(false).health != previous_health) self.bumpRevision();
+            return err;
         };
-        defer configuration.deinit();
-        try self.installAutomaticWorkspaceRoot(&configuration, canonical_root, false);
-    }
-
-    pub fn resetAutomaticWorkspaceRoot(
-        self: *Runtime,
-        expected_generation: u64,
-    ) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.requireAutomaticRootGeneration(expected_generation);
-        const root = self.automatic_workspace_system_root orelse
-            return error.WorkspaceUnavailable;
-        var configuration = product_workspace.AutomaticRootConfiguration.systemDefault(
-            self.allocator,
-        );
-        defer configuration.deinit();
-        try self.installAutomaticWorkspaceRoot(&configuration, root, true);
-    }
-
-    pub fn retryAutomaticWorkspaceRoot(
-        self: *Runtime,
-        expected_generation: u64,
-    ) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.requireAutomaticRootGeneration(expected_generation);
-        if (self.automatic_root_configuration.health != .path_unavailable)
-            return error.WorkspaceUnavailable;
-        const root_path = self.automatic_root_configuration.committedRoot(
-            self.automatic_workspace_system_root,
-        ) orelse return error.WorkspaceUnavailable;
-        const mode = self.automatic_root_configuration.configuration.?.mode;
-        var root = switch (mode) {
-            .system_default => product_workspace.AutomaticRoot.open(
-                self.io,
-                self.allocator,
-                root_path,
-            ),
-            .custom => product_workspace.AutomaticRoot.openExisting(
-                self.io,
-                self.allocator,
-                root_path,
-            ),
-        } catch return error.WorkspaceUnavailable;
-        defer root.deinit();
-        if (mode == .custom and !product_workspace.automaticPathEqual(
-            root_path,
-            root.canonicalPath(),
-        )) return error.InvalidWorkspace;
-        try self.workspace.validateAutomaticRootCandidate(root.canonicalPath());
-        self.workspace.replaceAutomaticRoot(&root);
-        self.automatic_root_configuration.health = .ready;
-        self.automatic_root_configuration.advanceGeneration();
         self.bumpRevision();
-    }
-
-    fn requireAutomaticRootGeneration(
-        self: *const Runtime,
-        expected_generation: u64,
-    ) Error!void {
-        if (expected_generation == 0 or
-            expected_generation != self.automatic_root_configuration.generation)
-            return error.AutomaticWorkspaceRootGenerationMismatch;
-    }
-
-    fn installAutomaticWorkspaceRoot(
-        self: *Runtime,
-        configuration: *const product_workspace.AutomaticRootConfiguration,
-        candidate_path: []const u8,
-        create: bool,
-    ) Error!void {
-        const store = self.automatic_workspace_configuration_store orelse
-            return error.AutomaticWorkspaceRootPersistenceUnavailable;
-        var root = if (create)
-            product_workspace.AutomaticRoot.open(
-                self.io,
-                self.allocator,
-                candidate_path,
-            ) catch return error.WorkspaceUnavailable
-        else
-            product_workspace.AutomaticRoot.openExisting(
-                self.io,
-                self.allocator,
-                candidate_path,
-            ) catch return error.WorkspaceUnavailable;
-        defer root.deinit();
-        if (!product_workspace.automaticPathEqual(
-            candidate_path,
-            root.canonicalPath(),
-        )) return error.InvalidWorkspace;
-        try self.workspace.validateAutomaticRootCandidate(root.canonicalPath());
-        var encoded_storage: [product_workspace.automatic_root_configuration.max_store_bytes]u8 = undefined;
-        const encoded = product_workspace.automatic_root_configuration.encode(
-            &encoded_storage,
-            configuration,
-        ) catch return error.InvalidWorkspace;
-        var replacement = try configuration.clone();
-        var replacement_owned = true;
-        defer if (replacement_owned) replacement.deinit();
-        const recovering = self.automatic_root_configuration.recovery_required;
-        if (recovering)
-            store.recover(encoded) catch |err| return self.failAutomaticRootPersistence(err)
-        else
-            store.commit(encoded) catch |err| return self.failAutomaticRootPersistence(err);
-
-        if (self.automatic_root_configuration.configuration) |*current| current.deinit();
-        self.automatic_root_configuration.configuration = replacement;
-        replacement_owned = false;
-        self.automatic_root_configuration.health = .ready;
-        self.automatic_root_configuration.recovery_required = false;
-        self.workspace.replaceAutomaticRoot(&root);
-        self.automatic_root_configuration.advanceGeneration();
-        self.bumpRevision();
-    }
-
-    fn failAutomaticRootPersistence(
-        self: *Runtime,
-        err: product_workspace.automatic_root_configuration.FileStoreError,
-    ) Error {
-        switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.PersistenceOutcomeUnknown => {
-                self.workspace.disableAutomaticRoot();
-                self.automatic_root_configuration.health = .outcome_unknown;
-                self.automatic_root_configuration.recovery_required = true;
-                self.bumpRevision();
-                return error.AutomaticWorkspaceRootPersistenceOutcomeUnknown;
-            },
-            else => {
-                if (!self.automatic_root_configuration.recovery_required) {
-                    switch (self.automatic_root_configuration.health) {
-                        .ready => {
-                            self.automatic_root_configuration.health = .write_failed;
-                            self.bumpRevision();
-                        },
-                        .write_failed,
-                        .path_unavailable,
-                        .persistence_unavailable,
-                        .read_failed,
-                        .corrupt,
-                        .outcome_unknown,
-                        => {},
-                    }
-                }
-                return error.AutomaticWorkspaceRootPersistenceFailed;
-            },
-        }
     }
 
     pub fn stageAttachments(
@@ -4298,9 +4037,7 @@ pub const Runtime = struct {
             self.bumpRevision();
             return error.SessionReleasing;
         }
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (task.runtime.close_thread != null or task.runtime.close_requested) return error.SessionReleasing;
-        };
+        if (self.task_runtime.pendingSessionCloseTask() != null) return error.SessionReleasing;
         if (self.sessionReleaseFailureTaskId() != null) return error.SessionReleaseFailed;
         return error.SessionCapacity;
     }
@@ -4380,53 +4117,38 @@ pub const Runtime = struct {
     }
 
     fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64, approval_revision: ?u64) Error!u64 {
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
-        if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
-        const attached = task.runtime.hasAttachedSession();
-        if (task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
-        if (!attached) _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
-        if (attached and (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready))
+        const facts = try self.task_runtime.modelRebindFacts(task_id);
+        if (!facts.attached) _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
+            error.McpRestoreBusy => return if (approval_revision != null) err else error.RecoveryUnavailable,
+            else => return err,
+        };
+        if (facts.attached and (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready))
             return error.RecoveryUnavailable;
-        const workspace = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
+        const workspace = try self.workspace.taskRunAuthority(facts.workspace_id, facts.workspace_epoch);
         const binding = self.workspace.recoveryBinding(workspace.id) orelse return error.RecoveryUnavailable;
         const home = self.canonical_user_home orelse return error.RecoveryUnavailable;
-        const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
+        if (!facts.has_model_intent) return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         try self.validateTaskMetaskAuthorization(task_id);
         try self.prepareTaskCredential(target.input().api_key);
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
-        if (attached) {
-            var access = try task.runtime.acquireAccess();
-            defer access.deinit();
-            var original = try access.captureRestoreInputs();
-            var original_owned = true;
-            defer if (original_owned) original.deinit() catch {};
+        if (try self.task_runtime.captureModelRebindInputs(task_id)) |captured| {
+            var original = captured;
+            errdefer original.deinit() catch {};
             const filters = try self.prepareTaskRestoreFilters(task_id, &original);
             capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
-            original_owned = false;
-        } else if (task.runtime.parked_capabilities) |parked| {
-            var original = parked;
-            original.skill = null;
-            original.mcp = null;
-            var original_owned = true;
-            defer if (original_owned) original.deinit() catch {};
-            if (parked.skill) |skill| original.skill = try skill.clone();
-            if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
-            const filters = try self.prepareTaskRestoreFilters(task_id, &original);
-            capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
-            original_owned = false;
         }
         const execution = target.input();
         // A cold restore may reuse an already resolved immutable connection.
         // Only exact full authority permits reuse; an absent or unrelated
         // global default still resolves independently and gets a new identity.
-        const generation = self.nextExecutionGeneration(task.durable.execution_generation) catch return error.ExecutionUnavailable;
+        const generation = self.nextExecutionGeneration(facts.execution_generation) catch return error.ExecutionUnavailable;
         const config: models_contract.ConfigInput = .{ .execution_generation = generation, .target = execution.target, .api_key = execution.api_key };
         const attempt = try self.task_runtime.startRecovery(task_id, .{
             .expected_binding_epoch = expected_binding_epoch,
             .workspace_id = workspace.id,
-            .workspace_epoch = task.durable.workspace_epoch,
+            .workspace_epoch = facts.workspace_epoch,
             .workspace_root = binding.canonical_root,
             .canonical_user_home = home,
             .workspace_trust = switch (binding.trust) {
@@ -4448,7 +4170,7 @@ pub const Runtime = struct {
             .checkpoint_limits = checkpoint_export_limits,
             .notifier = .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake },
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
-            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (capabilities != null) &capabilities else null, .text = self.taskRuntimeTextProjection() },
+            .rebind = .{ .source_id = authority.source_id, .selection_revision = authority.selection_revision, .catalog_generation = authority.catalog_generation, .capabilities = if (capabilities != null) &capabilities else null, .text = self.taskRuntimeTextProjection() },
         });
         self.bumpRevision();
         return attempt;
@@ -4465,7 +4187,10 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         self.syncLifecycle();
-        return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null);
+        return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null) catch |err| switch (err) {
+            error.McpRestoreBusy => error.RecoveryUnavailable,
+            else => err,
+        };
     }
 
     fn admitTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64, approval_revision: ?u64) Error!u64 {
@@ -4482,7 +4207,8 @@ pub const Runtime = struct {
             switch (self.agent_runtime.restoreAdmission(null)) {
                 .available => {},
                 .capacity_reached => return self.sessionPressureError(task_id),
-                .mcp_busy, .unavailable => return error.RecoveryUnavailable,
+                .mcp_busy => return error.McpRestoreBusy,
+                .unavailable => return error.RecoveryUnavailable,
             }
         }
         if (target) |*value| if (task.runtime.attachment == .detached or
@@ -4580,11 +4306,31 @@ pub const Runtime = struct {
         };
     }
 
-    fn beginApprovalRecovery(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        const change = task.approval_change orelse return false;
-        _ = self.admitTaskConversationRestore(task_id, task.durable.binding_epoch, change.revision) catch return false;
-        return true;
+    fn startApprovalRecovery(context: *anyopaque, task_id: u64, binding_epoch: u64, revision: u64) task_runtime.ApprovalRecoveryOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        _ = self.admitTaskConversationRestore(task_id, binding_epoch, revision) catch |err| return switch (err) {
+            error.SessionReleasing => if (self.task_runtime.pendingSessionCloseTask()) |blocking_id|
+                .{ .waiting = .{ .session_close = blocking_id } }
+            else
+                .failed,
+            error.McpRestoreBusy => .{ .waiting = .mcp_apply },
+            else => .failed,
+        };
+        return .started;
+    }
+
+    fn advanceDetachedApprovalRecovery(self: *Runtime, task_id: u64) bool {
+        return self.task_runtime.advanceDetachedApprovalRecovery(task_id, .{
+            .context = self,
+            .start_fn = startApprovalRecovery,
+            .mcp_apply_pending_fn = approvalMcpApplyPending,
+        });
+    }
+
+    fn approvalMcpApplyPending(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.mcp) |*mcp| if (mcp.configurationApplyInProgress()) return true;
+        return self.agent_runtime.restoreAdmission(null) == .mcp_busy;
     }
 
     fn syncApprovalChanges(self: *Runtime) bool {
@@ -4597,27 +4343,26 @@ pub const Runtime = struct {
         for (&self.task_runtime.approval_jobs) |*entry| {
             const slot = entry.* orelse continue;
             if (!slot.job.completionReady()) continue;
-            const task_id = slot.task_id;
-            if (task_id == 0) {
-                if (slot.job.work == .history) {
-                    const resolve_only = slot.job.work.history.input == .resolution;
+            const task_id = switch (slot.recipient) {
+                .checkpoint_retirement => {
+                    slot.job.deinit();
+                    entry.* = null;
+                    continue;
+                },
+                .history_projection => {
+                    const readback = slot.job.work.history.input == .resolution;
                     switch (slot.job.outcome) {
                         .history => |result| switch (result) {
                             .committed, .failed => {
-                                if (resolve_only) {
-                                    if (self.pending_model_intent) |*intent| {
-                                        if (result == .committed) {
-                                            const intent_task_id = intent.task.durable.id;
-                                            intent.complete();
-                                            self.rememberTaskModelPreference(intent_task_id);
-                                        } else intent.rollback();
-                                        self.pending_model_intent = null;
+                                if (readback) {
+                                    if (self.task_runtime.settleModelIntent(result == .committed)) |task_id| {
+                                        self.rememberTaskModelPreference(task_id);
                                     }
 
                                     self.approval_history_unknown = null;
                                     self.approval_history_dirty = true;
                                 }
-                                if (resolve_only or result == .committed)
+                                if (readback or result == .committed)
                                     self.task_persistence_health = .ready
                                 else {
                                     self.approval_history_dirty = true;
@@ -4625,7 +4370,7 @@ pub const Runtime = struct {
                                 }
                             },
                             .outcome_unknown => {
-                                if (!resolve_only) {
+                                if (!readback) {
                                     std.debug.assert(self.approval_history_unknown == null);
                                     self.approval_history_unknown = slot.job.historyToken();
                                 }
@@ -4633,57 +4378,31 @@ pub const Runtime = struct {
                                 self.task_persistence_health = .outcome_unknown;
                             },
                         },
-                        .none, .failure, .checkpoint, .retired => if (!resolve_only) {
+                        .none, .failure, .checkpoint, .retired => if (!readback) {
                             self.approval_history_dirty = true;
                             if (!self.shutting_down) self.markTaskPersistenceWriteFailed();
                         },
                     }
                     changed = true;
-                }
-                slot.job.deinit();
-                entry.* = null;
-                continue;
-            }
+                    slot.job.deinit();
+                    entry.* = null;
+                    continue;
+                },
+                .recovery => |identity| {
+                    switch (self.task_runtime.finishRecoveryHistory(identity.task_id, identity.attempt_id, slot.job)) {
+                        .unchanged => {},
+                        .ready => self.task_persistence_health = .ready,
+                        .write_failed => if (!self.shutting_down or slot.job.outcome == .history) self.markTaskPersistenceWriteFailed(),
+                        .outcome_unknown => self.task_persistence_health = .outcome_unknown,
+                    }
+                    slot.job.deinit();
+                    entry.* = null;
+                    changed = true;
+                    continue;
+                },
+                .approval => |id| id,
+            };
             const task = self.task_runtime.find(task_id) orelse unreachable;
-            if (slot.restore_attempt_id) |attempt_id| {
-                const restore = task.runtime.restore_job orelse unreachable;
-                std.debug.assert(restore.attempt.attempt_id == attempt_id);
-                const resolve_only = slot.job.work.history.input == .resolution;
-                switch (slot.job.outcome) {
-                    .history => |outcome| {
-                        restore.binding_commit = switch (outcome) {
-                            .committed => .committed,
-                            .failed => .failed,
-                            .outcome_unknown => .outcome_unknown,
-                        };
-                        switch (outcome) {
-                            .committed, .failed => {
-                                restore.unknown_history = null;
-                                task.runtime.last_restore_failure = if (outcome == .failed) .binding_persistence_failed else null;
-                                if (outcome == .committed or resolve_only)
-                                    self.task_persistence_health = .ready
-                                else
-                                    self.markTaskPersistenceWriteFailed();
-                            },
-                            .outcome_unknown => {
-                                if (!resolve_only) restore.unknown_history = slot.job.historyToken();
-                                self.task_persistence_health = .outcome_unknown;
-                                task.runtime.last_restore_failure = .binding_persistence_unknown;
-                            },
-                        }
-                    },
-                    .none, .failure, .checkpoint, .retired => if (!resolve_only) {
-                        restore.binding_commit = .failed;
-                        const cancelled = slot.job.outcome == .failure and slot.job.outcome.failure.reason == .cancelled;
-                        if (cancelled) task.runtime.last_restore_failure = .cancelled;
-                        if (!cancelled and !self.shutting_down) self.markTaskPersistenceWriteFailed();
-                    },
-                }
-                slot.job.deinit();
-                entry.* = null;
-                changed = true;
-                continue;
-            }
             const change = task.approval_change.?;
             const mode_commit = if (change.phase == .outcome_unknown) if (change.unknown_history) |history| history.mode_commit else false else change.phase == .mode_commit;
             const phase = change.phase;
@@ -4751,32 +4470,24 @@ pub const Runtime = struct {
             if (self.task_runtime.approvalJobFor(task.durable.id)) continue;
             if (self.shutting_down) continue;
             switch (change.phase) {
-                .waiting => {
-                    if (change.recovery_attempt_id != null and task.runtime.close_failed and task.runtime.close_thread == null) {
-                        self.task_runtime.failApprovalRecovery(task.durable.id);
+                .waiting, .recovering => switch (self.task_runtime.advanceApprovalAttachment(task.durable.id)) {
+                    .wait => {},
+                    .changed => changed = true,
+                    .detached => changed = self.advanceDetachedApprovalRecovery(task.durable.id) or changed,
+                    .detach => {
+                        _ = self.task_runtime.beginDetach(task.durable.id, self.taskRuntimeOperationEffects()) catch |err| switch (err) {
+                            error.CloseInProgress => {},
+                            else => self.task_runtime.failApprovalRecovery(task.durable.id),
+                        };
                         changed = true;
-                        continue;
-                    }
-                    if (!task.runtime.hasAttachedSession()) {
-                        if (task.runtime.active_operation != .none or task.runtime.hasClosingSession() or task.runtime.close_thread != null) continue;
-                        if (change.recovery_attempt_id != null) {
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        } else if (!self.beginApprovalRecovery(task.durable.id))
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        changed = true;
-                        continue;
-                    }
-                    if (task.durable.permission_profile == change.target.profile()) {
-                        task.approval_change.?.phase = .mode_commit;
-                        changed = true;
-                    } else {
-                        if (!self.task_runtime.approvalCoreIdle(task.durable.id)) continue;
+                    },
+                    .checkpoint => |baseline_confirmed| {
                         const resources = self.taskRuntimeOperationEffects().worker.checkpoint;
-                        self.task_runtime.queueApprovalCheckpoint(task.durable.id, change.baseline_confirmed, resources, self.approvalExecutor(), self.approvalNotifier()) catch {
+                        self.task_runtime.queueApprovalCheckpoint(task.durable.id, baseline_confirmed, resources, self.approvalExecutor(), self.approvalNotifier()) catch {
                             self.failApprovalChange(task.durable.id, .checkpoint_failed, false);
                         };
                         changed = true;
-                    }
+                    },
                 },
                 .baseline_commit, .mode_commit => {
                     if (self.approvalHistoryBlocked()) continue;
@@ -4790,30 +4501,6 @@ pub const Runtime = struct {
                         self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                     };
                     changed = true;
-                },
-                .recovering => {
-                    if (task.runtime.close_failed and task.runtime.close_thread == null) {
-                        self.task_runtime.failApprovalRecovery(task.durable.id);
-                        changed = true;
-                        continue;
-                    }
-                    if (task.runtime.hasAttachedSession()) {
-                        if (change.recovery_attempt_id != null and task.runtime.active_operation == .none) {
-                            self.failApprovalChange(task.durable.id, change.failure orelse .mode_update_failed, false);
-                        } else {
-                            _ = self.task_runtime.beginDetach(task.durable.id, self.taskRuntimeOperationEffects()) catch |err| switch (err) {
-                                error.CloseInProgress => {},
-                                else => self.task_runtime.failApprovalRecovery(task.durable.id),
-                            };
-                        }
-                        changed = true;
-                    } else if (task.runtime.active_operation == .none and !task.runtime.hasClosingSession() and task.runtime.close_thread == null) {
-                        if (change.recovery_attempt_id != null) {
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        } else if (!self.beginApprovalRecovery(task.durable.id))
-                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
-                        changed = true;
-                    }
                 },
                 .baseline_export, .mutation_export, .outcome_unknown => {},
             }
@@ -4991,14 +4678,8 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (input.target.source_id.len == 0 or
-            input.target.model_id.len == 0 or
-            input.target.source_id.len > models_contract.Limits.provider_id_bytes or
-            input.target.model_id.len > models_contract.Limits.model_id_bytes or
-            input.expected_source_generation == 0 or
+        if (!input.target.valid() or input.expected_source_generation == 0 or
             input.expected_catalog_generation == 0 or
-            !std.unicode.utf8ValidateSlice(input.target.source_id) or
-            !std.unicode.utf8ValidateSlice(input.target.model_id) or
             self.containsKnownCredential(input.target.source_id) or
             self.containsKnownCredential(input.target.model_id))
             return error.InvalidTaskModel;
@@ -5008,16 +4689,14 @@ pub const Runtime = struct {
             .expected_catalog_generation = input.expected_catalog_generation,
         }))
             return error.StaleCatalog;
-        if (self.approvalHistoryBlocked() or self.task_runtime.approvalHistoryWorkerActive()) return error.TaskBusy;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change != null) return error.TaskBusy;
-        var prepared = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
-        defer if (prepared.active) prepared.rollback();
-        const revision = prepared.task.durable.model_intent.?.revision;
+        if (self.approvalHistoryBlocked() or self.task_runtime.approvalChangePending()) return error.TaskBusy;
+        const revision = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
+        var rollback = true;
+        defer if (rollback) {
+            _ = self.task_runtime.settleModelIntent(false);
+        };
         if (self.task_persistence.enabled or self.task_persistence.restore_failed) {
-            switch (self.task_persistence_health) {
-                .ready, .degraded, .write_failed => {},
-                else => return error.TaskPersistenceUnavailable,
-            }
+            if (!self.task_persistence_health.allowsWrite(.retry_failed)) return error.TaskPersistenceUnavailable;
             var scratch = try self.buildTaskStateWire();
             defer scratch.deinit();
             if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return error.TaskStoreEncodeFailed;
@@ -5030,8 +4709,7 @@ pub const Runtime = struct {
                 },
                 .outcome_unknown => {
                     self.approval_history_unknown = candidate.token orelse return error.TaskPersistenceFailed;
-                    self.pending_model_intent = prepared;
-                    prepared.active = false;
+                    rollback = false;
                     self.approval_history_dirty = true;
                     self.task_persistence_health = .outcome_unknown;
                     self.bumpRevision();
@@ -5039,16 +4717,17 @@ pub const Runtime = struct {
                 },
             }
         }
-        prepared.complete();
+        const settled_task_id = self.task_runtime.settleModelIntent(true).?;
+        std.debug.assert(settled_task_id == task_id);
+        rollback = false;
         self.rememberTaskModelPreference(task_id);
         self.bumpRevision();
         return revision;
     }
 
     fn rememberTaskModelPreference(self: *Runtime, task_id: u64) void {
-        const task = self.task_runtime.findConst(task_id) orelse return;
-        const intent = task.durable.model_intent orelse return;
-        _ = self.custom_providers.rememberPreference(intent.modelRef());
+        const model_ref = self.task_runtime.committedModelRef(task_id) orelse return;
+        _ = self.custom_providers.rememberPreference(model_ref);
     }
 
     /// Close admission before any Application shutdown drain can reconcile.
@@ -5361,10 +5040,8 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (self.observeMcpInstallation(null)) |observation| {
-            const operation = observation.server.installation.?;
-            if (operation.task_id == task_id and operation.run_id == run_id) {
-                const id = observation.server.id[0..mcp_configuration.created_identity_bytes].*;
-                _ = self.cancelMcpInstallation(&id, operation.revision) catch {};
+            if (observation.task_id == task_id and observation.run_id == run_id) {
+                _ = self.cancelMcpInstallation(&observation.server_id, observation.revision) catch {};
             }
         }
         if (try self.task_runtime.cancelRun(
@@ -6000,7 +5677,14 @@ pub const Runtime = struct {
                         if (receipt.outcome == .rejected) break;
                     },
                     .start => |index| {
-                        if (!self.startWaitingInput(task.durable.id, index)) break;
+                        if (!self.task_runtime.advanceWaitingInput(task.durable.id, index, self.taskRuntimeProjectionEffects(), .{
+                            .context = self,
+                            .restore_fn = restoreWaitingInput,
+                            .run_fn = admitWaitingInput,
+                            .history_blocked = self.approvalHistoryBlocked(),
+                            .release = self.taskRuntimeReleaseEffects(),
+                        })) break;
+                        self.bumpRevision();
                     },
                 }
             }
@@ -6018,43 +5702,22 @@ pub const Runtime = struct {
         };
     }
 
-    fn startWaitingInput(self: *Runtime, task_id: u64, index: usize) bool {
-        const task = self.task_runtime.find(task_id) orelse return false;
-        if (task.model_intent_prepared or task.approval_change != null or self.approvalHistoryBlocked()) return false;
-        if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) {
-            const capability = self.task_runtime.continuationProjection(task_id, self.taskRuntimeProjectionEffects());
-            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed or capability.?.unavailable == .runtime_unavailable) and self.task_runtime.beginInputPreparation(task_id, index)) {
-                _ = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch |err| {
-                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null);
-                    self.bumpRevision();
-                    return true;
-                };
-                return false;
-            }
-            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable, null);
-            self.bumpRevision();
-            return true;
-        }
-        var previous: u64 = 0;
-        for (task.durable.runs) |entry| if (entry) |run| {
-            previous = @max(previous, run.id);
+    fn restoreWaitingInput(context: *anyopaque, task_id: u64, binding_epoch: u64) ?task_runtime.Runtime.WaitingInputEffects.RestoreFailure {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        _ = self.restoreTaskConversation(task_id, binding_epoch) catch |err| return .{
+            .reason = sendInputRejection(err),
+            .blocking_task_id = if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null,
         };
-        const id = self.admitTaskRunInternal(task_id, task.durable.binding_epoch, .{ .queued = index }, null) catch |err| {
-            for (task.durable.runs) |entry| if (entry) |run| if (run.id > previous) {
-                self.task_runtime.finishWaitingInput(task_id, index, run.id, null, self.taskRuntimeReleaseEffects());
-                self.bumpRevision();
-                return true;
-            };
-            switch (err) {
-                error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => return false,
-                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), null),
-            }
-            self.bumpRevision();
-            return true;
+        return null;
+    }
+
+    fn admitWaitingInput(context: *anyopaque, task_id: u64, binding_epoch: u64, index: usize) task_runtime.Runtime.WaitingInputEffects.RunAdmission {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const id = self.admitTaskRunInternal(task_id, binding_epoch, .{ .queued = index }, null) catch |err| return switch (err) {
+            error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => .retry,
+            else => .{ .rejected = sendInputRejection(err) },
         };
-        self.task_runtime.finishWaitingInput(task_id, index, id, null, self.taskRuntimeReleaseEffects());
-        self.bumpRevision();
-        return true;
+        return .{ .admitted = id };
     }
 
     fn advanceInputContinuation(self: *Runtime, task_id: u64) bool {
@@ -6333,66 +5996,16 @@ pub const Runtime = struct {
         var parsed = lifecycle.parseMcpInstallRequest(self.allocator, pending.json) catch return .{ .outcome = .rejected };
         defer parsed.deinit();
         const request = parsed.parsed.value;
-        const d = request.connection;
-        const source_url = std.mem.sliceTo(request.sourceUrl, '#');
-        const origin = mcp_configuration.endpointOrigin(source_url, 4096) orelse return .{ .outcome = .rejected };
         const evidence = self.task_runtime.mcpInstallationSourceEvidence(pending.task_id, request.sourceUrl);
-        const source_message = evidence.message_id;
-        var needs_authorization = evidence.requiresConfirmation();
-        const destination = if (d.endpoint) |endpoint| mcp_configuration.endpointOrigin(endpoint, 4096) orelse return .{ .outcome = .rejected } else null;
-        var slots: [16]mcp_configuration.InstallationCredentialWire = undefined;
-        for (request.credentials, 0..) |plan, i| {
-            slots[i] = .{ .name = plan.slot, .manual = plan.kind == .user_input };
-            if (plan.url) |url| {
-                const credential_origin = mcp_configuration.endpointOrigin(url, 4096) orelse return .{ .outcome = .rejected };
-                if (!std.mem.eql(u8, credential_origin, origin) or (destination != null and !std.mem.eql(u8, credential_origin, destination.?))) needs_authorization = true;
-            }
-        }
-        const connection: mcp_configuration.InstallationConnection = if (std.mem.eql(u8, d.transport, "stdio")) .{ .stdio = .{
-            .display_name = d.displayName,
-            .command = d.command.?,
-            .arguments = d.arguments,
-            .cwd = d.cwd,
-            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
-            .environment_names = d.environmentNames,
-        } } else if (std.mem.eql(u8, d.authMode, "oauth")) .{ .oauth = .{ .display_name = d.displayName, .url = d.endpoint.?, .client = .dynamic_registration } } else .{ .http = .{
-            .display_name = d.displayName,
-            .url = d.endpoint.?,
-            .auth_mode = if (std.mem.eql(u8, d.authMode, "static")) .static else .none,
-            .header_names = d.headerNames,
-        } };
-        const inspection = runtime.state.management.?.inspect();
         defer self.publishMcpRuntimeChanges();
-        return runtime.startInstallation(inspection.desired_generation orelse 0, connection, .{
-            .task_id = pending.task_id,
-            .run_id = pending.run_id,
-            .source_message_id = source_message orelse pending.run_id,
-            .source_origin = origin,
-            .phase = if (needs_authorization) .needs_authorization else .preparing,
-            .request = pending.json,
-            .existing_server_id = request.serverId orelse existing,
-            .credentials = slots[0..request.credentials.len],
-        }) catch |err| return @errorCast(err);
+        return runtime.startPendingInstallation(id, request, evidence.message_id, evidence.requiresConfirmation(), existing) catch |err| return @errorCast(err);
     }
 
     pub fn observeMcpInstallation(self: *Runtime, id: ?[]const u8) ?control_ports.McpInstallObservation {
         const runtime = if (self.mcp) |*value| value else return null;
-        const management = if (runtime.state.management) |*value| value else return null;
-        const registry = management.desiredRegistry() orelse return null;
-        for (registry.servers) |server| {
-            const operation = server.installation orelse continue;
-            if (id) |value| {
-                if (!std.mem.eql(u8, value, server.id)) continue;
-            } else if (!operation.phase.active() and !operation.stop_pending) continue;
-            return .{
-                .generation = registry.generation,
-                .server = server,
-                .source_available = self.task_runtime.mcpInstallationSourceAvailable(operation.task_id, operation.run_id),
-                .ready = runtime.installationReady(server.id),
-                .connection_failed = runtime.installationConnectionFailed(server.id),
-            };
-        }
-        return null;
+        var observed = runtime.observeInstallation(id) orelse return null;
+        observed.source_available = self.task_runtime.mcpInstallationSourceAvailable(observed.task_id, observed.run_id);
+        return observed;
     }
 
     pub fn updateMcpInstallation(self: *Runtime, generation: u64, input: mcp_configuration.InstallationUpdate) Error!mcp_configuration.ManagementOutcome {
@@ -6408,8 +6021,8 @@ pub const Runtime = struct {
     }
     pub fn replaceMcpInstallation(self: *Runtime, generation: u64, id: []const u8, revision: u64, connection: mcp_configuration.InstallationConnection) Error!mcp_configuration.ManagementOutcome {
         const observed = self.observeMcpInstallation(id) orelse return .rejected;
-        const operation = observed.server.installation.?;
-        if (!observed.source_available or operation.revision != revision or observed.generation != generation or !operation.phase.active() or operation.phase == .needs_authorization or operation.phase == .connecting) return .rejected;
+        if (!observed.source_available or observed.revision != revision or observed.generation != generation or !observed.can_replace)
+            return .rejected;
         return switch (connection) {
             .http => |value| try self.updateMcpHttpConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .url = value.url, .sensitive_endpoint = true, .endpoint_parts = value.endpoint_parts, .auth_mode = value.auth_mode, .header_names = value.header_names }),
             .oauth => |value| try self.updateMcpOauthHttpConnection(generation, .{ .server_id = id, .display_name = value.display_name, .negotiation = value.negotiation, .timeout_ms = value.timeout_ms, .url = value.url, .sensitive_endpoint = true, .endpoint_parts = value.endpoint_parts, .client = value.client }),
@@ -7846,8 +7459,6 @@ pub const Runtime = struct {
         self.shutdownExecutor();
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
-        if (self.pending_model_intent) |*intent| intent.rollback();
-        self.pending_model_intent = null;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         self.attachments.deinit();
@@ -7859,8 +7470,6 @@ pub const Runtime = struct {
             ));
         }
         self.workspace.deinit(self.workspaceStorage());
-        self.automatic_root_configuration.deinit();
-        if (self.automatic_workspace_system_root) |root| self.allocator.free(root);
         self.schedule.deinit();
         self.skill.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
@@ -8084,7 +7693,7 @@ pub const Runtime = struct {
                 redacted = true;
                 continue;
             }
-            const codepoint_len = utf8CodepointLen(value, read);
+            const codepoint_len = credential_match.codepointLen(value, read);
             @memcpy(
                 projected[write..][0..codepoint_len],
                 value[read..][0..codepoint_len],
@@ -8197,26 +7806,15 @@ pub const Runtime = struct {
 
     fn taskModelSelectionAvailability(self: *Runtime, query: task_runtime.ProjectionAuthorityQuery) product_task.ModelSelectionAvailability {
         if (self.shutting_down) return .task_unavailable;
-        const task = self.task_runtime.findConst(query.task_id) orelse return .task_unavailable;
-        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle or task.runtime.close_requested)
-            return .task_unavailable;
-        const models = self.modelsView();
-        if (models.availability != .ready) return .catalog_unavailable;
-        for (models.custom_providers) |provider| {
-            if (provider.enabled and provider.credential_status == .ready)
-                for (provider.models) |model| {
-                    if (model.ready) return .available;
-                };
-        }
-        var loading = false;
-        for (models.providers) |provider| switch (provider.catalog_state) {
-            .ready => {
-                if (provider.models.len != 0) return .available;
-            },
-            .loading, .choosing => loading = true,
-            else => {},
+        const intent_source = switch (self.task_runtime.modelSelectionScope(query.task_id)) {
+            .unavailable => return .task_unavailable,
+            .editable => |source| source,
         };
-        return if (loading) .catalog_loading else .catalog_unavailable;
+        return switch (models_aggregate.Runtime.selectionCatalogAvailability(self.custom_providers.view(), intent_source)) {
+            .available => .available,
+            .catalog_loading => .catalog_loading,
+            .catalog_unavailable => .catalog_unavailable,
+        };
     }
 
     fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
@@ -8264,17 +7862,7 @@ pub const Runtime = struct {
             installed.provider_id["custom_provider:".len..]
         else
             return false;
-        const target: models_contract.ModelRef = .{ .source_id = source, .model_id = installed.model };
-        const models = self.modelsView();
-        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, source)) {
-            if (provider.source_generation != installed.source_generation) return false;
-            if (std.mem.eql(u8, source, models_contract.metask_source_id) and
-                (provider.catalog_state == .loading or provider.catalog_state == .failed or provider.catalog_state == .unavailable)) return true;
-            return self.custom_providers.sourceModelProtocol(target, installed.source_generation, provider.catalog_generation) == installed.protocol;
-        };
-        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, source))
-            return self.custom_providers.sourceModelProtocol(target, installed.source_generation, provider.catalog_generation) == installed.protocol;
-        return false;
+        return self.custom_providers.installedModelAvailable(.{ .source_id = source, .model_id = installed.model }, installed.source_generation, installed.protocol);
     }
 
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
@@ -8347,6 +7935,7 @@ pub const Runtime = struct {
     fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
         return .{
             .now_ms = self.run_clock.now(),
+            .checkpoint_health = self.checkpoint_store_health.load(.acquire),
             .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
             .context = self,
             .authority_fn = taskProjectionAuthority,
@@ -8434,15 +8023,7 @@ pub const Runtime = struct {
         self: *Runtime,
         selection: NewTaskModelSelectionInput,
     ) bool {
-        if (selection.target.source_id.len == 0 or
-            selection.target.model_id.len == 0 or
-            selection.target.source_id.len > models_contract.Limits.provider_id_bytes or
-            selection.target.model_id.len > models_contract.Limits.model_id_bytes or
-            selection.expected_source_generation == 0 or
-            selection.expected_catalog_generation == 0 or
-            !std.unicode.utf8ValidateSlice(selection.target.source_id) or
-            !std.unicode.utf8ValidateSlice(selection.target.model_id))
-            return false;
+        if (!selection.target.valid()) return false;
         return self.custom_providers.sourceModelProtocol(
             selection.target,
             selection.expected_source_generation,
@@ -8465,39 +8046,31 @@ pub const Runtime = struct {
         };
     }
 
+    fn scheduledModelBinding(self: *Runtime, binding: product_schedule.ModelBinding) models_aggregate.Runtime.BoundModelAvailability {
+        const availability = self.custom_providers.boundModelAvailability(binding.model_ref, binding.source_generation, binding.protocol);
+        if (availability == .ready) _ = self.metaskAuthorizationScope(binding.model_ref.source_id) catch return .unavailable;
+        return availability;
+    }
+
     fn scheduleBindingAvailability(context: ?*anyopaque, binding: product_schedule.ModelBinding) product_schedule.BindingAvailability {
         const self: *Runtime = @ptrCast(@alignCast(context.?));
-        const models = self.modelsView();
-        if (models.availability != .ready) return .unavailable;
-        for (models.providers) |provider| {
-            if (!std.mem.eql(u8, provider.id, binding.model_ref.source_id)) continue;
-            if (provider.catalog_state != .ready) return .unavailable;
-            if (provider.source_generation != binding.source_generation) return .invalid;
-            const protocol = self.custom_providers.sourceModelProtocol(binding.model_ref, binding.source_generation, provider.catalog_generation) orelse return .invalid;
-            if (protocol != binding.protocol) return .invalid;
-            _ = self.metaskAuthorizationScope(provider.id) catch return .unavailable;
-            return .ready;
-        }
-        for (models.custom_providers) |provider| {
-            if (!std.mem.eql(u8, provider.id, binding.model_ref.source_id)) continue;
-            if (!provider.enabled or provider.source_generation != binding.source_generation or provider.protocol != binding.protocol) return .invalid;
-            if (provider.credential_status != .ready) return .unavailable;
-            return if (self.custom_providers.sourceModelProtocol(binding.model_ref, binding.source_generation, provider.catalog_generation) != null) .ready else .invalid;
-        }
-        return .invalid;
+        return switch (self.scheduledModelBinding(binding)) {
+            .ready => .ready,
+            .unavailable => .unavailable,
+            .invalid => .invalid,
+        };
     }
 
     fn scheduledSelection(self: *Runtime, binding: ScheduledTaskBindingInput) Error!NewTaskModelSelectionInput {
         if (self.shutting_down or !self.skill.identitySourceTrusted()) return error.ExecutionUnavailable;
-        if (scheduleBindingAvailability(self, binding) != .ready) return error.ExecutionGenerationMismatch;
-        const models = self.modelsView();
-        for (models.providers) |provider| {
-            if (std.mem.eql(u8, provider.id, binding.model_ref.source_id)) return .{ .target = binding.model_ref, .expected_source_generation = binding.source_generation, .expected_catalog_generation = provider.catalog_generation };
-        }
-        for (models.custom_providers) |provider| {
-            if (std.mem.eql(u8, provider.id, binding.model_ref.source_id)) return .{ .target = binding.model_ref, .expected_source_generation = binding.source_generation, .expected_catalog_generation = provider.catalog_generation };
-        }
-        return error.ExecutionUnavailable;
+        return switch (self.scheduledModelBinding(binding)) {
+            .ready => |catalog_generation| .{
+                .target = binding.model_ref,
+                .expected_source_generation = binding.source_generation,
+                .expected_catalog_generation = catalog_generation,
+            },
+            .invalid, .unavailable => error.ExecutionGenerationMismatch,
+        };
     }
 
     fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
@@ -8650,17 +8223,14 @@ pub const Runtime = struct {
             _ = try self.metaskAuthorizationScope(selection.target.source_id);
             break :selected .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = protocol };
         } else retained orelse return error.InvalidScheduledTaskInput;
-        const title = std.mem.trim(u8, input.title, " \t\r\n");
-        if (title.len == 0 or title.len > self.limits.max_task_title_bytes or !std.unicode.utf8ValidateSlice(title)) return error.InvalidTaskTitle;
-        for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
+        const title = try product_schedule.Definition.normalizedTitle(input.title, self.limits.max_task_title_bytes);
         if (!self.workspace.automaticRootAvailable()) return error.WorkspaceUnavailable;
         const recurrence = if (input.local_recurrence) |local| resolved: {
             if (input.recurrence != null) return error.InvalidSchedule;
             break :resolved try self.schedule.resolveLocalRecurrence(local, id);
         } else input.recurrence orelse return error.InvalidSchedule;
         try recurrence.validate();
-        const instruction = std.mem.trim(u8, input.input, " \t\r\n");
-        if (instruction.len == 0 or instruction.len > self.limits.max_user_message_bytes or !std.unicode.utf8ValidateSlice(instruction)) return error.InvalidScheduledTaskInput;
+        const instruction = try product_schedule.Definition.normalizedInstruction(input.input, self.limits.max_user_message_bytes);
         return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = recurrence, .timezone = input.timezone };
     }
 
@@ -9313,7 +8883,6 @@ pub const Runtime = struct {
         var input: task_runtime.HistoryInput = .{ .candidate = try self.captureTaskHistoryCandidate(null) };
         errdefer input.deinit();
         try self.task_runtime.queueRecoveryHistory(task_id, input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
-        self.task_runtime.find(task_id).?.runtime.restore_job.?.binding_commit = .pending;
         return null;
     }
 
@@ -9392,10 +8961,10 @@ pub const Runtime = struct {
         // During an approval transaction, ordinary lifecycle facts join the
         // existing bounded history writer. Even a gap between its jobs must
         // not turn cancel/terminal reconciliation into synchronous disk I/O.
-        for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change != null) {
+        if (self.task_runtime.approvalChangePending()) {
             self.approval_history_dirty = true;
             return error.TaskBusy;
-        };
+        }
         if (self.approvalHistoryBlocked()) {
             self.approval_history_dirty = true;
             return error.TaskBusy;
@@ -9403,10 +8972,7 @@ pub const Runtime = struct {
         // Retry failed memory scrubs using the Store's retained credential
         // lease, even if its execution owner has already retired.
         self.syncHistoryCredentials(null, null);
-        switch (self.task_persistence_health) {
-            .ready, .degraded, .write_failed, .outcome_unknown => {},
-            .read_failed, .corrupt, .unavailable => return error.TaskPersistenceUnavailable,
-        }
+        if (!self.task_persistence_health.allowsWrite(.after_readback)) return error.TaskPersistenceUnavailable;
         var scratch = self.buildTaskStateWireWithCheckpoint(checkpoint_override) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
@@ -9450,18 +9016,13 @@ pub const Runtime = struct {
 
     fn prepareAutomaticWorkspace(self: *Runtime) Error!PreparedAutomaticBinding {
         try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
+        const had_root = self.workspace.automaticRootAvailable();
         var preparation = self.workspace.prepareAutomatic(
             "",
             self.workspaceStorage(),
             self.skill.identitySourceTrusted(),
         ) catch |err| {
-            if (err == error.WorkspaceUnavailable and
-                self.workspace.automaticRootAvailable())
-            {
-                self.workspace.disableAutomaticRoot();
-                self.automatic_root_configuration.health = .path_unavailable;
-                self.bumpRevision();
-            }
+            if (had_root and !self.workspace.automaticRootAvailable()) self.bumpRevision();
             return err;
         };
         errdefer if (preparation.isActive()) {
@@ -9775,14 +9336,6 @@ pub const Runtime = struct {
         );
     }
 
-    fn checkpointMutationPending(
-        self: *const Runtime,
-        task: *const TestTask,
-    ) bool {
-        return self.checkpoint_store_health.load(.acquire) != .unavailable and
-            task.runtime.worker_leases.hasLive();
-    }
-
     test "automatic title fallback extracts text and skill display names" {
         var text_input: RunInputRecord = .{ .text = .{
             .value = @constCast("\n```text\nignored\n```\n### Review the AgentCore lifecycle\nmore detail"),
@@ -10084,7 +9637,7 @@ pub const Runtime = struct {
         var redacted = false;
         while (read < target.list.items.len) {
             const value = target.list.items;
-            if (credentialEndAtCodepoint(value, read, credential)) |redaction_end| {
+            if (credential_match.matchEnd(value, read, credential)) |redaction_end| {
                 const marker_len = @min(redaction_end - read, 3);
                 @memset(target.list.items[write..][0..marker_len], '*');
                 write += marker_len;
@@ -10092,7 +9645,7 @@ pub const Runtime = struct {
                 redacted = true;
                 continue;
             }
-            if (credentialMayContinueAtCodepoint(value, read, credential)) {
+            if (credential_match.mayContinue(value, read, credential)) {
                 const remaining = value[read..];
                 std.mem.copyForwards(
                     u8,
@@ -10103,7 +9656,7 @@ pub const Runtime = struct {
                 target.committed_len = write;
                 return redacted;
             }
-            const codepoint_len = utf8CodepointLen(value, read);
+            const codepoint_len = credential_match.codepointLen(value, read);
             std.mem.copyForwards(
                 u8,
                 target.list.items[write..][0..codepoint_len],
@@ -10196,7 +9749,7 @@ pub const Runtime = struct {
                         try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, "***"[0..@min(end - index, 3)]);
                         index = end;
                         copied = end;
-                    } else index += utf8CodepointLen(value, index);
+                    } else index += credential_match.codepointLen(value, index);
                 }
                 try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..]);
             }
@@ -10248,7 +9801,7 @@ pub const Runtime = struct {
         value: []const u8,
         codepoint_start: usize,
     ) ?usize {
-        const codepoint_len = utf8CodepointLen(value, codepoint_start);
+        const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         var match_end: usize = 0;
         for (0..codepoint_len) |offset| {
             const credential_len = self.matchedKnownCredentialLen(
@@ -10278,7 +9831,7 @@ pub const Runtime = struct {
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
         while (index < value.len) {
-            if (credentialEndAtCodepoint(value, index, credential)) |redaction_end| {
+            if (credential_match.matchEnd(value, index, credential)) |redaction_end| {
                 _ = writer.splatByte('*', @min(redaction_end - index, 3)) catch
                     return error.SnapshotTooLarge;
                 index = redaction_end;
@@ -10588,6 +10141,7 @@ pub const Runtime = struct {
             .installation_request_fn = controlMcpInstallationRequest,
             .start_installation_fn = controlMcpStartInstallation,
             .observe_installation_fn = controlMcpObserveInstallation,
+            .next_installation_retry_candidate_fn = controlMcpNextInstallationRetryCandidate,
             .update_installation_fn = controlMcpUpdateInstallation,
             .capture_installation_fn = controlMcpCaptureInstallation,
             .replace_installation_fn = controlMcpReplaceInstallation,
@@ -11143,6 +10697,11 @@ fn controlMcpStartInstallation(context: *anyopaque, id: u64, existing: ?[]const 
 fn controlMcpObserveInstallation(context: *anyopaque, id: ?[]const u8) ?control_ports.McpInstallObservation {
     return controlOwner(context).observeMcpInstallation(id);
 }
+fn controlMcpNextInstallationRetryCandidate(context: *anyopaque, task_id: u64, index: *usize) !?product_mcp.InstallationRetryCandidate {
+    const self = controlOwner(context);
+    const runtime = if (self.mcp) |*value| value else return null;
+    return runtime.nextInstallationRetryCandidate(task_id, index);
+}
 fn controlMcpUpdateInstallation(context: *anyopaque, generation: u64, input: mcp_configuration.InstallationUpdate) !mcp_configuration.ManagementOutcome {
     return controlOwner(context).updateMcpInstallation(generation, input);
 }
@@ -11270,33 +10829,6 @@ fn controlSetScheduleBackgroundAvailable(context: *anyopaque, available: bool) v
     controlOwner(context).setScheduleBackgroundAvailableNoFail(available);
 }
 
-fn closeWorker(
-    completion_out: *std.atomic.Value(CloseCompletion),
-    binding: *task_test_agent_session.Binding,
-    notifier: ChangeNotifier,
-) void {
-    const completion: CloseCompletion = close: {
-        switch (binding.state()) {
-            .owned => switch (binding.closeOutcome(.session_close)) {
-                .closed => {},
-                .failure => |failure| break :close closeFailureCompletion(
-                    failure.session_disposition,
-                ),
-            },
-            // A previous close succeeded but Runtime slot release failed.
-            // Retry only that remaining linear obligation.
-            .closed => {},
-            .released, .relinquished, .moved, .fixture, .abandoned => unreachable,
-        }
-        binding.releaseClosed() catch
-            break :close .failed_closing;
-        break :close .closed;
-    };
-    completion_out.store(completion, .release);
-    _ = notifier.notify();
-}
-
-const publishAutomaticTitleFallback = if (builtin.is_test) task_test_execution.publishAutomaticTitleFallback else void;
 const cancelPreparedRunOrPanic = taskWorkerCancelPreparedRun;
 const cancelPreparedCompactOrPanic = taskWorkerCancelPreparedCompact;
 fn taskWorkerCancelPreparedRun(
@@ -11343,45 +10875,6 @@ fn commitCompactProductTerminal(
         source_diagnostic_truncated,
         false,
     );
-}
-
-fn requestRunTermination(
-    run: *TestRunRecord,
-    interruption: lifecycle.ExternalInterruption,
-) RunTerminationDispatch {
-    const pending = pendingInterruption(interruption);
-    _ = run.pending_termination.cmpxchgStrong(.none, pending, .acq_rel, .acquire);
-    switch (run.agent_handoff.load(.acquire)) {
-        .queued, .starting => return .pending,
-        .finishing => return .already_finishing,
-        .running => {},
-    }
-    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse return .already_finishing;
-    var lease = lease_value;
-    defer lease.deinit();
-    return switch (lease.requestTermination(pendingTerminationSignal(run))) {
-        .requested => .requested,
-        .already_requested => .already_requested,
-        .already_terminal => .already_terminal,
-        .stale_run => .stale_run,
-        .session_closing => .session_closing,
-    };
-}
-
-fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) void {
-    switch (dispatch) {
-        .pending,
-        .requested,
-        .already_requested,
-        .already_finishing,
-        .already_terminal,
-        .session_closing,
-        => {},
-        .stale_run => std.debug.panic(
-            "active lifecycle Run {d} published a stale RunControl",
-            .{run_id},
-        ),
-    }
 }
 
 fn noChangeNotification(_: ?*anyopaque) bool {
@@ -11488,36 +10981,6 @@ fn commitTerminal(
     return false;
 }
 
-fn commitBeginFailure(run: *TestRunRecord, failure: lifecycle.BeginRunFailure) void {
-    const decision = task_test_policy.classifyBeginFailure(run, failure);
-    _ = commitTerminal(
-        run,
-        decision.phase,
-        decision.outcome,
-        decision.cause,
-        failure.session_disposition,
-        "",
-        false,
-    );
-}
-
-fn cancelTaskCheckpoints(task: *TestTask) void {
-    for (task.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        switch (run.checkpoint.state.load(.acquire)) {
-            .none, .exporting => run.checkpoint.cancelled.store(true, .release),
-            else => {},
-        }
-    }
-    for (task.durable.compacts) |*entry| {
-        const compact = &(entry.* orelse continue);
-        switch (compact.checkpoint.state.load(.acquire)) {
-            .none, .exporting => compact.checkpoint.cancelled.store(true, .release),
-            else => {},
-        }
-    }
-}
-
 test "approval checkpoint restores before the first Run independently of the Task model and rejects a future approval anchor" {
     var source = try testRuntime();
     defer source.deinit();
@@ -11577,15 +11040,6 @@ test "approval checkpoint restores before the first Run independently of the Tas
     }
 }
 
-fn cancelTaskAutomaticTitles(task: *TestTask) void {
-    for (task.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        const execution = run.execution orelse continue;
-        execution.automatic_title.cancel_requested.store(true, .release);
-        publishAutomaticTitleFallback(run);
-    }
-}
-
 fn checkpointIdentityEqual(
     left: checkpoint_store.Identity,
     right: checkpoint_store.Identity,
@@ -11621,8 +11075,8 @@ fn sanitizeInto(destination: []u8, value: []const u8, secrets: []const []const u
     while (read < value.len) {
         var match_end: usize = 0;
         var cursor = read;
-        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
-            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+        while (cursor == read or cursor < match_end) : (cursor += credential_match.codepointLen(value, cursor)) {
+            for (secrets) |secret| if (credential_match.matchEnd(value, cursor, secret)) |end| {
                 match_end = @max(match_end, end);
             };
         }
@@ -11636,7 +11090,7 @@ fn sanitizeInto(destination: []u8, value: []const u8, secrets: []const []const u
             redacted = true;
             continue;
         }
-        const sequence_len = utf8CodepointLen(value, read);
+        const sequence_len = credential_match.codepointLen(value, read);
         if (sequence_len > value.len - read or sequence_len > destination.len - write) break;
         @memcpy(destination[write..][0..sequence_len], value[read..][0..sequence_len]);
         write += sequence_len;
@@ -11669,7 +11123,7 @@ fn redactWorkspaceBytesNoFail(
     var redacted = false;
     while (read < projected_len.*) {
         const projected = storage[0..projected_len.*];
-        if (credentialEndAtCodepoint(projected, read, credential)) |redaction_end| {
+        if (credential_match.matchEnd(projected, read, credential)) |redaction_end| {
             const marker_len = @min(redaction_end - read, 3);
             @memset(storage[write..][0..marker_len], '*');
             write += marker_len;
@@ -11677,7 +11131,7 @@ fn redactWorkspaceBytesNoFail(
             redacted = true;
             continue;
         }
-        const codepoint_len = utf8CodepointLen(projected, read);
+        const codepoint_len = credential_match.codepointLen(projected, read);
         std.mem.copyForwards(
             u8,
             storage[write..][0..codepoint_len],
@@ -11707,13 +11161,6 @@ fn redactFixedWidthNoFail(storage: []u8, credential: []const u8) bool {
 
 const RedactionBounds = struct { start: usize, end: usize };
 
-fn utf8CodepointLen(value: []const u8, start: usize) usize {
-    return @min(
-        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
-        value.len - start,
-    );
-}
-
 fn utf8RedactionBounds(
     value: []const u8,
     match_start: usize,
@@ -11724,49 +11171,6 @@ fn utf8RedactionBounds(
     var end = @min(value.len, match_start + match_len);
     while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
     return .{ .start = start, .end = end };
-}
-
-fn credentialEndAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) ?usize {
-    if (credential.len == 0) return null;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    var match_end: usize = 0;
-    for (0..codepoint_len) |offset| {
-        if (std.mem.startsWith(
-            u8,
-            value[codepoint_start + offset ..],
-            credential,
-        ))
-            match_end = @max(
-                match_end,
-                codepoint_start + offset + credential.len,
-            );
-    }
-    if (match_end == 0) return null;
-    return utf8RedactionBounds(
-        value,
-        codepoint_start,
-        match_end - codepoint_start,
-    ).end;
-}
-
-fn credentialMayContinueAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) bool {
-    if (credential.len == 0) return false;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    for (0..codepoint_len) |offset| {
-        const remaining = value[codepoint_start + offset ..];
-        if (remaining.len < credential.len and
-            std.mem.startsWith(u8, credential, remaining))
-            return true;
-    }
-    return false;
 }
 
 fn kindForResponse(response: UiResponse) UiRecordKind {
@@ -12840,6 +12244,8 @@ test "automatic Workspace root configuration swaps only future allocations and f
         &custom_storage,
     );
     const default_root = default_storage[0..default_len];
+    const configured_default = try std.fs.path.join(std.testing.allocator, &.{ std.fs.path.dirname(default_root).?, ".", "default" });
+    defer std.testing.allocator.free(configured_default);
     const custom_root = custom_storage[0..custom_len];
     var store: product_workspace.AutomaticRootConfigurationFileStore = .{
         .io = std.testing.io,
@@ -12851,7 +12257,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
         &test_agent_runtime,
         testLimits(),
         .{ .directories = .{
-            .automatic_workspace_system_root = default_root,
+            .automatic_workspace_system_root = configured_default,
             .automatic_workspace_configuration_store = &store,
         } },
     );
@@ -12968,8 +12374,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
     try std.testing.expectEqualStrings(default_root, recovered.canonical_root.?);
     try std.testing.expect(control.automaticWorkspacesAvailable());
 
-    control.workspace.disableAutomaticRoot();
-    control.automatic_root_configuration.health = .path_unavailable;
+    product_workspace.testing.invalidateAutomaticRoot(&control.workspace);
     product_workspace.automatic_root_configuration.testing.setCommitFault(
         &store,
         .write_failed,
@@ -12988,7 +12393,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
         unavailable_after_write_failure.mode.?,
     );
     try std.testing.expectEqualStrings(
-        default_root,
+        configured_default,
         unavailable_after_write_failure.canonical_root.?,
     );
     product_workspace.automatic_root_configuration.testing.setCommitFault(
@@ -15518,6 +14923,35 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     const completed = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
+    const task = control.task_runtime.find(3).?;
+    var action_storage: [16 * 1024]u8 = undefined;
+    const idle_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, idle_view, "\"compactBlocker\":null") != null);
+    const original_checkpoint_health = control.checkpoint_store_health.swap(.ready, .acq_rel);
+    var worker = try task.runtime.worker_leases.acquire();
+    defer if (worker.isActive()) worker.deinit();
+    control.syncLifecycle();
+    const worker_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, worker_view, "\"compactBlocker\":\"busy\"") != null);
+    worker.deinit();
+    control.syncLifecycle();
+    const released_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, released_view, "\"compactBlocker\":null") != null);
+    control.checkpoint_store_health.store(original_checkpoint_health, .release);
+    const coverage = completed.coverage;
+    completed.coverage = .excluded;
+    control.bumpRevision();
+    const excluded_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, excluded_view, "\"compactBlocker\":\"no_history\"") != null);
+    try std.testing.expectError(error.NoSuchRun, control.compactTaskAtBinding(3, task.durable.binding_epoch));
+    completed.coverage = coverage;
+    task.model_intent_prepared = true;
+    control.bumpRevision();
+    const pending_intent_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, pending_intent_view, "\"archiveBlocker\":\"busy\",\"deleteBlocker\":\"busy\"") != null);
+    try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskBusy, control.deleteTask(3));
+    task.model_intent_prepared = false;
     try control.setTaskArchived(3, true);
     try std.testing.expect(control.task_runtime.tasks[0].?.durable.archived);
 
@@ -15532,6 +14966,8 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     var deletion_lease = try control.task_runtime.tasks[0].?.runtime.worker_leases.acquire();
     try control.deleteTask(3);
     try std.testing.expect(control.task_runtime.tasks[0] != null);
+    const deleting_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, deleting_view, "\"archiveBlocker\":\"deleting\",\"deleteBlocker\":\"deleting\"") != null);
     try std.testing.expectError(error.TaskBusy, control.renameTask(3, "too late"));
     deletion_lease.deinit();
     const tracked_before_delete = control.projection_bytes;
@@ -16076,8 +15512,19 @@ test "busy Task model selection commits the last intent without changing install
 test "Product Control publishes Task model selection availability from cross-owner authority" {
     var control = try testRuntime();
     defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestCustomProviderVault = .{};
+    control.stopCustomProviders();
+    try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
+    defer control.stopCustomProviders();
+    const custom = try createReadyTestCustomProvider(&control);
+    try TestSupport.configureMetaskSource(&control, 17);
 
     const task = control.task_runtime.tasks[0].?;
+    _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     var query: task_runtime.ProjectionAuthorityQuery = .{
         .task_id = task.durable.id,
         .workspace_id = task.durable.workspace_id,
@@ -16102,6 +15549,9 @@ test "Product Control publishes Task model selection availability from cross-own
         product_task.ModelSelectionAvailability.catalog_loading,
         control.taskModelSelectionAvailability(query),
     );
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"modelSelectionAvailability\":\"catalog_loading\"") != null);
     control.failMetaskCatalogRefresh(
         preparation.attempt_id,
         preparation.authorization_generation,
@@ -16138,6 +15588,32 @@ test "Product Control publishes Task model selection availability from cross-own
         product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
+    const provider = control.modelsView().custom_providers[0];
+    _ = try control.selectTaskModel(task.durable.id, .{
+        .target = .{ .source_id = custom.source_id, .model_id = "gpt-5" },
+        .expected_selection_revision = 1,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    });
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .update = .{
+        .selection = .{ .source_id = custom.source_id, .expected_provider_revision = provider.provider_revision },
+        .spec = .{
+            .display_name = "OpenAI",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://example.com/v1/responses",
+        },
+    } }).accepted);
+    const configuring = control.modelsView().custom_providers[0];
+    try std.testing.expectEqual(models_contract.CustomProviderCredentialStatus.ready, configuring.credential_status);
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .remove = .{
+        .source_id = custom.source_id,
+        .expected_provider_revision = configuring.provider_revision,
+    } }).accepted);
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.available, control.taskModelSelectionAvailability(query));
+    control.custom_providers.store_healthy = false;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    control.custom_providers.store_healthy = true;
     task.durable.archived = true;
     try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));
     task.durable.archived = false;
@@ -16185,7 +15661,7 @@ test "Task model selection unknown commit resolves the original candidate before
         var settled = false;
         for (0..100_000) |_| {
             control.syncLifecycle();
-            if (control.pending_model_intent == null) {
+            if (!control.task_runtime.modelIntentPending()) {
                 settled = true;
                 break;
             }
@@ -18072,7 +17548,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
         for (0..2000) |_| {
             const pending = pending: {
                 for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
-                    if (slot.task_id == 3) break :pending slot.job;
+                    if (slot.recipient.taskId() == 3) break :pending slot.job;
                 };
                 break :pending null;
             };
@@ -21828,7 +21304,7 @@ test "approval shutdown settles joined history outcomes before releasing Task re
         _ = control.syncApprovalChanges();
         const pending = pending: {
             for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
-                if (slot.task_id == 3) break :pending slot.job;
+                if (slot.recipient.taskId() == 3) break :pending slot.job;
             };
             return error.TestUnexpectedResult;
         };

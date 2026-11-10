@@ -7,8 +7,24 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const automatic_root = @import("product_workspace_automatic_root");
+const root_configuration = @import("product_workspace_configuration");
 
 pub const AutomaticRoot = automatic_root.Root;
+pub const AutomaticRootInputs = struct {
+    system_path: ?[]const u8 = null,
+    store: ?root_configuration.Persistence = null,
+    testing_root: ?*AutomaticRoot = null,
+};
+pub const AutomaticRootChange = union(enum) { choose: []const u8, reset, retry };
+pub const AutomaticRootView = struct {
+    generation: u64,
+    mode: ?root_configuration.Mode,
+    canonical_root: ?[]const u8,
+    health: root_configuration.Health,
+    can_choose: bool,
+    can_reset: bool,
+    can_retry: bool,
+};
 
 pub fn automaticPathEqual(left: []const u8, right: []const u8) bool {
     return automatic_root.pathEqual(left, right);
@@ -137,6 +153,10 @@ pub const Error = StorageError || error{
     WorkspaceEpochMismatch,
     WorkspaceUnavailable,
     UnknownWorkspace,
+    AutomaticWorkspaceRootGenerationMismatch,
+    AutomaticWorkspaceRootPersistenceUnavailable,
+    AutomaticWorkspaceRootPersistenceFailed,
+    AutomaticWorkspaceRootPersistenceOutcomeUnknown,
 };
 
 /// Linear preparation for one automatic Workspace record and its private
@@ -277,6 +297,9 @@ pub const Runtime = struct {
     max_automatic: usize,
     max_workspace_bytes: usize,
     automatic_allocator: ?automatic_root.Allocator,
+    automatic_root_configuration: root_configuration.Runtime,
+    automatic_root_system_path: ?[]u8,
+    automatic_root_store: ?root_configuration.Persistence,
     next_id: u64 = 1,
     next_recent_order: u64 = 1,
 
@@ -286,8 +309,30 @@ pub const Runtime = struct {
         max_manual: usize,
         max_automatic: usize,
         max_workspace_bytes: usize,
-        automatic_root_capability: ?*AutomaticRoot,
+        automatic_root_inputs: AutomaticRootInputs,
     ) Error!Runtime {
+        if (automatic_root_inputs.testing_root != null and
+            (automatic_root_inputs.system_path != null or automatic_root_inputs.store != null))
+            return error.InvalidWorkspace;
+        const system_path = if (automatic_root_inputs.system_path) |path| owned: {
+            if (path.len == 0 or !std.fs.path.isAbsolute(path) or
+                !std.unicode.utf8ValidateSlice(path) or std.mem.indexOfScalar(u8, path, 0) != null or
+                path.len > root_configuration.max_root_bytes) return error.InvalidWorkspace;
+            break :owned try allocator.dupe(u8, path);
+        } else null;
+        errdefer if (system_path) |path| allocator.free(path);
+        var configuration = if (automatic_root_inputs.testing_root) |root|
+            root_configuration.Runtime{
+                .allocator = allocator,
+                .configuration = root_configuration.Configuration.custom(allocator, root.canonicalPath()) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidWorkspace,
+                },
+                .health = .ready,
+            }
+        else
+            try root_configuration.Runtime.bootstrap(allocator, automatic_root_inputs.store);
+        errdefer configuration.deinit();
         const capacity = std.math.add(usize, max_manual, max_automatic) catch
             return error.ProjectionCapacity;
         const records = try allocator.alloc(?Record, capacity);
@@ -295,7 +340,7 @@ pub const Runtime = struct {
         @memset(records, null);
         const pending_automatic = try allocator.alloc(?automatic_root.Allocation, capacity);
         @memset(pending_automatic, null);
-        return .{
+        var runtime: Runtime = .{
             .allocator = allocator,
             .io = io,
             .records = records,
@@ -303,11 +348,16 @@ pub const Runtime = struct {
             .max_manual = max_manual,
             .max_automatic = max_automatic,
             .max_workspace_bytes = max_workspace_bytes,
-            .automatic_allocator = if (automatic_root_capability) |root|
-                automatic_root.Allocator.init(root)
-            else
-                null,
+            .automatic_allocator = null,
+            .automatic_root_configuration = configuration,
+            .automatic_root_system_path = system_path,
+            .automatic_root_store = automatic_root_inputs.store,
         };
+        if (automatic_root_inputs.testing_root) |root|
+            runtime.replaceAutomaticRoot(root)
+        else
+            runtime.openInitialAutomaticRoot();
+        return runtime;
     }
 
     pub fn deinit(self: *Runtime, storage: Storage) void {
@@ -318,10 +368,7 @@ pub const Runtime = struct {
             deinitRecord(&record, storage);
             entry.* = null;
         }
-        self.allocator.free(self.pending_automatic);
-        self.allocator.free(self.records);
-        if (self.automatic_allocator) |*allocator| allocator.deinit();
-        self.* = undefined;
+        self.deinitEmpty();
     }
 
     pub fn deinitEmpty(self: *Runtime) void {
@@ -330,7 +377,142 @@ pub const Runtime = struct {
         self.allocator.free(self.pending_automatic);
         self.allocator.free(self.records);
         if (self.automatic_allocator) |*allocator| allocator.deinit();
+        self.automatic_root_configuration.deinit();
+        if (self.automatic_root_system_path) |path| self.allocator.free(path);
         self.* = undefined;
+    }
+
+    fn openInitialAutomaticRoot(self: *Runtime) void {
+        const settings = &self.automatic_root_configuration;
+        const path = settings.effectiveRoot(self.automatic_root_system_path) orelse {
+            if (settings.configuration != null and (settings.health == .ready or settings.health == .write_failed))
+                settings.health = .path_unavailable;
+            return;
+        };
+        var root = self.openAutomaticRoot(path, settings.configuration.?.mode) catch {
+            settings.health = .path_unavailable;
+            return;
+        };
+        defer root.deinit();
+        self.replaceAutomaticRoot(&root);
+    }
+
+    pub fn validateRestoredAutomaticRoot(self: *Runtime) void {
+        const path = self.automaticRootPath() orelse return;
+        self.validateAutomaticRootCandidate(path) catch self.markAutomaticRootUnavailable();
+    }
+
+    fn openAutomaticRoot(self: *const Runtime, path: []const u8, mode: root_configuration.Mode) Error!AutomaticRoot {
+        var root = switch (mode) {
+            .system_default => AutomaticRoot.open(self.io, self.allocator, path),
+            .custom => AutomaticRoot.openExisting(self.io, self.allocator, path),
+        } catch return error.WorkspaceUnavailable;
+        errdefer root.deinit();
+        if (mode == .custom and !automatic_root.pathEqual(path, root.canonicalPath()))
+            return error.InvalidWorkspace;
+        return root;
+    }
+
+    pub fn automaticRootView(self: *const Runtime, shutting_down: bool) AutomaticRootView {
+        const settings = &self.automatic_root_configuration;
+        const path = switch (settings.health) {
+            .ready => self.automaticRootPath(),
+            .path_unavailable, .write_failed => settings.committedRoot(self.automatic_root_system_path),
+            .persistence_unavailable, .read_failed, .corrupt, .outcome_unknown => null,
+        };
+        const configuration = settings.configuration;
+        const store_available = self.automatic_root_store != null and !shutting_down;
+        return .{
+            .generation = settings.generation,
+            .mode = if (path != null) if (configuration) |value| value.mode else null else null,
+            .canonical_root = path,
+            .health = settings.health,
+            .can_choose = store_available,
+            .can_reset = store_available and self.automatic_root_system_path != null and
+                (configuration == null or configuration.?.mode != .system_default or settings.health != .ready),
+            .can_retry = !shutting_down and settings.health == .path_unavailable and path != null,
+        };
+    }
+
+    pub fn changeAutomaticRoot(self: *Runtime, expected_generation: u64, change: AutomaticRootChange) Error!void {
+        const settings = &self.automatic_root_configuration;
+        if (expected_generation == 0 or expected_generation != settings.generation)
+            return error.AutomaticWorkspaceRootGenerationMismatch;
+        switch (change) {
+            .choose => |path| {
+                var configuration = root_configuration.Configuration.custom(self.allocator, path) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidWorkspace,
+                };
+                defer configuration.deinit();
+                try self.commitAutomaticRoot(&configuration, path);
+            },
+            .reset => {
+                const path = self.automatic_root_system_path orelse return error.WorkspaceUnavailable;
+                var configuration = root_configuration.Configuration.systemDefault(self.allocator);
+                defer configuration.deinit();
+                try self.commitAutomaticRoot(&configuration, path);
+            },
+            .retry => {
+                if (settings.health != .path_unavailable) return error.WorkspaceUnavailable;
+                const path = settings.committedRoot(self.automatic_root_system_path) orelse return error.WorkspaceUnavailable;
+                var root = try self.openAutomaticRoot(path, settings.configuration.?.mode);
+                defer root.deinit();
+                try self.validateAutomaticRootCandidate(root.canonicalPath());
+                self.replaceAutomaticRoot(&root);
+                settings.health = .ready;
+                settings.advanceGeneration();
+            },
+        }
+    }
+
+    fn commitAutomaticRoot(self: *Runtime, configuration: *const root_configuration.Configuration, path: []const u8) Error!void {
+        const store = self.automatic_root_store orelse return error.AutomaticWorkspaceRootPersistenceUnavailable;
+        var root = try self.openAutomaticRoot(path, configuration.mode);
+        defer root.deinit();
+        try self.validateAutomaticRootCandidate(root.canonicalPath());
+        var encoded_storage: [root_configuration.max_store_bytes]u8 = undefined;
+        const encoded = root_configuration.encode(&encoded_storage, configuration) catch return error.InvalidWorkspace;
+        var replacement = configuration.clone() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidWorkspace,
+        };
+        errdefer replacement.deinit();
+
+        const settings = &self.automatic_root_configuration;
+        if (settings.recovery_required)
+            store.recover(encoded) catch |err| return self.failAutomaticRootPersistence(err)
+        else
+            store.commit(encoded) catch |err| return self.failAutomaticRootPersistence(err);
+
+        if (settings.configuration) |*current| current.deinit();
+        settings.configuration = replacement;
+        settings.health = .ready;
+        settings.recovery_required = false;
+        self.replaceAutomaticRoot(&root);
+        settings.advanceGeneration();
+    }
+
+    fn failAutomaticRootPersistence(self: *Runtime, err: root_configuration.PersistenceError) Error {
+        const settings = &self.automatic_root_configuration;
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.PersistenceOutcomeUnknown => blk: {
+                self.disableAutomaticRoot();
+                settings.health = .outcome_unknown;
+                settings.recovery_required = true;
+                break :blk error.AutomaticWorkspaceRootPersistenceOutcomeUnknown;
+            },
+            else => blk: {
+                if (!settings.recovery_required and settings.health == .ready) settings.health = .write_failed;
+                break :blk error.AutomaticWorkspaceRootPersistenceFailed;
+            },
+        };
+    }
+
+    fn markAutomaticRootUnavailable(self: *Runtime) void {
+        self.disableAutomaticRoot();
+        self.automatic_root_configuration.health = .path_unavailable;
     }
 
     pub fn automaticRootAvailable(self: *const Runtime) bool {
@@ -373,14 +555,14 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn replaceAutomaticRoot(self: *Runtime, root: *AutomaticRoot) void {
+    fn replaceAutomaticRoot(self: *Runtime, root: *AutomaticRoot) void {
         for (self.pending_automatic) |pending| std.debug.assert(pending == null);
         const replacement = automatic_root.Allocator.init(root);
         if (self.automatic_allocator) |*current| current.deinit();
         self.automatic_allocator = replacement;
     }
 
-    pub fn disableAutomaticRoot(self: *Runtime) void {
+    fn disableAutomaticRoot(self: *Runtime) void {
         for (self.pending_automatic) |pending| std.debug.assert(pending == null);
         if (self.automatic_allocator) |*current| current.deinit();
         self.automatic_allocator = null;
@@ -914,7 +1096,10 @@ pub const Runtime = struct {
         var allocation = allocator.allocate() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidAutomaticRoot => return error.InvalidWorkspace,
-            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
+            error.RootUnavailable, error.AllocationUnavailable => {
+                self.markAutomaticRootUnavailable();
+                return error.WorkspaceUnavailable;
+            },
         };
         errdefer _ = allocator.rollback(&allocation);
         const canonical_root = allocation.path();
@@ -1261,6 +1446,10 @@ pub const testing = if (builtin.is_test) struct {
         runtime.automatic_allocator = automatic_root.Allocator.init(root);
     }
 
+    pub fn invalidateAutomaticRoot(runtime: *Runtime) void {
+        runtime.markAutomaticRootUnavailable();
+    }
+
     pub const OwnedRecord = struct {
         id: u64,
         kind: Kind = .manual,
@@ -1398,7 +1587,7 @@ test "automatic root candidate conflicts preserve old records and allow ancestor
         1,
         1,
         1024,
-        null,
+        .{},
     );
     defer runtime.deinit(storage);
     testing.installOwned(&runtime, 0, .{
@@ -1468,7 +1657,7 @@ test "automatic root replacement affects only new allocations and old automatic 
         1,
         2,
         std.Io.Dir.max_path_bytes,
-        &root_a,
+        .{ .testing_root = &root_a },
     );
     defer runtime.deinit(storage);
 
@@ -1542,7 +1731,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
         0,
         1,
         std.Io.Dir.max_path_bytes,
-        &root,
+        .{ .testing_root = &root },
     );
     defer runtime.deinit(storage);
 
@@ -1606,7 +1795,7 @@ test "typed authorities invalidate stale Workspace consumers" {
         1,
         1,
         1024,
-        null,
+        .{},
     );
     defer runtime.deinit(storage);
     testing.installOwned(&runtime, 0, .{

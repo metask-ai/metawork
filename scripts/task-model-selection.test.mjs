@@ -73,7 +73,7 @@ test("busy Tasks can select the next model but an unknown save waits for Host re
   });
 });
 
-test("a Task with no model intent lists every ready source without inferring its old provider", () => {
+function modelsWithCustomSource() {
   const { models } = JSON.parse(
     readFileSync(
       "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
@@ -93,6 +93,11 @@ test("a Task with no model intent lists every ready source without inferring its
       models: [{ ...model, ready: true }],
     },
   ];
+  return models;
+}
+
+test("a Task with no model intent lists every ready source without inferring its old provider", () => {
+  const models = modelsWithCustomSource();
   const options = taskModelCandidates(models, null);
   assert.deepEqual(
     options.map((option) => option.modelRef.sourceId),
@@ -113,16 +118,44 @@ test("a Task with no model intent lists every ready source without inferring its
     }).map((option) => option.modelRef.sourceId),
     ["metask"],
   );
-  models.customProviders[0].enabled = false;
-  assert.deepEqual(
-    taskModelCandidates(models, {
-      sourceId: "other",
-      modelId: model.id,
-    }),
-    [],
+});
+
+test("Task model candidates agree with the Host availability fixture", () => {
+  const cases = JSON.parse(
+    readFileSync(
+      "frontend/src/bridge/__fixtures__/task-model-menu.fixture",
+      "utf8",
+    ),
   );
-  assert.deepEqual(
-    taskModelCandidates(models, null).map((option) => option.modelRef.sourceId),
-    ["metask"],
-  );
+  for (const entry of cases) {
+    const models = modelsWithCustomSource();
+    models.persistenceHealth = entry.persistenceHealth;
+    models.providers[0].catalogState = entry.metaskCatalog;
+    const [custom] = models.customProviders;
+    custom.enabled = entry.customEnabled;
+    custom.state = entry.customState;
+    custom.models[0].ready = custom.state === "ready";
+    const candidates = taskModelCandidates(
+      models,
+      entry.intentSource === null
+        ? null
+        : { sourceId: entry.intentSource, modelId: custom.models[0].id },
+    );
+    const policy = taskModelSelectionPolicy(task(entry.availability));
+    assert.deepEqual(
+      candidates.map((option) => option.modelRef.sourceId),
+      entry.menuSources,
+      JSON.stringify(entry),
+    );
+    assert.equal(
+      policy.selectable,
+      candidates.length !== 0,
+      JSON.stringify(entry),
+    );
+    assert.equal(
+      policy.pending,
+      entry.availability === "catalog_loading",
+      JSON.stringify(entry),
+    );
+  }
 });

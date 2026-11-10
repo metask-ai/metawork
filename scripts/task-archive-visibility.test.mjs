@@ -1175,6 +1175,34 @@ test("task quick archive and menu share the running Task restriction", async (ct
     exact: true,
   });
   assert.equal(menuArchive.getAttribute("aria-disabled"), "true");
+  const menuDelete = screen.getByRole("menuitem", {
+    name: "Permanently delete",
+  });
+  assert.notEqual(menuDelete.getAttribute("aria-disabled"), "true");
+});
+
+test("Host pending model intent blocks both Task mutations without a running operation", async (ctx) => {
+  const app = await renderApp(ctx, {
+    projectTask: {
+      modelIntent: {
+        modelRef: { sourceId: "metask", modelId: "fixture-model" },
+        selectionRevision: "2",
+        state: "outcome_unknown",
+      },
+    },
+  });
+  const row = taskRows("3")[0];
+  assert.equal(
+    row.parentElement.querySelector(".task-list-archive-trigger").disabled,
+    true,
+  );
+  fireEvent.contextMenu(row);
+  for (const name of ["Archive", "Permanently delete"]) {
+    const item = await screen.findByRole("menuitem", { name, exact: true });
+    assert.equal(item.getAttribute("aria-disabled"), "true");
+    await app.user.click(item);
+    assert.equal(app.requests.length, 0);
+  }
 });
 
 test("project heading toggles only its task list by pointer and keyboard", async (ctx) => {

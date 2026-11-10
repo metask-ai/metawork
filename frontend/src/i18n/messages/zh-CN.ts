@@ -549,6 +549,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.apply_status.pending": "等待连接",
   "mcp.apply_status.rejected": "变更被拒绝",
   "mcp.apply_status.failed": "变更未应用",
+  "mcp.apply_status.capacity": "MCP 连接容量已满",
+  "mcp.next.capacity.body": "请关闭不再使用的任务，再重试连接。",
   "mcp.apply_status.unknown": "连接状态待确认",
   "mcp.apply_status.current": "已处理",
   "mcp.apply_status.applying": "正在连接",

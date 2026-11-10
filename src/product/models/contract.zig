@@ -40,6 +40,12 @@ pub fn metaskEndpoint(protocol: Protocol) ?[]const u8 {
 pub const ModelRef = struct {
     source_id: []const u8,
     model_id: []const u8,
+
+    pub fn valid(self: ModelRef) bool {
+        return self.source_id.len != 0 and self.source_id.len <= Limits.provider_id_bytes and
+            self.model_id.len != 0 and self.model_id.len <= Limits.model_id_bytes and
+            std.unicode.utf8ValidateSlice(self.source_id) and std.unicode.utf8ValidateSlice(self.model_id);
+    }
 };
 
 pub const Source = enum {

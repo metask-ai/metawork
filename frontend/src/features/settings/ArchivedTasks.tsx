@@ -3,6 +3,7 @@ import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
 import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { taskActionBlockerMessageId } from "../../i18n/formatters.ts";
 
 export type ArchivedTasksProps = {
   tasks: TaskSummary[];
@@ -106,10 +107,7 @@ export function ArchivedTasks({
             const workspace = workspaces.find(
               (entry) => entry.id === task.workspaceId,
             );
-            const busy =
-              !synchronized ||
-              `task:${task.id}` in pending ||
-              task.deletionStatus === "deleting";
+            const busy = !synchronized || `task:${task.id}` in pending;
             return (
               <li
                 className="settings-row archived-task-row"
@@ -156,11 +154,11 @@ export function ArchivedTasks({
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={
-                      busy ||
-                      task.historyReadOnly ||
-                      task.lifecycle === "closing" ||
-                      task.activeOperation !== null
+                    disabled={busy || task.archiveBlocker !== null}
+                    title={
+                      task.archiveBlocker
+                        ? t(taskActionBlockerMessageId(task.archiveBlocker))
+                        : undefined
                     }
                     onClick={() => onRestore(task)}
                   >
@@ -169,11 +167,11 @@ export function ArchivedTasks({
                   <Button
                     variant="ghost"
                     size="sm"
-                    disabled={
-                      busy ||
-                      task.historyReadOnly ||
-                      (task.lifecycle === "closing" &&
-                        task.deletionStatus !== "failed")
+                    disabled={busy || task.deleteBlocker !== null}
+                    title={
+                      task.deleteBlocker
+                        ? t(taskActionBlockerMessageId(task.deleteBlocker))
+                        : undefined
                     }
                     onClick={() => onDelete(task)}
                   >

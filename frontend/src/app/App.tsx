@@ -195,7 +195,6 @@ import type {
   TaskModelSelectionReason,
   TaskModelSelectionAvailability,
   ModelRef,
-  TaskView,
   TaskSummary,
   FileReferenceView,
   FileChangeDiffResult,
@@ -206,6 +205,7 @@ import type {
   UiResponsePayload,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
+import { taskActionBlockerMessageId } from "../i18n/formatters.ts";
 import {
   searchWorkbench,
   boundedSearchQuery,
@@ -2289,6 +2289,7 @@ export default function App() {
     });
   }
   function requestTaskDeletion(task: TaskSummary) {
+    if (task.deleteBlocker !== null) return;
     deleteDialogRevision.current++;
     setDeleteError(null);
     deleteOpener.current =
@@ -3254,11 +3255,7 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       !activeTask ||
-      activeTask.lifecycle !== "open" ||
-      !activeTask.continuationAvailable ||
-      activeTask.archived ||
-      activeTask.activeOperation !== null ||
-      activeTask.runs.length === 0
+      activeTask.compactBlocker !== null
     )
       return;
     const taskId = activeTask.id;
@@ -3641,15 +3638,11 @@ export default function App() {
         current?.taskId === taskId ? null : current,
       );
   }
-  async function setArchived(
-    archived: boolean,
-    task: TaskSummary | TaskView | null = activeTask,
-  ) {
+  async function setArchived(archived: boolean, task: TaskSummary) {
     if (
-      !task ||
       workbenchMutationDisabled ||
       `task:${task.id}` in taskPending ||
-      task.activeOperation !== null
+      task.archiveBlocker !== null
     )
       return;
     const taskId = task.id;
@@ -3729,15 +3722,12 @@ export default function App() {
       endTaskPendingOperation(scope, generation);
     }
   }
-  async function deleteTask(
-    task: TaskSummary | TaskView | null = deleteTarget,
-  ) {
+  async function deleteTask(task = deleteTarget) {
     if (
       !task ||
       workbenchMutationDisabled ||
       `task:${task.id}` in taskPending ||
-      task.deletionStatus === "deleting" ||
-      (task.lifecycle === "closing" && task.deletionStatus !== "failed")
+      task.deleteBlocker !== null
     )
       return;
     const taskId = task.id;
@@ -4029,15 +4019,7 @@ export default function App() {
     newTaskDraftActive,
     bridgeUnavailable,
     taskMutationDisabled,
-    task: activeTask
-      ? {
-          lifecycleOpen: activeTask.lifecycle === "open",
-          continuationAvailable: activeTask.continuationAvailable,
-          archived: activeTask.archived,
-          activeOperation: taskOperationInFlight,
-          hasFinalizedRun: activeTask.runs.length > 0,
-        }
-      : null,
+    task: activeTask,
   });
   const commandBarFeedback = selectCommandBarFeedback(statuses);
   if (
@@ -4285,7 +4267,9 @@ export default function App() {
         unavailable={Boolean(
           activeTask &&
           activeTask.lifecycle === "open" &&
-          !activeTask.continuationAvailable,
+          !activeTask.continuationAvailable &&
+          (activeTask.continuationUnavailableReason !== "runtime_unavailable" ||
+            !activeTask.inputAcceptance.available),
         )}
         unavailableReason={activeTask?.continuationUnavailableReason ?? null}
         draft={currentComposerDraft}
@@ -5388,12 +5372,21 @@ export default function App() {
                       size="sm"
                       disabled={
                         taskMutationDisabled ||
-                        selectedTaskSummary?.historyReadOnly ||
-                        activeTask.lifecycle === "closing" ||
-                        activeTask.activeOperation !== null ||
-                        activeTask.deletionStatus === "deleting"
+                        selectedTaskSummary?.archiveBlocker !== null
                       }
-                      onClick={() => void setArchived(false, activeTask)}
+                      title={
+                        selectedTaskSummary?.archiveBlocker
+                          ? t(
+                              taskActionBlockerMessageId(
+                                selectedTaskSummary.archiveBlocker,
+                              ),
+                            )
+                          : undefined
+                      }
+                      onClick={() => {
+                        if (selectedTaskSummary)
+                          void setArchived(false, selectedTaskSummary);
+                      }}
                     >
                       {t("archive.restore")}
                     </Button>
@@ -5556,9 +5549,7 @@ export default function App() {
             bridgeUnavailable ||
             !noticeTask ||
             !noticeTask.archived ||
-            noticeTask.historyReadOnly ||
-            noticeTask.lifecycle === "closing" ||
-            noticeTask.deletionStatus === "deleting" ||
+            noticeTask.archiveBlocker !== null ||
             `task:${noticeTask.id}` in taskPending
           }
           onDismiss={() => setArchiveNotice(null)}
@@ -5712,7 +5703,16 @@ export default function App() {
                   disabled={
                     workbenchMutationDisabled ||
                     `task:${deleteTarget.id}` in taskPending ||
-                    deleteTarget.deletionStatus === "deleting"
+                    deleteTarget.deleteBlocker !== null
+                  }
+                  title={
+                    deleteTarget.deleteBlocker
+                      ? t(
+                          taskActionBlockerMessageId(
+                            deleteTarget.deleteBlocker,
+                          ),
+                        )
+                      : undefined
                   }
                   onClick={() => void deleteTask()}
                 >

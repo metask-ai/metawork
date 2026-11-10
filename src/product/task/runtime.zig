@@ -4,6 +4,7 @@
 //! effects are supplied by composition; they are never retained here.
 
 const std = @import("std");
+const credential_match = @import("product_credential_match");
 const search_casefold = @import("search_casefold.zig");
 const agent = @import("metawork_agent");
 const models_contract = @import("metawork_product_models_contract");
@@ -683,7 +684,7 @@ pub const ReleaseEffects = struct {
 /// Synchronous history overlay. Control must complete the durable write before
 /// completing this transaction, or roll it back before publishing a snapshot.
 /// Neither path changes the installed Session, Run, or permission authority.
-pub const PreparedModelIntent = struct {
+const PreparedModelIntent = struct {
     allocator: std.mem.Allocator,
     task: *task_state.Task,
     previous: ?task_state.ModelIntent,
@@ -1163,6 +1164,7 @@ pub const RecoveryAdmissionEffects = struct {
 
 pub const ProjectionEffects = struct {
     now_ms: ?u64 = null,
+    checkpoint_health: checkpoint_store.Health = .unavailable,
     max_pending_inputs_per_task: usize = 64,
     context: *anyopaque,
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
@@ -1259,7 +1261,23 @@ pub const Runtime = struct {
     agent_runtime_shutdown_complete: bool = false,
     permission_reviews_closed: bool = false,
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
-    approval_jobs: [approval_job.max_operations]?struct { task_id: u64, restore_attempt_id: ?u64 = null, job: *approval_job.Job } = @splat(null),
+    approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
+    pending_model_intent: ?PreparedModelIntent = null,
+
+    const ApprovalJobRecipient = union(enum) {
+        approval: u64,
+        recovery: struct { task_id: u64, attempt_id: u64 },
+        history_projection,
+        checkpoint_retirement,
+
+        pub fn taskId(self: ApprovalJobRecipient) ?u64 {
+            return switch (self) {
+                .approval => |id| id,
+                .recovery => |identity| identity.task_id,
+                .history_projection, .checkpoint_retirement => null,
+            };
+        }
+    };
 
     pub const ApprovalError = error{
         UnknownTask,
@@ -1354,7 +1372,7 @@ pub const Runtime = struct {
     }
 
     pub fn approvalJobFor(self: *const Runtime, task_id: u64) bool {
-        for (self.approval_jobs) |entry| if (entry) |slot| if (slot.task_id == task_id) return true;
+        for (self.approval_jobs) |entry| if (entry) |slot| if (slot.recipient.taskId() == task_id) return true;
         return false;
     }
 
@@ -1368,6 +1386,13 @@ pub const Runtime = struct {
         for (self.tasks) |entry| if (entry) |task| {
             if (task.approval_change) |change| if (change.phase == .outcome_unknown) return true;
             if (task.runtime.restore_job) |job| if (job.binding_commit != .not_started) return true;
+        };
+        return false;
+    }
+
+    pub fn approvalChangePending(self: *const Runtime) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.approval_change != null) return true;
         };
         return false;
     }
@@ -1423,13 +1448,13 @@ pub const Runtime = struct {
             job.lease.deinit();
             return err;
         };
-        self.approval_jobs[slot] = .{ .task_id = task_id, .job = job };
+        self.approval_jobs[slot] = .{ .recipient = .{ .approval = task_id }, .job = job };
         task.approval_change.?.phase = if (mutate) .mutation_export else .baseline_export;
     }
 
     pub fn queueApprovalHistory(self: *Runtime, task_id: u64, candidate: task_persistence.OwnedCandidate, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
-        return self.queueApprovalHistoryWork(task_id, null, .{ .candidate = candidate }, capability, executor, notifier);
+        return self.queueApprovalHistoryWork(.{ .approval = task_id }, .{ .candidate = candidate }, capability, executor, notifier);
     }
 
     pub fn queueApprovalResolution(self: *Runtime, task_id: u64, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
@@ -1438,14 +1463,14 @@ pub const Runtime = struct {
         const change = task.approval_change orelse return error.TaskBusy;
         if (change.phase != .outcome_unknown) return error.TaskBusy;
         const history = change.unknown_history orelse return error.ApprovalUnavailable;
-        try self.queueApprovalHistoryWork(task_id, null, .{ .resolution = history.token }, capability, executor, notifier);
+        try self.queueApprovalHistoryWork(.{ .approval = task_id }, .{ .resolution = history.token }, capability, executor, notifier);
     }
 
     /// A post-commit projection uses the same bounded writer and outlives the
     /// completed Task intent, like retirement of its superseded checkpoint.
     pub fn queueApprovalProjection(self: *Runtime, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         if (self.approvalHistoryWorkerActive()) return error.TaskBusy;
-        return self.queueApprovalHistoryWork(0, null, input, capability, executor, notifier);
+        return self.queueApprovalHistoryWork(.history_projection, input, capability, executor, notifier);
     }
 
     /// Recovery binding confirmation shares the same single history writer.
@@ -1456,14 +1481,15 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const restore = task.runtime.restore_job orelse return error.TaskBusy;
         if (resolve_only and (restore.binding_commit != .outcome_unknown or restore.unknown_history == null)) return error.TaskBusy;
-        try self.queueApprovalHistoryWork(task_id, restore.attempt.attempt_id, input, capability, executor, notifier);
+        try self.queueApprovalHistoryWork(.{ .recovery = .{ .task_id = task_id, .attempt_id = restore.attempt.attempt_id } }, input, capability, executor, notifier);
+        if (!resolve_only) restore.binding_commit = .pending;
     }
 
-    fn queueApprovalHistoryWork(self: *Runtime, task_id: u64, restore_attempt_id: ?u64, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
-        const leases = if (task_id == 0) &self.approval_cleanup_leases else leases: {
+    fn queueApprovalHistoryWork(self: *Runtime, recipient: ApprovalJobRecipient, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        const leases = if (recipient.taskId()) |task_id| leases: {
             const task = self.find(task_id) orelse return error.UnknownTask;
             break :leases &task.runtime.worker_leases;
-        };
+        } else &self.approval_cleanup_leases;
         const slot = try self.approvalJobSlot();
         var lease = try leases.acquire();
         var lease_live = true;
@@ -1481,7 +1507,39 @@ pub const Runtime = struct {
             job.lease.deinit();
             return err;
         };
-        self.approval_jobs[slot] = .{ .task_id = task_id, .restore_attempt_id = restore_attempt_id, .job = job };
+        self.approval_jobs[slot] = .{ .recipient = recipient, .job = job };
+    }
+
+    pub fn finishRecoveryHistory(self: *Runtime, task_id: u64, attempt_id: u64, job: *const approval_job.Job) enum { unchanged, ready, write_failed, outcome_unknown } {
+        const task = self.find(task_id) orelse unreachable;
+        const restore = task.runtime.restore_job orelse unreachable;
+        std.debug.assert(restore.attempt.attempt_id == attempt_id);
+        const readback = job.work.history.input == .resolution;
+        switch (job.outcome) {
+            .history => |outcome| switch (outcome) {
+                .committed, .failed => {
+                    restore.binding_commit = if (outcome == .committed) .committed else .failed;
+                    restore.unknown_history = null;
+                    task.runtime.last_restore_failure = if (outcome == .failed) .binding_persistence_failed else null;
+                    return if (outcome == .committed or readback) .ready else .write_failed;
+                },
+                .outcome_unknown => {
+                    restore.binding_commit = .outcome_unknown;
+                    if (!readback) restore.unknown_history = job.historyToken();
+                    task.runtime.last_restore_failure = .binding_persistence_unknown;
+                    return .outcome_unknown;
+                },
+            },
+            .none, .failure, .checkpoint, .retired => {
+                if (readback) return .unchanged;
+                restore.binding_commit = .failed;
+                if (job.outcome == .failure and job.outcome.failure.reason == .cancelled) {
+                    task.runtime.last_restore_failure = .cancelled;
+                    return .unchanged;
+                }
+                return .write_failed;
+            },
+        }
     }
 
     pub fn queueApprovalRetirement(self: *Runtime, store: *checkpoint_store.FileStore, identity: checkpoint_store.Identity, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
@@ -1502,7 +1560,7 @@ pub const Runtime = struct {
             job.lease.deinit();
             return err;
         };
-        self.approval_jobs[slot] = .{ .task_id = 0, .job = job };
+        self.approval_jobs[slot] = .{ .recipient = .checkpoint_retirement, .job = job };
     }
 
     pub const PreparedApprovalCommit = struct {
@@ -1581,6 +1639,95 @@ pub const Runtime = struct {
         if (task.runtime.attached()) |attached| attached.health = .session_poisoned;
         task.runtime.close_failed = true;
         self.failApprovalChange(task_id, .recovery_failed, false);
+    }
+
+    pub fn advanceApprovalAttachment(self: *Runtime, task_id: u64) union(enum) { wait, changed, detached, detach, checkpoint: bool } {
+        const task = self.find(task_id) orelse return .wait;
+        const change = if (task.approval_change) |*value| value else return .wait;
+        std.debug.assert(change.phase == .waiting or change.phase == .recovering);
+        if (task.runtime.close_failed and task.runtime.close_thread == null and
+            (change.phase == .recovering or change.recovery_attempt_id != null))
+        {
+            self.failApprovalRecovery(task_id);
+            return .changed;
+        }
+        if (!task.runtime.hasAttachedSession()) return .detached;
+        if (change.phase == .recovering) {
+            if (change.recovery_attempt_id != null and task.runtime.active_operation == .none) {
+                std.debug.assert(change.candidate == null);
+                self.failApprovalChange(task_id, change.failure orelse .mode_update_failed, false);
+                return .changed;
+            }
+            return .detach;
+        }
+        if (task.durable.permission_profile == change.target.profile()) {
+            change.phase = .mode_commit;
+            return .changed;
+        }
+        if (!self.approvalCoreIdle(task_id)) return .wait;
+        return .{ .checkpoint = change.baseline_confirmed };
+    }
+
+    pub const ApprovalRecoveryOutcome = union(enum) {
+        started,
+        waiting: task_state.ApprovalRecoveryWait,
+        failed,
+    };
+
+    pub const ApprovalRecoveryEffects = struct {
+        context: *anyopaque,
+        start_fn: *const fn (*anyopaque, u64, u64, u64) ApprovalRecoveryOutcome,
+        mcp_apply_pending_fn: *const fn (*anyopaque) bool,
+    };
+
+    pub fn advanceDetachedApprovalRecovery(self: *Runtime, task_id: u64, effects: ApprovalRecoveryEffects) bool {
+        const task = self.find(task_id) orelse return false;
+        const change = if (task.approval_change) |*value| value else return false;
+        if (change.phase != .waiting and change.phase != .recovering) return false;
+        std.debug.assert(change.candidate == null);
+        if (task.runtime.active_operation != .none or task.runtime.hasAttachedSession() or
+            task.runtime.hasClosingSession() or task.runtime.close_thread != null) return false;
+        if (change.recovery_attempt_id != null or task.durable.archived or task.deletion != .idle or
+            task.runtime.close_requested)
+        {
+            self.failApprovalChange(task_id, .recovery_failed, false);
+            return true;
+        }
+        if (change.recovery_wait) |wait| {
+            if (wait.binding_epoch != task.durable.binding_epoch) {
+                self.failApprovalChange(task_id, .recovery_failed, false);
+                return true;
+            }
+            switch (wait.reason) {
+                .session_close => |blocking_id| if (self.findConst(blocking_id)) |blocking| {
+                    if (sessionClosePending(blocking)) return false;
+                    if (blocking.runtime.close_failed and blocking.runtime.liveConst() != null) {
+                        self.failApprovalChange(task_id, .recovery_failed, false);
+                        return true;
+                    }
+                },
+                .mcp_apply => if (effects.mcp_apply_pending_fn(effects.context)) return false,
+            }
+        }
+        change.recovery_wait = null;
+        switch (effects.start_fn(effects.context, task_id, task.durable.binding_epoch, change.revision)) {
+            .started => {},
+            .waiting => |wait| change.recovery_wait = .{ .binding_epoch = task.durable.binding_epoch, .reason = wait },
+            .failed => self.failApprovalChange(task_id, .recovery_failed, false),
+        }
+        return true;
+    }
+
+    fn sessionClosePending(task: *const task_state.Task) bool {
+        return task.runtime.close_thread != null or task.runtime.close_requested;
+    }
+
+    pub fn pendingSessionCloseTask(self: *const Runtime) ?u64 {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            if (sessionClosePending(task)) return task.durable.id;
+        }
+        return null;
     }
 
     pub fn markApprovalUnknown(self: *Runtime, task_id: u64, token: ?task_persistence.CommitToken) void {
@@ -1991,9 +2138,7 @@ pub const Runtime = struct {
     /// Message acceptance is Task-local and independent of execution readiness.
     pub fn receiveInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects) RunError!Submission {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting or
-            !failedDeletionCanBeAbandoned(task))
-            return error.TaskClosing;
+        if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
         if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
         for (operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidInput;
         for (task.input_submissions.items) |record| if (std.mem.eql(u8, operation_id, record.submission.operationId())) return error.InvalidInput;
@@ -2113,6 +2258,63 @@ pub const Runtime = struct {
         const record = self.pendingInput(task_id, index) orelse return false;
         if (record.state != .waiting or record.preparation_attempted) return false;
         record.preparation_attempted = true;
+        return true;
+    }
+
+    pub const WaitingInputEffects = struct {
+        pub const RestoreFailure = struct { reason: SendInputReason, blocking_task_id: ?u64 = null };
+        pub const RunAdmission = union(enum) { admitted: u64, retry, rejected: SendInputReason };
+
+        context: *anyopaque,
+        restore_fn: *const fn (*anyopaque, u64, u64) ?RestoreFailure,
+        run_fn: *const fn (*anyopaque, u64, u64, usize) RunAdmission,
+        history_blocked: bool,
+        release: ReleaseEffects,
+    };
+
+    pub fn advanceWaitingInput(
+        self: *Runtime,
+        task_id: u64,
+        index: usize,
+        projection: ProjectionEffects,
+        effects: WaitingInputEffects,
+    ) bool {
+        const task = self.find(task_id) orelse return false;
+        if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked) return false;
+        const authority = projection.authority(projectionAuthorityQuery(task));
+        const continuation = self.recoveryProjectionWithAuthority(task, authority).continuation;
+        if (authority.shutting_down or task_policy.taskLifecycle(task) != .open or
+            !task_policy.continuationAvailable(continuation))
+        {
+            if (continuation == .unavailable) switch (continuation.unavailable) {
+                .session_recovery_required, .session_recovery_failed, .runtime_unavailable => {
+                    if (self.beginInputPreparation(task_id, index)) {
+                        const failure = effects.restore_fn(effects.context, task_id, task.durable.binding_epoch) orelse return false;
+                        self.failWaitingInput(task_id, index, failure.reason, failure.blocking_task_id);
+                        return true;
+                    }
+                },
+                else => {},
+            };
+            self.failWaitingInput(task_id, index, .binding_unavailable, null);
+            return true;
+        }
+
+        const previous_run = task_policy.runHistoryHighWater(task);
+        const outcome = effects.run_fn(effects.context, task_id, task.durable.binding_epoch, index);
+        // A failed effect may already have published a real Run with a terminal outcome.
+        if (outcome != .admitted) {
+            const latest_run = task_policy.runHistoryHighWater(task);
+            if (latest_run > previous_run) {
+                self.finishWaitingInput(task_id, index, latest_run, null, effects.release);
+                return true;
+            }
+        }
+        switch (outcome) {
+            .admitted => |id| self.finishWaitingInput(task_id, index, id, null, effects.release),
+            .retry => return false,
+            .rejected => |reason| self.failWaitingInput(task_id, index, reason, null),
+        }
         return true;
     }
 
@@ -2383,10 +2585,8 @@ pub const Runtime = struct {
 
     pub fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
         const task = self.find(task_id) orelse return null;
-        for (task.durable.runs) |*entry| if (entry.*) |*run| {
-            if (run.input_continuation_pending) return run;
-        };
-        return null;
+        const slot = inputContinuationSlot(task) orelse return null;
+        return &task.durable.runs[slot].?;
     }
 
     pub fn cancelInputContinuation(self: *Runtime, task_id: u64, source_id: ?u64, reason: SendInputReason) bool {
@@ -2677,21 +2877,9 @@ pub const Runtime = struct {
         effects: OperationEffects,
     ) CompactError!PreparedCompact {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (self.inputContinuation(task_id) != null) return error.TaskBusy;
-        if (expected_binding_epoch == 0 or
-            expected_binding_epoch != task.durable.binding_epoch)
-            return error.BindingEpochMismatch;
-        _ = try taskExecutionInput(task);
-        if (task_policy.hasActiveOperation(task) or
-            checkpointMutationPending(task, effects.worker.checkpoint.store_health) or
-            task_state.hasUnfinalizedTerminalEvents(task))
-            return error.TaskBusy;
-        const slot = findEmptyCompact(task.durable.compacts) orelse growth: {
-            if (task.runtime.worker_leases.hasLive()) return error.TaskBusy;
-            break :growth try growHistory(self.allocator, task_state.CompactRecord, &task.durable.compacts);
-        };
-        const after_run_id = task_policy.lastConversationRunId(task) orelse
-            return error.NoSuchRun;
+        const after_run_id = try compactAdmission(task, expected_binding_epoch, effects.worker.checkpoint.store_health.load(.acquire));
+        const slot = findEmptyCompact(task.durable.compacts) orelse
+            try growHistory(self.allocator, task_state.CompactRecord, &task.durable.compacts);
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         var access_live = true;
         errdefer if (access_live) access.deinit();
@@ -3139,16 +3327,64 @@ pub const Runtime = struct {
         return true;
     }
 
+    fn modelIntentEditable(task: *const task_state.Task) bool {
+        return task.read_only_history == null and !task.durable.archived and
+            task.deletion == .idle and !task.runtime.close_requested;
+    }
+
+    pub fn modelSelectionScope(self: *const Runtime, task_id: u64) union(enum) {
+        unavailable,
+        editable: ?[]const u8,
+    } {
+        const task = self.findConst(task_id) orelse return .unavailable;
+        if (!modelIntentEditable(task)) return .unavailable;
+        return .{ .editable = if (task.durable.model_intent) |intent| intent.source_id else null };
+    }
+
+    pub fn committedModelRef(self: *const Runtime, task_id: u64) ?models_contract.ModelRef {
+        const task = self.findConst(task_id) orelse return null;
+        if (task.model_intent_prepared) return null;
+        const intent = task.durable.model_intent orelse return null;
+        return intent.modelRef();
+    }
+
+    pub fn modelIntentPending(self: *const Runtime) bool {
+        return self.pending_model_intent != null;
+    }
+
     pub fn prepareModelIntent(
+        self: *Runtime,
+        task_id: u64,
+        expected_revision: u64,
+        target: models_contract.ModelRef,
+    ) ModelIntentError!u64 {
+        if (self.modelIntentPending()) return error.TaskBusy;
+        const prepared = try self.prepareModelIntentOverlay(task_id, expected_revision, target);
+        self.pending_model_intent = prepared;
+        return prepared.task.durable.model_intent.?.revision;
+    }
+
+    /// Only confirmed history makes the new preference available to callers.
+    pub fn settleModelIntent(self: *Runtime, committed: bool) ?u64 {
+        var pending = self.pending_model_intent orelse return null;
+        self.pending_model_intent = null;
+        if (!committed) {
+            pending.rollback();
+            return null;
+        }
+        const task_id = pending.task.durable.id;
+        pending.complete();
+        return task_id;
+    }
+
+    fn prepareModelIntentOverlay(
         self: *Runtime,
         task_id: u64,
         expected_revision: u64,
         target: models_contract.ModelRef,
     ) ModelIntentError!PreparedModelIntent {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null or task.durable.archived or
-            task.deletion != .idle or task.runtime.close_requested)
-            return error.TaskClosing;
+        if (!modelIntentEditable(task)) return error.TaskClosing;
         if (task.approval_change != null or task.model_intent_prepared) return error.TaskBusy;
         const revision = if (task.durable.model_intent) |intent| intent.revision else 0;
         if (expected_revision != revision) return error.TaskModelMismatch;
@@ -3178,9 +3414,7 @@ pub const Runtime = struct {
     /// Pressure release uses the ordinary close owner, but never cancels work.
     /// The caller retries admission after completion; no operation is replayed.
     pub fn releaseIdleSession(self: *Runtime, except_task_id: ?u64, notifier: task_execution.Notifier) (agent.Error || std.mem.Allocator.Error || std.Thread.SpawnError)!bool {
-        for (self.tasks) |entry| if (entry) |task| {
-            if (task.runtime.close_thread != null or task.runtime.close_requested) return false;
-        };
+        if (self.pendingSessionCloseTask() != null) return false;
         var candidate: ?*task_state.Task = null;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -3724,11 +3958,10 @@ pub const Runtime = struct {
         archived: bool,
     ) MutationError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null) return error.TaskReadOnly;
-        if (task.model_intent_prepared or task.deletion == .deleting or !failedDeletionCanBeAbandoned(task) or
-            task_policy.taskLifecycle(task) == .closing or
-            task_policy.hasActiveOperation(task))
-            return error.TaskBusy;
+        if (archiveBlocker(task)) |blocker| return switch (blocker) {
+            .history_read_only => error.TaskReadOnly,
+            else => error.TaskBusy,
+        };
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
         if (archived) {
@@ -3784,12 +4017,11 @@ pub const Runtime = struct {
 
     pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null) return error.TaskReadOnly;
-        if (task.model_intent_prepared or task.approval_change != null) return error.TaskBusy;
-        if (task.runtime.restore_job) |job| {
-            if (job.binding_commit == .pending or job.binding_commit == .outcome_unknown) return error.TaskBusy;
-        }
-        if (task.deletion == .deleting) return false;
+        if (deleteBlocker(task)) |blocker| switch (blocker) {
+            .history_read_only => return error.TaskReadOnly,
+            .deleting => return false,
+            else => return error.TaskBusy,
+        };
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
         _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
@@ -4872,6 +5104,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinitTasks(self: *Runtime, effects: ReleaseEffects) void {
+        _ = self.settleModelIntent(false);
         if (self.taskCount() != 0) self.noteSearchChange();
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -5159,6 +5392,7 @@ pub const Runtime = struct {
                 .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
                 .input_acceptance_reason = acceptance_reason,
+                .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .catalog = effects.catalog,
                 .pending_ui = .{
@@ -5175,7 +5409,7 @@ pub const Runtime = struct {
             const task = entry.* orelse continue;
             if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             count += 1;
-            try task_view.writeSummary(writer, task, text);
+            try task_view.writeSummary(writer, task, text, archiveBlocker(task), deleteBlocker(task));
         }
     }
 
@@ -5341,6 +5575,7 @@ pub const Runtime = struct {
         const older = bounds.older;
         var pending_ui_context = PendingUiContext{ .runtime = self, .max_json_bytes = effects.max_pending_ui_json_bytes };
         const external = effects.authority(projectionAuthorityQuery(task));
+        const recovery = self.recoveryProjectionWithAuthority(task, external);
         var available_modes: [3]task_state.ApprovalMode = undefined;
         writer.writeAll("{\"beforeRunId\":") catch return error.SnapshotTooLarge;
         if (before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -5352,11 +5587,12 @@ pub const Runtime = struct {
         try task_view.writeProjection(writer, .{
             .task = task,
             .now_ms = effects.now_ms,
-            .recovery = self.recoveryProjectionWithAuthority(task, external),
+            .recovery = recovery,
             .model_selection_availability = external.model_selection_availability,
             .available_approval_modes = self.availableApprovalModes(task, external, &available_modes),
             .shutting_down = external.shutting_down,
             .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
+            .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
@@ -5366,12 +5602,49 @@ pub const Runtime = struct {
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
+    pub fn modelRebindFacts(self: *const Runtime, task_id: u64) error{ UnknownTask, RestoreBusy, RecoveryUnavailable }!struct {
+        attached: bool,
+        workspace_id: u64,
+        workspace_epoch: u64,
+        execution_generation: u64,
+        has_model_intent: bool,
+    } {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
+        if (task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
+        return .{
+            .attached = task.runtime.hasAttachedSession(),
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .execution_generation = task.durable.execution_generation,
+            .has_model_intent = task.durable.model_intent != null,
+        };
+    }
+
+    /// An owned copy survives release of the live Session access.
+    pub fn captureModelRebindInputs(self: *Runtime, task_id: u64) !?agent.SessionRestoreInputs {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.runtime.hasAttachedSession()) {
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            return try access.captureRestoreInputs();
+        }
+        const parked = task.runtime.parked_capabilities orelse return null;
+        var original = parked;
+        original.skill = null;
+        original.mcp = null;
+        errdefer original.deinit() catch {};
+        if (parked.skill) |skill| original.skill = try skill.clone();
+        if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
+        return original;
+    }
+
     pub fn recoveryStartFacts(
         self: *const Runtime,
         task_id: u64,
         expected_binding_epoch: u64,
         effects: RecoveryAdmissionEffects,
-    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable, SessionCapacity }!RecoveryStartFacts {
+    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable, SessionCapacity, McpRestoreBusy }!RecoveryStartFacts {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -5382,8 +5655,11 @@ pub const Runtime = struct {
         )) {
             .admitted => {},
             .denied => |reason| {
-                if (reason == .runtime_unavailable and external.runtime_admission == .capacity_reached and external.authority_stable)
-                    return error.SessionCapacity;
+                if (reason == .runtime_unavailable and external.authority_stable) switch (external.runtime_admission) {
+                    .capacity_reached => return error.SessionCapacity,
+                    .busy => return error.McpRestoreBusy,
+                    else => {},
+                };
                 return error.RecoveryUnavailable;
             },
         }
@@ -5610,17 +5886,40 @@ pub const Runtime = struct {
     ) bool {
         const task = self.findConst(task_id) orelse return false;
         const external = effects.authority(projectionAuthorityQuery(task));
-        return !external.shutting_down and
+        return continuationAdmitted(task, external.shutting_down, self.recoveryProjectionWithAuthority(task, external));
+    }
+
+    fn continuationAdmitted(task: *const task_state.Task, shutting_down: bool, recovery: task_recovery.Projection) bool {
+        return !shutting_down and
             task_policy.taskLifecycle(task) == .open and
-            task_policy.continuationAvailable(
-                self.recoveryProjectionWithAuthority(task, external).continuation,
-            );
+            task_policy.continuationAvailable(recovery.continuation);
+    }
+
+    fn compactAdmission(task: *const task_state.Task, binding_epoch: u64, checkpoint_health: checkpoint_store.Health) error{ TaskBusy, BindingEpochMismatch, ExecutionUnavailable, ExecutionGenerationMismatch, NoSuchRun }!u64 {
+        if (inputContinuationSlot(task) != null) return error.TaskBusy;
+        if (binding_epoch == 0 or binding_epoch != task.durable.binding_epoch) return error.BindingEpochMismatch;
+        _ = try taskExecutionInput(task);
+        if (task_policy.hasActiveOperation(task) or task_state.hasUnfinalizedTerminalEvents(task)) return error.TaskBusy;
+        if (task.runtime.worker_leases.hasLive() and
+            (checkpoint_health != .unavailable or findEmptyCompact(task.durable.compacts) == null)) return error.TaskBusy;
+        return task_policy.lastConversationRunId(task) orelse error.NoSuchRun;
+    }
+
+    fn compactBlocker(task: *const task_state.Task, shutting_down: bool, recovery: task_recovery.Projection, checkpoint_health: checkpoint_store.Health) ?task_view.ActionBlocker {
+        if (task.read_only_history != null) return .history_read_only;
+        if (task_policy.taskLifecycle(task) == .closing) return .closing;
+        if (!continuationAdmitted(task, shutting_down, recovery)) return .unavailable;
+        _ = compactAdmission(task, task.durable.binding_epoch, checkpoint_health) catch |err| return switch (err) {
+            error.TaskBusy => .busy,
+            error.NoSuchRun => .no_history,
+            else => .unavailable,
+        };
+        return null;
     }
 
     fn inputAcceptanceReason(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, max_pending: usize) ?SendInputReason {
         if (authority.shutting_down) return .shutting_down;
-        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting or
-            !failedDeletionCanBeAbandoned(task)) return .task_unavailable;
+        if (!acceptsOrdinaryInput(task)) return .task_unavailable;
         if (!authority.workspace_identity_exact or !authority.automatic_owner_exact) return .workspace_unavailable;
         var pending: usize = 0;
         for (task.input_submissions.items) |record| if (record.state == .waiting) {
@@ -6662,6 +6961,14 @@ pub const Runtime = struct {
         // Checkpoint/close reconciliation above can retire the final lease on
         // this very pass. Do not retain the scrub credential until another wake.
         self.releaseQuiescentRunEffects(effects.release);
+        for (self.tasks) |entry| if (entry) |task| {
+            const has_live_workers = task.runtime.worker_leases.hasLive();
+            if (has_live_workers != task.observed_live_workers) {
+                task.observed_live_workers = has_live_workers;
+                // The active operation already accounts for both action gates.
+                if (!task_policy.hasActiveOperation(task)) result.changed = true;
+            }
+        };
         return result;
     }
 };
@@ -7817,8 +8124,8 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
         const value = target.list.items;
         var match_end: usize = 0;
         var cursor = read;
-        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
-            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+        while (cursor == read or cursor < match_end) : (cursor += credential_match.codepointLen(value, cursor)) {
+            for (secrets) |secret| if (credential_match.matchEnd(value, cursor, secret)) |end| {
                 match_end = @max(match_end, end);
             };
         }
@@ -7832,7 +8139,7 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
             continue;
         }
         const partial = for (secrets) |secret| {
-            if (credentialMayContinueAtCodepoint(value, read, secret)) break true;
+            if (credential_match.mayContinue(value, read, secret)) break true;
         } else false;
         if (partial) {
             const remaining = value[read..];
@@ -7845,7 +8152,7 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
             target.committed_len = write;
             return redacted;
         }
-        const codepoint_len = utf8CodepointLen(value, read);
+        const codepoint_len = credential_match.codepointLen(value, read);
         std.mem.copyForwards(
             u8,
             target.list.items[write..][0..codepoint_len],
@@ -7857,46 +8164,6 @@ fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []
     target.list.items.len = write;
     target.committed_len = write;
     return redacted;
-}
-
-fn utf8CodepointLen(value: []const u8, start: usize) usize {
-    return @min(
-        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
-        value.len - start,
-    );
-}
-
-fn credentialEndAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) ?usize {
-    if (credential.len == 0) return null;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    var match_end: usize = 0;
-    for (0..codepoint_len) |offset| {
-        if (std.mem.startsWith(u8, value[codepoint_start + offset ..], credential))
-            match_end = @max(match_end, codepoint_start + offset + credential.len);
-    }
-    if (match_end == 0) return null;
-    var end = @min(value.len, match_end);
-    while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
-    return end;
-}
-
-fn credentialMayContinueAtCodepoint(
-    value: []const u8,
-    codepoint_start: usize,
-    credential: []const u8,
-) bool {
-    if (credential.len == 0) return false;
-    const codepoint_len = utf8CodepointLen(value, codepoint_start);
-    for (0..codepoint_len) |offset| {
-        const remaining = value[codepoint_start + offset ..];
-        if (remaining.len < credential.len and
-            std.mem.startsWith(u8, credential, remaining)) return true;
-    }
-    return false;
 }
 
 fn releaseExecutionValueNoFail(
@@ -8733,10 +9000,39 @@ fn exportRecoveryCheckpoint(job: *recovery_job.Job, access: *task_agent_session.
     };
 }
 
+fn acceptsOrdinaryInput(task: *const task_state.Task) bool {
+    return task.read_only_history == null and !task.durable.archived and task.deletion != .deleting and
+        failedDeletionCanBeAbandoned(task);
+}
+
 fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
     return task.deletion != .failed or
         (task_policy.taskLifecycle(task) == .open and !task_policy.hasActiveOperation(task) and
             !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
+}
+
+fn inputContinuationSlot(task: *const task_state.Task) ?usize {
+    for (task.durable.runs, 0..) |entry, slot| if (entry) |run| {
+        if (run.input_continuation_pending) return slot;
+    };
+    return null;
+}
+
+fn archiveBlocker(task: *const task_state.Task) ?task_view.ActionBlocker {
+    if (task.read_only_history != null) return .history_read_only;
+    if (task.deletion == .deleting) return .deleting;
+    if (task_policy.taskLifecycle(task) == .closing) return .closing;
+    if (task.model_intent_prepared or !failedDeletionCanBeAbandoned(task) or task_policy.hasActiveOperation(task)) return .busy;
+    return null;
+}
+
+fn deleteBlocker(task: *const task_state.Task) ?task_view.ActionBlocker {
+    if (task.read_only_history != null) return .history_read_only;
+    if (task.model_intent_prepared or task.approval_change != null) return .busy;
+    if (task.runtime.restore_job) |job| {
+        if (job.binding_commit == .pending or job.binding_commit == .outcome_unknown) return .busy;
+    }
+    return if (task.deletion == .deleting) .deleting else null;
 }
 
 /// A bounded window over the same readable text shown by the consumer.
@@ -9763,35 +10059,35 @@ test "Task model intent transaction uses its own revision and rolls back without
         runtime.tasks[0] = null;
     }
     const target = models_contract.ModelRef{ .source_id = "provider-b", .model_id = "same-model" };
-    try std.testing.expectError(error.UnknownTask, runtime.prepareModelIntent(2, 0, target));
-    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntent(1, 1, target));
+    try std.testing.expectError(error.UnknownTask, runtime.prepareModelIntentOverlay(2, 0, target));
+    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntentOverlay(1, 1, target));
     try std.testing.expect(task.durable.model_intent == null);
-    var first = try runtime.prepareModelIntent(1, 0, target);
+    var first = try runtime.prepareModelIntentOverlay(1, 0, target);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
-    try std.testing.expectError(error.TaskBusy, runtime.prepareModelIntent(1, 1, target));
+    try std.testing.expectError(error.TaskBusy, runtime.prepareModelIntentOverlay(1, 1, target));
     first.rollback();
     try std.testing.expect(task.durable.model_intent == null);
     try std.testing.expect(!task.model_intent_prepared);
 
-    first = try runtime.prepareModelIntent(1, 0, target);
+    first = try runtime.prepareModelIntentOverlay(1, 0, target);
     first.complete();
     try std.testing.expect(!task.model_intent_prepared);
     const original_source = task.durable.model_intent.?.source_id.ptr;
-    var second = try runtime.prepareModelIntent(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
+    var second = try runtime.prepareModelIntentOverlay(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
     try std.testing.expectEqual(@as(u64, 2), task.durable.model_intent.?.revision);
     second.rollback();
     try std.testing.expectEqual(original_source, task.durable.model_intent.?.source_id.ptr);
     try std.testing.expectEqualStrings("provider-b", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
-    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntent(1, 0, target));
-    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, 1, .{ .source_id = "bad\nsource", .model_id = "model" }));
+    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntentOverlay(1, 0, target));
+    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntentOverlay(1, 1, .{ .source_id = "bad\nsource", .model_id = "model" }));
 
     // The same transaction is legal while a Run is active. It neither obtains
     // Session access nor changes the Run/permission/installed binding facts.
     task.runtime.active_operation = .{ .run = 12 };
     task.runtime.active_run_id = 12;
     task.runtime.pending_ui_request_id = 33;
-    second = try runtime.prepareModelIntent(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
+    second = try runtime.prepareModelIntentOverlay(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
     second.complete();
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 2), task.durable.model_intent.?.revision);
@@ -9805,11 +10101,97 @@ test "Task model intent transaction uses its own revision and rolls back without
     try std.testing.expect(task.runtime.attachment == .detached);
 
     task.durable.archived = true;
-    try std.testing.expectError(error.TaskClosing, runtime.prepareModelIntent(1, 2, target));
+    try std.testing.expectError(error.TaskClosing, runtime.prepareModelIntentOverlay(1, 2, target));
     task.durable.archived = false;
     task.durable.model_intent.?.revision = std.math.maxInt(u64);
-    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, std.math.maxInt(u64), target));
+    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntentOverlay(1, std.math.maxInt(u64), target));
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
+}
+
+test "approval recovery waits for the observed blocker before admitting one attempt" {
+    const Harness = struct {
+        task: *task_state.Task,
+        outcome: Runtime.ApprovalRecoveryOutcome,
+        calls: usize = 0,
+        applying: bool = false,
+
+        fn start(context: *anyopaque, id: u64, epoch: u64, revision: u64) Runtime.ApprovalRecoveryOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(id == self.task.durable.id and epoch == self.task.durable.binding_epoch);
+            std.debug.assert(revision == self.task.approval_change.?.revision);
+            self.calls += 1;
+            if (self.outcome == .started) self.task.approval_change.?.recovery_attempt_id = 8;
+            return self.outcome;
+        }
+
+        fn applyingNow(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.applying;
+        }
+
+        fn finishClose() void {}
+    };
+    var runtime = try Runtime.init(std.testing.allocator, 2);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    var blocker = testModelIntentTask();
+    blocker.durable.id = 2;
+    runtime.tasks[0] = &task;
+    runtime.tasks[1] = &blocker;
+    defer @memset(runtime.tasks, null);
+
+    task.approval_change = .{ .revision = 2, .target = .auto_review };
+    blocker.runtime.close_requested = true;
+    var harness = Harness{ .task = &task, .outcome = .{ .waiting = .{ .session_close = 2 } } };
+    const effects = Runtime.ApprovalRecoveryEffects{
+        .context = &harness,
+        .start_fn = Harness.start,
+        .mcp_apply_pending_fn = Harness.applyingNow,
+    };
+    try std.testing.expectEqual(@as(?u64, 2), runtime.pendingSessionCloseTask());
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(task.approval_result == null and task.approval_change.?.recovery_attempt_id == null);
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 1), harness.calls);
+    blocker.runtime.close_thread = try std.Thread.spawn(.{}, Harness.finishClose, .{});
+    defer if (blocker.runtime.close_thread) |thread| thread.join();
+    blocker.runtime.close_requested = false;
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 1), harness.calls);
+    blocker.runtime.close_thread.?.join();
+    blocker.runtime.close_thread = null;
+
+    // MCP apply can start while waiting for the Session. Re-evaluate it as a
+    // separate blocker without assigning an attempt to either wait.
+    harness.outcome = .{ .waiting = .mcp_apply };
+    harness.applying = true;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 2), harness.calls);
+    harness.outcome = .started;
+    harness.applying = false;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(?u64, 8), task.approval_change.?.recovery_attempt_id);
+    task.runtime.active_operation = .{ .restore = .{ .id = 8 } };
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expectEqual(@as(usize, 3), harness.calls);
+
+    task.runtime.active_operation = .none;
+    task.approval_change = .{ .revision = 3, .target = .auto_review, .phase = .recovering };
+    harness.outcome = .failed;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(.recovery_failed, task.approval_result.?.reason.?);
+    try std.testing.expect(!runtime.advanceDetachedApprovalRecovery(1, effects));
+
+    task.approval_change = .{ .revision = 3, .target = .auto_review };
+    harness.outcome = .{ .waiting = .mcp_apply };
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    const waiting_calls = harness.calls;
+    task.durable.binding_epoch += 1;
+    try std.testing.expect(runtime.advanceDetachedApprovalRecovery(1, effects));
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(waiting_calls, harness.calls);
 }
 
 test "restoring a read-only Task frees its payload when record allocation fails" {
@@ -9845,7 +10227,7 @@ test "Task model intent allocation failure preserves the exact committed identit
             }
             task.durable.model_intent = try task_state.ModelIntent.init(allocator, .{ .source_id = "source", .model_id = "model" }, 5);
             const previous = task.durable.model_intent.?;
-            var prepared = runtime.prepareModelIntent(1, 5, .{ .source_id = "new-source", .model_id = "new-model" }) catch |err| {
+            var prepared = runtime.prepareModelIntentOverlay(1, 5, .{ .source_id = "new-source", .model_id = "new-model" }) catch |err| {
                 try std.testing.expectEqual(previous.source_id.ptr, task.durable.model_intent.?.source_id.ptr);
                 try std.testing.expectEqual(previous.model_id.ptr, task.durable.model_intent.?.model_id.ptr);
                 try std.testing.expectEqual(@as(u64, 5), task.durable.model_intent.?.revision);

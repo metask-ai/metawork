@@ -9282,7 +9282,7 @@ test "approval Core refusal and export failure keep the old mode or restore its 
         try std.testing.expectEqual(.baseline_export, task.approval_change.?.phase);
         const baseline = pending: {
             for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
-                if (slot.task_id == task_id) break :pending slot.job;
+                if (slot.recipient.taskId() == task_id) break :pending slot.job;
             };
             return error.TestUnexpectedResult;
         };
@@ -9514,7 +9514,7 @@ test "approval recovery owns restore before waiting input" {
             try std.testing.expectEqual(.closing, std.meta.activeTag(task.runtime.attachment));
         } else {
             const baseline = for (control.task_runtime.approval_jobs) |entry| {
-                if (entry) |slot| if (slot.task_id == task_id) break slot.job;
+                if (entry) |slot| if (slot.recipient.taskId() == task_id) break slot.job;
             } else return error.TestUnexpectedResult;
             for (0..2000) |_| {
                 if (baseline.completionReady()) break;
@@ -9985,7 +9985,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
             try std.testing.expect(blocker.entered.load(.acquire));
             control.syncLifecycle();
             const writer = queued: {
-                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.restore_attempt_id == attempt_id) break :queued slot.job;
+                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.recipient == .recovery and slot.recipient.recovery.attempt_id == attempt_id) break :queued slot.job;
                 return error.TestUnexpectedResult;
             };
             try std.testing.expectEqual(.queued, writer.state.load(.acquire));
@@ -10067,7 +10067,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         if (case.single_wake) {
             const writer = pending: {
                 for (control.task_runtime.approval_jobs) |entry| if (entry) |slot|
-                    if (slot.restore_attempt_id == attempt_id) break :pending slot.job;
+                    if (slot.recipient == .recovery and slot.recipient.recovery.attempt_id == attempt_id) break :pending slot.job;
                 return error.TestUnexpectedResult;
             };
             for (0..2000) |_| {
@@ -10104,7 +10104,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         if (case.shutdown) {
             const history_job = pending: {
                 for (control.task_runtime.approval_jobs) |entry| if (entry) |slot|
-                    if (slot.restore_attempt_id == attempt_id) break :pending slot.job;
+                    if (slot.recipient == .recovery and slot.recipient.recovery.attempt_id == attempt_id) break :pending slot.job;
                 return error.TestUnexpectedResult;
             };
             for (0..2000) |_| {
@@ -10445,7 +10445,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         _ = try control.setApprovalMode(task_id, .full_access, 1, 1);
         try std.testing.expectEqual(.baseline_export, task.approval_change.?.phase);
         const baseline_job = pending: {
-            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.task_id == task_id) break :pending slot.job;
+            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.recipient.taskId() == task_id) break :pending slot.job;
             return error.TestUnexpectedResult;
         };
         for (0..2000) |_| {
@@ -11783,7 +11783,15 @@ test "file delivery Run authority survives preparation changes until worker and 
     try std.testing.expectEqual(@as(usize, 1), probe.released);
 }
 
-test "MCP apply barrier never releases an unrelated idle Session as capacity recovery" {
+test "approval recovery waits for Session pressure and the MCP apply barrier" {
+    try expectApprovalRecoveryWaitsForClose(false);
+}
+
+test "approval recovery waits for a requested Session close before its worker starts" {
+    try expectApprovalRecoveryWaitsForClose(true);
+}
+
+fn expectApprovalRecoveryWaitsForClose(close_running_task: bool) !void {
     fake_core.reset();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11796,7 +11804,7 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     configuration.directories.canonical_user_home = home;
     configuration.task_persistence = history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
-    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = if (close_running_task) 2 else 1 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
@@ -11804,14 +11812,16 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 2,
-        .max_tasks = 2,
+        .max_tasks = if (close_running_task) 3 else 2,
         .max_workspaces = 1,
     }, configuration);
     defer control.deinit();
+    defer fake_core.releaseControlled();
     try installControlExecution(&control);
     var input = productControlTaskInput();
     input.workspace_root = home;
     input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
     const waiter_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     const waiter = control.task_runtime.find(waiter_id).?;
     try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, waiter_id));
@@ -11821,6 +11831,7 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     const other_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+    try waitInitialTaskCatalog(&control, other_id);
     const other = control.task_runtime.find(other_id).?;
     const destroyed = fake_core.session_destroyed;
     runtime.mcp_operation.phase = .apply;
@@ -11832,6 +11843,55 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     try std.testing.expect(other.runtime.close_thread == null);
     try std.testing.expect(!other.runtime.close_requested);
     try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
+
+    runtime.mcp_operation.phase = .idle;
+    const releasing = if (close_running_task) closing: {
+        fake_core.setNextPlan(.controlled);
+        const id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+        try waitInitialTaskCatalog(&control, id);
+        _ = try runPreparedTask(&control, id, .{ .text = "Hold the Session until its requested close can start." });
+        try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
+        try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, id));
+        const task = control.task_runtime.find(id).?;
+        try std.testing.expect(task.runtime.close_requested);
+        try std.testing.expect(task.runtime.close_thread == null);
+        break :closing task;
+    } else other;
+    const attempt_before = control.task_runtime.next_restore_attempt_id;
+    const revision = try control.setApprovalMode(waiter_id, .auto_review, waiter.durable.binding_epoch, 1);
+    try std.testing.expect(waiter.approval_change != null);
+    try std.testing.expect(waiter.approval_result == null);
+    if (close_running_task) {
+        try std.testing.expect(releasing.runtime.close_requested);
+        try std.testing.expect(releasing.runtime.close_thread == null);
+        try std.testing.expect(other.runtime.hasAttachedSession());
+        try std.testing.expect(other.runtime.close_thread == null);
+    } else try std.testing.expect(other.runtime.close_thread != null);
+    try std.testing.expectEqual(attempt_before, control.task_runtime.next_restore_attempt_id);
+
+    runtime.sessions_mutex.lockUncancelable(std.testing.io);
+    runtime.mcp_operation.phase = .apply;
+    runtime.sessions_mutex.unlock(std.testing.io);
+    if (close_running_task) fake_core.releaseControlled();
+    for (0..5000) |_| {
+        if (close_running_task) try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (releasing.runtime.attachment == .detached) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(waiter.approval_change != null);
+    try std.testing.expectEqual(attempt_before, control.task_runtime.next_restore_attempt_id);
+
+    runtime.mcp_operation.phase = .idle;
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (waiter.approval_change == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.completed, waiter.approval_result.?.outcome);
+    try std.testing.expectEqual(revision, waiter.durable.approval_revision);
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(waiter_id));
+    try std.testing.expectEqual(attempt_before + 1, control.task_runtime.next_restore_attempt_id);
 }
 
 test "Session pressure never cancels busy work or automatically retries a failed close" {

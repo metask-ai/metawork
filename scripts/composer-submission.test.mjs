@@ -1475,7 +1475,9 @@ test("App keeps Workspace selection in the draft toolbar and hides the automatic
   );
   assert.ok(!screen.queryByText(path));
   assert.ok(!document.querySelector(".composer-workspace-context"));
-  await user.click(screen.getByRole("button", { name: "Task information" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Task information" }),
+  );
   assert.ok(!screen.queryByText("Working directory"));
   assert.ok(!screen.queryByText(path));
   await fixture.settle();
@@ -1589,6 +1591,19 @@ test("App sends while the Run is not ready and keeps later drafts independent", 
   await fixture.settle();
   assert.equal(fixture.textarea.value, "unsent C");
   assert.equal(fixture.inputs.length, 2);
+});
+
+test("App keeps the ordinary Composer prompt when the Runtime can accept input for recovery", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.task.continuationAvailable = false;
+  fixture.task.continuationRecoveryAvailable = false;
+  fixture.task.continuationUnavailableReason = "runtime_unavailable";
+  await fixture.publish();
+  assert.equal(fixture.textarea.placeholder, "Enter your instructions…");
+  fireEvent.change(fixture.textarea, { target: { value: "Continue" } });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle();
 });
 
 function finishWithPendingContinuation(fixture) {

@@ -1647,6 +1647,9 @@ fn wireAgentCore(
     models_runtime.addImport("product_models_ports", models_ports);
     models_runtime.addImport("product_models_providers", models_providers);
     models_runtime.addImport("product_models_metask", models_metask);
+    const models_contract_fixture = b.addOptions();
+    models_contract_fixture.addOption([]const u8, "task_model_menu", @embedFile("frontend/src/bridge/__fixtures__/task-model-menu.fixture"));
+    models_runtime.addOptions("product_models_contract_fixture", models_contract_fixture);
     models_runtime.addImport(
         "product_models_builtin_providers",
         models_builtin_providers,
@@ -2048,6 +2051,12 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const credential_match = b.createModule(.{
+        .root_source_file = b.path("src/product/credential_match.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_runtime.addImport("product_credential_match", credential_match);
     task_runtime.addImport("product_task_state", task_state);
     task_runtime.addImport("product_task_approval_job", task_approval_job);
     task_runtime.addImport("product_permission_review", product_permission_review);
@@ -2075,6 +2084,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_execution.addImport("product_credential_match", credential_match);
     task_execution.addImport("metawork_agent", agent);
     task_execution.addImport("product_task_checkpoint_record", checkpoint_record);
     task_execution.addImport("product_task_checkpoint_store", checkpoint_store);
@@ -2227,6 +2237,7 @@ fn wireAgentCore(
         "product_workspace_automatic_root",
         product_workspace_automatic_root,
     );
+    product_workspace_runtime.addImport("product_workspace_configuration", product_workspace_configuration);
     const product_workspace_view = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/view.zig"),
         .target = target,
@@ -2263,6 +2274,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_control_runtime.addImport("product_credential_match", credential_match);
     product_control_runtime.addImport("metawork_agent", agent);
     product_control_runtime.addImport("metawork_product_update", product_update);
     product_control_runtime.addImport("metawork_product_identity", product_identity);
