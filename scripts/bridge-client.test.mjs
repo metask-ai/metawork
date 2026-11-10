@@ -657,6 +657,13 @@ test("MCP management uses only typed revision 1 commands", async () => {
         return { outcome: "started" };
       if (command === "metawork.mcp.testConnection")
         return { outcome: "started" };
+      if (command === "metawork.mcp.probeHttpDraft")
+        return {
+          outcome: "redirected",
+          endpoint: "https://mcp.example.test/connect",
+        };
+      if (command === "metawork.mcp.verifyAndAddHttpDraft")
+        return { outcome: "failed" };
       if (command === "metawork.mcp.authorizeOAuth")
         return { outcome: "started", operationId: "oauth-op" };
       if (command === "metawork.mcp.cancelAuthorization")
@@ -692,6 +699,20 @@ test("MCP management uses only typed revision 1 commands", async () => {
     cwd: null,
     environmentNames: ["TOKEN"],
   });
+  assert.deepEqual(
+    await client.probeMcpHttpDraft("7", http.displayName, http.endpoint),
+    { outcome: "redirected", endpoint: "https://mcp.example.test/connect" },
+  );
+  const headers = [{ name: "Authorization", value: "Bearer fixture-draft" }];
+  assert.deepEqual(
+    await client.verifyAndAddMcpHttpDraft(
+      "7",
+      http.displayName,
+      http.endpoint,
+      headers,
+    ),
+    { outcome: "failed" },
+  );
   await client.createMcpHttpServer("7", http);
   await client.updateMcpHttpConnection("7", "server-1", http);
   await client.renameMcpServer("7", "server-1", "Search API");
@@ -726,6 +747,23 @@ test("MCP management uses only typed revision 1 commands", async () => {
         arguments: ["--safe"],
         cwd: null,
         environmentNames: ["TOKEN"],
+      },
+    },
+    {
+      command: "metawork.mcp.probeHttpDraft",
+      payload: {
+        expectedDesiredGeneration: "7",
+        displayName: http.displayName,
+        endpoint: http.endpoint,
+      },
+    },
+    {
+      command: "metawork.mcp.verifyAndAddHttpDraft",
+      payload: {
+        expectedDesiredGeneration: "7",
+        displayName: http.displayName,
+        endpoint: http.endpoint,
+        headers,
       },
     },
     {

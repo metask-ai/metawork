@@ -2760,6 +2760,36 @@ test "static HTTP header and STDIO env reach a new Product Task real MCP call" {
     try expectMcpProductAdmissionWithAuth("2025-11-25", .stdio, .expiry, true);
 }
 
+fn verifyProtectedHttpDraft(workbench: *product_control.Runtime, registry: *DurableRegistry, endpoint: []const u8) !mcp_configuration.CreateResult {
+    const header = "Bearer mcp-static-fixture-secret";
+    var draft = try workbench.prepareMcpHttpDraftCreate(0, "Deterministic HTTP", endpoint, &.{.{
+        .name = "Authorization",
+        .value = header,
+    }});
+    defer draft.deinit();
+    if (draft != .prepared) return error.TestUnexpectedResult;
+    var candidate = (try draft.prepared.httpDraftPreparation(product_mcp_limits)) orelse return error.TestUnexpectedResult;
+    defer candidate.deinit();
+    var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{});
+    defer built.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &built.input.? });
+    defer runtime.deinit();
+    defer runtime.shutdown() catch unreachable;
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer activation.deinit();
+    try std.testing.expectEqual(agent.McpActivationState.ready, activation.state());
+    try std.testing.expectEqual(@as(usize, 0), registry.len);
+    try std.testing.expectEqual(@as(usize, 0), registry.credential_len);
+    const port = workbench.mcpManagementPort();
+    const result = try port.commit_http_draft_fn(port.context, 0, &draft);
+    try std.testing.expectEqualStrings(header, registry.credential[0..registry.credential_len]);
+    try std.testing.expect(std.mem.indexOf(u8, registry.storage[0..registry.len], header) == null);
+    return result;
+}
+
 fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: agent.McpTransportKind, race: McpCreationRace, static_auth: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2842,13 +2872,11 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
             .arguments = if (static_auth) &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path, "--require-env" } else &.{ options.fixture_path, "--protocol", protocol_version, "--trace", trace_path, "--ttl-ms", "2000" },
             .auth_mode = if (static_auth) .static else .none,
             .environment_names = if (static_auth) &.{"MCP_FIXTURE_TOKEN"} else &.{},
-        })).outcome else (try initial_workbench.createMcpHttpServer(0, .{
+        })).outcome else if (static_auth) (try verifyProtectedHttpDraft(&initial_workbench, &durable_registry, fixture.endpoint)).outcome else (try initial_workbench.createMcpHttpServer(0, .{
             .display_name = "Deterministic HTTP",
             .negotiation = if (std.mem.eql(u8, protocol_version, "2026-07-28")) "modern_only" else "automatic",
             .timeout_ms = 2000,
             .url = fixture.endpoint,
-            .auth_mode = if (static_auth) .static else .none,
-            .header_names = if (static_auth) &.{"Authorization"} else &.{},
         })).outcome,
     );
     var created = try mcp_configuration.decode(
@@ -2859,10 +2887,10 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
     const server_id = try std.testing.allocator.dupe(u8, created.value.servers[0].id);
     created.deinit();
     defer std.testing.allocator.free(server_id);
-    if (static_auth) {
+    if (static_auth and transport == .stdio) {
         var secret_buffer: [128]u8 = undefined;
-        const secret = try std.fmt.bufPrint(&secret_buffer, "{s}mcp-static-fixture-secret", .{if (transport == .stdio) @as([]const u8, "") else "Bearer "});
-        try std.testing.expectEqual(.saved, try initial_workbench.captureMcpStaticSecret(1, .{ .server_id = server_id, .slot_name = if (transport == .stdio) "MCP_FIXTURE_TOKEN" else "Authorization", .secret = secret }));
+        const secret = try std.fmt.bufPrint(&secret_buffer, "mcp-static-fixture-secret", .{});
+        try std.testing.expectEqual(.saved, try initial_workbench.captureMcpStaticSecret(1, .{ .server_id = server_id, .slot_name = "MCP_FIXTURE_TOKEN", .secret = secret }));
         for (secret) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
         try std.testing.expect(std.mem.indexOf(u8, durable_registry.storage[0..durable_registry.len], "mcp-static-fixture-secret") == null);
     }
@@ -2955,7 +2983,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
     try std.testing.expect(refresh_timer.arm_count > 0);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try restarted_workbench.setMcpAllowedTools(if (static_auth) 2 else 1, .{
+        try restarted_workbench.setMcpAllowedTools(if (static_auth and transport == .stdio) 2 else 1, .{
             .server_id = server_id,
             .tools = &.{"echo"},
         }),

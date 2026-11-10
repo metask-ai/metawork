@@ -38,6 +38,8 @@ pub const skill_detail = "metawork.skills.detail";
 pub const mcp_cancel_installation = "metawork.mcp.cancelInstallation";
 pub const mcp_create_stdio_server = "metawork.mcp.createStdioServer";
 pub const mcp_create_http_server = "metawork.mcp.createHttpServer";
+pub const mcp_probe_http_draft = "metawork.mcp.probeHttpDraft";
+pub const mcp_verify_add_http_draft = "metawork.mcp.verifyAndAddHttpDraft";
 pub const mcp_update_stdio_connection = "metawork.mcp.updateStdioConnection";
 pub const mcp_update_http_connection = "metawork.mcp.updateHttpConnection";
 pub const mcp_rename_server = "metawork.mcp.renameServer";
@@ -149,6 +151,8 @@ pub const product = [_][]const u8{
     skill_detail,
     mcp_create_stdio_server,
     mcp_create_http_server,
+    mcp_probe_http_draft,
+    mcp_verify_add_http_draft,
     mcp_cancel_installation,
     mcp_update_stdio_connection,
     mcp_update_http_connection,

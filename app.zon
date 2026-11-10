@@ -51,6 +51,8 @@
             .{ .name = "metawork.mcp.cancelInstallation", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.createStdioServer", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.createHttpServer", .origins = .{"zero://app"} },
+            .{ .name = "metawork.mcp.probeHttpDraft", .origins = .{"zero://app"} },
+            .{ .name = "metawork.mcp.verifyAndAddHttpDraft", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.updateStdioConnection", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.updateHttpConnection", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.renameServer", .origins = .{"zero://app"} },

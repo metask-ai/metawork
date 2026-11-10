@@ -114,13 +114,65 @@ export async function runMcpLifecycleVertical({
         protocolVersion === "2026-07-28" ? "modern_only" : "automatic",
       timeoutMs: 8000,
     };
+    if (transport === "http") {
+      const draft = {
+        expectedDesiredGeneration: initial.desiredGeneration,
+        displayName: common.displayName,
+        endpoint,
+      };
+      const rejected = await invoke("metawork.mcp.probeHttpDraft", {
+        ...draft,
+        endpoint: new URL("/missing", endpoint).href,
+      });
+      assert.deepEqual(rejected, { outcome: "failed" });
+      assert.deepEqual(await invoke("metawork.mcp.probeHttpDraft", draft), {
+        outcome: "connected",
+      });
+      assert.deepEqual(
+        await invoke("metawork.mcp.probeHttpDraft", {
+          ...draft,
+          endpoint: new URL("/mcp/draft-entry", endpoint).href,
+        }),
+        {
+          outcome: "redirected",
+          endpoint: new URL("/mcp/draft-test", endpoint).href,
+        },
+      );
+      assert.deepEqual(
+        await invoke("metawork.mcp.probeHttpDraft", {
+          ...draft,
+          endpoint: new URL("/mcp/cross-origin/", endpoint).href,
+        }),
+        { outcome: "failed" },
+      );
+      assert.deepEqual(
+        await invoke("metawork.mcp.probeHttpDraft", {
+          ...draft,
+          endpoint: new URL("/mcp/draft-test", endpoint).href,
+        }),
+        { outcome: "authentication_required" },
+      );
+      assert.deepEqual(
+        await invoke("metawork.mcp.verifyAndAddHttpDraft", {
+          ...draft,
+          endpoint: new URL("/mcp/draft-test", endpoint).href,
+          headers: [
+            { name: "Authorization", value: "Bearer wrong-fixture-token" },
+          ],
+        }),
+        { outcome: "failed" },
+      );
+      const afterProbe = await mcpView();
+      assert.equal(afterProbe.desiredGeneration, initial.desiredGeneration);
+      assert.deepEqual(afterProbe.servers, initial.servers);
+    }
     const created =
       transport === "http"
-        ? await invoke("metawork.mcp.createHttpServer", {
-            ...common,
+        ? await invoke("metawork.mcp.verifyAndAddHttpDraft", {
+            expectedDesiredGeneration: initial.desiredGeneration,
+            displayName: common.displayName,
             endpoint,
-            authMode: "none",
-            headerNames: [],
+            headers: [],
           })
         : await invoke("metawork.mcp.createStdioServer", {
             ...common,

@@ -1302,6 +1302,25 @@ pub const Runtime = struct {
         return self.commitPreparedCreate(&preparation);
     }
 
+    pub fn prepareHttpDraft(self: *Runtime, expected_generation: u64, display_name: []const u8, endpoint: []const u8) Error!?configuration.Preparation {
+        const management = self.mutableManagement(expected_generation, null) orelse return null;
+        return management.prepareHttpDraft(expected_generation, display_name, endpoint);
+    }
+
+    pub fn prepareHttpDraftCreate(self: *Runtime, expected_generation: u64, name: []const u8, endpoint: []const u8, headers: []const configuration.HttpDraftHeader) Error!configuration.MutationPreparation {
+        const management = self.mutableManagement(expected_generation, null) orelse return .rejected;
+        return management.prepareHttpDraftCreate(expected_generation, name, endpoint, headers);
+    }
+
+    pub fn commitHttpDraftCreate(self: *Runtime, generation: u64, draft: *configuration.MutationPreparation) Error!configuration.CreateResult {
+        if (self.mutableManagement(generation, null) == null) {
+            draft.deinit();
+            return .{ .outcome = self.generationOutcome(generation) };
+        }
+        defer draft.* = .rejected;
+        return self.commitPreparedCreate(draft);
+    }
+
     pub fn createOauthHttpServer(
         self: *Runtime,
         expected_generation: u64,

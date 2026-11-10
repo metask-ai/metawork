@@ -1169,6 +1169,29 @@ pub const PreparedMutation = struct {
         return self.plan.targetRegistry() catch unreachable;
     }
 
+    pub fn httpDraftPreparation(self: *const PreparedMutation, limits: Limits) std.mem.Allocator.Error!?Preparation {
+        var registry = cloneRegistry(self.allocator, self.target(), limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        };
+        errdefer registry.deinit();
+        const states = try self.allocator.alloc(ServerPreparationState, registry.value.servers.len);
+        errdefer self.allocator.free(states);
+        @memset(states, .disabled);
+        states[states.len - 1] = .eligible;
+        const credentials = try self.allocator.alloc(ResolvedCredential, self.candidates.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (credentials[0..initialized]) |credential| secureFree(self.allocator, credential.secret);
+            self.allocator.free(credentials);
+        }
+        for (self.candidates, credentials) |candidate, *credential| {
+            credential.* = .{ .locator = candidate.locator, .secret = try self.allocator.dupe(u8, candidate.secret) };
+            initialized += 1;
+        }
+        return .{ .allocator = self.allocator, .state = .available, .registry = registry, .server_states = states, .credentials = credentials };
+    }
+
     pub fn deinit(self: *PreparedMutation) void {
         for (self.candidates) |candidate| secureFree(self.allocator, candidate.secret);
         if (self.candidates.len != 0) self.allocator.free(self.candidates);
@@ -1181,6 +1204,22 @@ pub const MutationPreparation = union(enum) {
     unchanged,
     rejected,
     prepared: PreparedMutation,
+
+    pub fn deinit(self: *MutationPreparation) void {
+        if (self.* == .prepared) self.prepared.deinit();
+        self.* = .rejected;
+    }
+};
+
+pub const HttpDraftHeader = struct { name: []const u8, value: []const u8 };
+pub const HttpDraftDetection = union(enum) {
+    connected,
+    failed,
+    authentication_required,
+    access_denied,
+    oauth_automatic,
+    oauth_existing,
+    redirected: []const u8,
 };
 
 /// Workbench-owned desired MCP registry and mutation admission boundary.
@@ -1335,6 +1374,63 @@ pub const ManagementPort = struct {
             return preparation;
         }
         return self.secureEndpointPreparation(&preparation, null, input.url, input.endpoint_parts);
+    }
+
+    pub fn prepareHttpDraft(
+        self: *ManagementPort,
+        expected_generation: u64,
+        display_name: []const u8,
+        endpoint: []const u8,
+    ) std.mem.Allocator.Error!?Preparation {
+        var mutation = try self.prepareCreateHttpServer(expected_generation, .{
+            .display_name = display_name,
+            .url = endpoint,
+        });
+        const prepared = switch (mutation) {
+            .prepared => |*value| value,
+            else => return null,
+        };
+        defer prepared.deinit();
+        const states = try self.allocator.alloc(ServerPreparationState, prepared.target().servers.len);
+        @memset(states, .disabled);
+        states[states.len - 1] = .eligible;
+        return .{
+            .allocator = self.allocator,
+            .state = .available,
+            .registry = prepared.plan.takeTarget(),
+            .server_states = states,
+        };
+    }
+
+    pub fn prepareHttpDraftCreate(self: *ManagementPort, expected_generation: u64, display_name: []const u8, endpoint: []const u8, headers: []const HttpDraftHeader) std.mem.Allocator.Error!MutationPreparation {
+        const max_headers = 4;
+        if (headers.len > max_headers) return .rejected;
+        var names: [max_headers][]const u8 = undefined;
+        for (headers, 0..) |header, i| {
+            if (!validHttpHeaderCredential(header.value) or header.value.len > self.limits.max_credential_secret_bytes) return .rejected;
+            names[i] = header.name;
+        }
+        var draft = try self.prepareCreateHttpServer(expected_generation, .{
+            .display_name = display_name,
+            .url = endpoint,
+            .header_names = names[0..headers.len],
+            .auth_mode = if (headers.len == 0) .none else .static,
+        });
+        if (headers.len == 0 or draft != .prepared) return draft;
+        defer draft.deinit();
+        const target = draft.prepared.target();
+        const server = &target.servers[target.servers.len - 1];
+        const slots = try self.allocator.dupe(SecretSlotWire, server.transport.headers);
+        defer self.allocator.free(slots);
+        server.transport.headers = slots;
+        var storage: [max_headers][35]u8 = undefined;
+        var sources: [max_headers]SecretCandidateSource = undefined;
+        for (headers, slots, 0..) |header, *slot, i| {
+            const locator = self.freshCredentialLocator(target, &storage[i]) orelse return .rejected;
+            slot.credential_ref = locator;
+            sources[i] = .{ .locator = locator, .secret = header.value };
+        }
+        return self.prepareTargetWithSecrets(target, sources[0..headers.len]);
     }
 
     pub fn prepareCreateOauthHttpServer(
@@ -1816,10 +1912,10 @@ pub const ManagementPort = struct {
             const start = i * chunk_bytes;
             try sources.append(.{ .locator = locator, .secret = input.request[start..@min(input.request.len, start + chunk_bytes)] });
         }
-        return self.prepareInstallationTarget(target, sources.items);
+        return self.prepareTargetWithSecrets(target, sources.items);
     }
 
-    fn prepareInstallationTarget(self: *ManagementPort, target: RegistryWire, sources: []const SecretCandidateSource) std.mem.Allocator.Error!MutationPreparation {
+    fn prepareTargetWithSecrets(self: *ManagementPort, target: RegistryWire, sources: []const SecretCandidateSource) std.mem.Allocator.Error!MutationPreparation {
         const locators = try self.allocator.alloc([]const u8, sources.len);
         defer self.allocator.free(locators);
         for (sources, locators) |source, *locator| locator.* = source.locator;
@@ -1893,7 +1989,7 @@ pub const ManagementPort = struct {
         slots[slot_index].credential_ref = locator;
         servers[index].installation.?.credentials = slots;
         servers[index].installation.?.revision += 1;
-        return self.prepareInstallationTarget(target, &.{.{ .locator = locator, .secret = secret }});
+        return self.prepareTargetWithSecrets(target, &.{.{ .locator = locator, .secret = secret }});
     }
 
     /// Persist Stop even while an uninterruptible Core apply is in flight.
@@ -7484,6 +7580,7 @@ test "typed management creates approved enabled servers with an empty allowlist"
             .delete_fn = Fake.delete,
         },
         .identity_generator = .{ .available = true, .fill_fn = Fake.fill },
+        .locator_generator = .{ .available = true, .fill_fn = Fake.fill },
         .limits = test_limits,
     });
     defer management.deinit();
@@ -7500,6 +7597,28 @@ test "typed management creates approved enabled servers with an empty allowlist"
         .display_name = "Remote",
         .url = "https://exa mple.test/rpc",
     })) == .rejected);
+    var draft = (try management.prepareHttpDraft(0, "Remote", "https://mcp.example.test/rpc")) orelse return error.TestUnexpectedResult;
+    defer draft.deinit();
+    try std.testing.expectEqualStrings("https://mcp.example.test/rpc", draft.registry.?.value.servers[0].transport.url.?);
+    try std.testing.expectEqual(ServerPreparationState.eligible, draft.server_states[0]);
+    try std.testing.expectEqual(@as(usize, 0), fake.registry_commits);
+    try std.testing.expect(management.desiredRegistry() == null);
+    var draft_with_headers = try management.prepareHttpDraftCreate(0, "Protected", "https://mcp.example.test/rpc", &.{
+        .{ .name = "Authorization", .value = "Bearer fixture-draft" },
+    });
+    defer draft_with_headers.deinit();
+    try std.testing.expect(draft_with_headers == .prepared);
+    var draft_connection = (try draft_with_headers.prepared.httpDraftPreparation(test_limits)) orelse return error.TestUnexpectedResult;
+    defer draft_connection.deinit();
+    const header = draft_connection.registry.?.value.servers[0].transport.headers[0];
+    try std.testing.expectEqualStrings("Authorization", header.name);
+    try std.testing.expectEqualStrings(header.credential_ref.?, draft_connection.credentials[0].locator);
+    try std.testing.expectEqualStrings("Bearer fixture-draft", draft_connection.credentials[0].secret);
+    const draft_registry_bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, draft_connection.registry.?.value, .{});
+    defer std.testing.allocator.free(draft_registry_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, draft_registry_bytes, "fixture-draft") == null);
+    try std.testing.expectEqual(@as(usize, 0), fake.registry_commits);
+    try std.testing.expect(management.desiredRegistry() == null);
     var stdio_preparation = try management.prepareCreateStdioServer(0, .{
         .display_name = "Local",
         .command = "/usr/bin/local-mcp",

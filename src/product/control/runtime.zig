@@ -6733,6 +6733,35 @@ pub const Runtime = struct {
         defer self.publishMcpRuntimeChanges();
         return runtime.recoverOauthOperation(operation_id) catch |err| return @errorCast(err);
     }
+    pub fn prepareMcpHttpDraft(self: *Runtime, expected_generation: u64, display_name: []const u8, endpoint: []const u8) Error!?mcp_configuration.Preparation {
+        const input: mcp_configuration.CreateHttpServerInput = .{ .display_name = display_name, .url = endpoint };
+        if (self.mcpPublicInputContainsSensitive(input)) return null;
+        const runtime = if (self.mcp) |*value| value else return null;
+        return runtime.prepareHttpDraft(expected_generation, display_name, endpoint) catch |err| return @errorCast(err);
+    }
+
+    pub fn canPublishMcpDraftRedirect(self: *const Runtime, endpoint: []const u8) bool {
+        return !self.containsKnownCredential(endpoint);
+    }
+
+    pub fn prepareMcpHttpDraftCreate(self: *Runtime, generation: u64, name: []const u8, endpoint: []const u8, headers: []const mcp_configuration.HttpDraftHeader) Error!mcp_configuration.MutationPreparation {
+        const input: mcp_configuration.CreateHttpServerInput = .{ .display_name = name, .url = endpoint };
+        if (self.mcpPublicInputContainsSensitive(input)) return .rejected;
+        for (headers) |header| if (self.containsKnownCredential(header.name)) return .rejected;
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        return runtime.prepareHttpDraftCreate(generation, name, endpoint, headers) catch |err| return @errorCast(err);
+    }
+
+    fn controlMcpCommitHttpDraft(context: *anyopaque, generation: u64, draft: *mcp_configuration.MutationPreparation) anyerror!mcp_configuration.CreateResult {
+        const self = controlOwner(context);
+        const runtime = if (self.mcp) |*value| value else {
+            draft.deinit();
+            return .{ .outcome = .rejected };
+        };
+        defer self.publishMcpRuntimeChanges();
+        return runtime.commitHttpDraftCreate(generation, draft);
+    }
+
     pub fn createMcpHttpServer(
         self: *Runtime,
         expected_generation: u64,
@@ -10597,6 +10626,7 @@ pub const Runtime = struct {
             .observe_process_fn = controlMcpObserveProcess,
             .inspect_fn = controlMcpInspect,
             .write_desired_fn = controlMcpWriteDesired,
+            .commit_http_draft_fn = controlMcpCommitHttpDraft,
             .begin_connection_test_fn = controlMcpBeginConnectionTest,
             .complete_connection_test_fn = controlMcpCompleteConnectionTest,
             .begin_apply_fn = controlMcpBeginApply,

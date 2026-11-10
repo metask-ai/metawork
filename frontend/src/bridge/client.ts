@@ -20,6 +20,7 @@ import type {
   OutputActionState,
   ViewScope,
   McpHttpConnectionInput,
+  McpHttpDraftHeader,
   McpSecretSlot,
   McpStdioConnectionInput,
   ApprovalMode,
@@ -80,6 +81,8 @@ import {
   decodeMcpRefreshResult,
   decodeMcpConfigurationApplyResult,
   decodeMcpConnectionTestResult,
+  decodeMcpHttpDraftProbeResult,
+  decodeMcpHttpDraftAddResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
   decodeFileChangeDiff,
@@ -638,6 +641,39 @@ export class BridgeClient {
       }),
     );
   }
+  async probeMcpHttpDraft(
+    expectedDesiredGeneration: string,
+    displayName: string,
+    endpoint: string,
+  ) {
+    return decodeMcpHttpDraftProbeResult(
+      await this.invoke(
+        commands.mcpProbeHttpDraft,
+        {
+          expectedDesiredGeneration,
+          displayName,
+          endpoint,
+        },
+        0,
+      ),
+    );
+  }
+
+  async verifyAndAddMcpHttpDraft(
+    expectedDesiredGeneration: string,
+    displayName: string,
+    endpoint: string,
+    headers: McpHttpDraftHeader[],
+  ) {
+    return decodeMcpHttpDraftAddResult(
+      await this.invoke(
+        commands.mcpVerifyAndAddHttpDraft,
+        { expectedDesiredGeneration, displayName, endpoint, headers },
+        0,
+      ),
+    );
+  }
+
   async createMcpHttpServer(
     expectedDesiredGeneration: string,
     input: McpHttpConnectionInput,

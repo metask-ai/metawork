@@ -183,6 +183,7 @@ pub const McpInstallObservation = struct {
 };
 
 pub const McpManagementPort = struct {
+    commit_http_draft_fn: *const fn (*anyopaque, u64, *mcp_contract.MutationPreparation) anyerror!mcp_contract.CreateResult,
     context: *anyopaque,
     installation_request_fn: *const fn (*anyopaque) ?McpInstallIngress,
     start_installation_fn: *const fn (*anyopaque, u64, ?[]const u8) anyerror!mcp_contract.CreateResult,

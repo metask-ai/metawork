@@ -9,6 +9,8 @@ const mcp_management_coordinator = @import("mcp_management_coordinator.zig");
 pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.McpManagementHost {
     return .{
         .context = coordinator,
+        .probe_http_draft_fn = probeHttpDraft,
+        .verify_http_draft_fn = verifyHttpDraft,
         .test_fn = testConnection,
         .begin_approval_fn = beginApproval,
         .cancel_approval_fn = cancelApproval,
@@ -18,6 +20,25 @@ pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.Mcp
         .cancel_fn = cancelAuthorization,
         .apply_fn = applyConfiguration,
     };
+}
+
+fn probeHttpDraft(context: *anyopaque, preparation: *const mcp_contract.Preparation, completion_context: *anyopaque, complete: *const fn (*anyopaque, mcp_contract.HttpDraftDetection) void) anyerror!bool {
+    const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return coordinator.probeHttpDraft(preparation, completion_context, complete);
+}
+
+fn verifyHttpDraft(context: *anyopaque, mutation: *mcp_contract.MutationPreparation, generation: u64, completion_context: *anyopaque, active: *const fn (*anyopaque) bool, complete: *const fn (*anyopaque, ?mcp_contract.CreateResult) void) anyerror!bool {
+    const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    var draft: mcp_management_coordinator.Coordinator.VerifiedDraft = .{
+        .mutation = mutation.*,
+        .generation = generation,
+        .context = completion_context,
+        .active = active,
+        .complete = complete,
+    };
+    const started = try coordinator.verifyAndAddHttpDraft(&draft);
+    if (started) mutation.* = .rejected;
+    return started;
 }
 
 fn applyConfiguration(
