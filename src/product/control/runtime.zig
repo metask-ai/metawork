@@ -4271,6 +4271,7 @@ pub const Runtime = struct {
     }
 
     fn queueApprovalProjection(self: *Runtime, resolve_only: bool) !void {
+        if (!self.task_runtime.approvalJobCapacityAvailable()) return error.QueueFull;
         if (resolve_only and !self.task_runtime.approvalHistoryWorkerActive()) self.syncHistoryCredentials(null, null);
         var input: task_runtime.HistoryInput = if (resolve_only)
             .{ .resolution = self.approval_history_unknown orelse return error.TaskBusy }
@@ -4388,6 +4389,9 @@ pub const Runtime = struct {
         if (self.shutting_down) if (self.task_runtime.takeShutdownRestoreWitness()) |token| {
             std.debug.assert(self.approval_history_unknown == null);
             self.approval_history_unknown = token;
+        };
+        if (!self.shutting_down) if (self.checkpoint_store) |store| {
+            self.task_runtime.flushCheckpointRetirements(store, effects.executor, effects.notifier);
         };
         changed = self.task_runtime.advanceApprovalChanges(effects) or changed;
         if (changed) self.bumpRevision();
@@ -8775,6 +8779,7 @@ pub const Runtime = struct {
             return .committed;
         if (!self.task_persistence_health.operational()) return .failed;
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
+        if (!self.task_runtime.approvalJobCapacityAvailable()) return error.QueueFull;
         var input: task_runtime.HistoryInput = .{ .candidate = try self.captureTaskHistoryCandidate(null) };
         errdefer input.deinit();
         try self.task_runtime.queueRecoveryHistory(task_id, input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
@@ -8789,6 +8794,7 @@ pub const Runtime = struct {
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
             .refresh_capabilities_fn = refreshModelRestoreCapabilities,
             .retire_checkpoint_fn = retireRecoveryCheckpoint,
+            .shutting_down = self.shutting_down,
         };
     }
 
@@ -8796,7 +8802,7 @@ pub const Runtime = struct {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.shutting_down) return;
         if (self.checkpoint_store) |store|
-            self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
+            self.task_runtime.retireCheckpoint(store, identity, self.approvalExecutor(), self.approvalNotifier());
     }
 
     const HistoryWritePurpose = enum { projection, required };
@@ -11944,7 +11950,7 @@ const TestTaskPersistence = struct {
     }
 };
 
-const TestHeldHistoryProjection = struct {
+const TestHeldApprovalJob = struct {
     job: ?*anyopaque = null,
     execute_fn: ?*const fn (*anyopaque) void = null,
 
@@ -11959,14 +11965,14 @@ const TestHeldHistoryProjection = struct {
         return false;
     }
 
+    fn executor(self: *@This()) product_task.ApprovalExecutor {
+        return .{ .context = self, .enqueue_fn = enqueue, .cancel_fn = cancel };
+    }
+
     fn hold(self: *@This(), control: *Runtime) !void {
         var input: task_runtime.HistoryInput = .{ .candidate = try control.captureTaskHistoryCandidate(null) };
         errdefer input.deinit();
-        try control.task_runtime.queueApprovalProjection(input, control.task_persistence, .{
-            .context = self,
-            .enqueue_fn = enqueue,
-            .cancel_fn = cancel,
-        }, control.approvalNotifier());
+        try control.task_runtime.queueApprovalProjection(input, control.task_persistence, self.executor(), control.approvalNotifier());
     }
 
     fn finish(self: *@This()) void {
@@ -13786,7 +13792,7 @@ test "writer release advances pending deletion before deferred history projectio
     control.task_persistence = persistence.capability(null);
     control.task_persistence_health = .ready;
 
-    var held: TestHeldHistoryProjection = .{};
+    var held: TestHeldApprovalJob = .{};
     try held.hold(&control);
     defer held.finish();
     try control.deleteTask(3);
@@ -14015,7 +14021,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3000 } },
     });
-    var held: TestHeldHistoryProjection = .{};
+    var held: TestHeldApprovalJob = .{};
     try held.hold(&control);
     defer held.finish();
 
@@ -21305,6 +21311,64 @@ test "MCP startup activation failure stays globally unavailable without inventin
     control.shutting_down = true;
     control.syncLifecycle();
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
+}
+
+test "full approval lane keeps confirmation pending and retires confirmed blob after wake" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store = try checkpoint_store.FileStore.init(std.testing.io, home);
+    defer store.deinit();
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var history: TestTaskPersistence = .{ .storage = storage };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.checkpoint_store = &store;
+    control.task_persistence = history.capability(null);
+    control.task_persistence_health = .ready;
+
+    const blob = "unreferenced checkpoint";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(blob, &digest, .{});
+    var writer = try store.begin(3, blob.len);
+    defer writer.deinit();
+    try writer.write(blob);
+    const retired = try writer.commit(1, digest, blob.len);
+    const nonexistent: checkpoint_store.Identity = .{
+        .task_id = 3,
+        .generation = 2,
+        .digest = digest,
+        .byte_size = blob.len,
+    };
+    var held: [product_task.approval_capacity]TestHeldApprovalJob = @splat(.{});
+    defer for (&held) |*job| job.finish();
+    for (&held) |*job| {
+        try control.task_runtime.queueApprovalRetirement(&store, nonexistent, job.executor(), control.approvalNotifier());
+    }
+
+    const task = control.task_runtime.find(3).?;
+    task.approval_change = .{ .revision = 2, .target = .auto_review, .phase = .mode_commit };
+    Runtime.retireRecoveryCheckpoint(&control, retired);
+    try store.verify(retired);
+    try std.testing.expectEqual(retired, task.pending_checkpoint_retirements[0].?);
+    try std.testing.expectError(error.QueueFull, control.queueApprovalProjection(false));
+    _ = control.syncApprovalChanges();
+    try std.testing.expectEqual(.mode_commit, task.approval_change.?.phase);
+    try std.testing.expect(task.approval_result == null);
+    try std.testing.expectEqual(@as(usize, 0), history.commits);
+
+    for (&held) |*job| job.finish();
+    for (0..2000) |_| {
+        _ = control.syncApprovalChanges();
+        if (task.approval_result != null) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+    try std.testing.expect(task.pending_checkpoint_retirements[0] == null);
+    try std.testing.expectError(error.BlobMissing, store.verify(retired));
+    try std.testing.expectEqual(@as(usize, 1), history.commits);
 }
 
 test "approval shutdown settles joined history outcomes before releasing Task resources" {

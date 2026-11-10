@@ -1086,6 +1086,7 @@ pub const RecoveryEffects = struct {
     executor: ?ExecutorPort = null,
     refresh_capabilities_fn: ?*const fn (*anyopaque, u64) bool = null,
     retire_checkpoint_fn: ?*const fn (*anyopaque, checkpoint_store.Identity) void = null,
+    shutting_down: bool = false,
 
     fn authority(
         self: RecoveryEffects,
@@ -1366,9 +1367,13 @@ pub const Runtime = struct {
         return revision;
     }
 
-    fn approvalJobSlot(self: *Runtime) error{QueueFull}!usize {
+    fn approvalJobSlot(self: *const Runtime) error{QueueFull}!usize {
         for (self.approval_jobs, 0..) |entry, index| if (entry == null) return index;
         return error.QueueFull;
+    }
+
+    pub fn approvalJobCapacityAvailable(self: *const Runtime) bool {
+        return if (self.approvalJobSlot()) |_| true else |_| false;
     }
 
     pub fn approvalJobFor(self: *const Runtime, task_id: u64) bool {
@@ -1561,6 +1566,38 @@ pub const Runtime = struct {
             return err;
         };
         self.approval_jobs[slot] = .{ .recipient = .checkpoint_retirement, .job = job };
+    }
+
+    pub fn retireCheckpoint(self: *Runtime, store: *checkpoint_store.FileStore, identity: checkpoint_store.Identity, executor: ExecutorPort, notifier: task_execution.Notifier) void {
+        self.queueApprovalRetirement(store, identity, executor, notifier) catch |err| {
+            if (err != error.QueueFull) return;
+            const task = self.find(identity.task_id) orelse unreachable;
+            for (task.pending_checkpoint_retirements) |entry| {
+                if (entry) |pending| if (checkpointIdentityEqual(pending, identity)) return;
+            }
+            for (&task.pending_checkpoint_retirements) |*entry| {
+                if (entry.* != null) continue;
+                entry.* = identity;
+                return;
+            }
+            unreachable; // No new transition for this Task can accumulate another batch.
+        };
+    }
+
+    pub fn flushCheckpointRetirements(self: *Runtime, store: *checkpoint_store.FileStore, executor: ExecutorPort, notifier: task_execution.Notifier) void {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (&task.pending_checkpoint_retirements) |*pending| {
+                const identity = pending.* orelse continue;
+                self.queueApprovalRetirement(store, identity, executor, notifier) catch return;
+                pending.* = null;
+            }
+        }
+    }
+
+    fn checkpointRetirementWaiting(task: *const task_state.Task) bool {
+        for (task.pending_checkpoint_retirements) |entry| if (entry != null) return true;
+        return false;
     }
 
     pub const PreparedApprovalCommit = struct {
@@ -1955,7 +1992,7 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             const change = task.approval_change orelse continue;
-            if (self.approvalJobFor(task.durable.id)) continue;
+            if (self.approvalJobFor(task.durable.id) or checkpointRetirementWaiting(task)) continue;
             if (effects.shutting_down) continue;
             switch (change.phase) {
                 .waiting, .recovering => switch (self.advanceApprovalAttachment(task.durable.id)) {
@@ -1971,21 +2008,23 @@ pub const Runtime = struct {
                     },
                     .checkpoint => |baseline_confirmed| {
                         const resources = effects.operation_fn(effects.context).worker.checkpoint;
-                        self.queueApprovalCheckpoint(task.durable.id, baseline_confirmed, resources, effects.executor, effects.notifier) catch {
+                        self.queueApprovalCheckpoint(task.durable.id, baseline_confirmed, resources, effects.executor, effects.notifier) catch |err| {
+                            if (err == error.QueueFull) continue;
                             self.rejectApprovalChange(effects, task.durable.id, .checkpoint_failed, false);
                         };
                         changed = true;
                     },
                 },
                 .baseline_commit, .mode_commit => {
-                    if (effects.history_blocked_fn(effects.context)) continue;
+                    if (effects.history_blocked_fn(effects.context) or !self.approvalJobCapacityAvailable()) continue;
                     var candidate = self.captureApprovalCandidate(effects, task.durable.id) catch {
                         self.rejectApprovalChange(effects, task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                         changed = true;
                         continue;
                     };
-                    self.queueApprovalHistory(task.durable.id, candidate, effects.persistence, effects.executor, effects.notifier) catch {
+                    self.queueApprovalHistory(task.durable.id, candidate, effects.persistence, effects.executor, effects.notifier) catch |err| {
                         candidate.deinit();
+                        if (err == error.QueueFull) continue;
                         self.rejectApprovalChange(effects, task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                     };
                     changed = true;
@@ -6875,6 +6914,7 @@ pub const Runtime = struct {
         while (true) {
             const job = task.runtime.restore_job orelse break;
             if (!job.completionReady()) break;
+            if (!effects.shutting_down and checkpointRetirementWaiting(task)) break;
             if (job.rebind != null) switch (self.syncRebindPreparation(task, job, effects, release, notifier)) {
                 .waiting => break,
                 .finished => {
