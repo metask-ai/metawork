@@ -2705,13 +2705,13 @@ pub const Runtime = struct {
         }
     }
 
-    /// Freeze the current batch by changing its records, never a sticky Task flag.
     pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
         for (self.tasks) |entry| if (entry) |task| {
             _ = self.cancelWaitingInputs(task.durable.id, .shutting_down);
         };
     }
 
+    /// Freeze the current batch by changing its records, never a sticky Task flag.
     pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
         const task = self.find(task_id) orelse return false;
         task.skill_preparation = null;
@@ -6269,7 +6269,6 @@ pub const Runtime = struct {
         };
     }
 
-    /// An owned copy survives release of the live Session access.
     pub const RestoreFilters = struct {
         skill: ?*agent.SkillRestoreInputs,
         mcp: ?*agent.McpSelection,
@@ -6371,6 +6370,7 @@ pub const Runtime = struct {
         return if (original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
     }
 
+    /// An owned copy survives release of the live Session access.
     pub fn captureModelRebindInputs(self: *Runtime, task_id: u64) !?agent.SessionRestoreInputs {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.hasAttachedSession()) {
