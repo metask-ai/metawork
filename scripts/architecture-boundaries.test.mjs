@@ -980,6 +980,10 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(runtime, /@import\("metawork_product_schedule"\)/);
   assert.doesNotMatch(
     runtime,
+    /\b(?:input_continuation_schedule_gate|completion_confirmation_failed_task)\b/,
+  );
+  assert.doesNotMatch(
+    runtime,
     /product_schedule_(?:state|persistence|runtime)/,
   );
   assert.match(scheduleRoot, /pub const Runtime = runtime_impl\.Runtime/);

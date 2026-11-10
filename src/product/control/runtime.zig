@@ -5504,28 +5504,13 @@ pub const Runtime = struct {
             changed = true;
             durable_changed = true;
         }
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (self.task_runtime.inputContinuation(task.durable.id)) |source| {
-                if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id))
-                    source.input_continuation_schedule_gate = true;
-            }
-        };
+        self.task_runtime.gateScheduledContinuations(&self.schedule, scheduleHasPendingContinuation);
         if (self.schedule.reconcileNoFail(
             self.scheduleExecutionBinding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         )) changed = true;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (self.task_runtime.inputContinuation(task.durable.id)) |source| {
-                if (!source.input_continuation_schedule_gate) continue;
-                const pending = self.schedule.hasPendingSubmittedOccurrence(task.durable.id);
-                if (self.schedule.persistenceHealth() != .ready or
-                    (pending and self.schedule.completion_confirmation_failed_task == task.durable.id))
-                {
-                    changed = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .schedule_failed) or changed;
-                } else if (!pending) source.input_continuation_schedule_gate = false;
-            }
-        };
+        changed = self.task_runtime.settleScheduledContinuations(&self.schedule, scheduleContinuationConfirmation) or changed;
         if (durable_changed) self.approval_history_dirty = true;
         if (self.task_runtime.syncDeletions(
             self.checkpoint_store_health.load(.acquire) != .unavailable,
@@ -5547,6 +5532,20 @@ pub const Runtime = struct {
         self.flushApprovalProjectionNoFail();
         if (changed) self.bumpRevision();
         return task_sync.mcp_refresh_needed;
+    }
+
+    fn scheduleHasPendingContinuation(context: *const anyopaque, task_id: u64) bool {
+        const schedule: *const product_schedule.Runtime = @ptrCast(@alignCast(context));
+        return schedule.hasPendingSubmittedOccurrence(task_id);
+    }
+
+    fn scheduleContinuationConfirmation(context: *const anyopaque, task_id: u64) task_runtime.Runtime.ScheduleConfirmation {
+        const schedule: *const product_schedule.Runtime = @ptrCast(@alignCast(context));
+        return switch (schedule.continuationConfirmation(task_id)) {
+            .confirmed => .confirmed,
+            .pending => .pending,
+            .failed => .failed,
+        };
     }
 
     fn advanceTaskInputs(self: *Runtime) void {

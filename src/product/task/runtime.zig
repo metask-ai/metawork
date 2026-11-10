@@ -2843,6 +2843,39 @@ pub const Runtime = struct {
         return &task.durable.runs[slot].?;
     }
 
+    pub const ScheduleConfirmation = enum { confirmed, pending, failed };
+
+    pub fn gateScheduledContinuations(
+        self: *Runtime,
+        context: *const anyopaque,
+        has_pending: *const fn (*const anyopaque, u64) bool,
+    ) void {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const source = self.inputContinuation(task.durable.id) orelse continue;
+            if (has_pending(context, task.durable.id)) source.input_continuation_schedule_gate = true;
+        }
+    }
+
+    pub fn settleScheduledContinuations(
+        self: *Runtime,
+        context: *const anyopaque,
+        observe: *const fn (*const anyopaque, u64) ScheduleConfirmation,
+    ) bool {
+        var changed = false;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const source = self.inputContinuation(task.durable.id) orelse continue;
+            if (!source.input_continuation_schedule_gate) continue;
+            switch (observe(context, task.durable.id)) {
+                .confirmed => source.input_continuation_schedule_gate = false,
+                .pending => {},
+                .failed => changed = self.cancelInputContinuation(task.durable.id, source.id, .schedule_failed) or changed,
+            }
+        }
+        return changed;
+    }
+
     pub fn cancelInputContinuation(self: *Runtime, task_id: u64, source_id: ?u64, reason: SendInputReason) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;

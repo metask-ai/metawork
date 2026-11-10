@@ -824,6 +824,15 @@ pub const Runtime = struct {
         return false;
     }
 
+    pub const ContinuationConfirmation = enum { confirmed, pending, failed };
+
+    /// Observe after reconciliation, for a continuation already gated by an occurrence.
+    pub fn continuationConfirmation(self: *const Runtime, task_id: u64) ContinuationConfirmation {
+        if (self.persistence_health != .ready) return .failed;
+        if (!self.hasPendingSubmittedOccurrence(task_id)) return .confirmed;
+        return if (self.completion_confirmation_failed_task == task_id) .failed else .pending;
+    }
+
     fn nextCompletionResolution(
         self: *Runtime,
         tasks: TaskEffects,
