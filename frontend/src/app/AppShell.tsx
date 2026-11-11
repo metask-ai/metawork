@@ -147,6 +147,12 @@ function initialPanel(key: string, minimumWidth: number) {
   return window.innerWidth >= minimumWidth && stored !== "closed";
 }
 
+// A minimized or hidden window can report an empty viewport. That is not a
+// narrow layout, so it must neither collapse panels nor replace the width.
+function hasViewport() {
+  return window.innerWidth > 0;
+}
+
 export function AppShell({
   taskTitle,
   contextVisible,
@@ -253,7 +259,7 @@ export function AppShell({
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
     const closeForViewport = () => {
-      if (narrow.matches) setLeftOpen(false);
+      if (narrow.matches && hasViewport()) setLeftOpen(false);
     };
     narrow.addEventListener("change", closeForViewport);
     return () => {
@@ -265,6 +271,7 @@ export function AppShell({
     const element = workbenchElement.current;
     if (!element) return;
     const measure = (observedWidth?: number) => {
+      if (!hasViewport()) return;
       const measuredWidth =
         observedWidth && observedWidth > 0
           ? observedWidth

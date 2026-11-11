@@ -11,12 +11,30 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
 });
 if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
-dom.window.matchMedia = (query) => ({
-  matches: query === "(max-width: 819px)" && dom.window.innerWidth < 820,
-  media: query,
-  addEventListener() {},
-  removeEventListener() {},
-});
+const mediaQueryLists = new Set();
+dom.window.matchMedia = (query) => {
+  const evaluate = () =>
+    query === "(max-width: 819px)" && dom.window.innerWidth < 820;
+  const listeners = new Set();
+  const list = {
+    matches: evaluate(),
+    media: query,
+    addEventListener(type, listener) {
+      if (type === "change") listeners.add(listener);
+    },
+    removeEventListener(type, listener) {
+      listeners.delete(listener);
+    },
+    reevaluate() {
+      const matches = evaluate();
+      if (matches === list.matches) return;
+      list.matches = matches;
+      for (const listener of listeners) listener({ matches, media: query });
+    },
+  };
+  mediaQueryLists.add(list);
+  return list;
+};
 
 Object.assign(globalThis, {
   window: dom.window,
@@ -55,6 +73,7 @@ const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
 test.afterEach(() => {
   cleanup();
+  mediaQueryLists.clear();
   dom.window.localStorage.clear();
   Object.defineProperty(dom.window, "innerWidth", {
     configurable: true,
@@ -124,6 +143,9 @@ function renderTaskPanelShell(viewportWidth, overrides = {}) {
         value: width,
       });
       fireEvent(dom.window, new dom.window.Event("resize"));
+      act(() => {
+        for (const list of mediaQueryLists) list.reevaluate();
+      });
     },
   };
 }
@@ -257,6 +279,43 @@ test("the stable app window owns layout measurement", () => {
 
     assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
     assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
+  } finally {
+    delete globalThis.ResizeObserver;
+  }
+});
+
+test("an empty minimized viewport keeps the sidebar and the measured layout", () => {
+  let callback;
+  let observedElement;
+  globalThis.ResizeObserver = class {
+    constructor(next) {
+      callback = next;
+    }
+    observe(element) {
+      observedElement = element;
+    }
+    disconnect() {}
+  };
+  const observe = (width) =>
+    act(() => callback([{ target: observedElement, contentRect: { width } }]));
+  try {
+    const { root, resizeViewport } = renderTaskPanelShell(1400);
+    const rightWidth = root?.style.getPropertyValue("--right-panel-width");
+    assert.equal(root?.getAttribute("data-left-open"), "true");
+
+    // The root min-width keeps the app window at 320px in an empty viewport.
+    resizeViewport(0);
+    observe(320);
+    assert.equal(root?.getAttribute("data-left-open"), "true");
+    assert.equal(root?.getAttribute("data-right-panel-docked"), "true");
+    assert.equal(
+      root?.style.getPropertyValue("--right-panel-width"),
+      rightWidth,
+    );
+
+    resizeViewport(1400);
+    observe(1400);
+    assert.equal(root?.getAttribute("data-left-open"), "true");
   } finally {
     delete globalThis.ResizeObserver;
   }
