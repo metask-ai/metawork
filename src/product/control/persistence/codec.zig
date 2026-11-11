@@ -828,7 +828,7 @@ fn writeTool(batch: *Batch, v: wire.ToolWire, task_id: u64, run_id: u64, positio
         .progress_truncated = boolean(v.progress_truncated),
         .content_truncated = boolean(v.content_truncated),
         .redacted = boolean(v.redacted),
-        .file_refs_json = try batch.ojson(v.file_refs),
+        .file_refs_json = if (v.file_refs) |refs| sql.Value{ .text = try std.json.Stringify.valueAlloc(batch.allocator, refs, .{ .emit_null_optional_fields = false }) } else .null_value,
     });
 }
 
@@ -848,6 +848,7 @@ fn readTool(row: Record) !wire.ToolWire {
     v.content_truncated = try row.boolean("content_truncated");
     v.redacted = try row.boolean("redacted");
     v.file_refs = try row.ojson([]wire.FileReferenceWire, "file_refs_json");
+    if (v.file_refs) |refs| for (refs) |*ref| ref.normalizeLegacyVideo();
     return v;
 }
 
@@ -938,8 +939,8 @@ comptime {
     if (std.meta.fields(wire.AttachmentWire).len != 5) @compileError("Review history fixture coverage after AttachmentWire changes");
     if (std.meta.fields(wire.FileReferencePositionWire).len != 2) @compileError("Review history fixture coverage after FileReferencePositionWire changes");
     if (std.meta.fields(wire.FileReferenceRangeWire).len != 2) @compileError("Review history fixture coverage after FileReferenceRangeWire changes");
-    // generated_image is preserved inside file_refs_json; history_schema_test covers absent/false/true.
-    if (std.meta.fields(wire.FileReferenceWire).len != 10) @compileError("Review history fixture coverage after FileReferenceWire changes");
+    // Generated media provenance is preserved inside file_refs_json.
+    if (std.meta.fields(wire.FileReferenceWire).len != 11) @compileError("Review history fixture coverage after FileReferenceWire changes");
     if (std.meta.fields(wire.FileChangeArtifactWire).len != 4) @compileError("Review history fixture coverage after FileChangeArtifactWire changes");
     if (std.meta.fields(wire.UsageWire).len != 4) @compileError("Review history fixture coverage after UsageWire changes");
     if (std.meta.fields(wire.PermissionSummaryWire).len != 11) @compileError("Review history fixture coverage after PermissionSummaryWire changes");

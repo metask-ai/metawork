@@ -1020,6 +1020,7 @@ pub const FileReferenceWire = struct {
     presentation_state: ?[]const u8 = null,
     presentation_anchor: ?task_state.PresentationAnchor = null,
     generated_image: bool = false,
+    generated_video: ?bool = null,
 
     id: []const u8,
     title: []const u8,
@@ -1029,10 +1030,17 @@ pub const FileReferenceWire = struct {
     locator: []const u8,
     range: ?FileReferenceRangeWire = null,
 
-    pub const video_presentation_state = "generated_video";
+    const legacy_video_state = "generated_video";
 
     pub fn isGeneratedVideo(self: FileReferenceWire) bool {
-        return std.mem.eql(u8, self.presentation_state orelse "", video_presentation_state);
+        return self.generated_video orelse false;
+    }
+
+    pub fn normalizeLegacyVideo(self: *FileReferenceWire) void {
+        if (self.generated_video == null and std.mem.eql(u8, self.presentation_state orelse "", legacy_video_state)) {
+            self.generated_video = true;
+            self.presentation_state = "anchored";
+        }
     }
 };
 
@@ -1492,7 +1500,8 @@ fn projectRun(
                 const reference = reference_entry orelse continue;
                 references[file_ref_index] = .{
                     .generated_image = reference.generated_image,
-                    .presentation_state = if (reference.generated_video) FileReferenceWire.video_presentation_state else if (reference.presentation_anchor != null) "anchored" else "legacy",
+                    .generated_video = if (reference.generated_video) true else null,
+                    .presentation_state = if (reference.presentation_anchor != null) "anchored" else "legacy",
                     .presentation_anchor = reference.presentation_anchor,
                     .id = reference.id,
                     .title = reference.title,
@@ -3183,6 +3192,9 @@ pub fn decodeRecovering(
                         continue;
                     };
                 };
+                for (task.runs) |run| for (run.tools) |tool| {
+                    if (tool.file_refs) |refs| for (refs) |*ref| ref.normalizeLegacyVideo();
+                };
                 if (task.id != id or task.recent_order != order) {
                     dropped_tasks += 1;
                     degraded = true;
@@ -3609,6 +3621,7 @@ fn validatePresentation(task: TaskWire, limits: Limits) !void {
         for (run.tools) |tool| if (tool.file_refs) |refs| {
             for (refs) |ref| {
                 const video = ref.isGeneratedVideo();
+                if (std.mem.eql(u8, ref.presentation_state orelse "", FileReferenceWire.legacy_video_state)) return error.Invalid;
                 if (!ref.generated_image and !video) {
                     if (ref.presentation_anchor != null) return error.Invalid;
                     continue;
@@ -3622,7 +3635,7 @@ fn validatePresentation(task: TaskWire, limits: Limits) !void {
                     generated_images += 1;
                     if (generated_images > agent.image_generation_limits.sends_per_run) return error.Invalid;
                 }
-                try validatePresentationItem(task, if (video) "anchored" else ref.presentation_state, if (ref.presentation_anchor) |a| a.presentation_order else null, if (ref.presentation_anchor) |a| a.after_output_count else 0, limits, &seen);
+                try validatePresentationItem(task, ref.presentation_state, if (ref.presentation_anchor) |a| a.presentation_order else null, if (ref.presentation_anchor) |a| a.after_output_count else 0, limits, &seen);
             }
         };
     }

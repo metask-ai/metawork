@@ -2320,7 +2320,7 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     const saved = (try history.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, video_path) != null);
-    try std.testing.expect(std.mem.indexOf(u8, saved, "\"presentation_state\":\"generated_video\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"generated_video\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "video_execution") == null);
     try std.testing.expectEqual(@as(usize, 1), effects.catalog_calls.load(.acquire));
     try h.evidence(0, 0, "verified_for_delivery");
