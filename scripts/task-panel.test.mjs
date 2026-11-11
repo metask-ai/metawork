@@ -6932,6 +6932,7 @@ async function renderAppFixture(
   width = 1440,
   runOverrides = {},
   clientOverrides = {},
+  locale = "en-US",
 ) {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
@@ -7036,7 +7037,7 @@ async function renderAppFixture(
     ...clientOverrides,
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
-  render(localizedView(createElement(App)));
+  render(localizedView(createElement(App), locale));
   return {
     snapshot,
     previews,
@@ -7295,6 +7296,119 @@ test("App opens conversation Markdown file links through Workspace authority", a
   );
   assert.equal(screen.queryByRole("tab", { name: "qa preview.txt" }), null);
   assert.equal(reads.length, 2);
+});
+
+test("App re-enables a missing Workspace link once a later Tool call creates the file", async (ctx) => {
+  // Mirrors the manual acceptance: a reply links a file that does not exist,
+  // the next Run creates it with a Tool call, and the same link opens it.
+  let created = false;
+  const listings = [],
+    reads = [];
+  const fixture = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      listWorkspaceDirectory: async (...args) => {
+        listings.push(args[3]);
+        return args[3] === "link-check" && created
+          ? workspaceDirectory(["demo.md"])
+          : workspaceDirectory([], { state: "missing" });
+      },
+      previewWorkspaceFile: (...args) =>
+        new Promise((resolve) => reads.push({ args, resolve })),
+    },
+    "zh-CN",
+  );
+  const [task] = fixture.snapshot.tasks;
+  const publish = async () => {
+    fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
+    await act(async () => fixture.publish());
+  };
+  const output = (response) => ({
+    commentary: [],
+    response,
+    responseKind: response ? "final" : null,
+    provisional: "",
+    redacted: false,
+    provisionalRedacted: false,
+  });
+  Object.assign(task, { currentRunPhase: null, activeOperation: null });
+  Object.assign(task.runs[0], {
+    phase: "completed",
+    terminal: terminal("completed"),
+    activity: null,
+    output: output("[打开复验文件](link-check/demo.md)"),
+  });
+  await publish();
+  await selectRecentTask(/First task/);
+
+  const link = await screen.findByRole("link", { name: "打开复验文件" });
+  assert.equal(link.getAttribute("aria-disabled"), "true");
+  assert.equal(
+    document.getElementById(link.getAttribute("aria-describedby")).textContent,
+    "无法打开：文件不存在或不可用 link-check/demo.md",
+  );
+  fireEvent.click(link);
+  assert.equal(reads.length, 0);
+
+  // The next Run starts writing; until its Tool call finishes nothing exists.
+  const write = technicalTool({ id: "write-demo", name: "Write" });
+  const later = {
+    ...structuredClone(task.runs[0]),
+    id: "8",
+    phase: "running",
+    terminal: null,
+    activity: { kind: "executing_tools", inFlight: null },
+    output: output(""),
+    tools: [{ ...write, state: "running" }],
+    fileChanges: null,
+  };
+  task.runs.push(later);
+  Object.assign(task, {
+    currentRunId: "8",
+    currentRunPhase: "running",
+    activeOperation: { kind: "run", id: "8" },
+  });
+  await publish();
+  await waitFor(() => assert.equal(listings.length, 2));
+  assert.equal(
+    screen
+      .getByRole("link", { name: "打开复验文件" })
+      .getAttribute("aria-disabled"),
+    "true",
+  );
+
+  // The Tool call creates the file and finishes: the same link opens it.
+  created = true;
+  Object.assign(later, {
+    phase: "completed",
+    terminal: terminal("completed"),
+    activity: null,
+    output: output("已创建。"),
+    tools: [
+      {
+        ...write,
+        fileRefs: [{ id: "ref-demo", displayPath: "link-check/demo.md" }],
+      },
+    ],
+  });
+  Object.assign(task, { currentRunPhase: null, activeOperation: null });
+  await publish();
+  const opener = await screen.findByRole("button", {
+    name: "预览 link-check/demo.md",
+  });
+  assert.equal(opener.textContent, "打开复验文件");
+  assert.equal(screen.queryByRole("link", { name: "打开复验文件" }), null);
+  assert.deepEqual(listings, ["link-check", "link-check", "link-check"]);
+  fireEvent.click(opener);
+  assert.deepEqual(reads[0].args.slice(0, 4), [
+    "3",
+    "1",
+    "1",
+    "link-check/demo.md",
+  ]);
+  assert.ok(screen.getByRole("tab", { name: "demo.md" }));
 });
 
 test("App marks retained Run state unsynchronized and disables stop until refresh succeeds", async (ctx) => {
