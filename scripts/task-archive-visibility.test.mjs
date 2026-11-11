@@ -131,6 +131,7 @@ async function renderApp(
     historyRuns = [],
     projectTask = {},
     projectHidden = false,
+    searchPage,
   } = {},
 ) {
   const snapshot = structuredClone(initialSnapshot);
@@ -202,6 +203,10 @@ async function renderApp(
     ping: async () => {},
     fetchSnapshot: async (scope) => {
       if (scope.beforeRunId !== null) historyReads.push(scope.beforeRunId);
+      if (scope.search && searchPage) {
+        const searchIndex = await searchPage(scope);
+        return productStateFixture({ ...snapshot, searchIndex }, scope);
+      }
       return productStateFixture(snapshot, scope);
     },
     renameTask: async (taskId, title) => {
@@ -356,6 +361,93 @@ test("Global search restores the opener on cancellation and focuses an accepted 
   assert.equal(
     within(archived).queryByRole("combobox", { name: /instruction/i }),
     null,
+  );
+});
+
+test("Global search skips filtered pages and discards a closed search session", async (ctx) => {
+  const cursor = (task) => ({
+    revision: "1",
+    securityEpoch: "1",
+    task,
+    run: "0",
+    part: "0",
+    offset: "0",
+  });
+  const hit = (taskId) => ({
+    taskId,
+    runId: null,
+    part: "0",
+    kind: "task",
+    detail: "",
+  });
+  const requests = [];
+  let resolveLate;
+  const { user } = await renderApp(ctx, {
+    searchPage({ searchQuery, searchCursor }) {
+      requests.push([searchQuery, searchCursor?.task ?? null]);
+      if (searchQuery === "late") {
+        return new Promise((resolve) => {
+          resolveLate = resolve;
+        });
+      }
+      if (searchQuery !== "archive") {
+        return { stale: false, results: [], nextCursor: null };
+      }
+      if (!searchCursor) {
+        return { stale: false, results: [hit("99")], nextCursor: cursor("1") };
+      }
+      if (searchCursor.task === "1") {
+        return { stale: false, results: [hit("3")], nextCursor: cursor("2") };
+      }
+      return { stale: false, results: [hit("4")], nextCursor: null };
+    },
+  });
+  const launcher = screen.getByRole("button", { name: "Search", exact: true });
+  const input = () => screen.getByRole("combobox", { name: "Search MetaWork" });
+  const close = () =>
+    screen.getByRole("button", { name: "Close", exact: true });
+
+  await user.click(launcher);
+  await user.type(input(), "archive");
+  await screen.findByRole("option", { name: /Archive target/ });
+  assert.deepEqual(
+    requests.filter(([query]) => query === "archive"),
+    [
+      ["archive", null],
+      ["archive", "1"],
+    ],
+  );
+  await user.click(screen.getByRole("button", { name: "Continue search" }));
+  await screen.findByRole("option", { name: /Earlier archive/ });
+  assertFocused(input());
+  await user.click(screen.getByRole("button", { name: "Back to first page" }));
+  await screen.findByRole("option", { name: /Archive target/ });
+  assertFocused(input());
+
+  fireEvent.change(input(), { target: { value: "late" } });
+  await waitFor(() => assert.ok(resolveLate));
+  await user.click(close());
+  await waitFor(() => assertFocused(launcher));
+  await user.click(launcher);
+  assert.equal(input().value, "");
+  await act(async () =>
+    resolveLate({ stale: false, results: [hit("4")], nextCursor: cursor("2") }),
+  );
+  assert.equal(screen.queryByRole("option"), null);
+  assert.equal(
+    screen.queryByRole("button", { name: "Back to first page" }),
+    null,
+  );
+
+  fireEvent.change(input(), { target: { value: "cancelled" } });
+  await user.click(close());
+  await waitFor(() => assertFocused(launcher));
+  await user.click(launcher);
+  assert.equal(input().value, "");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(
+    requests.some(([query]) => query === "cancelled"),
+    false,
   );
 });
 

@@ -65,6 +65,12 @@ export function GlobalSearch({
       container.scrollTop += row.bottom - viewport.bottom;
   }, [activeIndex, activeResult?.key, open]);
 
+  function changePage(action: () => void) {
+    input.current?.focus({ preventScroll: true });
+    setActive(null);
+    action();
+  }
+
   return (
     <Dialog.Root
       open={open}
@@ -179,18 +185,22 @@ export function GlobalSearch({
           </div>
           {(hasMore || onFirst) && (
             <div className="flex gap-3 px-4 py-3">
-              {hasMore && (
+              {hasMore && onMore && (
                 <button
                   type="button"
                   className="focus-ring"
                   disabled={loading}
-                  onClick={onMore}
+                  onClick={() => changePage(onMore)}
                 >
                   {t("search.more")}
                 </button>
               )}
               {onFirst && (
-                <button type="button" className="focus-ring" onClick={onFirst}>
+                <button
+                  type="button"
+                  className="focus-ring"
+                  onClick={() => changePage(onFirst)}
+                >
                   {t("search.first")}
                 </button>
               )}

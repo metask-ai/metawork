@@ -411,16 +411,19 @@ export default function App() {
       setSearchSelection(null);
       setSearchOpen(false);
       setSearchQuery("");
+      setSearchHostQuery("");
+      setSearchCursor(null);
     },
     [],
   );
   useEffect(() => {
+    if (!searchOpen || searchQuery.trim() === searchHostQuery) return;
     const timer = setTimeout(() => {
       setSearchHostQuery(searchQuery.trim());
       setSearchCursor(null);
     }, 180);
     return () => clearTimeout(timer);
-  }, [searchQuery]);
+  }, [searchHostQuery, searchOpen, searchQuery]);
 
   const [skillsQuery, setSkillsQuery] = useState("");
   const cancelMcpInstallation = (id: string, revision: string) =>
@@ -1374,18 +1377,27 @@ export default function App() {
   useEffect(() => {
     setSearchCursor(null);
   }, [snapshot.securityEpoch, bridgeGeneration]);
-  useEffect(() => {
-    if (snapshot.searchIndex?.stale) setSearchCursor(null);
-  }, [snapshot.searchIndex]);
-  const searchCurrent =
-    snapshot.scope.searchQuery === searchHostQuery &&
-    searchQuery.trim() === searchHostQuery &&
-    JSON.stringify(snapshot.scope.searchCursor) ===
-      JSON.stringify(searchCursor);
+  const searchQueryReady = searchOpen && searchQuery.trim() === searchHostQuery;
+  function matchesSearchPage(view: WorkbenchSnapshot) {
+    return (
+      searchQueryReady &&
+      view.scope.search &&
+      view.scope.searchQuery === searchHostQuery &&
+      JSON.stringify(view.scope.searchCursor) === JSON.stringify(searchCursor)
+    );
+  }
+  const searchCurrent = matchesSearchPage(snapshot);
+  const searchPage = searchCurrent ? snapshot.searchIndex : null;
+  const nextSearchCursor = searchPage?.stale
+    ? null
+    : (searchPage?.nextCursor ?? null);
   const searchResults = useMemo(
     () => (searchCurrent ? searchWorkbench(snapshot, searchHostQuery) : []),
     [searchHostQuery, snapshot, searchCurrent],
   );
+  useEffect(() => {
+    if (searchPage?.stale) setSearchCursor(null);
+  }, [searchPage]);
   useLayoutEffect(() => {
     if (searchSelection === null) return;
     if (
@@ -1408,19 +1420,10 @@ export default function App() {
     searchSelection,
     workbench.activeTaskId,
   ]);
-  // Empty work quanta continue automatically; only pages with visible hits
-  // require a user's next-page action. No result corpus accumulates here.
   useEffect(() => {
-    if (
-      searchOpen &&
-      searchCurrent &&
-      snapshot.searchIndex &&
-      !snapshot.searchIndex.stale &&
-      snapshot.searchIndex.results.length === 0 &&
-      snapshot.searchIndex.nextCursor
-    )
-      setSearchCursor(snapshot.searchIndex.nextCursor);
-  }, [searchOpen, searchCurrent, snapshot.searchIndex]);
+    if (nextSearchCursor && searchResults.length === 0)
+      setSearchCursor(nextSearchCursor);
+  }, [nextSearchCursor, searchResults.length]);
   const taskDrafts = useTaskDrafts(workbench.activeTaskId);
   const newTaskDraftActive =
     workbench.draftOpen || workbench.activeTaskId === null;
@@ -3845,9 +3848,11 @@ export default function App() {
     if (!searchOpen || searchSelection !== null) return;
     const latest = latestSnapshotRef.current;
     if (
-      !searchResults.some((candidate) => candidate.key === result.key) ||
       !latest ||
-      !selectableTask(latest, result.taskId)
+      !matchesSearchPage(latest) ||
+      !searchWorkbench(latest, searchHostQuery).some(
+        (candidate) => candidate.key === result.key,
+      )
     ) {
       setSearchSelectionUnavailable(true);
       return;
@@ -5630,24 +5635,22 @@ export default function App() {
         results={searchResults}
         loading={
           Boolean(searchQuery.trim()) &&
-          (!searchCurrent ||
-            snapshot.searchIndex === null ||
-            snapshot.searchIndex.stale ||
-            (snapshot.searchIndex.results.length === 0 &&
-              snapshot.searchIndex.nextCursor !== null))
+          (!searchPage ||
+            searchPage.stale ||
+            (searchResults.length === 0 && nextSearchCursor !== null))
         }
-        hasMore={searchCurrent && snapshot.searchIndex?.nextCursor != null}
-        onMore={() => {
-          if (searchCurrent && snapshot.searchIndex?.nextCursor)
-            setSearchCursor(snapshot.searchIndex.nextCursor);
-        }}
+        hasMore={searchResults.length > 0 && nextSearchCursor !== null}
+        onMore={
+          nextSearchCursor ? () => setSearchCursor(nextSearchCursor) : undefined
+        }
         onFirst={
-          searchCursor === null ? undefined : () => setSearchCursor(null)
+          searchQueryReady && searchCursor
+            ? () => setSearchCursor(null)
+            : undefined
         }
         onQuery={(query) => {
           setSearchSelectionUnavailable(false);
           setSearchQuery(boundedSearchQuery(query));
-          setSearchCursor(null);
         }}
         onClose={() => closeGlobalSearch("opener")}
         onSelect={selectSearchResult}
