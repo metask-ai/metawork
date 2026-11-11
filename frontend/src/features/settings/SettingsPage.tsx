@@ -5,8 +5,10 @@ import type {
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
+import { SignOutConfirmation } from "../../components/SignOutConfirmation.tsx";
 import {
   SelectionMenu,
   type SelectionMenuOption,
@@ -100,7 +102,6 @@ export function SettingsPage({
   const customProviderSettingsAvailable = supportsCustomProviders(
     customProviderCapabilities,
   );
-  const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(initialSection);
   const [automaticRootPending, setAutomaticRootPending] = useState<{
@@ -114,8 +115,6 @@ export function SettingsPage({
   const generalHeading = useRef<HTMLHeadingElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
-  const signOut = useRef<HTMLButtonElement>(null);
-  const signOutCancel = useRef<HTMLButtonElement>(null);
   const automaticRootChooseButton = useRef<HTMLButtonElement>(null);
   const automaticRootResetButton = useRef<HTMLButtonElement>(null);
   const automaticRootRetryButton = useRef<HTMLButtonElement>(null);
@@ -171,13 +170,6 @@ export function SettingsPage({
       content.current.scrollTop = archiveManagement?.scrollTop ?? 0;
     else content.current?.scrollTo?.({ top: 0, behavior: "auto" });
   }, [activeSection]);
-  useEffect(() => {
-    if (!confirmSignOut) return;
-    const frame = window.requestAnimationFrame(() =>
-      signOutCancel.current?.focus(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [confirmSignOut]);
   useEffect(() => {
     if (
       !automaticRootPending ||
@@ -242,10 +234,6 @@ export function SettingsPage({
     automaticWorkspaceRoot.canonicalRoot === null
       ? "settings.automatic_workspace.health.write_failed_no_active"
       : `settings.automatic_workspace.health.${automaticWorkspaceRoot.health}`;
-  function closeSignOutConfirmation() {
-    setConfirmSignOut(false);
-    window.requestAnimationFrame(() => signOut.current?.focus());
-  }
   return (
     <div
       className="settings-page"
@@ -576,62 +564,20 @@ export function SettingsPage({
 
               {authenticated && (
                 <div className="settings-group">
-                  <h3 className="settings-group-label">
-                    {t("settings.account_security")}
-                  </h3>
-                  <div className="settings-danger-zone">
-                    <div>
-                      <h3 id="settings-signout-title">
-                        {t("settings.signout_title")}
-                      </h3>
-                      <p>{t("settings.signout_help")}</p>
-                    </div>
-                    {!confirmSignOut ? (
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        ref={signOut}
-                        disabled={disabled || accountDisabled}
-                        onClick={() => setConfirmSignOut(true)}
-                      >
-                        {t("account.logout_short")}
-                      </Button>
-                    ) : (
-                      <div
-                        className="settings-signout-confirmation"
-                        role="group"
-                        aria-labelledby="settings-signout-title"
-                        aria-describedby="settings-signout-confirmation-copy"
-                        onKeyDown={(event) => {
-                          if (event.key !== "Escape") return;
-                          event.preventDefault();
-                          closeSignOutConfirmation();
-                        }}
-                      >
-                        <p id="settings-signout-confirmation-copy">
-                          {t("account.logout_confirm")}
-                        </p>
-                        <span>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            ref={signOutCancel}
-                            onClick={closeSignOutConfirmation}
-                          >
-                            {t("common.cancel")}
-                          </Button>
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            disabled={disabled || accountDisabled}
-                            onClick={onLogout}
-                          >
-                            {t("account.logout")}
-                          </Button>
-                        </span>
-                      </div>
-                    )}
-                  </div>
+                  <AlertDialog.Root>
+                    <AlertDialog.Trigger
+                      render={
+                        <Button variant="danger" size="lg" className="w-full" />
+                      }
+                      disabled={disabled || accountDisabled}
+                    >
+                      {t("account.logout")}
+                    </AlertDialog.Trigger>
+                    <SignOutConfirmation
+                      disabled={disabled || accountDisabled}
+                      onLogout={onLogout}
+                    />
+                  </AlertDialog.Root>
                 </div>
               )}
             </section>

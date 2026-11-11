@@ -238,7 +238,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.retry_refresh": "重试登录刷新",
   "account.logout": "退出登录",
   "account.logout_confirm":
-    "仅退出这台设备上的 Metask 账号，本地任务和历史记录会保留。",
+    "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
@@ -1255,7 +1255,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.account_history_legend_label": "使用强度从少到多",
   "settings.account_history_less": "少",
   "settings.account_history_more": "多",
-  "settings.account_security": "安全操作",
   "settings.builtin_provider_address_warning":
     "模型请求将向 {host} 发送 API Key。",
   "settings.get_api_key": "获取 API Key",
@@ -1407,9 +1406,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.choose_selection": "选择",
   "settings.change_selection": "更改",
   "settings.view_selection": "查看选项",
-  "settings.signout_title": "退出登录",
-  "settings.signout_help":
-    "退出后，创建使用 Metask 模型的新任务需要重新登录。自定义模型、本地任务和工作区文件会保留。",
   "settings.task_model_help": "选择此任务发送消息时使用的模型。",
   "settings.task_model_catalog_loading": "模型目录正在更新，完成后可继续选择。",
   "settings.task_model_catalog_unavailable":

@@ -2224,53 +2224,6 @@ summary::-webkit-details-marker {
   font-size: var(--text-label);
 }
 
-.settings-danger-zone {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  margin-top: 12px;
-  padding: 18px;
-  align-items: center;
-  gap: 24px;
-  border: 1px solid var(--settings-line);
-  border-radius: 14px;
-  background: var(--settings-paper);
-}
-
-.settings-danger-zone h3,
-.settings-danger-zone p {
-  margin: 0;
-}
-
-.settings-danger-zone h3 {
-  color: var(--settings-ink);
-  font-size: var(--text-body);
-  font-weight: 700;
-}
-
-.settings-danger-zone p {
-  margin-top: 4px;
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  line-height: 1.5;
-}
-
-.settings-signout-confirmation {
-  max-width: 320px;
-  padding: 12px 14px;
-  border: 1px solid var(--ui-action-danger-border);
-  border-radius: 10px;
-  background: var(--ui-surface-canvas);
-  font-size: var(--text-control);
-  line-height: 1.5;
-}
-
-.settings-signout-confirmation span {
-  display: flex;
-  margin-top: 10px;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .selection-trigger {
   display: inline-flex;
   min-width: 0;
@@ -3326,10 +3279,6 @@ button.run-process-tool:hover {
 
   .settings-control-compact {
     width: 100%;
-  }
-
-  .settings-danger-zone {
-    grid-template-columns: 1fr;
   }
 
   .settings-identity-row {
