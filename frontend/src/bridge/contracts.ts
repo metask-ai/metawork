@@ -655,6 +655,8 @@ export type RunInputView =
             displayName: string;
             sizeBytes: string;
             redacted: boolean;
+            /** The Task retained this image's original for preview. */
+            previewable: boolean;
           }
         | {
             kind: "file";

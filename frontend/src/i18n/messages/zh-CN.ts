@@ -835,6 +835,7 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.preview.close": "关闭图片预览",
   "attachment.preview.failed": "暂时无法预览这张图片。",
   "attachment.preview.invalid_draft": "附件已失效，请移除后重新添加。",
+  "attachment.preview.invalid_sent": "这张图片的原件已不可用。",
   "attachment.type.image": "图片",
   "attachment.type.file": "文件",
   "attachment.reload_required":

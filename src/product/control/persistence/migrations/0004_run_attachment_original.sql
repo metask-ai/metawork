@@ -1,0 +1,3 @@
+-- Marker: runs.input_json image attachments may carry `original`, the opaque
+-- identity of the Task-owned retained original. Earlier readers must reject
+-- this schema before decoding instead of dropping the field on save.

@@ -73,6 +73,7 @@ pub const finish_attachment_receive = "metawork.attachments.finishReceive";
 pub const cancel_attachment_receive = "metawork.attachments.cancelReceive";
 pub const release_attachment = "metawork.attachments.release";
 pub const preview_attachment = "metawork.attachments.preview";
+pub const preview_run_input_attachment = "metawork.attachments.previewRunInput";
 pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
 pub const account_retry_refresh = "metawork.account.retryRefresh";
@@ -186,6 +187,7 @@ pub const product = [_][]const u8{
     cancel_attachment_receive,
     release_attachment,
     preview_attachment,
+    preview_run_input_attachment,
     account_begin_login,
     account_cancel_operation,
     account_retry_refresh,

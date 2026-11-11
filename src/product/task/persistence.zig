@@ -987,6 +987,8 @@ pub const AttachmentWire = struct {
     display_name: []const u8,
     size_bytes: u64,
     redacted: bool,
+    /// Image-only lowercase hex identity of the Task-owned retained original.
+    original: ?[]const u8 = null,
 };
 
 pub const ToolWire = struct {
@@ -1377,12 +1379,13 @@ fn projectInput(allocator: std.mem.Allocator, record: task_state.RunInputRecord)
         },
         .multimodal => |multimodal| input: {
             const items = try allocator.alloc(AttachmentWire, multimodal.attachments.len);
-            for (items, multimodal.attachments) |*target, item| target.* = .{
+            for (items, multimodal.attachments) |*target, *item| target.* = .{
                 .kind = @tagName(item.kind),
                 .format = if (item.format) |format| @tagName(format) else null,
                 .display_name = item.display_name,
                 .size_bytes = item.size_bytes,
                 .redacted = item.redacted,
+                .original = if (item.original) |*original| original else null,
             };
             attachments = items;
             break :input .{
@@ -2253,6 +2256,13 @@ fn legacyCompletionSeenRunId(runs: []?task_state.RunRecord) u64 {
         0;
 }
 
+/// Retained originals use the store's 32-character lowercase hex names.
+pub fn originalIdentity(value: []const u8) ?task_state.OriginalIdentity {
+    if (value.len != 32) return null;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return null;
+    return value[0..32].*;
+}
+
 fn restoreRunInput(
     projection: RestoreProjection,
     wire: RunInputWire,
@@ -2282,6 +2292,10 @@ fn restoreRunInput(
             else
                 null;
             if ((kind == .image) != (format != null)) return error.TaskStoreCorrupt;
+            const original = if (wire_item.original) |value| identity: {
+                if (kind != .image) return error.TaskStoreCorrupt;
+                break :identity originalIdentity(value) orelse return error.TaskStoreCorrupt;
+            } else null;
             item.* = .{
                 .kind = kind,
                 .format = format,
@@ -2291,6 +2305,7 @@ fn restoreRunInput(
                 ),
                 .size_bytes = wire_item.size_bytes,
                 .redacted = wire_item.redacted,
+                .original = original,
             };
             initialized += 1;
         }
@@ -4029,7 +4044,8 @@ fn validateRunInput(input: RunInputWire, limits: Limits) !void {
             if (std.mem.eql(u8, item.kind, "image")) {
                 const format = item.format orelse return error.Invalid;
                 if (!oneOf(format, &.{ "png", "jpeg", "webp" })) return error.Invalid;
-            } else if (!std.mem.eql(u8, item.kind, "file") or item.format != null) {
+                if (item.original) |original| if (originalIdentity(original) == null) return error.Invalid;
+            } else if (!std.mem.eql(u8, item.kind, "file") or item.format != null or item.original != null) {
                 return error.Invalid;
             }
         }
@@ -4583,6 +4599,35 @@ test "an unrestorable Task and its automatic Workspace are written back unchange
     try std.testing.expectEqual(@as(usize, 2), reread.preserved.retained.len);
     try std.testing.expectEqual(@as(usize, 1), reread.value.tasks.len);
     try std.testing.expectEqual(@as(u64, 3), reread.value.next_task_id);
+}
+
+test "image attachments persist only a well-formed retained original identity" {
+    const identity = "0123456789abcdef0123456789abcdef";
+    var name = "photo.png".*;
+    var records = [_]task_state.AttachmentRecord{
+        .{ .kind = .image, .format = .png, .display_name = &name, .size_bytes = 4, .original = identity.* },
+        .{ .kind = .image, .format = .jpeg, .display_name = &name, .size_bytes = 4 },
+        .{ .kind = .file, .format = null, .display_name = &name, .size_bytes = 4 },
+    };
+    const wire = try projectInput(std.testing.allocator, .{ .multimodal = .{ .text = null, .attachments = &records } });
+    defer freeInputWire(std.testing.allocator, wire);
+    const items = wire.attachments.?;
+    try std.testing.expectEqualStrings(identity, items[0].original.?);
+    try std.testing.expect(items[1].original == null and items[2].original == null);
+    try validateRunInput(wire, testLimits());
+    try std.testing.expectEqual(identity.*, originalIdentity(identity).?);
+
+    var invalid = items[0..3].*;
+    var candidate = wire;
+    candidate.attachments = &invalid;
+    for ([_][]const u8{ "0123456789ABCDEF0123456789abcdef", "0123456789abcdef", "0123456789abcdef0123456789abcdeg", "../0123456789abcdef0123456789abc" }) |value| {
+        invalid[0].original = value;
+        try std.testing.expect(originalIdentity(value) == null);
+        try std.testing.expectError(error.Invalid, validateRunInput(candidate, testLimits()));
+    }
+    invalid[0].original = identity;
+    invalid[2].original = identity;
+    try std.testing.expectError(error.Invalid, validateRunInput(candidate, testLimits()));
 }
 
 test "a retired PDF Task is isolated without blocking valid Task recovery" {

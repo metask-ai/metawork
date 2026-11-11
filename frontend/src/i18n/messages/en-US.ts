@@ -978,6 +978,8 @@ export const enUS = {
   "attachment.preview.failed": "This image can't be previewed right now.",
   "attachment.preview.invalid_draft":
     "This attachment is no longer available. Remove it and add it again.",
+  "attachment.preview.invalid_sent":
+    "The original image is no longer available.",
   "attachment.type.image": "Image",
   "attachment.type.file": "File",
   "attachment.reload_required":

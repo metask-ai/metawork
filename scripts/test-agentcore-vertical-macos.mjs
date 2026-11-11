@@ -2711,6 +2711,8 @@ function assertMultimodalHistory(result, attachmentTokens, expected) {
     attachments: expected.map((attachment) => ({
       ...attachment,
       redacted: false,
+      // Accepted images keep their Task-owned original for preview.
+      ...(attachment.kind === "image" ? { previewable: true } : {}),
     })),
     redacted: false,
   });

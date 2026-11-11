@@ -116,6 +116,28 @@ test "model error migration upgrades published v1 records to null and rejects th
     try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]));
 }
 
+test "attachment original marker migration keeps v3 history and old readers reject it" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..3]);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+    }
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        try std.testing.expectEqual(@as(u32, 4), database.schemaVersion());
+        try expectSame(a, database.capability(), state);
+    }
+    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..3]));
+}
+
 test "Project removal survives SQL restart without changing Workspace or Task authority" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -286,7 +308,8 @@ test "history schema preserves null empty and nonterminal history variants" {
             },
             1 => {
                 const attachments = try allocator.dupe(history.wire.AttachmentWire, &.{
-                    .{ .kind = "image", .format = "png", .display_name = "image 世", .size_bytes = 123, .redacted = true },
+                    .{ .kind = "image", .format = "png", .display_name = "image 世", .size_bytes = 123, .redacted = true, .original = "0123456789abcdef0123456789abcdef" },
+                    .{ .kind = "image", .format = "webp", .display_name = "legacy image", .size_bytes = 7, .redacted = false },
                     .{ .kind = "file", .format = null, .display_name = "text\x00file", .size_bytes = std.math.maxInt(u64), .redacted = false },
                 });
                 run.input = .{ .kind = "multimodal", .text = null, .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .attachments = attachments, .redacted = false };

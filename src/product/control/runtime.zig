@@ -2031,6 +2031,54 @@ pub const Runtime = struct {
         return .queued;
     }
 
+    const RetainedImagePath = struct { root: []const u8, relative: []const u8, size: usize };
+
+    /// Where the retained original behind a Run input image chip lives now.
+    fn retainedImagePath(self: *const Runtime, task_id: u64, run_id: u64, index: u32, buffer: []u8) ?RetainedImagePath {
+        const retained = self.task_runtime.runInputImageOriginal(task_id, run_id, index) orelse return null;
+        const size = std.math.cast(usize, retained.size_bytes) orelse return null;
+        const location = self.attachments.retainedImageLocation(task_id, retained.original, switch (retained.format) {
+            .png => .png,
+            .jpeg => .jpeg,
+            .webp => .webp,
+        }, size, buffer) orelse return null;
+        return .{ .root = location.root, .relative = location.relative, .size = size };
+    }
+
+    /// Previews a sent image from the original its Task retained. The lane
+    /// reads exactly that file; the main thread then regenerates the same
+    /// bounded PNG the model input used, so large photos stay previewable.
+    pub fn beginRunAttachmentPreview(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, index: u32) FilePreviewAdmission {
+        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        if (!self.attachments.available()) return .{ .immediate = .unsupported };
+        var buffer: [product_attachment.store.max_relative_bytes]u8 = undefined;
+        const retained = self.retainedImagePath(task_id, run_id, index, &buffer) orelse return .{ .immediate = .missing };
+        if (retained.size > self.limits.max_attachment_file_bytes) return .{ .immediate = .image_limit };
+        self.preview_lane.begin(.{
+            .source = .attachment_original,
+            .completion_id = completion_id,
+            .task_id = task_id,
+            .run_id = run_id,
+            .workspace_id = 0,
+            .workspace_epoch = 0,
+            .reference_id = "",
+            .workspace_root = retained.root,
+            .relative_path = retained.relative,
+            .max_bytes = retained.size,
+            .max_lines = 0,
+            .max_line_bytes = 0,
+            .attachment_index = index,
+        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+        return .queued;
+    }
+
+    /// Main thread only: the injected codec is bound to the Native loop.
+    fn prepareRetainedPreview(self: *Runtime, taken: *file_preview.Taken) FilePreviewState {
+        // The same original was decodable at staging; a failure here is retryable.
+        const prepared = self.attachments.prepareImagePreview(self.preview_lane.allocator, taken.completion.content) catch return .failed;
+        return self.preview_lane.adoptPrepared(taken, prepared);
+    }
+
     /// Previews the bounded PNG already prepared for an unsent draft image. The
     /// Bridge resolves its connection-bound grant; Product rechecks the draft.
     pub fn beginAttachmentPreview(self: *Runtime, completion_id: u64, attachment_id: u64) FilePreviewAdmission {
@@ -2090,6 +2138,11 @@ pub const Runtime = struct {
 
     fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
         if (raw.source == .attachment_draft) return if (self.attachments.draftImagePreview(raw.attachment_id) != null) .ready else .missing;
+        if (raw.source == .attachment_original) {
+            var buffer: [product_attachment.store.max_relative_bytes]u8 = undefined;
+            const current = self.retainedImagePath(raw.task_id, raw.run_id, raw.attachment_index, &buffer) orelse return .missing;
+            return if (std.mem.eql(u8, current.relative, raw.relative_path)) .ready else .missing;
+        }
         if (raw.source != .reference) return if (self.workspaceFileAuthorized(raw.task_id, raw.workspace_id, raw.workspace_epoch, raw.workspace_root) and !self.workspacePathHasCredential(raw.relative_path)) .ready else .restricted;
         const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
         if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
@@ -2108,11 +2161,16 @@ pub const Runtime = struct {
     /// lane until scanning/transfer finishes. Bridge only sees sanitized data.
     pub fn drainFilePreviewCompletions(self: *Runtime, sink: FilePreviewSink) void {
         self.preview_lane.expireRequests();
-        while (self.preview_lane.take()) |taken| {
-            const raw = taken.completion;
+        while (self.preview_lane.take()) |next| {
+            var taken = next;
+            var raw = taken.completion;
             var state = self.filePreviewAuthority(raw);
             if (state == .ready) state = raw.state;
             if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
+            if (raw.source == .attachment_original and state == .ready) {
+                state = self.prepareRetainedPreview(&taken);
+                raw = taken.completion;
+            }
             if (raw.source == .directory) {
                 var safe_entries: [file_preview.max_directory_entries]DirectoryEntry = undefined;
                 var count: usize = 0;
@@ -4577,6 +4635,7 @@ pub const Runtime = struct {
                                 .jpeg => .jpeg,
                                 .webp => .webp,
                             },
+                            .original = self.attachments.borrowedImageOriginal(image.id, task_id),
                         },
                         .text => |text| .{
                             .resource_id = text.id,

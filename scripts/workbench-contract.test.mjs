@@ -1019,12 +1019,20 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
         displayName: "diagram.png",
         sizeBytes: "128",
         redacted: false,
+        previewable: true,
       },
       {
         kind: "image",
         format: "webp",
         displayName: "brief.webp",
         sizeBytes: "256",
+        redacted: false,
+        previewable: false,
+      },
+      {
+        kind: "file",
+        displayName: "notes.txt",
+        sizeBytes: "12",
         redacted: false,
       },
     ],
@@ -1035,6 +1043,19 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
   const leaked = clone(snapshot);
   leaked.tasks[0].runs[0].input.attachments[0].path = "/tmp/diagram.png";
   assert.throws(() => decodeWorkbenchSnapshot(leaked), /expected keys/);
+
+  const unstated = clone(snapshot);
+  delete unstated.tasks[0].runs[0].input.attachments[0].previewable;
+  assert.throws(() => decodeWorkbenchSnapshot(unstated), /expected keys/);
+  const loose = clone(snapshot);
+  loose.tasks[0].runs[0].input.attachments[1].previewable = "true";
+  assert.throws(() => decodeWorkbenchSnapshot(loose), /previewable/);
+  const previewableFile = clone(snapshot);
+  previewableFile.tasks[0].runs[0].input.attachments[2].previewable = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(previewableFile),
+    /expected keys/,
+  );
 
   const retiredPdf = clone(snapshot);
   retiredPdf.tasks[0].runs[0].input.attachments[1].kind = "pdf";

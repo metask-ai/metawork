@@ -400,6 +400,37 @@ pub const Runtime = struct {
         return self.descriptor(entry);
     }
 
+    /// Native-loop only: the bounded PNG model input uses, also used to preview
+    /// a retained original. The caller owns the returned bytes.
+    pub fn prepareImagePreview(self: *const Runtime, allocator: std.mem.Allocator, original: []const u8) Error![]u8 {
+        const prepare = self.images.prepare_fn orelse return error.UnsupportedType;
+        const preview = prepare(self.images.context, allocator, original, max_image_preview_bytes) catch return error.UnsupportedType;
+        if (preview.len == 0 or preview.len > max_image_preview_bytes) {
+            std.crypto.secureZero(u8, preview);
+            allocator.free(preview);
+            return error.UnsupportedType;
+        }
+        return preview;
+    }
+
+    pub const RetainedImageLocation = struct { root: []const u8, relative: []const u8 };
+
+    /// Where a Task keeps the image original its Run history names, for an
+    /// independent bounded no-follow reader. Store naming stays private here.
+    pub fn retainedImageLocation(self: *const Runtime, task_id: u64, name: [32]u8, format: Format, size: usize, buffer: []u8) ?RetainedImageLocation {
+        const fs = self.file_store orelse return null;
+        const relative = store.FileStore.relativePath(retainedImageFile(task_id, name, format, size), buffer) catch return null;
+        return .{ .root = fs.directory, .relative = relative };
+    }
+
+    /// Host-generated name of a borrowed image original after it moved into the
+    /// Task namespace, so the retained original can be found again later.
+    pub fn borrowedImageOriginal(self: *const Runtime, id: u64, task_id: u64) ?[32]u8 {
+        const entry = self.slots[self.findIndex(id) orelse return null].?;
+        if (entry.state != .borrowed or entry.format == null or task_id == 0 or entry.file.task_id != task_id) return null;
+        return entry.file.name;
+    }
+
     /// The bounded PNG already prepared for model input. Only an unsent draft
     /// image is previewable; the borrow is valid until the next mutation.
     pub fn draftImagePreview(self: *const Runtime, id: u64) ?[]const u8 {
@@ -433,23 +464,14 @@ pub const Runtime = struct {
         var prefix: [12]u8 = undefined;
         const count = try self.file_store.?.read(entry.file, 0, &prefix);
         if (detectFormat(prefix[0..count])) |format| {
-            try self.file_store.?.setExtension(&entry.file, switch (format) {
-                .png => "png",
-                .jpeg => "jpg",
-                .webp => "webp",
-            });
-            const prepare = self.images.prepare_fn orelse return error.UnsupportedType;
+            try self.file_store.?.setExtension(&entry.file, imageExtension(format));
+            if (self.images.prepare_fn == null) return error.UnsupportedType;
             const raw = try self.file_store.?.readAlloc(self.allocator, entry.file);
             defer {
                 std.crypto.secureZero(u8, raw);
                 self.allocator.free(raw);
             }
-            const preview = prepare(self.images.context, self.allocator, raw, max_image_preview_bytes) catch return error.UnsupportedType;
-            if (preview.len == 0 or preview.len > max_image_preview_bytes) {
-                self.allocator.free(preview);
-                return error.UnsupportedType;
-            }
-            entry.preview = preview;
+            entry.preview = try self.prepareImagePreview(self.allocator, raw);
             entry.format = format;
             return;
         }
@@ -545,6 +567,20 @@ pub const Borrow = struct {
         self.active = false;
     }
 };
+fn imageExtension(format: Format) []const u8 {
+    return switch (format) {
+        .png => "png",
+        .jpeg => "jpg",
+        .webp => "webp",
+    };
+}
+
+/// The accepted image original a Task retains under the identity recorded in
+/// its Run history. Only this module knows the owned image suffix.
+fn retainedImageFile(task_id: u64, name: [32]u8, format: Format, size: usize) store.File {
+    return .{ .name = name, .task_id = task_id, .size = size, .extension = store.Extension.fromSuffix(imageExtension(format)) catch unreachable };
+}
+
 fn validDisplayName(value: []const u8, max_bytes: usize) bool {
     if (value.len == 0 or value.len > max_bytes or !std.unicode.utf8ValidateSlice(value) or std.mem.eql(u8, value, ".") or std.mem.eql(u8, value, "..")) return false;
     for (value) |byte| {

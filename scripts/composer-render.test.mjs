@@ -226,6 +226,7 @@ function renderCompletedSurface(
     outputsEnabled = false,
     onOutputAction,
     onPrepareOutputEdit,
+    onPreviewRunAttachment,
   } = {},
 ) {
   const task = {
@@ -312,6 +313,7 @@ function renderCompletedSurface(
         onPrepareOutputEdit,
         onPrepareRetry() {},
         onPreviewFile() {},
+        onPreviewRunAttachment,
         onReviewFileChanges() {},
         onRespond() {},
         renderPendingUi() {
@@ -762,6 +764,47 @@ test("Task content renders multimodal history as metadata-only attachment chips"
   assert.match(markup, /brief\.webp/);
   assert.match(markup, /2 KB/);
   assert.doesNotMatch(markup, /attachmentToken|token|file:\/\/|\/Users\//);
+  assert.doesNotMatch(markup, /<button[^>]*aria-label="Preview/);
+});
+
+test("Task content offers a preview only for sent images with a retained original", () => {
+  const markup = renderCompletedSurface(
+    "Analysis complete",
+    {
+      kind: "multimodal",
+      text: "Inspect these files",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          displayName: "diagram.png",
+          sizeBytes: "2048",
+          redacted: false,
+          previewable: true,
+        },
+        {
+          kind: "image",
+          format: "webp",
+          displayName: "legacy.webp",
+          sizeBytes: "4096",
+          redacted: false,
+          previewable: false,
+        },
+        {
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "12",
+          redacted: false,
+        },
+      ],
+      redacted: false,
+    },
+    [],
+    { onPreviewRunAttachment() {} },
+  );
+  assert.match(markup, /<button[^>]*aria-label="Preview diagram\.png"/);
+  assert.doesNotMatch(markup, /aria-label="Preview legacy\.webp"/);
+  assert.doesNotMatch(markup, /aria-label="Preview notes\.txt"/);
 });
 
 test("Task content marks redacted Text and Skill inputs consistently", () => {

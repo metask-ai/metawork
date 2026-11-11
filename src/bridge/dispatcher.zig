@@ -20,7 +20,7 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 20;
+const async_product_handler_count = 21;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -535,6 +535,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[17] = .{ .name = commands.mcp_probe_http_draft, .context = self, .invoke_fn = probeMcpHttpDraft };
         self.registered_async_handlers[18] = .{ .name = commands.mcp_verify_add_http_draft, .context = self, .invoke_fn = verifyAndAddMcpHttpDraft };
         self.registered_async_handlers[19] = .{ .name = commands.preview_attachment, .context = self, .invoke_fn = previewAttachment };
+        self.registered_async_handlers[20] = .{ .name = commands.preview_run_input_attachment, .context = self, .invoke_fn = previewRunInputAttachment };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -1397,6 +1398,40 @@ pub const Dispatcher = struct {
             break;
         };
         switch (control.beginAttachmentPreview(id, resolved[0])) {
+            .queued => self.updatePreviewTimer(),
+            .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
+        }
+    }
+    fn previewRunInputAttachment(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginRunInputAttachmentPreview(invocation, responder) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, null);
+        };
+    }
+    /// A sent image is addressed by its exact Task, Run and chip position;
+    /// the Renderer never sees the retained original's identity or path.
+    fn beginRunInputAttachmentPreview(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.RunInputAttachmentPreviewRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
+        self.preview_high_water = key.preview_id;
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        const control = try self.requireProductControl();
+        const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
+            respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
+            return;
+        };
+        for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
+            slot.generation = key.generation;
+            slot.preview_id = key.preview_id;
+            slot.window_id = invocation.source.window_id;
+            break;
+        };
+        switch (control.beginRunAttachmentPreview(id, task_id, run_id, parsed.value.attachmentIndex.value)) {
             .queued => self.updatePreviewTimer(),
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
@@ -6479,7 +6514,7 @@ test "file preview native grants bind authority and cancellation and expire with
     boundary.assertQuiescent();
 }
 
-test "file preview of attachment grants exposes only this connection's unsent draft images" {
+test "file preview of attachment commands resolves only owned drafts and exact Run inputs" {
     const Host = struct {
         fn wake(_: ?*anyopaque) !void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
@@ -6507,6 +6542,11 @@ test "file preview of attachment grants exposes only this connection's unsent dr
         }
         fn deinit(self: *@This()) void {
             if (self.response) |bytes| std.testing.allocator.free(bytes);
+        }
+        fn runInput(self: *@This(), native: native_sdk.bridge.Dispatcher, payload: []const u8) !void {
+            const handler = native.async_registry.find(commands.preview_run_input_attachment).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "run-input-preview", .command = commands.preview_run_input_attachment, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
         }
         fn preview(self: *@This(), native: native_sdk.bridge.Dispatcher, window_id: native_sdk.platform.WindowId, preview_id: u64, token: []const u8) !void {
             const handler = native.async_registry.find(commands.preview_attachment).?;
@@ -6615,6 +6655,19 @@ test "file preview of attachment grants exposes only this connection's unsent dr
     try std.testing.expect(!control.hasFilePreviews());
     try std.testing.expectEqual(staged[1].id, boundary.attachment_grants.release(issued[1].token, 1, 3).?);
     try std.testing.expect(control.attachments.release(staged[1].id));
+
+    // Sent images are addressed by an exact JSON u32 position; a Run without a
+    // recorded image original reads as missing.
+    try capture.runInput(native, "{\"generation\":\"1\",\"previewId\":\"7\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":0}");
+    try capture.expectState("missing");
+    for ([_][]const u8{ "\"0\"", "0.0", "-1", "1e0", "4294967296" }, 8..) |index, preview_id| {
+        var request: [160]u8 = undefined;
+        try capture.runInput(native, try std.fmt.bufPrint(&request, "{{\"generation\":\"1\",\"previewId\":\"{d}\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":{s}}}", .{ preview_id, index }));
+        try capture.expectState("error");
+    }
+    try capture.runInput(native, "{\"generation\":\"1\",\"previewId\":\"20\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":0,\"path\":\"/tmp/a.png\"}");
+    try capture.expectState("error");
+    try std.testing.expect(!control.hasFilePreviews());
 }
 
 test "file preview async response preserves the exact bounded wire shape" {

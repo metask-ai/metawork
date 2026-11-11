@@ -696,10 +696,15 @@ pub fn writeInput(writer: *std.Io.Writer, text_projection: TextProjection, input
                     return error.SnapshotTooLarge;
                 writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
                 try text_projection.writeJson(writer, item.display_name);
-                writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{
+                writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}", .{
                     item.size_bytes,
                     item.redacted,
                 }) catch return error.SnapshotTooLarge;
+                // Only a recorded retained original can be previewed; the
+                // identity itself never reaches the Renderer.
+                if (item.kind == .image) writer.print(",\"previewable\":{}", .{item.original != null}) catch
+                    return error.SnapshotTooLarge;
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
             }
             writer.print("],\"redacted\":{}}}", .{multimodal.redacted}) catch
                 return error.SnapshotTooLarge;
@@ -1759,6 +1764,41 @@ test "interrupted Compact serializer matches the independent Renderer fixture" {
     try std.testing.expectEqualStrings(std.mem.trim(u8, @import("task_view_fixture").interrupted_compact, "\r\n"), writer.buffered());
     writer = std.Io.Writer.fixed(storage[0..8]);
     try std.testing.expectError(error.SnapshotTooLarge, writeCompact(&writer, &compact));
+}
+
+test "Product view multimodal input exposes only whether an image original is previewable" {
+    const Plain = struct {
+        fn sensitive(_: *const anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn json(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+        fn output(_: *const anyopaque, _: *std.Io.Writer, _: []const u8, _: []const u64) Error!bool {
+            unreachable;
+        }
+        fn parts(_: *const anyopaque, _: *std.Io.Writer, _: []const u8, _: []const u8) Error!bool {
+            unreachable;
+        }
+    };
+    const context: u8 = 0;
+    const projection: TextProjection = .{ .context = &context, .contains_sensitive_fn = Plain.sensitive, .write_json_fn = Plain.json, .write_json_output_fn = Plain.output, .write_json_parts_fn = Plain.parts };
+    var attachments = [_]task_state.AttachmentRecord{
+        .{ .kind = .image, .format = .png, .display_name = @constCast("a.png"), .size_bytes = 1, .original = "0123456789abcdef0123456789abcdef".* },
+        .{ .kind = .image, .format = .webp, .display_name = @constCast("b.webp"), .size_bytes = 2 },
+        .{ .kind = .file, .format = null, .display_name = @constCast("c.txt"), .size_bytes = 3 },
+    };
+    var storage: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writeInput(&writer, projection, .{ .multimodal = .{ .text = null, .attachments = &attachments } }, null);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[" ++
+            "{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"a.png\",\"sizeBytes\":\"1\",\"redacted\":false,\"previewable\":true}," ++
+            "{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"b.webp\",\"sizeBytes\":\"2\",\"redacted\":false,\"previewable\":false}," ++
+            "{\"kind\":\"file\",\"displayName\":\"c.txt\",\"sizeBytes\":\"3\",\"redacted\":false}],\"redacted\":false}",
+        writer.buffered(),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "0123456789abcdef") == null);
 }
 
 test "Product view owned Tool preparation copies facts and releases every allocation failure" {

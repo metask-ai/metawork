@@ -11,8 +11,9 @@ pub const max_image_side: u32 = 8192;
 pub const image_chunk_bytes: usize = 262143;
 pub const ImageInfo = image_container.Info;
 /// `attachment_draft` carries Host-prepared bytes for an unsent draft image;
-/// it never opens a path.
-pub const Source = enum { reference, workspace, directory, attachment_draft };
+/// it never opens a path. `attachment_original` reads one exact retained Task
+/// image original, which the main thread replaces with a bounded preview.
+pub const Source = enum { reference, workspace, directory, attachment_draft, attachment_original };
 pub const max_directory_entries = 512;
 pub const DirectoryEntry = struct { name: []const u8, kind: enum { file, directory } };
 
@@ -81,6 +82,7 @@ pub const Input = struct {
     max_lines: usize,
     max_line_bytes: usize,
     attachment_id: u64 = 0,
+    attachment_index: u32 = 0,
     /// Copied by `begin`; only `attachment_draft` may supply bytes.
     supplied: []const u8 = &.{},
 };
@@ -101,6 +103,7 @@ pub const Completion = struct {
     image_info: ?ImageInfo = null,
     truncated: bool,
     attachment_id: u64 = 0,
+    attachment_index: u32 = 0,
 };
 
 pub const Taken = struct {
@@ -158,8 +161,10 @@ const Job = struct {
     max_lines: usize,
     max_line_bytes: usize,
     attachment_id: u64 = 0,
+    attachment_index: u32 = 0,
     image_info: ?ImageInfo = null,
     reserved_image_bytes: usize = 0,
+    reserved_original: bool = false,
     cancelled: std.atomic.Value(bool) = .init(false),
     created_at: std.Io.Timestamp,
     state: State = .failed,
@@ -219,6 +224,7 @@ const Job = struct {
         };
         defer root.close(self.lane.io);
         if (self.source == .directory) return self.readDirectory(root);
+        if (self.source == .attachment_original) return self.readRetainedOriginal(root);
         if (self.source == .workspace and !validWorkspacePath(self.relative_path, false)) {
             self.state = .restricted;
             return .completed;
@@ -353,6 +359,74 @@ const Job = struct {
         return .completed;
     }
 
+    /// The recorded size is exact: a retained original never changes, so any
+    /// other file is not the one the Run accepted. One original is held at a
+    /// time; its bytes stay in the Job until the main thread prepares them.
+    fn readRetainedOriginal(self: *Job, root: std.Io.Dir) ReadOutcome {
+        var file = root.openFile(self.lane.io, self.relative_path, .{
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| {
+            self.state = switch (err) {
+                error.FileNotFound, error.NotDir => .missing,
+                else => .restricted,
+            };
+            return .completed;
+        };
+        defer file.close(self.lane.io);
+        if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
+        const before = file.stat(self.lane.io) catch {
+            self.state = .failed;
+            return .completed;
+        };
+        if (before.kind != .file or before.size != self.max_bytes) {
+            self.state = .missing;
+            return .completed;
+        }
+        if (!self.lane.reserveOriginal()) {
+            self.state = .busy;
+            return .completed;
+        }
+        self.reserved_original = true;
+        const bytes = self.lane.allocator.alloc(u8, self.max_bytes) catch {
+            self.clearContent();
+            self.state = .failed;
+            return .completed;
+        };
+        self.buffer = bytes;
+        var read: usize = 0;
+        while (read < bytes.len) {
+            if (self.cancelled.load(.acquire)) {
+                self.clearContent();
+                self.state = .failed;
+                return .completed;
+            }
+            const amount = @min(bytes.len - read, 64 * 1024);
+            const count = file.readPositionalAll(self.lane.io, bytes[read..][0..amount], read) catch {
+                self.clearContent();
+                self.state = .failed;
+                return .completed;
+            };
+            read += count;
+            if (count != amount) break;
+        }
+        const after = file.stat(self.lane.io) catch {
+            self.clearContent();
+            self.state = .failed;
+            return .completed;
+        };
+        if (read != bytes.len or metadataChanged(before, after)) return .changed;
+        if (!isImage(bytes)) {
+            self.clearContent();
+            self.state = .unsupported;
+            return .completed;
+        }
+        self.content = bytes;
+        self.state = .ready;
+        return .completed;
+    }
+
     /// Supplied image bytes still pass the same container, animation, size and
     /// held-image admission rules as a file read.
     fn adoptSupplied(self: *Job) ReadOutcome {
@@ -446,6 +520,8 @@ const Job = struct {
         self.image_info = null;
         if (self.reserved_image_bytes != 0) self.lane.releaseImage(self.reserved_image_bytes);
         self.reserved_image_bytes = 0;
+        if (self.reserved_original) self.lane.releaseOriginal();
+        self.reserved_original = false;
     }
 
     fn deinit(self: *Job) void {
@@ -475,6 +551,7 @@ pub const Lane = struct {
     jobs: [max_in_flight]?*Job = @splat(null),
     image_count: usize = 0,
     image_bytes: usize = 0,
+    original_held: bool = false,
 
     pub fn create(
         io: std.Io,
@@ -541,6 +618,7 @@ pub const Lane = struct {
             .max_lines = input.max_lines,
             .max_line_bytes = input.max_line_bytes,
             .attachment_id = input.attachment_id,
+            .attachment_index = input.attachment_index,
             .buffer = supplied,
         };
         self.lock();
@@ -578,7 +656,7 @@ pub const Lane = struct {
         std.debug.assert(!self.accepting);
         std.debug.assert(self.active_count == 0);
         std.debug.assert(self.completion_count == 0);
-        std.debug.assert(self.image_count == 0 and self.image_bytes == 0);
+        std.debug.assert(self.image_count == 0 and self.image_bytes == 0 and !self.original_held);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -612,6 +690,7 @@ pub const Lane = struct {
                 .image_info = job.image_info,
                 .truncated = job.truncated,
                 .attachment_id = job.attachment_id,
+                .attachment_index = job.attachment_index,
             },
         };
     }
@@ -657,6 +736,35 @@ pub const Lane = struct {
             }
         };
         return false;
+    }
+
+    /// Main thread: swaps a ready retained original for its bounded preview,
+    /// which then passes the ordinary held-image admission. Takes `prepared`.
+    pub fn adoptPrepared(self: *Lane, taken: *Taken, prepared: []u8) State {
+        _ = self;
+        const job: *Job = @ptrCast(@alignCast(taken.job));
+        std.debug.assert(job.source == .attachment_original and job.state == .ready);
+        job.clearContent();
+        job.buffer = prepared;
+        _ = job.adoptSupplied();
+        taken.completion.state = job.state;
+        taken.completion.content = job.content;
+        taken.completion.image_info = job.image_info;
+        return job.state;
+    }
+
+    fn reserveOriginal(self: *Lane) bool {
+        self.lock();
+        defer self.unlock();
+        if (!self.accepting or self.original_held) return false;
+        self.original_held = true;
+        return true;
+    }
+    fn releaseOriginal(self: *Lane) void {
+        self.lock();
+        defer self.unlock();
+        std.debug.assert(self.original_held);
+        self.original_held = false;
     }
 
     fn reserveImage(self: *Lane, bytes: usize) bool {

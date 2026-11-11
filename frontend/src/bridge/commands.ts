@@ -71,6 +71,7 @@ export const commands = {
   cancelAttachmentReceive: "metawork.attachments.cancelReceive",
   releaseAttachment: "metawork.attachments.release",
   previewAttachment: "metawork.attachments.preview",
+  previewRunInputAttachment: "metawork.attachments.previewRunInput",
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRetryRefresh: "metawork.account.retryRefresh",

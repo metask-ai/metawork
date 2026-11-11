@@ -590,7 +590,14 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
           attachmentValue,
           attachmentPath,
           attachmentKind === "image"
-            ? ["kind", "format", "displayName", "sizeBytes", "redacted"]
+            ? [
+                "kind",
+                "format",
+                "displayName",
+                "sizeBytes",
+                "redacted",
+                "previewable",
+              ]
             : ["kind", "displayName", "sizeBytes", "redacted"],
         );
         const common = {
@@ -616,6 +623,10 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
                 "webp",
               ] as const),
               ...common,
+              previewable: booleanValue(
+                attachment.previewable,
+                `${attachmentPath}.previewable`,
+              ),
             }
           : { kind: attachmentKind, ...common };
       },

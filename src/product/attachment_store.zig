@@ -35,7 +35,7 @@ pub const Extension = struct {
         return result;
     }
 };
-const max_relative_bytes = 20 + 1 + 32 + 1 + Extension.max_bytes;
+pub const max_relative_bytes = 20 + 1 + 32 + 1 + Extension.max_bytes;
 const max_filename_bytes = 32 + 1 + Extension.max_bytes;
 
 pub const Source = struct {
@@ -76,6 +76,11 @@ pub const FileStore = struct {
 
     fn relative(file: File, buffer: []u8) Error![]const u8 {
         return std.fmt.bufPrint(buffer, "{d}/{s}.{s}", .{ file.task_id, file.name, file.extension.slice() }) catch error.WriteFailed;
+    }
+
+    /// Store-relative location for an independent bounded reader.
+    pub fn relativePath(file: File, buffer: []u8) Error![]const u8 {
+        return relative(file, buffer);
     }
 
     pub fn allocate(self: *FileStore, size: usize) Error!File {

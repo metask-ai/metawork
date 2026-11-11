@@ -235,6 +235,40 @@ test("draft attachment previews submit only the grant token and reuse the image 
   preview.release();
 });
 
+test("sent image previews address the Run input position, never a path or token", async () => {
+  const calls = [];
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === commands.previewRunInputAttachment)
+        return { ...empty, state: "missing" };
+      assert.equal(command, commands.releasePreview);
+      return {
+        generation: payload.generation,
+        previewId: payload.previewId,
+        released: true,
+      };
+    },
+    () => "7",
+  );
+  const preview = await loader.loadRunAttachment("17", "23", 1);
+  assert.equal(preview.state, "missing");
+  assert.deepEqual(calls[0], {
+    command: commands.previewRunInputAttachment,
+    payload: {
+      generation: "7",
+      previewId: "1",
+      taskId: "17",
+      runId: "23",
+      attachmentIndex: 1,
+    },
+  });
+  assert.deepEqual(
+    calls.slice(1).map((call) => call.command),
+    [commands.releasePreview],
+  );
+});
+
 test("original bytes including a trailer round trip through sequential aligned chunks and close before display", async () => {
   const host = new Host();
   host.bytes = Buffer.concat([png, Buffer.alloc(524300, 0x7a)]);

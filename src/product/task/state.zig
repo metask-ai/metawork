@@ -448,6 +448,9 @@ pub const MultimodalAttachment = struct {
     reference: []const u8 = &.{},
     size_bytes: ?u64 = null,
     source_format: ?AttachmentFormat = null,
+    /// Host-generated name of the retained image original in this Task's
+    /// attachment namespace; never a user path.
+    original: ?OriginalIdentity = null,
 };
 
 /// Borrowed command input. An accepted submission owns its slices separately.
@@ -672,6 +675,8 @@ pub const InputAcceptance = struct {
 
 pub const AttachmentKind = enum { image, file };
 pub const AttachmentFormat = enum { png, jpeg, webp };
+/// Lowercase hex name of a retained original; its suffix follows the format.
+pub const OriginalIdentity = [32]u8;
 pub const AttachmentRecord = struct {
     /// Runtime-only ownership correlation with the attachment aggregate.
     resource_id: u64 = 0,
@@ -680,6 +685,9 @@ pub const AttachmentRecord = struct {
     display_name: []u8,
     size_bytes: u64,
     redacted: bool = false,
+    /// Durable image-only identity of the Run's retained original. History
+    /// written before this field existed stays without one.
+    original: ?OriginalIdentity = null,
 };
 
 /// Immutable checkpoint description facts captured before executor handoff.

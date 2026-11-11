@@ -2449,6 +2449,11 @@ pub const Runtime = struct {
         }
         var safe = try copyRunInput(self, task, input, credentials, effects);
         errdefer deinitRunInput(self, effects.release, &safe);
+        // A waiting message is not a preview target; only the Run that later
+        // consumes its payload keeps the retained original's identity.
+        if (safe == .multimodal) {
+            for (safe.multimodal.attachments) |*item| item.original = null;
+        }
         try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
         errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
         var submission: Submission = .{ .operation_id_len = @intCast(operation_id.len), .received_at_unix_ms = effects.run_clock.nowUnixMs(), .presentation_order = try task.durable.takePresentationOrder() };
@@ -4363,6 +4368,28 @@ pub const Runtime = struct {
             };
         }
         return null;
+    }
+
+    pub const InputImageOriginal = struct {
+        original: task_state.OriginalIdentity,
+        format: task_state.AttachmentFormat,
+        size_bytes: u64,
+    };
+
+    /// The retained original behind one image chip of a Run's input. Deleting
+    /// Tasks and history without a recorded identity expose nothing.
+    pub fn runInputImageOriginal(self: *const Runtime, task_id: u64, run_id: u64, index: usize) ?InputImageOriginal {
+        const task = self.findConst(task_id) orelse return null;
+        if (task.deletion == .deleting) return null;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        if (run.input != .multimodal) return null;
+        const items = run.input.multimodal.attachments;
+        if (index >= items.len or items[index].kind != .image) return null;
+        return .{
+            .original = items[index].original orelse return null,
+            .format = items[index].format orelse return null,
+            .size_bytes = items[index].size_bytes,
+        };
     }
 
     pub fn fileReference(
@@ -9400,6 +9427,7 @@ fn copyRunInput(
                     .display_name = display.value,
                     .size_bytes = item.size_bytes orelse item.bytes.len,
                     .redacted = display.redacted,
+                    .original = if (item.kind == .image) item.original else null,
                 };
                 initialized += 1;
                 redacted = redacted or display.redacted;

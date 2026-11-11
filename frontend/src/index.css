@@ -2770,7 +2770,34 @@ summary::-webkit-details-marker {
   background: var(--ui-surface-panel);
 }
 
-.task-input-attachment > span {
+.task-input-attachment[data-previewable="true"] {
+  display: flex;
+  padding: 0;
+}
+
+.task-input-attachment-open {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 9px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 7px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: zoom-in;
+}
+
+.task-input-attachment-open:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.task-input-attachment > span,
+.task-input-attachment-open > span {
   grid-row: 1 / 3;
   color: var(--ui-content-muted);
   font-family: var(--font-mono);

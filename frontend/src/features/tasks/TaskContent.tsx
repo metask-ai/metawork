@@ -12,6 +12,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -221,8 +222,69 @@ function outcomeState(
       return "failed";
   }
 }
-function TaskInput({ input }: { input: RunInputView }) {
+type InputAttachment = Extract<
+  RunInputView,
+  { kind: "multimodal" }
+>["attachments"][number];
+
+function inputAttachmentDetail(
+  attachment: InputAttachment,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return `${
+    attachment.kind === "image"
+      ? `${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`
+      : t("attachment.type.file")
+  } · ${formatAttachmentSize(attachment.sizeBytes)}`;
+}
+
+function InputAttachmentSummary({
+  attachment,
+  detailId,
+}: {
+  attachment: InputAttachment;
+  detailId?: string;
+}) {
   const { t } = useI18n();
+  return (
+    <>
+      <span aria-hidden="true">
+        {attachment.kind === "image" ? (
+          attachment.format.toUpperCase()
+        ) : (
+          <Icon name="skill-file" />
+        )}
+      </span>
+      <strong dir="auto">{attachment.displayName}</strong>
+      <small id={detailId}>{inputAttachmentDetail(attachment, t)}</small>
+    </>
+  );
+}
+
+export type RunAttachmentPreviewRequest = {
+  taskId: string;
+  runId: string;
+  attachmentIndex: number;
+  displayName: string;
+  detail: string;
+};
+
+function TaskInput({
+  input,
+  onPreview,
+}: {
+  input: RunInputView;
+  /** Present only for an executed Run input; queued messages stay inert. */
+  onPreview?: (
+    preview: Pick<
+      RunAttachmentPreviewRequest,
+      "attachmentIndex" | "displayName" | "detail"
+    >,
+    opener: HTMLElement,
+  ) => void;
+}) {
+  const { t } = useI18n();
+  const detailId = useId();
   const content =
     input.kind === "text" ? (
       <p className="task-input-copy">{input.text}</p>
@@ -236,22 +298,44 @@ function TaskInput({ input }: { input: RunInputView }) {
             <span
               className="task-input-attachment"
               role="listitem"
+              data-previewable={
+                attachment.kind === "image" &&
+                attachment.previewable &&
+                onPreview
+                  ? "true"
+                  : undefined
+              }
               key={`${attachment.displayName}:${index}`}
             >
-              <span aria-hidden="true">
-                {attachment.kind === "image" ? (
-                  attachment.format.toUpperCase()
-                ) : (
-                  <Icon name="skill-file" />
-                )}
-              </span>
-              <strong dir="auto">{attachment.displayName}</strong>
-              <small>
-                {attachment.kind === "image"
-                  ? `${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`
-                  : t("attachment.type.file")}
-                {` · ${formatAttachmentSize(attachment.sizeBytes)}`}
-              </small>
+              {attachment.kind === "image" &&
+              attachment.previewable &&
+              onPreview ? (
+                <button
+                  type="button"
+                  className="task-input-attachment-open focus-ring"
+                  aria-label={t("attachment.preview", {
+                    name: attachment.displayName,
+                  })}
+                  aria-describedby={`${detailId}-${index}`}
+                  onClick={(event) =>
+                    onPreview(
+                      {
+                        attachmentIndex: index,
+                        displayName: attachment.displayName,
+                        detail: inputAttachmentDetail(attachment, t),
+                      },
+                      event.currentTarget,
+                    )
+                  }
+                >
+                  <InputAttachmentSummary
+                    attachment={attachment}
+                    detailId={`${detailId}-${index}`}
+                  />
+                </button>
+              ) : (
+                <InputAttachmentSummary attachment={attachment} />
+              )}
             </span>
           ))}
         </div>
@@ -310,6 +394,7 @@ export function TaskContent({
   onPreviewFile,
   workspaceRoot = null,
   onPreviewWorkspaceFile,
+  onPreviewRunAttachment,
   loadFilePreview,
   onReviewFileChanges,
   onRespond,
@@ -359,6 +444,10 @@ export function TaskContent({
     taskId: string,
     path: string,
     opener: HTMLButtonElement,
+  ) => void;
+  onPreviewRunAttachment?: (
+    preview: RunAttachmentPreviewRequest,
+    opener: HTMLElement,
   ) => void;
   onReviewFileChanges: (
     taskId: string,
@@ -1048,7 +1137,18 @@ export function TaskContent({
                         : `${run.id}:root`
                     }
                   >
-                    <TaskInput input={run.input} />
+                    <TaskInput
+                      input={run.input}
+                      onPreview={
+                        onPreviewRunAttachment
+                          ? (preview, opener) =>
+                              onPreviewRunAttachment(
+                                { ...preview, taskId: task.id, runId: run.id },
+                                opener,
+                              )
+                          : undefined
+                      }
+                    />
                   </Message>
                   <MessageInfoBar
                     role="user"

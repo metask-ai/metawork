@@ -5837,14 +5837,16 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"redacted\":false,\"previewable\":true},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"redacted\":false,\"previewable\":true}],\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "attachmentTokens") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "PNG\\r\\n") == null);
 
+    // A structurally valid JPEG so the retained original can be previewed.
+    const photo = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
     const pure_media = [_]product_control.AttachmentCandidate{.{
         .display_name = "photo.jpg",
-        .bytes = "\xff\xd8\xffbody",
+        .bytes = photo,
     }};
     var pure_descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
     const pure_descriptors = try workbench.stageAttachments(
@@ -5867,8 +5869,37 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         pure_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"redacted\":false}],\"redacted\":false}",
+        std.fmt.comptimePrint("\"input\":{{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"{d}\",\"redacted\":false,\"previewable\":true}}],\"redacted\":false}}", .{photo.len}),
     ) != null);
+    // The Run consumed the grant, yet the Task's retained original stays
+    // previewable through the same bounded preparation as model input.
+    const PreviewCapture = struct {
+        calls: usize = 0,
+        result: ?product_control.FilePreviewResult = null,
+        fn receive(context: *anyopaque, result: product_control.FilePreviewResult) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.result = result;
+        }
+        fn sink(self: *@This()) product_control.FilePreviewSink {
+            return .{ .context = self, .complete_fn = receive };
+        }
+    };
+    var preview = PreviewCapture{};
+    try std.testing.expectEqual(product_control.Runtime.FilePreviewAdmission.queued, workbench.beginRunAttachmentPreview(901, task_id, pure_run_id, 0));
+    for (0..5000) |_| {
+        workbench.drainFilePreviewCompletions(preview.sink());
+        if (preview.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), preview.calls);
+    try std.testing.expectEqual(product_control.FilePreviewState.ready, preview.result.?.state);
+    const preview_image = preview.result.?.image.?;
+    try std.testing.expectEqualStrings("image/jpeg", preview_image.media_type);
+    try std.testing.expectEqualSlices(u8, photo, try workbench.readFilePreviewImage(preview_image.id, 0));
+    try std.testing.expect(workbench.releaseFilePreview(preview_image.id));
+    try std.testing.expectEqual(product_control.Runtime.FilePreviewAdmission{ .immediate = .missing }, workbench.beginRunAttachmentPreview(902, task_id, pure_run_id, 1));
+    try std.testing.expectEqual(product_control.Runtime.FilePreviewAdmission{ .immediate = .missing }, workbench.beginRunAttachmentPreview(903, task_id, pure_run_id + 100, 0));
 
     const text_files = [_]product_control.AttachmentCandidate{.{
         .display_name = "report.docx",

@@ -135,6 +135,19 @@ export class FilePreviewLoader {
   ): Promise<FilePreview> {
     return this.loadTarget(commands.previewAttachment, { token }, options);
   }
+  /** A sent image is addressed by its Run input position only. */
+  loadRunAttachment(
+    taskId: string,
+    runId: string,
+    attachmentIndex: number,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<FilePreview> {
+    return this.loadTarget(
+      commands.previewRunInputAttachment,
+      { taskId, runId, attachmentIndex },
+      options,
+    );
+  }
   async listDirectory(
     taskId: string,
     workspaceId: string,
@@ -201,8 +214,9 @@ export class FilePreviewLoader {
     command:
       | typeof commands.previewFile
       | typeof commands.previewWorkspaceFile
-      | typeof commands.previewAttachment,
-    target: Record<string, string>,
+      | typeof commands.previewAttachment
+      | typeof commands.previewRunInputAttachment,
+    target: Record<string, string | number>,
     options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();

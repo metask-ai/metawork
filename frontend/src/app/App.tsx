@@ -501,13 +501,26 @@ export default function App() {
   );
   const attachmentBusy = attachmentView !== null || attachmentRemoving;
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [attachmentPreview, setAttachmentPreview] = useState<{
-    token: string;
-    scope: string;
-    name: string;
-    detail: string;
-    opener: HTMLElement | null;
-  } | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<
+    | {
+        source: "draft";
+        token: string;
+        scope: string;
+        name: string;
+        detail: string;
+        opener: HTMLElement | null;
+      }
+    | {
+        source: "run";
+        taskId: string;
+        runId: string;
+        attachmentIndex: number;
+        name: string;
+        detail: string;
+        opener: HTMLElement | null;
+      }
+    | null
+  >(null);
   const attachmentBusyRef = useRef(false);
   const attachmentOperation = useRef<{
     cancelled: boolean;
@@ -1668,29 +1681,54 @@ export default function App() {
     issues: [],
   };
   const currentComposerDraft = reconcileSkillDraft(composerDraft, skillCatalog);
-  // The preview belongs to the draft that opened it; navigation closes it,
-  // while a withdrawn image stays open as an explained invalid preview.
-  const attachmentPreviewTarget: AttachmentPreviewTarget | null =
-    attachmentPreview && attachmentPreview.scope === composerDraftScope
-      ? {
-          key: `draft:${attachmentPreview.token}`,
-          name: attachmentPreview.name,
-          detail: attachmentPreview.detail,
-          available:
-            currentComposerDraft.kind === "multimodal" &&
-            currentComposerDraft.attachments.some(
-              (attachment) =>
-                attachment.kind === "image" &&
-                attachment.token === attachmentPreview.token,
-            ),
-          invalid: "attachment.preview.invalid_draft",
-          opener: attachmentPreview.opener,
-        }
-      : null;
+  // A preview belongs to the draft or Task that opened it; navigation closes
+  // it, while a withdrawn image stays open as an explained invalid preview.
+  const attachmentPreviewCurrent =
+    attachmentPreview?.source === "draft"
+      ? attachmentPreview.scope === composerDraftScope
+      : attachmentPreview?.source === "run"
+        ? route === "workbench" && activeTask?.id === attachmentPreview.taskId
+        : false;
+  let attachmentPreviewTarget: AttachmentPreviewTarget | null = null;
+  if (attachmentPreview && attachmentPreviewCurrent) {
+    const common = {
+      name: attachmentPreview.name,
+      detail: attachmentPreview.detail,
+      opener: attachmentPreview.opener,
+    };
+    if (attachmentPreview.source === "draft") {
+      attachmentPreviewTarget = {
+        ...common,
+        key: `draft:${attachmentPreview.token}`,
+        available:
+          currentComposerDraft.kind === "multimodal" &&
+          currentComposerDraft.attachments.some(
+            (attachment) =>
+              attachment.kind === "image" &&
+              attachment.token === attachmentPreview.token,
+          ),
+        invalid: "attachment.preview.invalid_draft",
+      };
+    } else {
+      const input = activeTask?.runs.find(
+        (run) => run.id === attachmentPreview.runId,
+      )?.input;
+      const attachment =
+        input?.kind === "multimodal"
+          ? input.attachments[attachmentPreview.attachmentIndex]
+          : undefined;
+      attachmentPreviewTarget = {
+        ...common,
+        key: `run:${attachmentPreview.taskId}:${attachmentPreview.runId}:${attachmentPreview.attachmentIndex}`,
+        available: attachment?.kind === "image" && attachment.previewable,
+        invalid: "attachment.preview.invalid_sent",
+      };
+    }
+  }
   useEffect(() => {
-    if (attachmentPreview && attachmentPreview.scope !== composerDraftScope)
+    if (attachmentPreview && !attachmentPreviewCurrent)
       setAttachmentPreview(null);
-  }, [attachmentPreview, composerDraftScope]);
+  }, [attachmentPreview, attachmentPreviewCurrent]);
   useEffect(() => {
     inputHistoryReader.clear();
   }, [
@@ -4543,6 +4581,7 @@ export default function App() {
         onRemoveAttachment={(token) => void removeAttachment(token)}
         onPreviewAttachment={(preview, opener) =>
           setAttachmentPreview({
+            source: "draft",
             token: preview.token,
             scope: composerDraftScope,
             name: preview.displayName,
@@ -5592,6 +5631,17 @@ export default function App() {
                     ? openConversationWorkspaceFile
                     : undefined
                 }
+                onPreviewRunAttachment={(preview, opener) =>
+                  setAttachmentPreview({
+                    source: "run",
+                    taskId: preview.taskId,
+                    runId: preview.runId,
+                    attachmentIndex: preview.attachmentIndex,
+                    name: preview.displayName,
+                    detail: preview.detail,
+                    opener,
+                  })
+                }
                 loadFilePreview={loadFilePreview}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}
@@ -5660,7 +5710,14 @@ export default function App() {
       <AttachmentPreviewDialog
         target={attachmentPreviewTarget}
         load={(options) =>
-          client.previewAttachment(attachmentPreview?.token ?? "", options)
+          attachmentPreview?.source === "run"
+            ? client.previewRunAttachment(
+                attachmentPreview.taskId,
+                attachmentPreview.runId,
+                attachmentPreview.attachmentIndex,
+                options,
+              )
+            : client.previewAttachment(attachmentPreview?.token ?? "", options)
         }
         onClose={() => setAttachmentPreview(null)}
       />

@@ -813,7 +813,7 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 图片模型输入可以经过缩放和 PNG 转码，原件仍完整保留；其他文件由 Agent 按需选择工具或 Skill 处理本地原件。内部预览、引用和上下文预算不作为附件类型的另一套文件大小上限展示。
 
-历史用户指令的附件 chip 只显示已保存名称、类型、可选图片格式、大小和顺序，不含文本正文，不可点击、预览、下载或一键重新发送。AgentCore 返回 `image_input_unsupported` 时，该 Run 以准确 terminal notice 收口，Composer 继续可用，但附件已被已接纳 Run 消费，用户若要换模型重试必须重新选择原文件。
+历史用户指令的附件 chip 只显示已保存名称、类型、可选图片格式、大小和顺序，不含文本正文，不可下载或一键重新发送。Host 标记 `previewable` 的已执行图片 chip 使用与草稿图片相同的预览按钮与模态预览，原件失效时说明“这张图片的原件已不可用”且不提供重试；其他图片、文件以及等待中或未执行消息的 chip 不可点击。AgentCore 返回 `image_input_unsupported` 时，该 Run 以准确 terminal notice 收口，Composer 继续可用，但附件已被已接纳 Run 消费，用户若要换模型重试必须重新选择原文件。
 
 ### 8.3 New task 首次发送
 
