@@ -214,6 +214,41 @@ const server = createServer(async (request, response) => {
       schema: declaration?.input_schema,
       results: images.length ? "[image result verified]" : results,
     });
+    if (
+      mode.startsWith("video") ||
+      (restoreProbe &&
+        JSON.stringify(last).includes("Generate the fixture video."))
+    ) {
+      const video = payload.tools.find((tool) => tool.name === "GenerateVideo");
+      if (
+        !video ||
+        JSON.stringify(Object.keys(video.input_schema.properties)) !==
+          '["prompt"]' ||
+        video.input_schema.properties.prompt.type !== "string" ||
+        video.input_schema.additionalProperties !== false ||
+        JSON.stringify(video.input_schema.required) !== '["prompt"]'
+      )
+        throw Error("video schema");
+      const videoCalls = messages
+        .flatMap((message) =>
+          Array.isArray(message.content) ? message.content : [],
+        )
+        .filter(
+          (part) => part.type === "tool_use" && part.name === "GenerateVideo",
+        );
+      const requestAgain = mode === "video-repeat" && videoCalls.length === 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(
+        results.length && !requestAgain
+          ? protocolTextSse("anthropic", "video fixture completed")
+          : protocolToolSse(
+              "anthropic",
+              payload.messages.length,
+              "GenerateVideo",
+              { prompt: "A black screen" },
+            ),
+      );
+    }
     if (mode === "mcp-installation") {
       const tool = payload.tools.find(
         (entry) => entry.name === "InstallMcpServer",

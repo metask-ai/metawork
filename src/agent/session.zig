@@ -26,6 +26,7 @@ const ModelBinding = model_binding.ModelBinding;
 const session_runtime = @import("session/runtime.zig");
 const image_generation = @import("image_generation.zig");
 const generate_image = @import("generate_image.zig");
+const generate_video = @import("generate_video.zig");
 const deliver_file = @import("agent_file_delivery");
 const mcp_install = @import("mcp_install.zig");
 const image_http = @import("agent_http_transport");
@@ -50,6 +51,9 @@ pub const ImageGenerationRunInput = struct {
     transport: image_http.Transport,
 };
 pub const ImageGenerationCredentialReader = image_generation.CredentialReader;
+pub const VideoGenerationRunInput = generate_video.Input;
+pub const VideoGenerationOutcome = generate_video.Outcome;
+pub const VideoGenerationReceipt = generate_video.Receipt;
 
 const RunImage = struct {
     binding: image_generation.OwnedBinding,
@@ -92,6 +96,7 @@ pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
 pub fn hostToolPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
     if (namespace != .host) return null;
     if (std.mem.eql(u8, name, generate_image.name)) return generate_image.description;
+    if (std.mem.eql(u8, name, generate_video.name)) return generate_video.description;
     if (std.mem.eql(u8, name, deliver_file.name)) return deliver_file.description;
     if (std.mem.eql(u8, name, mcp_install.name)) return mcp_install.description;
     return null;
@@ -670,6 +675,9 @@ pub const Session = struct {
     image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
     run_delivery: ?FileDeliveryInput = null,
     run_mcp_installation: ?McpInstallationInput = null,
+    run_video: ?VideoGenerationRunInput = null,
+    video_attempted: bool = false,
+    video_cancellation: ?*std.atomic.Value(bool) = null,
     delivery_attempts: usize = 0,
     delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
     matched_delivery_receipts: [deliver_file.max_receipts_per_run]bool = @splat(false),
@@ -784,7 +792,7 @@ pub const Session = struct {
             };
         };
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedTools(input, &image, null, null);
+        return self.prepareRunOwnedTools(input, &image, null, null, null);
     }
 
     /// Freeze one Host-resolved image configuration with the Run. A null input
@@ -802,10 +810,16 @@ pub const Session = struct {
             .transport = value.transport,
         } else null;
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedTools(input, &image, delivery_input, mcp_input);
+        return self.prepareRunOwnedTools(input, &image, delivery_input, mcp_input, null);
     }
 
-    fn prepareRunOwnedTools(self: *Session, input: RunInput, image: *?RunImage, delivery: ?FileDeliveryInput, mcp_input: ?McpInstallationInput) (Error || std.mem.Allocator.Error)!u64 {
+    pub fn prepareRunWithVideoForTesting(self: *Session, input: RunInput, video: VideoGenerationRunInput) (Error || std.mem.Allocator.Error)!u64 {
+        if (!self.agent_runtime.video_fixture) return error.InvalidRunInput;
+        var image: ?RunImage = null;
+        return self.prepareRunOwnedTools(input, &image, null, null, video);
+    }
+
+    fn prepareRunOwnedTools(self: *Session, input: RunInput, image: *?RunImage, delivery: ?FileDeliveryInput, mcp_input: ?McpInstallationInput, video: ?VideoGenerationRunInput) (Error || std.mem.Allocator.Error)!u64 {
         var owned_input = try OwnedRunInput.init(
             self.agent_runtime.allocator,
             input,
@@ -862,6 +876,9 @@ pub const Session = struct {
         @memset(&self.matched_image_receipts, null);
         self.run_delivery = delivery;
         self.run_mcp_installation = mcp_input;
+        std.debug.assert(self.run_video == null and self.video_cancellation == null);
+        self.run_video = video;
+        self.video_attempted = false;
         self.delivery_attempts = 0;
         @memset(&self.delivery_receipts, null);
         @memset(&self.matched_delivery_receipts, false);
@@ -2662,6 +2679,8 @@ pub const Session = struct {
         self.run_image = null;
         self.run_delivery = null;
         self.run_mcp_installation = null;
+        std.debug.assert(self.video_cancellation == null);
+        self.run_video = null;
     }
 
     fn imageLimits(self: *const Session) image_generation.Limits {
@@ -2815,6 +2834,77 @@ pub const Session = struct {
             watchdog.join();
         }
         return image_generation.perform(runtime.allocator, transport, &image.binding, prompt, limits, &call);
+    }
+
+    const video_capacity_result = "{\"status\":\"capacity\"}";
+    const VideoResultBuffer = [generate_video.result_bytes]u8;
+
+    pub fn executeVideo(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
+        if (out) |result_out| result_out.* = emptyOwnedBytes();
+        const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
+        defer self.releaseCoreCallback();
+        const result_out = out orelse return self.failHostCallback();
+        if (self.rejectClosingHostCallback()) return wire.HOST_FATAL;
+
+        result_out.* = .{ .ptr = @constCast(video_capacity_result.ptr), .len = video_capacity_result.len };
+        const previous = runtime.video_results_outstanding.fetchAdd(1, .acq_rel);
+        var transferred = false;
+        defer if (!transferred) {
+            _ = runtime.video_results_outstanding.fetchSub(1, .acq_rel);
+        };
+        if (previous >= runtime.sessions.len * 4) return wire.HOST_FAILED;
+        const allocation = runtime.allocator.create(VideoResultBuffer) catch return wire.HOST_FAILED;
+        defer if (!transferred) runtime.allocator.destroy(allocation);
+
+        const outcome = self.performVideo(arguments);
+        const encoded = generate_video.result(allocation, outcome) catch {
+            result_out.* = emptyOwnedBytes();
+            return self.failHostCallback();
+        };
+        result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
+        transferred = true;
+        return if (outcome == .saved) wire.HOST_OK else wire.HOST_FAILED;
+    }
+
+    pub fn releaseVideoResult(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return));
+        const result_out = out orelse return;
+        const ptr = result_out.ptr orelse return;
+        if (ptr != video_capacity_result.ptr) {
+            runtime.allocator.destroy(@as(*VideoResultBuffer, @ptrCast(ptr)));
+            const previous = runtime.video_results_outstanding.fetchSub(1, .acq_rel);
+            std.debug.assert(previous > 0);
+        }
+        result_out.* = emptyOwnedBytes();
+    }
+
+    fn performVideo(self: *Session, arguments: wire.BytesViewV1) VideoGenerationOutcome {
+        if (arguments.len > generate_video.max_arguments_bytes) return .{ .failed = .invalid_arguments };
+        const bytes = sdk.borrowedBytes(arguments) catch return .{ .failed = .invalid_arguments };
+        const allocator = self.agent_runtime.allocator;
+        const prompt = generate_video.prompt(allocator, bytes) catch |err|
+            return .{ .failed = if (err == error.OutOfMemory) .capacity else .invalid_arguments };
+        defer allocator.free(prompt);
+
+        var cancelled = std.atomic.Value(bool).init(false);
+        const input = input: {
+            self.lock();
+            defer self.unlock();
+            if (self.state == .closing or self.state == .closed or self.termination_signal != null)
+                return .{ .failed = .cancelled };
+            const input = self.run_video orelse return .{ .failed = .unavailable };
+            if (self.video_attempted) return .{ .failed = .capacity };
+            self.video_attempted = true;
+            self.video_cancellation = &cancelled;
+            break :input input;
+        };
+        defer {
+            self.lock();
+            self.video_cancellation = null;
+            self.unlock();
+        }
+        return input.generate_fn(input.context, prompt, &cancelled);
     }
 
     const McpResultHeader = struct { allocation_len: usize };
@@ -3609,6 +3699,7 @@ fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
     if (self.termination_signal == null) self.termination_signal = signal;
     for (self.image_calls) |call| if (call) |active| active.cancellation.request();
     for (self.delivery_calls) |call| if (call) |active| active.store(true, .release);
+    if (self.video_cancellation) |active| active.store(true, .release);
 }
 
 fn isRunProgressState(state: SessionState) bool {

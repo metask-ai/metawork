@@ -1167,6 +1167,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     fixture_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for image fixture"));
     fixture_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/image_generation.mjs"));
     fixture_options.addOption([]const u8, "png_path", b.pathFromRoot("src/agent/testdata/generated.png"));
+    fixture_options.addOption([]const u8, "mp4_path", b.pathFromRoot("tests/fixtures/generated-video.mp4"));
     fixture_options.addOption([]const u8, "xlsx_path", b.pathFromRoot("tests/fixtures/office/checked-summary.xlsx"));
     fixture_options.addOption([]const u8, "xlsx_report_path", b.pathFromRoot("tests/fixtures/office/checked-summary-report.json"));
     const backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
@@ -1186,6 +1187,11 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     const tests = b.addTest(.{ .name = "metawork-generate-image", .root_module = cases });
     const run = b.addRunArtifact(tests);
     b.step("test-generate-image", "Run canonical Core image tool and real HTTP lifecycle tests").dependOn(&run.step);
+    b.step("test-generate-video", "Run the canonical Core video tool fixture tests").dependOn(&b.addRunArtifact(b.addTest(.{
+        .name = "metawork-generate-video",
+        .root_module = cases,
+        .filters = &.{"GenerateVideo"},
+    })).step);
     b.step("test-generate-image-product", "Run canonical Product image lifecycle tests against local fixtures").dependOn(&b.addRunArtifact(b.addTest(.{
         .name = "metawork-generate-image-product",
         .root_module = cases,

@@ -259,6 +259,10 @@ const Harness = struct {
     sink: Sink,
 
     fn init(self: *Harness, mode: []const u8, limits: agent.ImageGenerationLimits) !void {
+        return self.initWithToolset(mode, limits, false);
+    }
+
+    fn initWithToolset(self: *Harness, mode: []const u8, limits: agent.ImageGenerationLimits, video: bool) !void {
         self.tmp = std.testing.tmpDir(.{});
         errdefer self.tmp.cleanup();
         self.root = try self.tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -268,7 +272,10 @@ const Harness = struct {
         self.fixture = try Fixture.start(trace_path, mode);
         errdefer self.fixture.deinit();
         self.network = .{ .allocator = std.testing.allocator, .io = std.testing.io };
-        self.runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, .{ .transport = self.network.transport(), .limits = limits });
+        self.runtime = if (video)
+            try agent.Runtime.initVideoGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, null)
+        else
+            try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, .{ .transport = self.network.transport(), .limits = limits });
         self.sink = .{ .dir = self.tmp.dir };
     }
     fn deinit(self: *Harness) void {
@@ -324,7 +331,11 @@ fn permissionRun(h: *Harness, session: *agent.Session, choice: agent.PermissionC
 }
 
 fn permissionRunText(runtime: *agent.Runtime, session: *agent.Session, text: []const u8, choice: agent.PermissionChoice, host: bool) !usize {
-    var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = text }) };
+    return permissionRunPrepared(runtime, session, try session.prepareRun(.{ .text = text }), choice, host);
+}
+
+fn permissionRunPrepared(runtime: *agent.Runtime, session: *agent.Session, run_id: u64, choice: agent.PermissionChoice, host: bool) !usize {
+    var work: Work = .{ .session = session, .id = run_id };
     const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
     defer {
         if (!work.done.load(.acquire)) {
@@ -374,7 +385,7 @@ const RestoreBytes = struct {
     }
 };
 
-fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !void {
+fn checkpointTools(old_host_count: usize, grant: bool, target: enum { current, changed_image_schema, added_video }) !void {
     var h: Harness = undefined;
     try h.init("restore", .{});
     defer h.deinit();
@@ -413,8 +424,11 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     try h.runtime.shutdown();
     h.runtime.deinit();
     var probe: CoreProbe = undefined;
-    try probe.init(changed_schema);
-    h.runtime = try agent.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &probe.api, .{ .max_sessions = 2 }, .{ .transport = h.network.transport() });
+    try probe.init(target == .changed_image_schema);
+    h.runtime = if (target == .added_video)
+        try agent.Runtime.initVideoGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, &probe.api)
+    else
+        try agent.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &probe.api, .{ .max_sessions = 2 }, .{ .transport = h.network.transport() });
     const restored = try h.runtime.restoreSessionRoute(.{
         .session = .{
             .model_binding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = h.fixture.provider_endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-dialogue-key" },
@@ -434,7 +448,7 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     defer described.deinit();
     // Changing only GenerateImage's schema does not invalidate an unrelated
     // built-in Write grant. Host tools cannot have persisted Session grants.
-    const changed = old_host_count < 3 and grant;
+    const changed = (old_host_count < 3 or target == .added_video) and grant;
     try std.testing.expectEqual(if (changed) agent.CheckpointRestoreHealth.degraded else .complete, restored.report.health);
     try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), restored.report.invalidated_permission_rules);
     try std.testing.expectEqual(@as(u32, if (grant and !changed) 1 else 0), restored.report.restored_permission_rules);
@@ -451,9 +465,10 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     const answers = try permissionRunText(h.runtime, restored.session, "Write the checkpoint fixture.", .allow_once, false);
     try std.testing.expectEqual(@as(usize, if (!grant or changed) 1 else 0), answers);
     // Host authorization must still be requested independently of any Write grant.
-    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, restored.session, "Generate the fixture image.", .allow_once, true));
+    const prompt = if (target == .added_video) video_prompt else "Generate the fixture image.";
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, restored.session, prompt, .allow_once, true));
     try h.evidence(0, 0, "unavailable");
-    if (changed_schema) {
+    if (target == .changed_image_schema) {
         const trace = try h.trace();
         defer std.testing.allocator.free(trace);
         try std.testing.expect(std.mem.indexOf(u8, trace, "\"maxLength\":1000") != null);
@@ -461,13 +476,13 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
 }
 
 test "GenerateImage canonical checkpoint invalidates changed tool authority and preserves unchanged grants" {
-    try checkpointTools(0, true, false);
-    try checkpointTools(3, true, false);
-    try checkpointTools(3, true, true);
+    try checkpointTools(0, true, .current);
+    try checkpointTools(3, true, .current);
+    try checkpointTools(3, true, .changed_image_schema);
 }
 
 test "GenerateImage legacy checkpoint without grants restores complete and requires fresh approval" {
-    try checkpointTools(0, false, false);
+    try checkpointTools(0, false, .current);
 }
 
 test "GenerateImage canonical Core updates credentials during approval without restarting the Run" {
@@ -1653,13 +1668,137 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
 }
 
 test "DeliverFile previous GenerateImage-only checkpoints restore without recreating file authority" {
-    try checkpointTools(1, false, false);
-    try checkpointTools(1, true, false);
+    try checkpointTools(1, false, .current);
+    try checkpointTools(1, true, .current);
 }
 
 test "InstallMcpServer restores genuine two-Host-tool checkpoints without restoring proposal authority" {
-    try checkpointTools(2, false, false);
-    try checkpointTools(2, true, false);
+    try checkpointTools(2, false, .current);
+    try checkpointTools(2, true, .current);
+}
+
+const video_prompt = "Generate the fixture video.";
+const video_path = "clip.mp4";
+
+const VideoEffect = struct {
+    dir: std.Io.Dir,
+    bytes: []const u8,
+    wait_for_stop: bool = false,
+    return_unknown: bool = false,
+    calls: std.atomic.Value(usize) = .init(0),
+    saw_cancellation: std.atomic.Value(bool) = .init(false),
+
+    fn input(self: *VideoEffect) agent.VideoGenerationRunInput {
+        return .{ .context = self, .generate_fn = generate };
+    }
+
+    fn generate(context: *anyopaque, prompt: []const u8, cancelled: *const std.atomic.Value(bool)) agent.VideoGenerationOutcome {
+        const self: *VideoEffect = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, prompt, "A black screen")) return .{ .failed = .invalid_arguments };
+        _ = self.calls.fetchAdd(1, .release);
+        if (self.return_unknown) return .{ .failed = .outcome_unknown };
+        if (self.wait_for_stop) {
+            const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+            while (std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < deadline) {
+                if (cancelled.load(.acquire)) {
+                    self.saw_cancellation.store(true, .release);
+                    return .{ .failed = .cancelled };
+                }
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            }
+            return .{ .failed = .outcome_unknown };
+        }
+        const receipt = agent.VideoGenerationReceipt.init(video_path, self.bytes.len) catch unreachable;
+        self.dir.writeFile(std.testing.io, .{ .sub_path = video_path, .data = self.bytes, .flags = .{ .exclusive = true } }) catch
+            return .{ .failed = .output_failed };
+        return .{ .saved = receipt };
+    }
+};
+
+test "GenerateVideo canonical Core approves a saved MP4 and rejects denied or absent execution" {
+    var h: Harness = undefined;
+    try h.initWithToolset("video", .{}, true);
+    defer h.deinit();
+    const session = try h.session(.default, false);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.mp4_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(bytes);
+    var effect: VideoEffect = .{ .dir = h.tmp.dir, .bytes = bytes };
+
+    const denied = try session.prepareRunWithVideoForTesting(.{ .text = video_prompt }, effect.input());
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunPrepared(h.runtime, session, denied, .deny_once, true));
+    try std.testing.expectEqual(@as(usize, 0), effect.calls.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, h.tmp.dir.statFile(std.testing.io, video_path, .{}));
+
+    const allowed = try session.prepareRunWithVideoForTesting(.{ .text = video_prompt }, effect.input());
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunPrepared(h.runtime, session, allowed, .allow_once, true));
+    const saved = try h.tmp.dir.readFileAlloc(std.testing.io, video_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(saved);
+    try std.testing.expectEqualSlices(u8, bytes, saved);
+
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, session, video_prompt, .allow_once, true));
+    try std.testing.expectEqual(@as(usize, 1), effect.calls.load(.acquire));
+    try h.evidence(0, 0, "unavailable");
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video/mp4"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, video_path));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+}
+
+test "GenerateVideo canonical Core cancels and joins the callback on stop close and shutdown" {
+    for ([_]enum { stop, close, shutdown }{ .stop, .close, .shutdown }) |action| {
+        var h: Harness = undefined;
+        try h.initWithToolset("video", .{}, true);
+        defer h.deinit();
+        const session = try h.session(.full_access, false);
+        var effect: VideoEffect = .{ .dir = h.tmp.dir, .bytes = &.{}, .wait_for_stop = true };
+        var work: Work = .{ .session = session, .id = try session.prepareRunWithVideoForTesting(.{ .text = video_prompt }, effect.input()) };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        defer {
+            if (!work.done.load(.acquire)) _ = session.requestTermination(work.id, .{ .interrupted = .user_cancel }) catch {};
+            thread.join();
+            if (work.result) |*result| result.deinit();
+        }
+        const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+        while (effect.calls.load(.acquire) == 0 and !work.done.load(.acquire) and
+            std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < deadline)
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        try std.testing.expectEqual(@as(usize, 1), effect.calls.load(.acquire));
+        switch (action) {
+            .stop => _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel }),
+            .close => try session.close(.session_close),
+            .shutdown => try h.runtime.shutdown(),
+        }
+        const finished_deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 3 * std.time.ns_per_s;
+        while (!work.done.load(.acquire) and std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < finished_deadline)
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expect(effect.saw_cancellation.load(.acquire));
+        try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
+        try std.testing.expectError(error.FileNotFound, h.tmp.dir.statFile(std.testing.io, video_path, .{}));
+        try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+    }
+}
+
+test "GenerateVideo canonical Core cannot submit a second request after an uncertain outcome" {
+    var h: Harness = undefined;
+    try h.initWithToolset("video-repeat", .{}, true);
+    defer h.deinit();
+    const session = try h.session(.default, false);
+    var effect: VideoEffect = .{ .dir = h.tmp.dir, .bytes = &.{}, .return_unknown = true };
+    const run_id = try session.prepareRunWithVideoForTesting(.{ .text = video_prompt }, effect.input());
+    try std.testing.expectEqual(@as(usize, 2), try permissionRunPrepared(h.runtime, session, run_id, .allow_once, true));
+    try std.testing.expectEqual(@as(usize, 1), effect.calls.load(.acquire));
+    try h.evidence(0, 0, "outcome_unknown");
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "capacity"));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+}
+
+test "GenerateVideo canonical Core restores the previous three Host tools with or without a Write grant" {
+    try checkpointTools(3, false, .added_video);
+    try checkpointTools(3, true, .added_video);
 }
 
 test "InstallMcpServer canonical Core submits without a main-thread drain and releases owned results" {

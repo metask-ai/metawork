@@ -219,4 +219,7 @@ pub const ImageGenerationLimits = session_impl.ImageGenerationLimits;
 pub const image_generation_limits = session_impl.image_generation_limits;
 pub const ImageGenerationRunInput = session_impl.ImageGenerationRunInput;
 pub const ImageGenerationCredentialReader = session_impl.ImageGenerationCredentialReader;
+pub const VideoGenerationRunInput = session_impl.VideoGenerationRunInput;
+pub const VideoGenerationOutcome = session_impl.VideoGenerationOutcome;
+pub const VideoGenerationReceipt = session_impl.VideoGenerationReceipt;
 pub const Session = session_impl.Session;
