@@ -18,6 +18,9 @@ const { Markdown, renderMarkdownForClipboard } = await vite.ssrLoadModule(
 const { runFileReferenceLinks } = await vite.ssrLoadModule(
   "/src/workbench/run-file-references.ts",
 );
+const { resolveWorkspaceFileLink } = await vite.ssrLoadModule(
+  "/src/workbench/workspace-file-links.ts",
+);
 
 test.after(async () => {
   await vite.close();
@@ -186,4 +189,199 @@ test("Run link aliases retain exact references and reject ambiguous basenames", 
   assert.equal(links.get("a/index.html"), latest);
   assert.equal(runFileReferenceLinks({ tools: [] }).size, 0);
   assert.equal(run.tools[0].fileRefs[0], latest);
+});
+
+function localLinkMarkup(source, resolve, names = ["random_1.txt"]) {
+  const destinations = [];
+  const markup = renderToStaticMarkup(
+    createElement(
+      Markdown,
+      {
+        references: new Map(
+          names.map((name) => [
+            name,
+            { label: `Preview ${name}`, onOpen() {} },
+          ]),
+        ),
+        localLinks(destination) {
+          destinations.push(destination);
+          return resolve(destination);
+        },
+      },
+      source,
+    ),
+  );
+  return { markup, destinations };
+}
+
+test("explicit local links without a Run reference are resolved by the feature", () => {
+  const { markup, destinations } = localLinkMarkup(
+    [
+      "[已存在](p0-file-manifest.csv)",
+      "[绝对路径](/Users/me/ws/out/report.txt)",
+      "[尖括号](</Users/me/ws/my report.txt>)",
+      "[文件 URL](file:///Users/me/ws/a%20b.txt)",
+      "[驱动器](C:\\ws\\a.txt)",
+      "[定义][manifest]",
+      "",
+      "[manifest]: out/manifest.csv",
+    ].join("\n\n"),
+    (destination) => ({ label: `Open ${destination}`, onOpen() {} }),
+  );
+  assert.deepEqual(destinations, [
+    "p0-file-manifest.csv",
+    "/Users/me/ws/out/report.txt",
+    "/Users/me/ws/my report.txt",
+    "file:///Users/me/ws/a%20b.txt",
+    "C:\\ws\\a.txt",
+    "out/manifest.csv",
+  ]);
+  assert.equal((markup.match(/<button/g) ?? []).length, 6);
+  assert.match(markup, /aria-label="Open \/Users\/me\/ws\/my report.txt"/);
+  assert.doesNotMatch(markup, /<a\b|href=/);
+});
+
+test("Run references keep precedence and other text never becomes a local link", () => {
+  const { markup, destinations } = localLinkMarkup(
+    [
+      "[打开文件](random_1.txt) missing.txt `missing.txt`",
+      "```\n[代码](missing.txt)\n```",
+      "![图片](missing.png)",
+      "[网页](https://example.com/a.txt) [邮箱](mailto:test@example.com)",
+      "[锚点](#section) [查询](?q=1) [外部](//example.com/a.txt)",
+    ].join("\n\n"),
+    () => assert.fail("only explicit local destinations are resolved"),
+  );
+  assert.deepEqual(destinations, []);
+  assert.equal((markup.match(/<button/g) ?? []).length, 1);
+  assert.match(markup, /aria-label="Preview random_1.txt"/);
+  assert.match(markup, /href="https:\/\/example.com\/a.txt"/);
+  assert.doesNotMatch(markup, /ai-markdown-file-link-unavailable/);
+});
+
+test("unavailable local links keep their target without presenting an action", () => {
+  const { markup } = localLinkMarkup(
+    "[系统文件](/etc/my%20hosts)",
+    () => ({ unavailable: "Can't open: outside the current workspace" }),
+    [],
+  );
+  assert.doesNotMatch(markup, /<button|<a\b|href=/);
+  assert.match(
+    markup,
+    /<span role="link" aria-disabled="true" aria-describedby="([^"]+)" tabindex="0" class="[^"]*ai-markdown-file-link-unavailable[^"]*"[^>]*>系统文件<\/span>/,
+  );
+  const id = markup.match(/aria-describedby="([^"]+)"/)[1];
+  assert.match(
+    markup,
+    new RegExp(
+      `<span id="${id}" hidden="">Can&#x27;t open: outside the current workspace /etc/my hosts</span>`,
+    ),
+  );
+});
+
+test("provisional and resolver-free Markdown keep local links inert", () => {
+  const inert = renderToStaticMarkup(
+    createElement(
+      Markdown,
+      {
+        interactive: false,
+        localLinks: () => assert.fail("provisional output is not resolved"),
+      },
+      "[文件](report.txt)",
+    ),
+  );
+  assert.equal(
+    inert,
+    '<div class="ai-markdown"><p><span>文件</span></p></div>',
+  );
+  const unresolved = referenceMarkup("[文件](missing.txt)");
+  assert.match(unresolved, /<span>文件<\/span>/);
+  assert.doesNotMatch(unresolved, /role="link"|<button/);
+});
+
+test("Workspace file links map local destinations to Host-acceptable relative paths", () => {
+  const root = "/Users/me/ws";
+  const path = (destination, workspaceRoot = root) =>
+    resolveWorkspaceFileLink(destination, workspaceRoot);
+  for (const [destination, expected] of [
+    ["p0-file-manifest.csv", "p0-file-manifest.csv"],
+    ["./out/./report.txt", "out/report.txt"],
+    ["out/tmp/../report.txt", "out/report.txt"],
+    ["my%20report.txt", "my report.txt"],
+    ["my report.txt", "my report.txt"],
+    ["100%.txt", "100%.txt"],
+    ["report.md#L10", "report.md"],
+    ["report.md?plain=1", "report.md"],
+    ["notes%23draft.md", "notes#draft.md"],
+    ["/Users/me/ws/out/report.txt", "out/report.txt"],
+    ["/Users/me/ws/sub/../report.txt", "report.txt"],
+    ["file:///Users/me/ws/a%20b.txt", "a b.txt"],
+    ["file://localhost/Users/me/ws/a.txt", "a.txt"],
+    ["报告/结果.md", "报告/结果.md"],
+  ])
+    assert.deepEqual(
+      path(destination),
+      { kind: "path", path: expected },
+      destination,
+    );
+
+  for (const [destination, reason, workspaceRoot = root] of [
+    ["../outside.txt", "outside_workspace"],
+    ["out/../../outside.txt", "outside_workspace"],
+    ["/etc/hosts", "outside_workspace"],
+    ["/Users/me/ws2/report.txt", "outside_workspace"],
+    ["/Users/me/ws/../other/report.txt", "outside_workspace"],
+    ["/Users/me/report.txt", "outside_workspace"],
+    ["C:\\ws\\report.txt", "outside_workspace"],
+    ["/Users/me/ws/report.txt", "workspace_unavailable", null],
+    ["file:///Users/me/ws/a.txt", "workspace_unavailable", null],
+    ["file://server/share/a.txt", "unsupported_path"],
+    ["file:report.txt", "unsupported_path"],
+    ["~/report.txt", "unsupported_path"],
+    ["src/main.ts:42", "unsupported_path"],
+    ["out\\report.txt", "unsupported_path"],
+    ["out//report.txt", "unsupported_path"],
+    ["out/", "unsupported_path"],
+    ["./", "unsupported_path"],
+    ["/Users/me/ws", "unsupported_path"],
+    ["/Users/me/ws/", "unsupported_path"],
+    ["bad%0Aname.txt", "unsupported_path"],
+    [`${"a/".repeat(64)}b.txt`, "unsupported_path"],
+    [`${"界".repeat(1366)}.txt`, "unsupported_path"],
+  ])
+    assert.deepEqual(
+      path(destination, workspaceRoot),
+      { kind: "unavailable", reason },
+      destination,
+    );
+  // Relative destinations do not need the publishable root.
+  assert.deepEqual(path("report.txt", null), {
+    kind: "path",
+    path: "report.txt",
+  });
+});
+
+test("Windows Workspace roots accept drive paths, either separator and any letter case", () => {
+  const root = "C:\\Users\\Me\\Project";
+  for (const [destination, expected] of [
+    ["C:\\Users\\Me\\Project\\out\\report.txt", "out/report.txt"],
+    ["c:/users/me/project/out/report.txt", "out/report.txt"],
+    ["file:///C:/Users/Me/Project/a%20b.txt", "a b.txt"],
+    ["out\\report.txt", "out/report.txt"],
+  ])
+    assert.deepEqual(
+      resolveWorkspaceFileLink(destination, root),
+      { kind: "path", path: expected },
+      destination,
+    );
+  for (const destination of ["D:\\Project\\a.txt", "/Users/Me/Project/a.txt"])
+    assert.deepEqual(
+      resolveWorkspaceFileLink(destination, root),
+      { kind: "unavailable", reason: "outside_workspace" },
+      destination,
+    );
+  assert.deepEqual(resolveWorkspaceFileLink("out/a:b.txt", root), {
+    kind: "unavailable",
+    reason: "unsupported_path",
+  });
 });

@@ -1300,6 +1300,15 @@ export default function App() {
     );
     focusTaskPanelTab(tab.tabId);
   }
+  function openConversationWorkspaceFile(
+    taskId: string,
+    path: string,
+    opener: HTMLButtonElement,
+  ) {
+    if (activeTaskIdRef.current !== taskId || panelTask?.id !== taskId) return;
+    setRightPanelOpen(true);
+    openWorkspaceFile(path, opener);
+  }
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
     for (const tabId of taskPanelOpeners.current.keys())
@@ -5412,6 +5421,16 @@ export default function App() {
                 onPrepareRetry={prepareRetry}
                 onOpenSettings={openSettings}
                 onPreviewFile={openFilePreview}
+                workspaceRoot={
+                  panelWorkspace && !panelWorkspace.redacted
+                    ? panelWorkspace.canonicalRoot || null
+                    : null
+                }
+                onPreviewWorkspaceFile={
+                  workspaceFilesAvailable
+                    ? openConversationWorkspaceFile
+                    : undefined
+                }
                 loadFilePreview={loadFilePreview}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}

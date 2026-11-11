@@ -7189,12 +7189,30 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow-wrap: anywhere;
 }
 
+/* The copy action owns a band outside the scrollport, so a platform scrollbar
+   that takes layout width starts below the action instead of running under it,
+   and scrolled code never passes beneath it. */
 .code-block-copyable {
   position: relative;
+  padding-top: 42px;
+  border-radius: 8px;
+  background: var(--ui-content-primary);
 }
 
 .code-block-copyable .code-block-preview {
-  padding-top: 42px;
+  max-height: calc(240px - 42px);
+  padding-top: 0;
+  border-radius: 0 0 8px 8px;
+}
+
+/* The scrollport stays the keyboard target; its focus ring keeps framing the
+   whole block, band included. */
+.code-block-copyable:has(> .code-block-preview:focus-visible) {
+  outline: auto 1px -webkit-focus-ring-color;
+}
+
+.code-block-copyable > .code-block-preview:focus-visible {
+  outline: none;
 }
 
 .code-block-copy-action {
@@ -7345,6 +7363,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: normal;
   overflow-wrap: anywhere;
   user-select: text;
+}
+
+.ai-markdown .ai-markdown-file-link-unavailable {
+  border-radius: 2px;
+  color: var(--ui-content-muted);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: default;
+  overflow-wrap: anywhere;
 }
 
 .ai-markdown table {

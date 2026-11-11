@@ -936,6 +936,12 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.loading": "正在加载预览…",
   "file_preview.close": "关闭文件预览",
   "file_preview.open": "预览 {path}",
+  "file_preview.link_unavailable.outside_workspace":
+    "无法打开：不在当前工作区内",
+  "file_preview.link_unavailable.workspace_unavailable":
+    "无法打开：当前工作区不可用",
+  "file_preview.link_unavailable.unsupported_path":
+    "无法打开：不支持的文件路径",
   "file_preview.refresh": "刷新",
   "file_preview.mode": "文件展示模式",
   "file_preview.rendered": "预览",

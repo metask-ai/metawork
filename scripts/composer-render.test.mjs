@@ -365,6 +365,68 @@ test("terminal responses expose response and code copy without copying process U
   assert.equal((markup.match(/data-copy-state="idle"/g) ?? []).length, 3);
 });
 
+test("code copy keeps its band outside the code scrollport so scrollbars cannot run under it", async () => {
+  // A layout-width scrollbar (WebView2) spans its scroll container's full
+  // height, so the action must sit above the scrollport, not in its padding.
+  const markup = renderCompletedSurface(
+    "Answer\n\n```ts\nconst answer = 42;\n```",
+  );
+  assert.match(
+    markup,
+    /<div class="code-block-copyable"><button[^>]*aria-label="Copy code"[^>]*>.*?<\/button><pre class="code-block-preview" tabindex="0"/s,
+  );
+
+  const stylesheet = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+  const rule = (selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const body = stylesheet.match(new RegExp(`\\n${escaped} \\{([^}]*)\\}`));
+    assert.ok(body, `missing ${selector}`);
+    return Object.fromEntries(
+      body[1]
+        .split(";")
+        .map((declaration) => declaration.trim())
+        .filter(Boolean)
+        .map((declaration) => {
+          const colon = declaration.indexOf(":");
+          return [
+            declaration.slice(0, colon).trim(),
+            declaration.slice(colon + 1).trim(),
+          ];
+        }),
+    );
+  };
+  const preview = rule(".code-block-preview");
+  const band = rule(".code-block-copyable");
+  const scrollport = rule(".code-block-copyable .code-block-preview");
+  const action = rule(".code-block-copy-action");
+
+  assert.equal(band.position, "relative");
+  assert.equal(scrollport["padding-top"], "0");
+  assert.equal(action.position, "absolute");
+  assert.ok(
+    Number.parseFloat(action.top) + Number.parseFloat(action.height) <=
+      Number.parseFloat(band["padding-top"]),
+    "the copy action must fit inside the non-scrolling band",
+  );
+  // Moving the band out of the scrollport must not grow the block.
+  assert.equal(
+    scrollport["max-height"],
+    `calc(${preview["max-height"]} - ${band["padding-top"]})`,
+  );
+  // The scrollport stays the keyboard target; its ring still frames the block.
+  assert.match(
+    stylesheet,
+    /\.code-block-copyable:has\(> \.code-block-preview:focus-visible\) \{[^}]*outline: auto/,
+  );
+  assert.match(
+    stylesheet,
+    /\.code-block-copyable > \.code-block-preview:focus-visible \{[^}]*outline: none/,
+  );
+});
+
 function renderTaskList(tasks, props = {}) {
   return renderToStaticMarkup(
     createElement(
