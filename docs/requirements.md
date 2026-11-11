@@ -331,7 +331,7 @@ New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以
 - 主窗口关闭使用后台/托盘形态而不是销毁 Host；后台 Host 继续 timer、Run、通知与待处理事实，托盘提供重新打开和显式退出。显式退出可以停止本机后台执行，但下次启动仍恢复定义并执行上述单次 missed-run reconciliation；
 - 执行配置、Workspace authority、容量或 shutdown gate 不再满足时，计划进入明确的 `needs_attention`，停止继续计时并保留 typed 原因；用户必须编辑并确认当前事实后才能恢复；
 - Scheduled Task 定义必须固定一份可持久化、可恢复的非交互 `PermissionProfile`；默认值后续变化不得改写既有定义，编辑生效前必须重新经过 definition admission。编辑 paused 定义只更新未来执行内容，不得静默重新启用；
-- occurrence 不得进入同步 permission wait。若固定 profile 无法覆盖某个操作，当前 occurrence 以 typed `permission_required`（或经批准的等价产品原因）停止，并使定义进入 `needs_attention`；系统通知只能定位该真实 Task 和原因，不能承担远程批准、临时升级或继续原 Run 的职责；
+- occurrence 不得进入同步 permission wait。若固定 profile 无法覆盖某个操作，当前 occurrence 以 typed `permission_required`（或经批准的等价产品原因）停止，结果记录在该 occurrence。该 Run 的权限配置仍与当前定义相同时，定义进入 `needs_attention`。系统通知只能定位该真实 Task 和原因，不能承担远程批准、临时升级或继续原 Run 的职责；
 - Scheduled Task 和 occurrence 不保存 credential、Authorization header、OAuth URL 或 AgentCore handle；计划标题和 Text instruction 进入产品 projection 前执行与 Task history 相同的有界复制和 credential 清洗；
 - 每次 occurrence 必须由 Product Control 按定义自身的 `ModelRef + source_generation + protocol`、当前来源授权与目录 membership 精确解析；起始偏好及其 revision 不参与校验，编辑并发由 item epoch 保护。Product Control 的进程内 generation 可以在冷启动后变化；只要 source authority 未变，该变化不得单独使 Scheduled Task 进入 `needs_attention`。Catalog 或 execution authority 尚未就绪属于瞬态 admission 事实，只停止 resolve、occurrence 与 timer，不得持久化为 definition failure。当 Metask 是定义引用的 provider 时，Account 退出使其对新 resolve 不可用并停止 occurrence；custom provider 不受 Account 状态影响，已创建 Task/Run 也不被追溯撤销；
 - occurrence 完成、失败、跳过或等待用户时进入有界历史并发出系统通知；历史 Task 已永久不可用时只把 occurrence 收口为 `unavailable`，不得发送误导性的 Task 失败通知。通知点击只定位真实 Task/请求，不携带 secret 或建立第二状态面；通知不可用不得改变 Run terminal cause；

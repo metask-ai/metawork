@@ -7860,7 +7860,7 @@ pub const Runtime = struct {
             return .pending;
         return .{ .terminal = .{
             .outcome = scheduledTaskOutcome(terminal.outcome),
-            .permission_required = terminal.permission_required,
+            .permission_failure_profile = if (terminal.permission_required) scheduledPermissionProfile(terminal.permission_profile) else null,
         } };
     }
 

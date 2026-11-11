@@ -36,6 +36,7 @@ pub const RunOutcome = task_state.RunOutcome;
 pub const TerminalSummary = struct {
     outcome: RunOutcome,
     permission_required: bool,
+    permission_profile: task_state.PermissionProfile,
 };
 pub const ContinuationCapability = task_state.ContinuationCapability;
 pub const ExecutionIdentity = struct {
@@ -4798,10 +4799,12 @@ pub const Runtime = struct {
             const run = if (entry.*) |*value| value else continue;
             if (initial == null or run.id < initial.?.id) initial = run;
         }
-        const terminal = task_state.productTerminalFacts(initial orelse return null) orelse return null;
+        const run = initial orelse return null;
+        const terminal = task_state.productTerminalFacts(run) orelse return null;
         return .{
             .outcome = terminal.outcome,
             .permission_required = terminal.cause == .permission_required,
+            .permission_profile = run.permission_profile,
         };
     }
 
@@ -12310,6 +12313,8 @@ test "Schedule terminal observation stays with the initial Run after later Runs 
     var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(8, "later"), null, reviewHistoryTestRun(7, "scheduled") };
     task.durable.runs = &runs;
     const first = &runs[2].?;
+    first.permission_profile = .full_access;
+    task.durable.permission_profile = .approval_required;
     first.event_stream_finalized = true;
     first.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
     first.terminal_publication.store(.published, .release);
@@ -12323,6 +12328,7 @@ test "Schedule terminal observation stays with the initial Run after later Runs 
     const summary = runtime.initialRunTerminalSummary(1).?;
     try std.testing.expectEqual(task_state.RunOutcome.completed, summary.outcome);
     try std.testing.expect(!summary.permission_required);
+    try std.testing.expectEqual(task_state.PermissionProfile.full_access, summary.permission_profile);
     try std.testing.expectEqual(@as(?task_policy.NavigationSignal, .failed), task_policy.navigationSignal(&task));
     first.event_stream_finalized = false;
     try std.testing.expect(runtime.initialRunTerminalSummary(1) == null);
