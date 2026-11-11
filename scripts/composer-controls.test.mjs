@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
-import { createElement, createRef, useState } from "react";
+import { createElement, createRef, useLayoutEffect, useState } from "react";
 import { createServer } from "vite";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -2174,7 +2174,7 @@ test("Settings closes on Escape at the surface boundary", () => {
   assert.equal(closed, 1);
 });
 
-function renderComposer(overrides = {}) {
+function renderComposer(overrides = {}, afterDraftCommit) {
   const textareaRef = createRef();
   let submissions = 0;
   let setDraftFromTest = null;
@@ -2194,6 +2194,9 @@ function renderComposer(overrides = {}) {
       ? useTaskDrafts(overrides.taskDraftId)
       : null;
     const draft = owner?.draft ?? localDraft;
+    useLayoutEffect(() => {
+      afterDraftCommit?.(draft, textareaRef.current);
+    }, [afterDraftCommit, draft]);
     const [scope, setScope] = useState(overrides.draftScope ?? "task:3");
     const [historyAvailable, setHistoryAvailable] = useState(true);
     const [commands, setCommands] = useState(overrides.slashCommands ?? []);
@@ -2344,6 +2347,28 @@ test("Composer browses a frozen multiline input history and restores the empty d
   assert.equal(composer.currentDraft(), empty);
   assert.equal(key("ArrowDown"), true);
   assert.equal(composer.submissions(), 0);
+});
+
+test("Composer keeps browsing when another arrow arrives before draft effects run", async () => {
+  const composer = renderComposer(
+    {
+      draft: { kind: "text", text: "" },
+      inputHistory: { load: async () => ["first", "second", "third"] },
+    },
+    (draft, editor) => {
+      if (draft.text !== "third") return;
+      const arrow = new window.KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      });
+      assert.equal(editor.dispatchEvent(arrow), false);
+    },
+  );
+  fireEvent.keyDown(composer.textarea, { key: "ArrowUp" });
+  await waitFor(() => assert.equal(composer.textarea.value, "second"));
+  assert.equal(fireEvent.keyDown(composer.textarea, { key: "ArrowUp" }), false);
+  assert.equal(composer.textarea.value, "first");
 });
 
 test("Composer history requires a completely empty text draft", async () => {
