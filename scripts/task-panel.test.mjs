@@ -8938,7 +8938,23 @@ test("the assistant anchors a generated video once and leaves unrelated deliveri
     loadFilePreview: async () => assert.fail("Static render must not load"),
   };
   const completed = run({
-    tools: [technicalTool({ name: "GenerateVideo", fileRefs: [reference] })],
+    tools: [
+      technicalTool({ name: "GenerateVideo", fileRefs: [reference] }),
+      technicalTool({
+        id: "image-tool",
+        order: "2",
+        name: "GenerateImage",
+        fileRefs: [
+          {
+            id: "image-ref",
+            title: "",
+            displayPath: "generated-images/frame.png",
+            generatedImage: true,
+            presentationAnchor: { afterOutputCount: 0, presentationOrder: "2" },
+          },
+        ],
+      }),
+    ],
     outputs: [duplicate, other],
   });
   const html = renderTaskContent(task({ runs: [completed] }), "en-US", props);
@@ -8947,6 +8963,27 @@ test("the assistant anchors a generated video once and leaves unrelated deliveri
   const player = content.querySelector(".generated-video-preview");
   assert.ok(player?.closest('[data-reading-id="9:video:video-ref"]'));
   assert.equal(player.closest(".run-outputs"), null);
+  const response = content.querySelector('[data-output-disposition="final"]');
+  const picture = content.querySelector(".generated-image-preview");
+  const footers = content.querySelectorAll(
+    '.message-info-bar[data-role="assistant"]',
+  );
+  assert.equal(footers.length, 1);
+  const details = content.querySelector(".run-process");
+  assert.ok(
+    response.compareDocumentPosition(player) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    player.compareDocumentPosition(picture) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    picture.compareDocumentPosition(footers[0]) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    footers[0].compareDocumentPosition(details) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
   assert.equal(
     content.querySelector(`[data-output-id="${duplicate.id}"]`),
     null,

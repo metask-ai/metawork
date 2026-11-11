@@ -292,10 +292,16 @@ export function deriveRunReadingFlow(
         ? 1
         : a.localSequence - b.localSequence || a.index - b.index,
   );
+  const pendingMedia: RunReadingEntry[] = [];
   for (const message of messages) {
     prefixMax = Math.max(prefixMax, message.anchor);
+    if (message.entry.kind === "image" || message.entry.kind === "video") {
+      pendingMedia.push(message.entry);
+      continue;
+    }
     appendOutput(Math.min(parts.length, prefixMax));
-    entries.push(message.entry);
+    entries.push(...pendingMedia, message.entry);
+    pendingMedia.length = 0;
   }
   appendOutput(parts.length);
   if (output.redacted || output.provisionalRedacted) {
@@ -308,6 +314,7 @@ export function deriveRunReadingFlow(
         redacted: true,
       });
   }
+  entries.push(...pendingMedia);
   // Legacy images have no precise anchor: keep their historical Assistant block
   // after this Run's output, before its trailing user messages.
   const legacyImages = media.filter(

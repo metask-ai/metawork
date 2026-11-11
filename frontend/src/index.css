@@ -2693,7 +2693,8 @@ summary::-webkit-details-marker {
 ),
 .ai-message[data-role="user"]:is(:hover, :focus-within) + .message-info-bar,
 .message-info-bar:is(:hover, :focus-within),
-.run-assistant-output:is(:hover, :focus-within) > .message-info-bar {
+.ai-message[data-role="assistant"]:is(:hover, :focus-within)
+  > .message-info-bar {
   opacity: 1;
 }
 

@@ -775,6 +775,37 @@ export function TaskContent({
           );
           const videoPreviewLoader =
             synchronized && !responseDisabled ? loadFilePreview : undefined;
+          const responseIndex = responseCopyable
+            ? readingFlow.findIndex(
+                (entry) =>
+                  entry.kind === "assistant" &&
+                  entry.parts.some(
+                    (part) =>
+                      part.disposition === "final" ||
+                      part.disposition === "partial",
+                  ),
+              )
+            : -1;
+          let responseInfoAt = readingFlow[responseIndex]?.identity;
+          if (responseInfoAt) {
+            for (const entry of readingFlow.slice(responseIndex + 1)) {
+              if (
+                entry.kind === "image" ||
+                (entry.kind === "video" && videoPreviewLoader)
+              )
+                responseInfoAt = entry.identity;
+              else if (entry.kind !== "video") break;
+            }
+          }
+          const responseInfo = responseInfoAt && (
+            <MessageInfoBar
+              role="assistant"
+              time={finishedTime}
+              model={run.execution.model}
+              latest={run.id === latestCopyableId}
+              onCopy={() => copyResponseMarkdown(run.output.response)}
+            />
+          );
           const references = new Map(
             [...runFileReferenceLinks(run)].map(([text, reference]) => [
               text,
@@ -1079,6 +1110,7 @@ export function TaskContent({
                           )
                         }
                       />
+                      {entry.identity === responseInfoAt && responseInfo}
                     </Message>
                   ) : entry.kind === "video" ? (
                     videoPreviewLoader && (
@@ -1093,6 +1125,7 @@ export function TaskContent({
                           referenceId={entry.reference.id}
                           load={videoPreviewLoader}
                         />
+                        {entry.identity === responseInfoAt && responseInfo}
                       </Message>
                     )
                   ) : entry.kind === "supplement" ? (
@@ -1148,22 +1181,7 @@ export function TaskContent({
                             {t("privacy.sensitive_hidden")}
                           </p>
                         )}
-                        {responseCopyable &&
-                          entry.parts.some(
-                            (part) =>
-                              part.disposition === "final" ||
-                              part.disposition === "partial",
-                          ) && (
-                            <MessageInfoBar
-                              role="assistant"
-                              time={finishedTime}
-                              model={run.execution.model}
-                              latest={run.id === latestCopyableId}
-                              onCopy={() =>
-                                copyResponseMarkdown(run.output.response)
-                              }
-                            />
-                          )}
+                        {entry.identity === responseInfoAt && responseInfo}
                       </Message>
                     </Fragment>
                   ) : null,
