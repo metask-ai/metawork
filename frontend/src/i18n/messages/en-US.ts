@@ -290,7 +290,7 @@ export const enUS = {
   "account.retry_refresh": "Retry sign-in refresh",
   "account.logout": "Sign out",
   "account.logout_confirm":
-    "You will be signed out of Metask on this device. Your local tasks and history will remain.",
+    "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -1457,7 +1457,6 @@ export const enUS = {
   "settings.account_history_legend_label": "Usage intensity from less to more",
   "settings.account_history_less": "Less",
   "settings.account_history_more": "More",
-  "settings.account_security": "Security",
   "settings.builtin_provider_address_warning":
     "Model requests will send the API key to {host}.",
   "settings.get_api_key": "Get an API key",
@@ -1625,9 +1624,6 @@ export const enUS = {
   "settings.choose_selection": "Choose",
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",
-  "settings.signout_title": "Sign out",
-  "settings.signout_help":
-    "Sign in again to create new tasks using Metask models. Your custom models, local tasks, and workspace files will remain.",
   "settings.task_model_help":
     "Choose the model for messages sent in this task.",
   "settings.task_model_catalog_loading":

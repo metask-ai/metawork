@@ -2027,6 +2027,50 @@ test("Models adds a model independently without listing or reusing legacy provid
   assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 
+test("Settings signs out only after confirming in a modal", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let logoutCalls = 0;
+  let backCalls = 0;
+  renderSettings(readySettingsAccount, {
+    initialSection: "account",
+    onLogout() {
+      logoutCalls += 1;
+    },
+    onBack() {
+      backCalls += 1;
+    },
+  });
+
+  const heading = screen.getByRole("heading", { name: "Account", exact: true });
+  await waitFor(() => assert.ok(document.activeElement === heading));
+  const trigger = screen.getByRole("button", { name: "Sign out" });
+  assert.equal(screen.queryByRole("heading", { name: "Security" }), null);
+  assert.equal(screen.queryByText(/Sign in again to create new tasks/), null);
+  await user.click(trigger);
+
+  const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
+  const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+  await waitFor(() => assert.ok(document.activeElement === cancel));
+  assert.match(dialog.textContent, /Sign in again to create new tasks/);
+  assert.equal(logoutCalls, 0);
+
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  await waitFor(() => assert.ok(document.activeElement === trigger));
+  assert.equal(backCalls, 0);
+  assert.equal(logoutCalls, 0);
+
+  await user.click(trigger);
+  const confirmation = await screen.findByRole("alertdialog", {
+    name: "Sign out",
+  });
+  await user.click(
+    within(confirmation).getByRole("button", { name: "Sign out" }),
+  );
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(logoutCalls, 1);
+});
+
 test("Settings keeps Account cancellation independent from Models loading", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let cancellations = 0;

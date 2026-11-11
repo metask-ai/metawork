@@ -254,7 +254,7 @@ test("account-menu sign out confirms in place without opening settings", async (
   const confirmation = await screen.findByRole("alertdialog");
   assert.match(
     confirmation.textContent,
-    /local tasks and history will remain/i,
+    /local tasks and history, and workspace files will remain/i,
   );
   assert.deepEqual(calls, { settings: 0, logout: 0 });
 

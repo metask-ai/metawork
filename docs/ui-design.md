@@ -1087,7 +1087,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 请求或配置错误、网络失败与刷新结果不确定不得被描述为“凭据过期”“后端撤销”或“已从设备移除”。Account错误可保留authenticated identity；此时账户信息和账号菜单提供既有登录动作。重新登录取消后仍有错误时，入口继续可达。刷新阻断由Host校验，不从错误文字反推权限、不自动重试旧token、不增加保存恢复页面或公开状态；
 - 已验证 identity 的 refresh timer 或 wall clock 无法安排时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排并提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed；
 - 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task按创建时取得的 ExecutionConfig继续收口；
-- 退出登录必须说明 Account设备凭据会清理、Metask模型将暂时不可用于新 Task、自定义模型不受影响且历史保留；不能把它描述成对 live Task的热撤权。
+- 已登录时，账号设置在账户用量下方显示一个通栏的危险样式“退出登录”按钮。设置和账号菜单共用确认弹窗，打开时聚焦“取消”，点击确认才提交退出。弹窗说明本机 Metask 登录凭据会清理，创建使用 Metask 模型的新 Task 需要重新登录，自定义模型、本地 Task 及历史记录和 Workspace 文件会保留。
 
 `Models / 模型`规则：
 
