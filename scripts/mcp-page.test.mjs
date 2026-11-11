@@ -534,6 +534,62 @@ test("MCP keeps isolated test results in connection details", () => {
   assert.equal(within(dialog).queryByText("Connection test failed"), null);
 });
 
+test("MCP retest replaces the old result and keeps feedback beside the connection controls", async () => {
+  let finishRequest;
+  const actions = {
+    onTest: () =>
+      new Promise((resolve) => {
+        finishRequest = resolve;
+      }),
+  };
+  const pageWithTest = (status, toolCount = 0, issueCount = 0) =>
+    pageElement(
+      {
+        ...emptyManagement,
+        desiredGeneration: "7",
+        servers: [
+          { ...servers[0], connectionTest: { status, toolCount, issueCount } },
+        ],
+      },
+      "",
+      actions,
+    );
+  const view = render(pageWithTest("connected", 17));
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = within(screen.getByRole("dialog", { name: "GitHub" }));
+  const testButton = dialog.getByRole("button", { name: "Test connection" });
+  assert.match(dialog.getByRole("status").textContent, /Succeeded · 17 found/);
+
+  fireEvent.click(testButton);
+  assert.equal(testButton.disabled, true);
+  assert.match(dialog.getByRole("status").textContent, /Testing…/);
+  assert.equal(dialog.queryByText("Succeeded · 17 found"), null);
+
+  view.rerender(pageWithTest("testing"));
+  finishRequest({ outcome: "started" });
+  await waitFor(() =>
+    assert.match(dialog.getByRole("status").textContent, /Testing…/),
+  );
+  assert.equal(testButton.disabled, true);
+
+  view.rerender(pageWithTest("connected", 17));
+  await waitFor(() => assert.equal(testButton.disabled, false));
+  assert.match(dialog.getByRole("status").textContent, /Succeeded · 17 found/);
+  assert.equal(dialog.queryByText(/Opening an isolated test connection/), null);
+  assert.equal(dialog.queryByText("Testing…"), null);
+
+  fireEvent.click(testButton);
+  finishRequest({ outcome: "busy" });
+  await waitFor(() =>
+    assert.match(
+      dialog.getByRole("status").textContent,
+      /Another connection test is already running/,
+    ),
+  );
+  assert.equal(dialog.queryByText("Succeeded · 17 found"), null);
+  assert.equal(testButton.disabled, false);
+});
+
 test("MCP retries the formal Runtime instead of promoting connection tests", async () => {
   const refreshes = [];
   render(
@@ -887,7 +943,10 @@ test("MCP tests a saved connection without refreshing the current Runtime", asyn
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
   await waitFor(() => assert.deepEqual(calls, [["7", "github-binding"]]));
-  assert.ok(screen.getByText("Opening an isolated test connection."));
+  assert.equal(
+    screen.queryByText("Opening an isolated test connection."),
+    null,
+  );
 });
 
 test("MCP page distinguishes unavailable, empty, filtered, and redacted states", () => {

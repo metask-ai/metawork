@@ -61,6 +61,11 @@ type ConfirmAction = "enable" | "delete" | "allow_all";
 type Confirmation = { action: ConfirmAction; serverId: string } | null;
 type McpMutationSuccessNotice =
   "mcp.mutation.enabled" | "mcp.mutation.disabled";
+type ConnectionTestRequest = {
+  serverId: string;
+  generation: string;
+  outcome: "pending" | Exclude<McpConnectionTestResult["outcome"], "started">;
+};
 
 const draftAuthModes = ["oauth", "none"] as const;
 const draftOAuthClients = ["automatic", "existing"] as const;
@@ -568,6 +573,8 @@ export function McpPage({
   const [paneState, setPaneState] = useState<PaneState>(null);
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [pendingServerId, setPendingServerId] = useState<string | null>(null);
+  const [connectionTestRequest, setConnectionTestRequest] =
+    useState<ConnectionTestRequest | null>(null);
   const [createPending, setCreatePending] = useState(false);
   const [draftProbePending, setDraftProbePending] = useState(false);
   const [verifiedDraft, setVerifiedDraft] = useState<{
@@ -684,11 +691,44 @@ export function McpPage({
     draftProbePending ||
     pendingServerId !== null ||
     management.authorizationOperation.kind !== "idle";
+  const testRequestOutcome =
+    connectionTestRequest &&
+    connectionTestRequest.serverId === selected?.id &&
+    connectionTestRequest.generation === management.desiredGeneration
+      ? connectionTestRequest.outcome
+      : null;
+  const connectionTest = selected?.connectionTest;
+  const testInProgress =
+    testRequestOutcome === "pending" || connectionTest?.status === "testing";
   const selectedOperationBusy =
     selected !== null &&
     ((management.authorizationOperation.kind !== "idle" &&
       management.authorizationOperation.serverId === selected.id) ||
-      selected.connectionTest.status === "testing");
+      testInProgress);
+  let testFeedback: {
+    icon: "refresh" | "check" | "warning";
+    text: string;
+  } | null = null;
+  if (testInProgress) {
+    testFeedback = { icon: "refresh", text: t("mcp.test.summary.testing") };
+  } else if (testRequestOutcome !== null) {
+    testFeedback = {
+      icon: "warning",
+      text: t(`mcp.test.${testRequestOutcome}`),
+    };
+  } else if (connectionTest?.status === "connected") {
+    testFeedback = {
+      icon: "check",
+      text: t("mcp.test.summary.connected", {
+        tools: connectionTest.toolCount,
+      }),
+    };
+  } else if (connectionTest?.status === "failed") {
+    testFeedback = {
+      icon: "warning",
+      text: t("mcp.test.summary.failed", { issues: connectionTest.issueCount }),
+    };
+  }
   const paneCloseLocked =
     createPending || pendingServerId !== null || selectedOperationBusy;
   const existingOAuthClientAuthMethod =
@@ -792,6 +832,7 @@ export function McpPage({
     paneTrigger.current = trigger;
     setConfirmation(null);
     setNotice(null);
+    setConnectionTestRequest(null);
     setPaneState({ kind: "server", id: server.id });
   }
 
@@ -818,6 +859,7 @@ export function McpPage({
   function openReplacement(server: McpServer) {
     const connection = server.connection;
     if (connection === null) return;
+    setConnectionTestRequest(null);
     setDisplayName(server.displayName);
     setNegotiation(server.negotiation);
     setTimeoutMs(String(server.timeoutMs));
@@ -894,6 +936,7 @@ export function McpPage({
     setDraftProbePending(false);
     setVerifiedDraft(null);
     setDraftHeaders([]);
+    setConnectionTestRequest(null);
     const trigger = paneTrigger.current;
     setPaneState(null);
     setConfirmation(null);
@@ -1216,17 +1259,26 @@ export function McpPage({
 
   async function testConnection(server: McpServer) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId !== null) return;
+    if (
+      !generation ||
+      mutationLocked ||
+      pendingServerId !== null ||
+      testInProgress
+    )
+      return;
+    const request = { serverId: server.id, generation };
     setPendingServerId(server.id);
+    setConnectionTestRequest({ ...request, outcome: "pending" });
     setNotice(null);
     try {
       const result = await onTest(generation, server.id);
-      setNotice({
-        tone: result.outcome === "started" ? "quiet" : "attention",
-        text: t(`mcp.test.${result.outcome}`),
-      });
+      setConnectionTestRequest(
+        result.outcome === "started"
+          ? null
+          : { ...request, outcome: result.outcome },
+      );
     } catch {
-      setNotice({ tone: "attention", text: t("mcp.test.failed") });
+      setConnectionTestRequest({ ...request, outcome: "unavailable" });
     } finally {
       setPendingServerId(null);
     }
@@ -2633,11 +2685,11 @@ export function McpPage({
                       {selected.connection !== null &&
                         ["not_required", "ready"].includes(
                           selected.authorizationStatus,
-                        ) &&
-                        selected.connectionTest.status !== "testing" && (
+                        ) && (
                           <Button
                             variant="secondary"
                             size="sm"
+                            className="disabled:opacity-50"
                             disabled={
                               mutationLocked ||
                               pendingServerId !== null ||
@@ -2712,38 +2764,21 @@ export function McpPage({
                           </span>
                         </div>
                       )}
-                    {selected.connectionTest.status !== "untested" && (
+                    {testFeedback && (
                       <div
                         data-tone={
-                          selected.connectionTest.status === "connected"
+                          testFeedback.icon === "check"
                             ? "ready"
-                            : selected.connectionTest.status === "failed"
+                            : testFeedback.icon === "warning"
                               ? "attention"
                               : undefined
                         }
+                        role="status"
                       >
-                        <Icon
-                          name={
-                            selected.connectionTest.status === "connected"
-                              ? "check"
-                              : selected.connectionTest.status === "failed"
-                                ? "warning"
-                                : "refresh"
-                          }
-                        />
+                        <Icon name={testFeedback.icon} />
                         <span>
                           <strong>{t("mcp.detail.connection_test")}</strong>
-                          <small>
-                            {selected.connectionTest.status === "connected"
-                              ? t("mcp.test.summary.connected", {
-                                  tools: selected.connectionTest.toolCount,
-                                })
-                              : selected.connectionTest.status === "failed"
-                                ? t("mcp.test.summary.failed", {
-                                    issues: selected.connectionTest.issueCount,
-                                  })
-                                : t("mcp.test.summary.testing")}
-                          </small>
+                          <small>{testFeedback.text}</small>
                         </span>
                       </div>
                     )}

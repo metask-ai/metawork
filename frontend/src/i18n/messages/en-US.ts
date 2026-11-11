@@ -578,8 +578,6 @@ export const enUS = {
   "mcp.refresh.failed":
     "The tools could not be refreshed. The last confirmed state is unchanged.",
   "mcp.test.action": "Test connection",
-  "mcp.test.testing": "Testing…",
-  "mcp.test.started": "Opening an isolated test connection.",
   "mcp.test.busy": "Another connection test is already running.",
   "mcp.test.stale_generation":
     "The configuration changed. Retry with the latest settings.",
@@ -587,11 +585,6 @@ export const enUS = {
     "Finish secret setup or OAuth authorization first.",
   "mcp.test.rejected": "The current configuration cannot be tested.",
   "mcp.test.unavailable": "Connection testing is temporarily unavailable.",
-  "mcp.test.failed":
-    "Connection failed. Check the endpoint, authentication, and server status.",
-  "mcp.test.connected":
-    "Connected. Found {tools} tools and {issues} catalog issues.",
-  "mcp.test.summary.untested": "Not tested",
   "mcp.test.summary.testing": "Testing…",
   "mcp.test.summary.connected": "Succeeded · {tools} found",
   "mcp.test.summary.failed": "Failed · {issues} issues",
