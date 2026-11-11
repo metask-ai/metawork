@@ -6597,17 +6597,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   text-transform: uppercase;
 }
 
-.search-input-row kbd {
-  padding: 2px 5px;
-  border: 1px solid var(--ui-border);
-  border-radius: 5px;
-  color: var(--ui-content-muted);
-  background: var(--ui-surface-panel);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  box-shadow: 0 1px rgba(24, 50, 71, 0.08);
-}
-
 .text-button {
   padding: 3px 4px;
   border: 0;
@@ -8664,32 +8653,29 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-bottom: 1px solid var(--ui-border);
 }
 
-.search-input-row > svg {
+.search-query {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  padding-inline-start: 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+}
+
+.search-query > svg {
   flex: none;
   color: var(--ui-action-primary);
   font-size: var(--text-title-lg);
 }
 
-.search-input-row input {
+.search-query input {
   min-width: 0;
-  height: 52px;
   flex: 1;
   border: 0;
-  outline: 0;
   color: var(--ui-content-primary);
   background: transparent;
   font-size: var(--text-body);
-}
-
-.search-input-row kbd {
-  padding: 3px 6px;
-  border: 1px solid var(--ui-border);
-  border-radius: 6px;
-  color: var(--ui-content-muted);
-  background: var(--ui-surface-panel-2);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  text-transform: uppercase;
 }
 
 .search-results {
@@ -8698,7 +8684,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden auto;
 }
 
-.search-results > p {
+.search-status > p {
   margin: 0;
   padding: 24px 16px;
   color: var(--ui-content-muted);
@@ -8720,7 +8706,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   text-align: left;
 }
 
-.search-result:hover,
+.search-result:hover {
+  background: var(--ui-action-hover-surface);
+}
+
 .search-result:focus-visible,
 .search-result[data-active="true"] {
   background: var(--metask-primary-soft);
