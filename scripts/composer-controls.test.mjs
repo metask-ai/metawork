@@ -1704,6 +1704,26 @@ test("editing keeps Save disabled without changes and explains an emptied model 
   assert.equal(document.activeElement, modelId);
 });
 
+test("model dialog feedback is visible: defined error color, invalid borders and dimmed disabled actions", () => {
+  const read = (file) =>
+    readFileSync(new URL(`../frontend/src/${file}`, import.meta.url), "utf8");
+  const stylesheet = read("index.css");
+  const definitions = `${read("styles/metask-tokens.css")}\n${stylesheet}`;
+  const form = read("features/settings/CustomModelsSettings.tsx");
+  const tokens = new Set(form.match(/--ui-[a-z0-9-]+/gu));
+  assert.ok(tokens.has("--ui-content-error"));
+  for (const token of tokens)
+    assert.match(definitions, new RegExp(`${token}\\s*:`, "u"), token);
+  assert.match(
+    stylesheet,
+    /\.settings-model-form \.settings-custom-provider-input\[aria-invalid="true"\],\s*\.settings-model-form \.selection-trigger\.settings-control\[aria-invalid="true"\]\s*\{[^}]*border-color:/su,
+  );
+  assert.match(
+    stylesheet,
+    /\.settings-model-form-actions button:disabled\s*\{[^}]*opacity: 0\.5;/su,
+  );
+});
+
 test("only version-suffixed Base URLs get a chat completions suggestion", () => {
   const long = `https://example.com/${"a".repeat(2020)}/v1`;
   for (const [input, expected] of [

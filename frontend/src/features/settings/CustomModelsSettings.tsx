@@ -667,7 +667,7 @@ export function CustomModelsSettings({
                 {!editing && showProblem("choice") && (
                   <p
                     id={fieldErrorId("choice")}
-                    className="text-sm text-(--ui-content-danger)"
+                    className="text-sm text-(--ui-content-error)"
                   >
                     {t("settings.model_form_error.choice")}
                   </p>
@@ -740,7 +740,7 @@ export function CustomModelsSettings({
                                   }
                                   className={
                                     addressProblemVisible
-                                      ? "text-sm text-(--ui-content-danger)"
+                                      ? "text-sm text-(--ui-content-error)"
                                       : "text-xs text-(--ui-content-muted)"
                                   }
                                 >
@@ -773,7 +773,7 @@ export function CustomModelsSettings({
                             <>
                               <p
                                 role="alert"
-                                className="text-sm text-(--ui-content-danger)"
+                                className="text-sm text-(--ui-content-error)"
                               >
                                 {t(
                                   addressProblem === "required"
@@ -786,7 +786,7 @@ export function CustomModelsSettings({
                                   type="button"
                                   variant="secondary"
                                   size="sm"
-                                  className="h-auto min-h-8 max-w-full justify-self-start py-1.5 text-left leading-snug break-all whitespace-normal"
+                                  className="settings-model-address-suggestion"
                                   disabled={busy}
                                   onClick={() => {
                                     setDraft({
@@ -861,7 +861,7 @@ export function CustomModelsSettings({
                     {showProblem("api_key") && (
                       <p
                         id={fieldErrorId("api_key")}
-                        className="text-sm text-(--ui-content-danger)"
+                        className="text-sm text-(--ui-content-error)"
                       >
                         {t("settings.model_form_error.api_key")}
                       </p>
@@ -950,7 +950,7 @@ export function CustomModelsSettings({
                     {showProblem("model_id") && (
                       <p
                         id={fieldErrorId("model_id")}
-                        className="text-sm text-(--ui-content-danger)"
+                        className="text-sm text-(--ui-content-error)"
                       >
                         {t(
                           preset && !editing
