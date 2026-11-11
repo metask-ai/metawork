@@ -1,3 +1,5 @@
+import type { WorkspaceDirectory } from "../bridge/contracts.ts";
+
 export type WorkspaceFileLinkUnavailableReason =
   "outside_workspace" | "workspace_unavailable" | "unsupported_path";
 
@@ -76,4 +78,35 @@ export function resolveWorkspaceFileLink(
   const path = relative.join("/");
   if (new TextEncoder().encode(path).length > 4096) return unsupported;
   return { kind: "path", path };
+}
+
+export function workspaceFileParent(path: string): {
+  directory: string;
+  name: string;
+} {
+  const index = path.lastIndexOf("/");
+  return {
+    directory: index < 0 ? "" : path.slice(0, index),
+    name: path.slice(index + 1),
+  };
+}
+
+const nameKey = (name: string) => name.normalize("NFC").toLowerCase();
+
+// Decides from one Host directory listing whether a regular file named `name`
+// can exist for preview. Only a complete listing can prove absence; macOS and
+// Windows volumes usually resolve case and Unicode normalization differences.
+export function workspaceFilePresence(
+  directory: WorkspaceDirectory,
+  name: string,
+): "present" | "missing" | "unknown" {
+  if (directory.state === "missing" || directory.state === "restricted")
+    return "missing";
+  if (directory.state !== "ready") return "unknown";
+  const entry =
+    directory.entries.find((item) => item.name === name) ??
+    directory.entries.find((item) => nameKey(item.name) === nameKey(name));
+  if (entry) return entry.kind === "file" ? "present" : "missing";
+  // Credential-named entries are omitted, but the Host rejects those paths too.
+  return directory.truncated ? "unknown" : "missing";
 }

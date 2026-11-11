@@ -947,6 +947,7 @@ export const zhCN: Record<MessageId, string> = {
     "无法打开：当前工作区不可用",
   "file_preview.link_unavailable.unsupported_path":
     "无法打开：不支持的文件路径",
+  "file_preview.link_unavailable.missing": "无法打开：文件不存在或不可用",
   "file_preview.refresh": "刷新",
   "file_preview.mode": "文件展示模式",
   "file_preview.rendered": "预览",

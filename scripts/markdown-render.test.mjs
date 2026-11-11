@@ -18,9 +18,8 @@ const { Markdown, renderMarkdownForClipboard } = await vite.ssrLoadModule(
 const { runFileReferenceLinks } = await vite.ssrLoadModule(
   "/src/workbench/run-file-references.ts",
 );
-const { resolveWorkspaceFileLink } = await vite.ssrLoadModule(
-  "/src/workbench/workspace-file-links.ts",
-);
+const { resolveWorkspaceFileLink, workspaceFileParent, workspaceFilePresence } =
+  await vite.ssrLoadModule("/src/workbench/workspace-file-links.ts");
 
 test.after(async () => {
   await vite.close();
@@ -384,4 +383,60 @@ test("Windows Workspace roots accept drive paths, either separator and any lette
     kind: "unavailable",
     reason: "unsupported_path",
   });
+});
+
+test("only a complete Host listing proves a Workspace link target missing", () => {
+  assert.deepEqual(workspaceFileParent("report.txt"), {
+    directory: "",
+    name: "report.txt",
+  });
+  assert.deepEqual(workspaceFileParent("notes/2026/qa preview.txt"), {
+    directory: "notes/2026",
+    name: "qa preview.txt",
+  });
+  const listing = (entries, overrides = {}) => ({
+    state: "ready",
+    entries,
+    truncated: false,
+    redacted: false,
+    ...overrides,
+  });
+  const entries = [
+    { name: "Report.TXT", kind: "file" },
+    { name: "cafe\u0301.md", kind: "file" },
+    { name: "docs", kind: "directory" },
+  ];
+  for (const [name, expected] of [
+    ["Report.TXT", "present"],
+    // Case and Unicode normalization differences resolve on macOS and Windows.
+    ["report.txt", "present"],
+    ["caf\u00e9.md", "present"],
+    ["docs", "missing"],
+    ["missing.csv", "missing"],
+  ])
+    assert.equal(workspaceFilePresence(listing(entries), name), expected, name);
+  assert.equal(
+    workspaceFilePresence(listing(entries, { truncated: true }), "missing.csv"),
+    "unknown",
+  );
+  assert.equal(
+    workspaceFilePresence(listing(entries, { truncated: true }), "report.txt"),
+    "present",
+  );
+  assert.equal(
+    workspaceFilePresence(listing([], { redacted: true }), "missing.csv"),
+    "missing",
+  );
+  for (const state of ["missing", "restricted"])
+    assert.equal(
+      workspaceFilePresence(listing([], { state }), "report.txt"),
+      "missing",
+      state,
+    );
+  for (const state of ["busy", "error"])
+    assert.equal(
+      workspaceFilePresence(listing([], { state }), "report.txt"),
+      "unknown",
+      state,
+    );
 });

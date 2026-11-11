@@ -1372,6 +1372,21 @@ export default function App() {
     setRightPanelOpen(true);
     openWorkspaceFile(path, opener);
   }
+  function listConversationWorkspaceDirectory(
+    taskId: string,
+    path: string,
+    options: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+  ) {
+    if (!panelTask || !panelWorkspace || panelTask.id !== taskId)
+      return Promise.reject(new Error("Workspace link Task changed"));
+    return client.listWorkspaceDirectory(
+      taskId,
+      panelWorkspace.id,
+      panelWorkspace.epoch,
+      path,
+      options,
+    );
+  }
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
     for (const tabId of taskPanelOpeners.current.keys())
@@ -5626,9 +5641,13 @@ export default function App() {
                     ? panelWorkspace.canonicalRoot || null
                     : null
                 }
-                onPreviewWorkspaceFile={
-                  workspaceFilesAvailable
-                    ? openConversationWorkspaceFile
+                workspaceFiles={
+                  workspaceTreeScope
+                    ? {
+                        scope: workspaceTreeScope,
+                        list: listConversationWorkspaceDirectory,
+                        open: openConversationWorkspaceFile,
+                      }
                     : undefined
                 }
                 onPreviewRunAttachment={(preview, opener) => {

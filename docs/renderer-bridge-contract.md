@@ -187,7 +187,7 @@ Host 先校验 Task 仍属于该 Workspace、工作区 epoch 与当前授权，�
 
 目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前重新验证当前 Task 与 Workspace 授权，失效时整份结果清空。工作区文件预览返回与原引用预览相同的文本/图片结果，复用其分块、release、连接绑定、安全检查、超时及资源额度；每次刷新独立重新授权。
 
-Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安全代次；关闭 Task、工作区失效或换代后旧结果不可显示。隐藏视图可保留同一有效 Task 的目录数据，不自动轮询。每个 Task 会话最多缓存 64 个目录，超限明确提示用户刷新；刷新清空缓存及展开状态。目录与打开文件的请求共享准备并发和取消链路，不新增持久读取授权。
+Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安全代次；关闭 Task、工作区失效或换代后旧结果不可显示。隐藏视图可保留同一有效 Task 的目录数据，不自动轮询。每个 Task 会话最多缓存 64 个目录，超限明确提示用户刷新；刷新清空缓存及展开状态。目录与打开文件的请求共享准备并发和取消链路，不新增持久读取授权。对话工作区链接的存在确认是同一 command 的独立 Renderer 消费者：在同一绑定范围内逐个目录串行读取，每个 Task 范围最多确认 64 个目录，超限不提示并保持链接可打开；只在同一 Task 的工具调用完成、Run 增加或状态变化后重新读取仍显示链接的目录，不轮询，不共享或清空文件树缓存。
 
 ## File changes diff command
 

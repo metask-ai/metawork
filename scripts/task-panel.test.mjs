@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
-import { createElement, useState } from "react";
+import { StrictMode, createElement, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
@@ -2026,10 +2026,55 @@ const reportReference = {
   displayPath: "p0-file-report.txt",
 };
 
+function workspaceDirectory(entries, overrides = {}) {
+  return {
+    state: "ready",
+    entries: entries.map((name) =>
+      typeof name === "string" ? { name, kind: "file" } : name,
+    ),
+    truncated: false,
+    redacted: false,
+    ...overrides,
+  };
+}
+
+// Host directory reads stay pending until a test settles them in order.
+function workspaceFilesFixture(scope = "workspace-scope") {
+  const lists = [];
+  const opened = [];
+  return {
+    lists,
+    opened,
+    files: {
+      scope,
+      list: (taskId, path, options) =>
+        new Promise((resolve, reject) =>
+          lists.push({
+            taskId,
+            path,
+            priority: options.priority,
+            signal: options.signal,
+            resolve,
+            reject,
+          }),
+        ),
+      open: (taskId, path, opener) =>
+        opened.push([taskId, path, opener.textContent]),
+    },
+  };
+}
+
+function linkDescription(name) {
+  const link = screen.getByRole("link", { name });
+  assert.equal(link.getAttribute("aria-disabled"), "true");
+  return document.getElementById(link.getAttribute("aria-describedby"))
+    .textContent;
+}
+
 test("explicit Markdown file links open Workspace files without a Run reference", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const opened = [];
-  const workspaceOpened = [];
+  const workspace = workspaceFilesFixture();
   render(
     taskContentElement(
       task({
@@ -2053,8 +2098,7 @@ test("explicit Markdown file links open Workspace files without a Run reference"
         workspaceRoot: "/Users/me/My Work",
         onPreviewFile: (taskId, runId, reference) =>
           opened.push([taskId, runId, reference.id]),
-        onPreviewWorkspaceFile: (taskId, path, opener) =>
-          workspaceOpened.push([taskId, path, opener.textContent]),
+        workspaceFiles: workspace.files,
       },
     ),
   );
@@ -2071,27 +2115,47 @@ test("explicit Markdown file links open Workspace files without a Run reference"
     ["3", "9", "report-ref"],
     ["3", "9", "report-ref"],
   ]);
+  // Links stay openable while their directory is still being confirmed.
+  fireEvent.click(
+    screen.getByRole("button", { name: "Preview p0-file-manifest.csv" }),
+  );
+  assert.deepEqual(
+    workspace.lists.map(({ taskId, path, priority }) => [
+      taskId,
+      path,
+      priority,
+    ]),
+    [["3", "", "prefetch"]],
+  );
+  await act(async () =>
+    workspace.lists[0].resolve(workspaceDirectory(["p0-file-manifest.csv"])),
+  );
+  assert.deepEqual(workspace.lists.at(-1).path, "notes");
+  await act(async () =>
+    workspace.lists[1].resolve(workspaceDirectory(["qa preview.txt"])),
+  );
+  assert.equal(workspace.lists.length, 2);
   fireEvent.click(
     screen.getByRole("button", { name: "Preview p0-file-manifest.csv" }),
   );
   fireEvent.click(
     screen.getByRole("button", { name: "Preview notes/qa preview.txt" }),
   );
-  assert.deepEqual(workspaceOpened, [
+  assert.deepEqual(workspace.opened, [
+    ["3", "p0-file-manifest.csv", "p0-file-manifest.csv"],
     ["3", "p0-file-manifest.csv", "p0-file-manifest.csv"],
     ["3", "notes/qa preview.txt", "QA preview"],
   ]);
 
   const hosts = screen.getByRole("link", { name: "hosts" });
-  assert.equal(hosts.getAttribute("aria-disabled"), "true");
   assert.equal(hosts.tabIndex, 0);
   assert.equal(hosts.hasAttribute("href"), false);
   assert.equal(
-    document.getElementById(hosts.getAttribute("aria-describedby")).textContent,
+    linkDescription("hosts"),
     "Can't open: outside the current workspace /etc/hosts",
   );
   fireEvent.click(hosts);
-  assert.equal(opened.length + workspaceOpened.length, 4);
+  assert.equal(opened.length + workspace.opened.length, 5);
   await user.hover(hosts);
   await waitFor(() =>
     assert.equal(
@@ -2101,7 +2165,206 @@ test("explicit Markdown file links open Workspace files without a Run reference"
   );
 });
 
-test("Markdown file links follow Workspace availability without remounting output", () => {
+test("confirmed missing Workspace link targets turn unavailable while unconfirmed ones stay openable", async () => {
+  const workspace = workspaceFilesFixture();
+  const response = [
+    "[manifest](p0-file-manifest.csv) [ghost](ghost.csv)",
+    "[notes](notes/qa.txt) [big](big/x.txt) [broken](broken/x.txt)",
+    "[report](p0-file-report.txt) [nested](out/nested.txt)",
+  ].join("\n\n");
+  const references = [
+    reportReference,
+    { id: "nested-ref", title: "nested.txt", displayPath: "out/nested.txt" },
+  ];
+  const value = task({
+    currentRunId: "9",
+    runs: [linkedRun(response, references)],
+  });
+  const props = {
+    workspaceRoot: "/Users/me/ws",
+    workspaceFiles: workspace.files,
+  };
+  const view = render(taskContentElement(value, "1", props));
+  // Every Workspace link is openable while its directory is being confirmed.
+  for (const path of [
+    "p0-file-manifest.csv",
+    "ghost.csv",
+    "notes/qa.txt",
+    "big/x.txt",
+    "broken/x.txt",
+  ])
+    assert.ok(screen.getByRole("button", { name: `Preview ${path}` }));
+  // Reference-backed entries are never checked; directories are read in turn.
+  assert.deepEqual(
+    workspace.lists.map((request) => request.path),
+    [""],
+  );
+  await act(async () =>
+    workspace.lists[0].resolve(workspaceDirectory(["p0-file-manifest.csv"])),
+  );
+  assert.ok(
+    screen.getByRole("button", { name: "Preview p0-file-manifest.csv" }),
+  );
+  assert.equal(
+    linkDescription("ghost"),
+    "Can't open: file is missing or unavailable ghost.csv",
+  );
+  assert.equal(workspace.lists.at(-1).path, "notes");
+  await act(async () =>
+    workspace.lists[1].resolve(workspaceDirectory([], { state: "missing" })),
+  );
+  assert.equal(
+    linkDescription("notes"),
+    "Can't open: file is missing or unavailable notes/qa.txt",
+  );
+  await act(async () =>
+    workspace.lists[2].resolve(
+      workspaceDirectory(["other.txt"], { truncated: true }),
+    ),
+  );
+  await act(async () => workspace.lists[3].reject(new Error("timed out")));
+  assert.deepEqual(
+    workspace.lists.map((request) => request.path),
+    ["", "notes", "big", "broken"],
+  );
+  // Directories that cannot prove absence keep the link openable.
+  assert.ok(screen.getByRole("button", { name: "Preview big/x.txt" }));
+  assert.ok(screen.getByRole("button", { name: "Preview broken/x.txt" }));
+  assert.ok(screen.getByRole("button", { name: "Preview p0-file-report.txt" }));
+  assert.ok(screen.getByRole("button", { name: "Preview out/nested.txt" }));
+
+  // A finished Tool call re-checks shown directories; the old answer stays
+  // until the new listing arrives.
+  const progressed = task({
+    currentRunId: "9",
+    runs: [
+      {
+        ...linkedRun(response, references),
+        tools: [
+          ...linkedRun(response, references).tools,
+          technicalTool({ id: "write-2", order: "3", name: "Write" }),
+        ],
+      },
+    ],
+  });
+  view.rerender(taskContentElement(progressed, "2", props));
+  assert.equal(workspace.lists.at(-1).path, "");
+  assert.equal(
+    linkDescription("ghost"),
+    "Can't open: file is missing or unavailable ghost.csv",
+  );
+  await act(async () =>
+    workspace.lists
+      .at(-1)
+      .resolve(workspaceDirectory(["p0-file-manifest.csv", "ghost.csv"])),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Preview ghost.csv" }));
+  assert.deepEqual(workspace.opened.at(-1), ["3", "ghost.csv", "ghost"]);
+});
+
+test("Workspace link checks are bounded per Task scope and cancelled with it", async () => {
+  const workspace = workspaceFilesFixture();
+  const links = Array.from(
+    { length: 65 },
+    (_, index) => `[file ${index}](dir-${index}/file.txt)`,
+  ).join(" ");
+  const value = task({ currentRunId: "9", runs: [linkedRun(links)] });
+  const view = render(
+    taskContentElement(value, "1", { workspaceFiles: workspace.files }),
+  );
+  for (let index = 0; index < 64; index += 1) {
+    assert.equal(workspace.lists.length, index + 1);
+    assert.equal(workspace.lists[index].path, `dir-${index}`);
+    await act(async () =>
+      workspace.lists[index].resolve(
+        workspaceDirectory([], { state: "missing" }),
+      ),
+    );
+  }
+  assert.equal(workspace.lists.length, 64);
+  assert.equal(screen.getAllByRole("link").length, 64);
+  // Beyond the bound the target is unconfirmed, so it stays openable.
+  assert.ok(screen.getByRole("button", { name: "Preview dir-64/file.txt" }));
+
+  const next = workspaceFilesFixture("next-scope");
+  view.rerender(taskContentElement(value, "2", { workspaceFiles: next.files }));
+  // A new Task/Workspace/connection scope drops old answers and starts over.
+  assert.equal(screen.queryAllByRole("link").length, 0);
+  assert.deepEqual(
+    next.lists.map((request) => request.path),
+    ["dir-0"],
+  );
+  // Unfinished work of a replaced scope is cancelled, not carried over.
+  const other = workspaceFilesFixture("other-scope");
+  view.rerender(
+    taskContentElement(
+      task({
+        id: "5",
+        currentRunId: "9",
+        runs: [linkedRun("[other](other/x.txt)")],
+      }),
+      "3",
+      { workspaceFiles: other.files },
+    ),
+  );
+  assert.equal(next.lists[0].signal.aborted, true);
+  await act(async () => other.lists[0].resolve(workspaceDirectory(["x.txt"])));
+  assert.deepEqual(
+    other.lists.map((request) => [request.taskId, request.path]),
+    [["5", "other"]],
+  );
+  view.rerender(taskContentElement(value, "4", {}));
+  assert.equal(
+    linkDescription("file 0"),
+    "Can't open: workspace unavailable dir-0/file.txt",
+  );
+});
+
+test("Workspace link checks resume after a StrictMode effect replay", async () => {
+  const workspace = workspaceFilesFixture();
+  render(
+    createElement(
+      StrictMode,
+      null,
+      taskContentElement(
+        task({
+          currentRunId: "9",
+          runs: [linkedRun("[ghost](ghost.csv) [notes](notes/qa.txt)")],
+        }),
+        "1",
+        { workspaceFiles: workspace.files },
+      ),
+    ),
+  );
+  // The replayed mount cancels the first read and must resume the same work.
+  for (let settled = 0; settled < 2; settled += 1) {
+    const live = workspace.lists.filter(
+      (request) => !request.signal.aborted && !request.settled,
+    );
+    assert.equal(live.length, 1);
+    live[0].settled = true;
+    await act(async () =>
+      live[0].resolve(workspaceDirectory([], { state: "missing" })),
+    );
+  }
+  assert.deepEqual(
+    workspace.lists
+      .filter((request) => request.settled)
+      .map((request) => request.path)
+      .sort(),
+    ["", "notes"],
+  );
+  assert.equal(
+    linkDescription("ghost"),
+    "Can't open: file is missing or unavailable ghost.csv",
+  );
+  assert.equal(
+    linkDescription("notes"),
+    "Can't open: file is missing or unavailable notes/qa.txt",
+  );
+});
+
+test("Markdown file links follow Workspace availability without remounting output", async () => {
   const value = task({
     currentRunId: "9",
     runs: [
@@ -2116,41 +2379,36 @@ test("Markdown file links follow Workspace availability without remounting outpu
   );
   const part = view.container.querySelector(".agent-response");
   assert.ok(screen.getByRole("button", { name: "预览 p0-file-report.txt" }));
-  for (const [name, target] of [
-    ["p0-file-manifest.csv", "p0-file-manifest.csv"],
-    ["绝对", "/Users/me/ws/a.txt"],
-  ]) {
-    const link = screen.getByRole("link", { name });
-    assert.equal(
-      document.getElementById(link.getAttribute("aria-describedby"))
-        .textContent,
-      `无法打开：当前工作区不可用 ${target}`,
-    );
-  }
+  assert.equal(
+    linkDescription("p0-file-manifest.csv"),
+    "无法打开：当前工作区不可用 p0-file-manifest.csv",
+  );
+  assert.equal(
+    linkDescription("绝对"),
+    "无法打开：当前工作区不可用 /Users/me/ws/a.txt",
+  );
 
-  const workspaceOpened = [];
+  const workspace = workspaceFilesFixture();
   view.rerender(
     taskContentElement(
       value,
       "2",
-      {
-        workspaceRoot: "/Users/me/ws",
-        onPreviewWorkspaceFile: (taskId, path) =>
-          workspaceOpened.push([taskId, path]),
-      },
+      { workspaceRoot: "/Users/me/ws", workspaceFiles: workspace.files },
       "zh-CN",
     ),
   );
   assert.equal(view.container.querySelector(".agent-response"), part);
   assert.equal(screen.queryByRole("link"), null);
-  fireEvent.click(
-    screen.getByRole("button", { name: "预览 p0-file-manifest.csv" }),
+  await act(async () =>
+    workspace.lists[0].resolve(workspaceDirectory(["a.txt"])),
   );
+  assert.equal(view.container.querySelector(".agent-response"), part);
   fireEvent.click(screen.getByRole("button", { name: "预览 a.txt" }));
-  assert.deepEqual(workspaceOpened, [
-    ["3", "p0-file-manifest.csv"],
-    ["3", "a.txt"],
-  ]);
+  assert.deepEqual(workspace.opened, [["3", "a.txt", "绝对"]]);
+  assert.equal(
+    linkDescription("p0-file-manifest.csv"),
+    "无法打开：文件不存在或不可用 p0-file-manifest.csv",
+  );
 });
 
 test("live revisions extend the narrative while replacing one bottom status in place", () => {
@@ -6944,12 +7202,19 @@ test("App opens unreferenced workspace files in preview tabs and revokes them wi
 });
 
 test("App opens conversation Markdown file links through Workspace authority", async (ctx) => {
-  const reads = [];
+  const reads = [],
+    listings = [];
   const fixture = await renderAppFixture(
     ctx,
     1440,
     {},
     {
+      listWorkspaceDirectory: async (...args) => {
+        listings.push(args);
+        return workspaceDirectory(
+          args[3] === "" ? ["p0-file-manifest.csv"] : ["qa preview.txt"],
+        );
+      },
       previewWorkspaceFile: (...args) =>
         new Promise((resolve) => reads.push({ args, resolve })),
     },
@@ -6968,6 +7233,7 @@ test("App opens conversation Markdown file links through Workspace authority", a
         "[manifest](p0-file-manifest.csv)",
         "[notes](</tmp/metawork-test/notes/qa preview.txt>)",
         "[hosts](/etc/hosts)",
+        "[gone](gone.txt)",
       ].join("\n\n"),
       responseKind: "final",
       provisional: "",
@@ -6978,6 +7244,20 @@ test("App opens conversation Markdown file links through Workspace authority", a
   fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
   await act(async () => fixture.publish());
   await selectRecentTask(/First task/);
+  const gone = await screen.findByRole("link", { name: "gone" });
+  assert.equal(
+    document.getElementById(gone.getAttribute("aria-describedby")).textContent,
+    "Can't open: file is missing or unavailable gone.txt",
+  );
+  assert.deepEqual(
+    listings.map((args) => [...args.slice(0, 4), args[4].priority]),
+    [
+      ["3", "1", "1", "", "prefetch"],
+      ["3", "1", "1", "notes", "prefetch"],
+    ],
+  );
+  fireEvent.click(gone);
+  assert.equal(reads.length, 0);
   fireEvent.click(
     await screen.findByRole("button", { name: "Preview p0-file-manifest.csv" }),
   );

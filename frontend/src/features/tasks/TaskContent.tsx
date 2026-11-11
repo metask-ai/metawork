@@ -8,6 +8,7 @@ import { AdditionalInput } from "./AdditionalInput.tsx";
 import { MessageInfoBar } from "./MessageInfoBar.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import { resolveWorkspaceFileLink } from "../../workbench/workspace-file-links.ts";
+import { useWorkspaceLinkPresence } from "./useWorkspaceLinkPresence.ts";
 import {
   Fragment,
   useCallback,
@@ -19,6 +20,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  FilePreviewLoadOptions,
   FileReferenceView,
   OutputActionHandler,
   PendingUi,
@@ -29,6 +31,7 @@ import type {
   UiRecord,
   WaitingInputView,
   UiResponsePayload,
+  WorkspaceDirectory,
 } from "../../bridge/contracts.ts";
 import {
   Activity,
@@ -394,7 +397,7 @@ export function TaskContent({
   onOpenSettings,
   onPreviewFile,
   workspaceRoot = null,
-  onPreviewWorkspaceFile,
+  workspaceFiles,
   onPreviewRunAttachment,
   loadFilePreview,
   onReviewFileChanges,
@@ -440,12 +443,17 @@ export function TaskContent({
   ) => void;
   /** Publishable canonical root of the Task Workspace, for absolute links. */
   workspaceRoot?: string | null;
-  /** Present only while the Task Workspace files can be browsed. */
-  onPreviewWorkspaceFile?: (
-    taskId: string,
-    path: string,
-    opener: HTMLButtonElement,
-  ) => void;
+  /** Present only while the Task Workspace files can be browsed; `scope`
+   * changes with Task, Workspace epoch, connection or security epoch. */
+  workspaceFiles?: {
+    scope: string;
+    list: (
+      taskId: string,
+      path: string,
+      options: FilePreviewLoadOptions,
+    ) => Promise<WorkspaceDirectory>;
+    open: (taskId: string, path: string, opener: HTMLButtonElement) => void;
+  };
   onPreviewRunAttachment?: (
     preview: RunAttachmentPreviewRequest,
     opener: HTMLElement,
@@ -489,6 +497,21 @@ export function TaskContent({
   } | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
+  // Tool calls are the observed way files change; re-confirm links after each.
+  const fileEpoch =
+    task?.runs
+      .map(
+        (run) =>
+          `${run.id}:${run.phase}:${run.tools.filter((tool) => tool.state !== "running").length}`,
+      )
+      .join(",") ?? "";
+  const workspaceLinkPresence = useWorkspaceLinkPresence(
+    workspaceFiles?.scope ?? null,
+    fileEpoch,
+    workspaceFiles && task
+      ? (path, options) => workspaceFiles.list(task.id, path, options)
+      : undefined,
+  );
   const hasRunTimes =
     task?.runs.some(
       (run) => run.submittedAtUnixMs !== null || run.finishedAtUnixMs !== null,
@@ -896,16 +919,22 @@ export function TaskContent({
             const reference = runLinks.get(link.path);
             if (reference?.displayPath === link.path)
               return referenceLink(reference);
-            if (!onPreviewWorkspaceFile)
+            if (!workspaceFiles)
               return {
                 unavailable: t(
                   "file_preview.link_unavailable.workspace_unavailable",
                 ),
               };
+            // Only a confirmed absence disables the link; checking and
+            // unconfirmable paths stay openable and the Host decides on open.
+            if (workspaceLinkPresence(link.path) === "missing")
+              return {
+                unavailable: t("file_preview.link_unavailable.missing"),
+              };
             return {
               label: t("file_preview.open", { path: link.path }),
               onOpen: (opener) =>
-                onPreviewWorkspaceFile(task.id, link.path, opener),
+                workspaceFiles.open(task.id, link.path, opener),
             };
           };
           const disclosureKey = `${task.id}:${run.id}`;

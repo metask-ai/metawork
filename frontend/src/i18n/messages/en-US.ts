@@ -1110,6 +1110,8 @@ export const enUS = {
     "Can't open: workspace unavailable",
   "file_preview.link_unavailable.unsupported_path":
     "Can't open: unsupported file path",
+  "file_preview.link_unavailable.missing":
+    "Can't open: file is missing or unavailable",
   "file_preview.refresh": "Refresh",
   "file_preview.mode": "File display mode",
   "file_preview.rendered": "Preview",
