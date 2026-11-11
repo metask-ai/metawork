@@ -290,10 +290,13 @@ test("Global search scrolls the active result into view and preserves its identi
   const input = screen.getByRole("combobox");
   const list = screen.getByRole("listbox");
   const last = screen.getByRole("option", { name: "Task Task 49" });
-  list.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
-  last.getBoundingClientRect = () => ({ top: 150, bottom: 180 });
+  Object.defineProperty(list, "clientHeight", { value: 100 });
+  Object.defineProperties(last, {
+    offsetTop: { value: 150 },
+    offsetHeight: { value: 30 },
+  });
   fireEvent.keyDown(input, { key: "ArrowUp" });
-  assert.equal(list.scrollTop, 80);
+  assert.equal(list.scrollTop, 81);
   assert.equal(input.getAttribute("aria-activedescendant"), last.id);
   fireEvent.mouseEnter(screen.getAllByRole("option")[0]);
   fireEvent.keyDown(input, { key: "Enter" });
@@ -4047,6 +4050,10 @@ test("Global search distinguishes a pending work page and exposes bounded contin
   };
   const view = render(searchElement(props));
   assert.equal(screen.getByRole("status").textContent, "Searching…");
+  assert.equal(
+    screen.getByRole("combobox").getAttribute("aria-expanded"),
+    "false",
+  );
   assert.equal(screen.queryByText("No results found."), null);
   assert.ok(screen.getByRole("button", { name: "Continue search" }).disabled);
   view.rerender(searchElement({ ...props, loading: false }));

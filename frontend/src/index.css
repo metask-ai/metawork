@@ -8684,6 +8684,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .search-results {
+  position: relative;
   max-height: min(58vh, 520px);
   padding: 6px;
   overflow: hidden auto;
@@ -8717,12 +8718,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .search-result:focus-visible,
 .search-result[data-active="true"] {
-  background: var(--metask-primary-soft);
+  background: var(--ui-action-selected-surface);
   box-shadow: inset 2px 0 var(--ui-action-primary);
 }
 
 .search-result-kind {
-  color: var(--ui-action-primary);
+  color: var(--ui-content-muted);
   font-family: var(--font-mono);
   font-size: var(--text-micro);
   text-transform: uppercase;

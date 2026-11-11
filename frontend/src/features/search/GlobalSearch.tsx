@@ -57,12 +57,13 @@ export function GlobalSearch({
   useLayoutEffect(() => {
     const container = list.current;
     const option = container?.children.item(activeIndex);
-    if (!open || !container || !option) return;
-    const viewport = container.getBoundingClientRect();
-    const row = option.getBoundingClientRect();
-    if (row.top < viewport.top) container.scrollTop += row.top - viewport.top;
-    else if (row.bottom > viewport.bottom)
-      container.scrollTop += row.bottom - viewport.bottom;
+    if (!open || !container || !(option instanceof HTMLElement)) return;
+    const top = option.offsetTop;
+    const bottom = top + option.offsetHeight;
+    // Offsets use layout pixels. Leave one pixel for fractional row edges.
+    if (top < container.scrollTop) container.scrollTop = top - 1;
+    else if (bottom >= container.scrollTop + container.clientHeight)
+      container.scrollTop = bottom - container.clientHeight + 1;
   }, [activeIndex, activeResult?.key, open]);
 
   function changePage(action: () => void) {
@@ -97,7 +98,7 @@ export function GlobalSearch({
                 value={query}
                 aria-label={t("search.title")}
                 aria-autocomplete="list"
-                aria-expanded="true"
+                aria-expanded={Boolean(activeResult)}
                 aria-controls="search-results"
                 aria-activedescendant={
                   activeResult ? `search-result-${activeIndex}` : undefined
