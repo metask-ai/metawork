@@ -3633,6 +3633,60 @@ test("multimodal drafts expose ordered removable chips and preserve keyboard foc
   );
 });
 
+test("draft image chips open a preview while file chips stay metadata-only", () => {
+  const previewed = [];
+  const removed = [];
+  renderComposer({
+    attachmentsEnabled: true,
+    draft: {
+      kind: "multimodal",
+      text: "Compare these files",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "image",
+          format: "png",
+          displayName: "diagram.png",
+          sizeBytes: "1536",
+        },
+        {
+          token: "b".repeat(48),
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "12",
+        },
+      ],
+    },
+    onPreviewAttachment(preview) {
+      previewed.push(preview);
+    },
+    onRemoveAttachment(token) {
+      removed.push(token);
+    },
+  });
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Preview diagram.png",
+      description: "Image · 2 KB",
+    }),
+  );
+  assert.deepEqual(previewed, [
+    {
+      token: "a".repeat(48),
+      displayName: "diagram.png",
+      detail: "PNG · 2 KB",
+    },
+  ]);
+  assert.deepEqual(removed, []);
+  assert.equal(
+    screen.queryByRole("button", { name: "Preview notes.txt" }),
+    null,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Remove diagram.png" }));
+  assert.deepEqual(removed, ["a".repeat(48)]);
+  assert.equal(previewed.length, 1);
+});
+
 test("removing the last attachment returns keyboard focus to the picker", async () => {
   const removed = [];
   let composer;

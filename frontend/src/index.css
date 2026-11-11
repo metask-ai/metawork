@@ -7904,6 +7904,84 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-panel-2);
 }
 
+.composer-attachment-open {
+  display: grid;
+  min-width: 0;
+  grid-column: 1 / 3;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  margin: -3px 0 -3px -4px;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: zoom-in;
+}
+
+.composer-attachment-open:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.attachment-preview-dialog {
+  width: min(960px, calc(100vw - 2rem));
+  gap: 12px;
+  padding: 16px;
+}
+
+.attachment-preview-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.attachment-preview-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.attachment-preview-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-preview-body {
+  display: grid;
+  min-height: 160px;
+  place-items: center;
+}
+
+.attachment-preview-frame {
+  max-width: 100%;
+}
+
+.attachment-preview-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.attachment-preview-feedback {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  margin: 0;
+  color: var(--ui-content-muted);
+  text-align: center;
+}
+
+.attachment-preview-feedback p {
+  margin: 0;
+}
+
 .composer-attachment-kind {
   color: var(--ui-action-primary);
   font-family: var(--font-mono);

@@ -973,6 +973,11 @@ export const enUS = {
   "attachment.drop": "Drop files to add",
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
+  "attachment.preview": "Preview {name}",
+  "attachment.preview.close": "Close image preview",
+  "attachment.preview.failed": "This image can't be previewed right now.",
+  "attachment.preview.invalid_draft":
+    "This attachment is no longer available. Remove it and add it again.",
   "attachment.type.image": "Image",
   "attachment.type.file": "File",
   "attachment.reload_required":

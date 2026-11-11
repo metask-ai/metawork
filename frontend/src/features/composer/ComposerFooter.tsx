@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -96,6 +97,36 @@ function attachmentErrorMessage(reason: string): MessageId {
   return messages[reason] ?? "attachment.error.generic";
 }
 
+function AttachmentSummary({
+  attachment,
+  detailId,
+}: {
+  attachment: ComposerAttachment;
+  detailId?: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <>
+      <span className="composer-attachment-kind" aria-hidden="true">
+        {attachment.kind === "image" ? (
+          attachment.format.toUpperCase()
+        ) : (
+          <Icon name="skill-file" />
+        )}
+      </span>
+      <span className="composer-attachment-copy">
+        <strong dir="auto" title={attachment.displayName}>
+          {attachment.displayName}
+        </strong>
+        <small id={detailId}>
+          {attachmentTypeLabel(attachment, t)} ·{" "}
+          {formatAttachmentSize(attachment.sizeBytes)}
+        </small>
+      </span>
+    </>
+  );
+}
+
 export function ComposerFooter({
   textareaRef,
   approvalModeControl,
@@ -145,6 +176,7 @@ export function ComposerFooter({
   onPasteImages,
   onCancelAttachments,
   onRemoveAttachment,
+  onPreviewAttachment,
   onSubmit,
   sendDisabledReason,
   onStop,
@@ -208,6 +240,11 @@ export function ComposerFooter({
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
+  /** Opens one ready draft image; the opener receives focus on close. */
+  onPreviewAttachment?: (
+    preview: { token: string; displayName: string; detail: string },
+    opener: HTMLElement,
+  ) => void;
   onSubmit: () => void;
   sendDisabledReason?: MessageId;
   onStop: () => void;
@@ -255,6 +292,7 @@ export function ComposerFooter({
   const composerShellRef = useRef<HTMLDivElement>(null);
   const placeCaretAfterSkill = useRef(false);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const attachmentDetailId = useId();
   const onDropFilesRef = useRef(onDropFiles);
   onDropFilesRef.current = onDropFiles;
   const attachmentRemoveRefs = useRef(new Map<string, HTMLElement>());
@@ -678,22 +716,33 @@ export function ComposerFooter({
                   role="listitem"
                   key={attachment.token}
                 >
-                  <span className="composer-attachment-kind" aria-hidden="true">
-                    {attachment.kind === "image" ? (
-                      attachment.format.toUpperCase()
-                    ) : (
-                      <Icon name="skill-file" />
-                    )}
-                  </span>
-                  <span className="composer-attachment-copy">
-                    <strong dir="auto" title={attachment.displayName}>
-                      {attachment.displayName}
-                    </strong>
-                    <small>
-                      {attachmentTypeLabel(attachment, t)} ·{" "}
-                      {formatAttachmentSize(attachment.sizeBytes)}
-                    </small>
-                  </span>
+                  {attachment.kind === "image" && onPreviewAttachment ? (
+                    <button
+                      type="button"
+                      className="composer-attachment-open focus-ring"
+                      aria-label={t("attachment.preview", {
+                        name: attachment.displayName,
+                      })}
+                      aria-describedby={`${attachmentDetailId}-${index}`}
+                      onClick={(event) =>
+                        onPreviewAttachment(
+                          {
+                            token: attachment.token,
+                            displayName: attachment.displayName,
+                            detail: `${attachment.format.toUpperCase()} · ${formatAttachmentSize(attachment.sizeBytes)}`,
+                          },
+                          event.currentTarget,
+                        )
+                      }
+                    >
+                      <AttachmentSummary
+                        attachment={attachment}
+                        detailId={`${attachmentDetailId}-${index}`}
+                      />
+                    </button>
+                  ) : (
+                    <AttachmentSummary attachment={attachment} />
+                  )}
                   <Button
                     type="button"
                     variant="ghost"

@@ -85,6 +85,7 @@
             .{ .name = "metawork.attachments.finishReceive", .origins = .{"zero://app"} },
             .{ .name = "metawork.attachments.cancelReceive", .origins = .{"zero://app"} },
             .{ .name = "metawork.attachments.release", .origins = .{"zero://app"} },
+            .{ .name = "metawork.attachments.preview", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.beginLogin", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.cancelOperation", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.retryRefresh", .origins = .{"zero://app"} },

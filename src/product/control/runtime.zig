@@ -2031,6 +2031,30 @@ pub const Runtime = struct {
         return .queued;
     }
 
+    /// Previews the bounded PNG already prepared for an unsent draft image. The
+    /// Bridge resolves its connection-bound grant; Product rechecks the draft.
+    pub fn beginAttachmentPreview(self: *Runtime, completion_id: u64, attachment_id: u64) FilePreviewAdmission {
+        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        const preview = self.attachments.draftImagePreview(attachment_id) orelse return .{ .immediate = .missing };
+        self.preview_lane.begin(.{
+            .source = .attachment_draft,
+            .completion_id = completion_id,
+            .task_id = 0,
+            .run_id = 0,
+            .workspace_id = 0,
+            .workspace_epoch = 0,
+            .reference_id = "",
+            .workspace_root = "",
+            .relative_path = "",
+            .max_bytes = 0,
+            .max_lines = 0,
+            .max_line_bytes = 0,
+            .attachment_id = attachment_id,
+            .supplied = preview,
+        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+        return .queued;
+    }
+
     pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
         if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
         const binding = self.workspace.binding(workspace_id) orelse return .{ .immediate = .missing };
@@ -2065,6 +2089,7 @@ pub const Runtime = struct {
     }
 
     fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+        if (raw.source == .attachment_draft) return if (self.attachments.draftImagePreview(raw.attachment_id) != null) .ready else .missing;
         if (raw.source != .reference) return if (self.workspaceFileAuthorized(raw.task_id, raw.workspace_id, raw.workspace_epoch, raw.workspace_root) and !self.workspacePathHasCredential(raw.relative_path)) .ready else .restricted;
         const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
         if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
@@ -10047,6 +10072,11 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn filePreviewFixture(control: *Runtime, root: []const u8) !void {
         try testImagePreviewRuntime(control, root);
+    }
+
+    /// Image preparation copies its input, so a draft preview equals its bytes.
+    pub fn attachmentPreviewFixture(control: *Runtime, store: *AttachmentFileStore) !void {
+        try initTestRuntimeWithLimits(control, testLimits(), .{ .attachment_store = store, .attachment_images = .{ .prepare_fn = testAttachmentPreview } });
     }
 
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
@@ -19622,6 +19652,52 @@ test "file preview scans all original bytes including a credential across the sc
     try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
     try std.testing.expect(capture.image == null);
     try std.testing.expect(!control.hasFilePreviews());
+}
+
+test "file preview serves only an unsent draft image's prepared model preview" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
+    var control = try testRuntimeWith(.{ .attachment_store = &store, .attachment_images = .{ .prepare_fn = testAttachmentPreview } });
+    defer control.deinit();
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    var output: [2]product_attachment.Descriptor = undefined;
+    const staged = try control.attachments.stageBatch(&.{
+        .{ .display_name = "photo.jpg", .bytes = jpeg },
+        .{ .display_name = "notes.txt", .bytes = "plain" },
+    }, &output);
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginAttachmentPreview(80, staged[1].id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginAttachmentPreview(80, 9999));
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginAttachmentPreview(81, staged[0].id));
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    const image = capture.image.?;
+    try std.testing.expectEqualStrings("image/jpeg", image.media_type);
+    try std.testing.expectEqualSlices(u8, jpeg, try control.readFilePreviewImage(image.id, 0));
+    try std.testing.expect(control.releaseFilePreview(image.id));
+
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginAttachmentPreview(82, staged[0].id));
+    try std.testing.expect(control.attachments.release(staged[0].id));
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.missing, capture.state);
+    try std.testing.expect(capture.image == null);
+    try std.testing.expect(!control.hasFilePreviews());
+    try std.testing.expect(control.attachments.release(staged[1].id));
 }
 
 test "file preview immutable original transfer is sequential and revoked by security epoch" {

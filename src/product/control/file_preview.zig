@@ -10,7 +10,9 @@ pub const max_image_pixels: u64 = 4096 * 4096;
 pub const max_image_side: u32 = 8192;
 pub const image_chunk_bytes: usize = 262143;
 pub const ImageInfo = image_container.Info;
-pub const Source = enum { reference, workspace, directory };
+/// `attachment_draft` carries Host-prepared bytes for an unsent draft image;
+/// it never opens a path.
+pub const Source = enum { reference, workspace, directory, attachment_draft };
 pub const max_directory_entries = 512;
 pub const DirectoryEntry = struct { name: []const u8, kind: enum { file, directory } };
 
@@ -78,6 +80,9 @@ pub const Input = struct {
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
+    attachment_id: u64 = 0,
+    /// Copied by `begin`; only `attachment_draft` may supply bytes.
+    supplied: []const u8 = &.{},
 };
 
 pub const Completion = struct {
@@ -95,6 +100,7 @@ pub const Completion = struct {
     content: []const u8,
     image_info: ?ImageInfo = null,
     truncated: bool,
+    attachment_id: u64 = 0,
 };
 
 pub const Taken = struct {
@@ -151,6 +157,7 @@ const Job = struct {
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
+    attachment_id: u64 = 0,
     image_info: ?ImageInfo = null,
     reserved_image_bytes: usize = 0,
     cancelled: std.atomic.Value(bool) = .init(false),
@@ -202,6 +209,7 @@ const Job = struct {
             self.state = .failed;
             return .completed;
         }
+        if (self.source == .attachment_draft) return self.adoptSupplied();
         var root = std.Io.Dir.openDirAbsolute(self.lane.io, self.workspace_root, .{
             .access_sub_paths = true,
             .follow_symlinks = false,
@@ -345,6 +353,47 @@ const Job = struct {
         return .completed;
     }
 
+    /// Supplied image bytes still pass the same container, animation, size and
+    /// held-image admission rules as a file read.
+    fn adoptSupplied(self: *Job) ReadOutcome {
+        const bytes = self.buffer;
+        if (bytes.len == 0 or !isImage(bytes)) {
+            self.clearContent();
+            self.state = .unsupported;
+            return .completed;
+        }
+        if (bytes.len > max_image_source_bytes) {
+            self.clearContent();
+            self.state = .image_limit;
+            return .completed;
+        }
+        if (!self.lane.reserveImage(bytes.len)) {
+            self.clearContent();
+            self.state = .busy;
+            return .completed;
+        }
+        self.reserved_image_bytes = bytes.len;
+        const info = image_container.inspect(bytes) catch {
+            self.clearContent();
+            self.state = .unsupported;
+            return .completed;
+        };
+        if (info.animated) {
+            self.clearContent();
+            self.state = .animated_image;
+            return .completed;
+        }
+        if (info.width > max_image_side or info.height > max_image_side or info.pixels() > max_image_pixels) {
+            self.clearContent();
+            self.state = .image_limit;
+            return .completed;
+        }
+        self.content = bytes;
+        self.image_info = info;
+        self.state = .ready;
+        return .completed;
+    }
+
     fn readDirectory(self: *Job, root: std.Io.Dir) ReadOutcome {
         var directory = openWorkspaceDirectory(self.lane.io, root, self.relative_path) catch |err| {
             self.state = if (err == error.FileNotFound or err == error.NotDir) .missing else .restricted;
@@ -445,6 +494,7 @@ pub const Lane = struct {
     }
 
     pub fn begin(self: *Lane, input: Input) Error!void {
+        std.debug.assert((input.source == .attachment_draft) == (input.supplied.len != 0));
         self.lock();
         if (!self.accepting) {
             self.unlock();
@@ -470,6 +520,11 @@ pub const Lane = struct {
         errdefer self.allocator.free(workspace_root);
         const relative_path = try self.allocator.dupe(u8, input.relative_path);
         errdefer self.allocator.free(relative_path);
+        const supplied = try self.allocator.dupe(u8, input.supplied);
+        errdefer {
+            std.crypto.secureZero(u8, supplied);
+            self.allocator.free(supplied);
+        }
         job.* = .{
             .source = input.source,
             .lane = self,
@@ -485,6 +540,8 @@ pub const Lane = struct {
             .max_bytes = input.max_bytes,
             .max_lines = input.max_lines,
             .max_line_bytes = input.max_line_bytes,
+            .attachment_id = input.attachment_id,
+            .buffer = supplied,
         };
         self.lock();
         const job_index = for (&self.jobs, 0..) |*slot, index| {
@@ -554,6 +611,7 @@ pub const Lane = struct {
                 .content = job.content,
                 .image_info = job.image_info,
                 .truncated = job.truncated,
+                .attachment_id = job.attachment_id,
             },
         };
     }
@@ -924,6 +982,58 @@ test "two retained image buffers do not take text capacity and busy retains no b
     for (held) |taken| lane.release(taken);
     try std.testing.expectEqual(@as(usize, 0), lane.image_count);
     try std.testing.expectEqual(@as(usize, 0), lane.image_bytes);
+}
+
+test "draft attachment previews adopt an owned copy under the shared image admission" {
+    const Sync = struct {
+        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            job.execute_fn(job.context);
+        }
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = Sync.wake }, .{ .context = &context, .enqueue_fn = Sync.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++
+        "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    var source = jpeg.*;
+    const draft: Input = .{ .source = .attachment_draft, .completion_id = 1, .task_id = 0, .run_id = 0, .workspace_id = 0, .workspace_epoch = 0, .reference_id = "", .workspace_root = "", .relative_path = "", .max_bytes = 0, .max_lines = 0, .max_line_bytes = 0, .attachment_id = 9, .supplied = &source };
+    var held: [2]Taken = undefined;
+    for (0..3) |index| {
+        var input = draft;
+        input.completion_id = index + 1;
+        try lane.begin(input);
+        // The caller's borrowed bytes may change once begin has returned.
+        @memset(&source, 0);
+        defer source = jpeg.*;
+        const taken = lane.take().?;
+        try std.testing.expectEqual(@as(u64, 9), taken.completion.attachment_id);
+        if (index < 2) {
+            try std.testing.expectEqual(State.ready, taken.completion.state);
+            try std.testing.expectEqualSlices(u8, jpeg, taken.completion.content);
+            try std.testing.expectEqual(@as(u32, 3), taken.completion.image_info.?.width);
+            held[index] = taken;
+        } else {
+            try std.testing.expectEqual(State.busy, taken.completion.state);
+            try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
+            lane.release(taken);
+        }
+    }
+    for (held) |taken| lane.release(taken);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+    var text = "not an image".*;
+    var invalid = draft;
+    invalid.supplied = &text;
+    try lane.begin(invalid);
+    const rejected = lane.take().?;
+    defer lane.release(rejected);
+    try std.testing.expectEqual(State.unsupported, rejected.completion.state);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_count);
 }
 
 test "cancelled queued reads publish once without opening or reserving an image" {

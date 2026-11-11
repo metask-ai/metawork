@@ -109,7 +109,11 @@ export class FilePreviewLoader {
     fileReferenceId: string,
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
-    return this.loadTarget(taskId, { runId, fileReferenceId }, options);
+    return this.loadTarget(
+      commands.previewFile,
+      { taskId, runId, fileReferenceId },
+      options,
+    );
   }
   loadWorkspace(
     taskId: string,
@@ -119,10 +123,17 @@ export class FilePreviewLoader {
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
     return this.loadTarget(
-      taskId,
-      { workspaceId, workspaceEpoch, path },
+      commands.previewWorkspaceFile,
+      { taskId, workspaceId, workspaceEpoch, path },
       options,
     );
+  }
+  /** A draft image is addressed only by its connection-bound grant token. */
+  loadAttachment(
+    token: string,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<FilePreview> {
+    return this.loadTarget(commands.previewAttachment, { token }, options);
   }
   async listDirectory(
     taskId: string,
@@ -187,10 +198,11 @@ export class FilePreviewLoader {
     }
   }
   private async loadTarget(
-    taskId: string,
-    target:
-      | { runId: string; fileReferenceId: string }
-      | { workspaceId: string; workspaceEpoch: string; path: string },
+    command:
+      | typeof commands.previewFile
+      | typeof commands.previewWorkspaceFile
+      | typeof commands.previewAttachment,
+    target: Record<string, string>,
     options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();
@@ -240,16 +252,7 @@ export class FilePreviewLoader {
         signal.addEventListener("abort", cancelHost, { once: true });
         try {
           const response = decodeFilePreview(
-            await this.invoke(
-              "runId" in target
-                ? commands.previewFile
-                : commands.previewWorkspaceFile,
-              {
-                ...key,
-                taskId,
-                ...target,
-              },
-            ),
+            await this.invoke(command, { ...key, ...target }),
           );
           releasePreparation();
           check(signal);

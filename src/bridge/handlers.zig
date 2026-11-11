@@ -482,6 +482,7 @@ pub const WorkspaceFileRequest = struct {
     path: []const u8,
 };
 pub const FilePreviewChunkRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8, offset: []const u8, securityEpoch: []const u8 };
+pub const AttachmentPreviewRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8 };
 pub const FilePreviewRequest = struct {
     generation: []const u8,
     previewId: []const u8,

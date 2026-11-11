@@ -178,6 +178,63 @@ test("workspace preview and directory reads share request IDs and preserve their
   });
 });
 
+test("draft attachment previews submit only the grant token and reuse the image transfer", async () => {
+  const calls = [];
+  const grant = "c".repeat(48);
+  const imageToken = "d".repeat(48);
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === commands.previewAttachment)
+        return {
+          ...empty,
+          state: "ready",
+          image: {
+            token: imageToken,
+            mediaType: "image/png",
+            sizeBytes: String(png.length),
+            width: 1,
+            height: 1,
+            chunkBytes: "262143",
+            securityEpoch: "1",
+          },
+        };
+      if (command === commands.readPreviewImage)
+        return {
+          state: "ready",
+          token: imageToken,
+          offset: payload.offset,
+          bytes: String(png.length),
+          dataBase64: png.toString("base64"),
+        };
+      assert.equal(command, commands.releasePreview);
+      return {
+        generation: payload.generation,
+        previewId: payload.previewId,
+        released: true,
+      };
+    },
+    () => "7",
+  );
+  const preview = await loader.loadAttachment(grant);
+  assert.equal(preview.state, "ready");
+  assert.deepEqual(Buffer.from(preview.image.src.split(",")[1], "base64"), png);
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    [
+      commands.previewAttachment,
+      commands.readPreviewImage,
+      commands.releasePreview,
+    ],
+  );
+  assert.deepEqual(calls[0].payload, {
+    generation: "7",
+    previewId: "1",
+    token: grant,
+  });
+  preview.release();
+});
+
 test("original bytes including a trailer round trip through sequential aligned chunks and close before display", async () => {
   const host = new Host();
   host.bytes = Buffer.concat([png, Buffer.alloc(524300, 0x7a)]);

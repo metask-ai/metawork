@@ -70,6 +70,7 @@ export const commands = {
   finishAttachmentReceive: "metawork.attachments.finishReceive",
   cancelAttachmentReceive: "metawork.attachments.cancelReceive",
   releaseAttachment: "metawork.attachments.release",
+  previewAttachment: "metawork.attachments.preview",
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRetryRefresh: "metawork.account.retryRefresh",

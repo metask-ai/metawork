@@ -400,6 +400,14 @@ pub const Runtime = struct {
         return self.descriptor(entry);
     }
 
+    /// The bounded PNG already prepared for model input. Only an unsent draft
+    /// image is previewable; the borrow is valid until the next mutation.
+    pub fn draftImagePreview(self: *const Runtime, id: u64) ?[]const u8 {
+        const entry = self.slots[self.findIndex(id) orelse return null].?;
+        if (entry.state != .ready or entry.format == null or entry.preview.len == 0) return null;
+        return entry.preview;
+    }
+
     /// Only retained, never-delivered Task input originals can be removed here.
     /// The ordinary staging cleanup guard remains unchanged.
     pub fn settleTaskInput(self: *Runtime, id: u64, task_id: u64, keep_original: bool) Error!void {
@@ -661,6 +669,31 @@ test "borrow rollback preserves ready entries and consume releases the batch" {
     second.consume();
     try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
     try std.testing.expect(runtime.descriptorFor(ids[0]) == null);
+}
+
+test "only unsent draft images expose their prepared model preview" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var runtime = try Runtime.init(std.testing.allocator, testLimits(), &fixture.store, .{ .prepare_fn = TestStore.image }, null);
+    defer runtime.deinit();
+    const candidates = [_]Candidate{
+        .{ .display_name = "b.png", .bytes = "\x89PNG\r\n\x1a\ndata" },
+        .{ .display_name = "notes.txt", .bytes = "plain" },
+    };
+    var output: [2]Descriptor = undefined;
+    const staged = try runtime.stageBatch(&candidates, &output);
+    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\ndata", runtime.draftImagePreview(staged[0].id).?);
+    try std.testing.expect(runtime.draftImagePreview(staged[1].id) == null);
+    try std.testing.expect(runtime.draftImagePreview(9999) == null);
+    var parts: [1]BorrowedPart = undefined;
+    var indices: [1]usize = undefined;
+    var borrowed = try runtime.borrow(&.{staged[0].id}, &parts, &indices, 1);
+    try std.testing.expect(runtime.draftImagePreview(staged[0].id) == null);
+    borrowed.rollback();
+    try std.testing.expect(runtime.draftImagePreview(staged[0].id) != null);
+    try std.testing.expect(runtime.release(staged[0].id));
+    try std.testing.expect(runtime.draftImagePreview(staged[0].id) == null);
+    try std.testing.expect(runtime.release(staged[1].id));
 }
 
 test "duplicate and stale identities fail before changing any state" {

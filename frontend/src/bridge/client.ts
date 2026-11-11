@@ -419,6 +419,12 @@ export class BridgeClient {
       options,
     );
   }
+  previewAttachment(
+    token: string,
+    options?: FilePreviewLoadOptions,
+  ): Promise<FilePreview> {
+    return this.previews.loadAttachment(token, options);
+  }
   async ping() {
     return decodePingResponse(
       await this.invoke(commands.ping, {
