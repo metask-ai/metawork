@@ -213,7 +213,10 @@ import {
 import { WorkspaceRemovalMenu } from "../features/workspaces/WorkspaceRemovalMenu.tsx";
 import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
-import { navigableTasks } from "../workbench/task-visibility.ts";
+import {
+  navigableTasks,
+  selectableTask,
+} from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
 import {
   readyModelOptions,
@@ -360,6 +363,16 @@ export default function App() {
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchSelection, setSearchSelection] = useState<string | null>(null);
+  const [searchSelectionUnavailable, setSearchSelectionUnavailable] =
+    useState(false);
+  const searchOpener = useRef<HTMLElement | null>(null);
+  const searchButton = useRef<HTMLButtonElement>(null);
+  const searchFocusDestination = useRef<
+    "opener" | "external" | { taskId: string }
+  >("opener");
+  const taskStage = useRef<HTMLElement>(null);
+  const taskTitle = useRef<HTMLSpanElement>(null);
   const [taskStageExposed, setTaskStageExposed] = useState(false);
   const [documentAttention, setDocumentAttention] = useState(() =>
     typeof document === "undefined" ? false : documentHasAttention(document),
@@ -373,13 +386,39 @@ export default function App() {
   const [searchCursor, setSearchCursor] = useState<
     import("../bridge/contracts.ts").SearchCursor | null
   >(null);
+  const openGlobalSearch = useCallback(
+    (opener?: HTMLElement) => {
+      if (searchOpen) return;
+      searchOpener.current =
+        opener ??
+        (document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null);
+      searchFocusDestination.current = "opener";
+      setSearchSelectionUnavailable(false);
+      setSearchOpen(true);
+    },
+    [searchOpen],
+  );
+  const closeGlobalSearch = useCallback(
+    (destination: "opener" | "external" | { taskId: string }) => {
+      searchFocusDestination.current = destination;
+      setSearchSelection(null);
+      setSearchOpen(false);
+      setSearchQuery("");
+      setSearchHostQuery("");
+      setSearchCursor(null);
+    },
+    [],
+  );
   useEffect(() => {
+    if (!searchOpen || searchQuery.trim() === searchHostQuery) return;
     const timer = setTimeout(() => {
       setSearchHostQuery(searchQuery.trim());
       setSearchCursor(null);
     }, 180);
     return () => clearTimeout(timer);
-  }, [searchQuery]);
+  }, [searchHostQuery, searchOpen, searchQuery]);
 
   const [skillsQuery, setSkillsQuery] = useState("");
   const cancelMcpInstallation = (id: string, revision: string) =>
@@ -1336,31 +1375,53 @@ export default function App() {
   useEffect(() => {
     setSearchCursor(null);
   }, [snapshot.securityEpoch, bridgeGeneration]);
-  useEffect(() => {
-    if (snapshot.searchIndex?.stale) setSearchCursor(null);
-  }, [snapshot.searchIndex]);
-  const searchCurrent =
-    snapshot.scope.searchQuery === searchHostQuery &&
-    searchQuery.trim() === searchHostQuery &&
-    JSON.stringify(snapshot.scope.searchCursor) ===
-      JSON.stringify(searchCursor);
+  const searchQueryReady = searchOpen && searchQuery.trim() === searchHostQuery;
+  function matchesSearchPage(view: WorkbenchSnapshot) {
+    return (
+      searchQueryReady &&
+      view.scope.search &&
+      view.scope.searchQuery === searchHostQuery &&
+      JSON.stringify(view.scope.searchCursor) === JSON.stringify(searchCursor)
+    );
+  }
+  const searchCurrent = matchesSearchPage(snapshot);
+  const searchPage = searchCurrent ? snapshot.searchIndex : null;
+  const nextSearchCursor = searchPage?.stale
+    ? null
+    : (searchPage?.nextCursor ?? null);
   const searchResults = useMemo(
     () => (searchCurrent ? searchWorkbench(snapshot, searchHostQuery) : []),
     [searchHostQuery, snapshot, searchCurrent],
   );
-  // Empty work quanta continue automatically; only pages with visible hits
-  // require a user's next-page action. No result corpus accumulates here.
   useEffect(() => {
+    if (searchPage?.stale) setSearchCursor(null);
+  }, [searchPage]);
+  useLayoutEffect(() => {
+    if (searchSelection === null) return;
     if (
-      searchOpen &&
-      searchCurrent &&
-      snapshot.searchIndex &&
-      !snapshot.searchIndex.stale &&
-      snapshot.searchIndex.results.length === 0 &&
-      snapshot.searchIndex.nextCursor
-    )
-      setSearchCursor(snapshot.searchIndex.nextCursor);
-  }, [searchOpen, searchCurrent, snapshot.searchIndex]);
+      !searchOpen ||
+      route !== "workbench" ||
+      workbench.activeTaskId !== searchSelection ||
+      !latestSnapshotRef.current ||
+      !selectableTask(latestSnapshotRef.current, searchSelection)
+    ) {
+      setSearchSelection(null);
+      if (searchOpen) setSearchSelectionUnavailable(true);
+      return;
+    }
+    setSettingsOpen(false);
+    closeGlobalSearch({ taskId: searchSelection });
+  }, [
+    closeGlobalSearch,
+    route,
+    searchOpen,
+    searchSelection,
+    workbench.activeTaskId,
+  ]);
+  useEffect(() => {
+    if (nextSearchCursor && searchResults.length === 0)
+      setSearchCursor(nextSearchCursor);
+  }, [nextSearchCursor, searchResults.length]);
   const taskDrafts = useTaskDrafts(workbench.activeTaskId);
   const newTaskDraftActive =
     workbench.draftOpen || workbench.activeTaskId === null;
@@ -1878,7 +1939,7 @@ export default function App() {
     setNotificationTarget(null);
     setSettingsOpen(false);
     setModelSetupOpen(false);
-    setSearchOpen(false);
+    closeGlobalSearch("external");
     setRoute("workbench");
     pendingTaskSelection.current = target.taskId;
     void refreshSnapshot()
@@ -1914,6 +1975,7 @@ export default function App() {
     notificationTarget,
     bridgeGeneration,
     bridgeUnavailable,
+    closeGlobalSearch,
     refreshSnapshot,
   ]);
   useEffect(() => {
@@ -2159,7 +2221,7 @@ export default function App() {
       event.preventDefault();
       if (bridgeUnavailable || modelSetupOpen || renameEditor) return;
       if (key === "k") {
-        setSearchOpen(true);
+        openGlobalSearch();
       } else {
         setRoute("workbench");
         beginNewTask();
@@ -2167,7 +2229,7 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [bridgeUnavailable, modelSetupOpen, renameEditor]);
+  }, [bridgeUnavailable, modelSetupOpen, openGlobalSearch, renameEditor]);
   useEffect(() => {
     if (!client.available()) return;
     return client.onShortcut((detail) => {
@@ -3729,9 +3791,57 @@ export default function App() {
     }
   }
   function selectSearchResult(result: SearchResult) {
+    if (!searchOpen || searchSelection !== null) return;
+    const latest = latestSnapshotRef.current;
+    if (
+      !latest ||
+      !matchesSearchPage(latest) ||
+      !searchWorkbench(latest, searchHostQuery).some(
+        (candidate) => candidate.key === result.key,
+      )
+    ) {
+      setSearchSelectionUnavailable(true);
+      return;
+    }
+    setSearchSelection(result.taskId);
     openTask(result.taskId);
-    setSearchOpen(false);
-    setSearchQuery("");
+  }
+  function searchFocusTarget(...targets: (HTMLElement | null)[]) {
+    return targets.find(
+      (target) =>
+        target?.isConnected &&
+        target !== document.body &&
+        !target.closest("[inert], [hidden]") &&
+        !target.matches(":disabled") &&
+        target.checkVisibility?.({ visibilityProperty: true }) !== false,
+    );
+  }
+  function restoreSearchFocus() {
+    const destination = searchFocusDestination.current;
+    const focused = document.activeElement;
+    if (
+      searchOpen ||
+      destination === "external" ||
+      (focused &&
+        focused !== document.body &&
+        !focused.closest(".search-dialog"))
+    )
+      return;
+    if (destination === "opener") {
+      searchFocusTarget(searchOpener.current, searchButton.current)?.focus({
+        preventScroll: true,
+      });
+    } else if (
+      route === "workbench" &&
+      !settingsOpen &&
+      workbench.activeTaskId === destination.taskId
+    ) {
+      searchFocusTarget(
+        taskStageExposed ? taskStage.current : null,
+        taskTitle.current,
+        searchButton.current,
+      )?.focus({ preventScroll: true });
+    }
   }
   function handleTaskAction(task: TaskSummary, action: TaskMenuAction) {
     if (action === "rename") {
@@ -4542,7 +4652,15 @@ export default function App() {
           </>
         ) : null
       }
-      onSearch={() => setSearchOpen(true)}
+      onSearch={openGlobalSearch}
+      searchButtonRef={searchButton}
+      taskStageRef={taskStage}
+      taskTitleRef={taskTitle}
+      taskStageLabel={
+        route === "workbench" && selectedTaskSummary
+          ? activeTaskTitle
+          : undefined
+      }
       attentionNotice={
         commandBarFeedback.length > 1
           ? t("feedback.open", { count: String(commandBarFeedback.length) })
@@ -5454,32 +5572,30 @@ export default function App() {
       )}
       <GlobalSearch
         open={searchOpen}
+        onClosed={restoreSearchFocus}
+        selectionUnavailable={searchSelectionUnavailable}
         query={searchQuery}
         results={searchResults}
         loading={
           Boolean(searchQuery.trim()) &&
-          (!searchCurrent ||
-            snapshot.searchIndex === null ||
-            snapshot.searchIndex.stale ||
-            (snapshot.searchIndex.results.length === 0 &&
-              snapshot.searchIndex.nextCursor !== null))
+          (!searchPage ||
+            searchPage.stale ||
+            (searchResults.length === 0 && nextSearchCursor !== null))
         }
-        hasMore={searchCurrent && snapshot.searchIndex?.nextCursor != null}
-        onMore={() => {
-          if (searchCurrent && snapshot.searchIndex?.nextCursor)
-            setSearchCursor(snapshot.searchIndex.nextCursor);
-        }}
+        hasMore={searchResults.length > 0 && nextSearchCursor !== null}
+        onMore={
+          nextSearchCursor ? () => setSearchCursor(nextSearchCursor) : undefined
+        }
         onFirst={
-          searchCursor === null ? undefined : () => setSearchCursor(null)
+          searchQueryReady && searchCursor
+            ? () => setSearchCursor(null)
+            : undefined
         }
         onQuery={(query) => {
+          setSearchSelectionUnavailable(false);
           setSearchQuery(boundedSearchQuery(query));
-          setSearchCursor(null);
         }}
-        onClose={() => {
-          setSearchOpen(false);
-          setSearchQuery("");
-        }}
+        onClose={() => closeGlobalSearch("opener")}
         onSelect={selectSearchResult}
       />
       <ModelSetupDialog

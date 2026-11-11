@@ -387,6 +387,10 @@ test("global search consumes only the current Host page and drops stale queries"
   assert.deepEqual(searchWorkbench(snapshot, "private"), []);
   assert.deepEqual(searchWorkbench(snapshot, "tool-only"), []);
   assert.deepEqual(searchWorkbench(snapshot, "new query"), []);
+  snapshot.workspaces = [];
+  assert.deepEqual(searchWorkbench(snapshot, "audit"), []);
+  snapshot.taskIndex[0].archived = true;
+  assert.equal(searchWorkbench(snapshot, "audit")[0].archived, true);
   snapshot.searchIndex.stale = true;
   assert.deepEqual(searchWorkbench(snapshot, "audit"), []);
 });

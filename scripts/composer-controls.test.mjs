@@ -243,6 +243,18 @@ test("Global search keeps focus in its combobox and restores the opener", async 
     options.map((option) => option.tabIndex),
     [-1, -1],
   );
+  assert.equal(screen.getByRole("listbox").tabIndex, -1);
+  const close = screen.getByRole("button", { name: "Close" });
+  assert.ok(close.closest('[role="dialog"]'));
+  fireEvent.keyDown(combobox, { key: "ArrowDown", isComposing: true });
+  assert.equal(combobox.getAttribute("aria-activedescendant"), options[0].id);
+  fireEvent.compositionStart(combobox);
+  fireEvent.keyDown(combobox, { key: "Enter" });
+  fireEvent.keyDown(combobox, { key: "Escape" });
+  assert.equal(closed, 0);
+  fireEvent.compositionEnd(combobox);
+  fireEvent.keyDown(combobox, { key: "Enter", keyCode: 229 });
+  assert.deepEqual(selected, []);
   fireEvent.keyDown(combobox, { key: "ArrowDown" });
   assert.equal(
     combobox.getAttribute("aria-activedescendant"),
@@ -250,12 +262,55 @@ test("Global search keeps focus in its combobox and restores the opener", async 
   );
   fireEvent.keyDown(combobox, { key: "Enter" });
   assert.deepEqual(selected, ["task:2"]);
-  fireEvent.keyDown(document, { key: "Escape" });
+  fireEvent.click(close);
   assert.equal(closed, 1);
   view.rerender(searchElement({ ...props, open: false }));
   await waitFor(() => assert.ok(document.activeElement === opener));
   view.unmount();
   opener.remove();
+});
+
+test("Global search scrolls the active result into view and preserves its identity", () => {
+  const results = Array.from({ length: 50 }, (_, index) => ({
+    key: `task:${index}`,
+    kind: "task",
+    title: `Task ${index}`,
+    detail: "",
+    taskId: String(index),
+  }));
+  const selected = [];
+  const props = {
+    open: true,
+    query: "task",
+    results,
+    onQuery() {},
+    onClose() {},
+    onSelect(result) {
+      selected.push(result.key);
+    },
+  };
+  const view = render(searchElement(props));
+  const input = screen.getByRole("combobox");
+  const list = screen.getByRole("listbox");
+  const last = screen.getByRole("option", { name: "Task Task 49" });
+  Object.defineProperty(list, "clientHeight", { value: 100 });
+  Object.defineProperties(last, {
+    offsetTop: { value: 150 },
+    offsetHeight: { value: 30 },
+  });
+  fireEvent.keyDown(input, { key: "ArrowUp" });
+  assert.equal(list.scrollTop, 81);
+  assert.equal(input.getAttribute("aria-activedescendant"), last.id);
+  fireEvent.mouseEnter(screen.getAllByRole("option")[0]);
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  const reordered = [results[49], ...results.slice(0, 49)];
+  view.rerender(searchElement({ ...props, results: reordered }));
+  fireEvent.keyDown(input, { key: "Enter" });
+  view.rerender(searchElement({ ...props, results: results.slice(0, 49) }));
+  fireEvent.keyDown(input, { key: "Enter" });
+  assert.deepEqual(selected, ["task:49", "task:49", "task:0"]);
+  view.unmount();
 });
 
 test("SelectionMenu labels the custom group without adding a selectable item or interrupting keyboard navigation", async () => {
@@ -4373,6 +4428,10 @@ test("Global search distinguishes a pending work page and exposes bounded contin
   };
   const view = render(searchElement(props));
   assert.equal(screen.getByRole("status").textContent, "Searching…");
+  assert.equal(
+    screen.getByRole("combobox").getAttribute("aria-expanded"),
+    "false",
+  );
   assert.equal(screen.queryByText("No results found."), null);
   assert.ok(screen.getByRole("button", { name: "Continue search" }).disabled);
   view.rerender(searchElement({ ...props, loading: false }));
