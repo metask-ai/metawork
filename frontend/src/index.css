@@ -4050,6 +4050,22 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow-wrap: anywhere;
 }
 
+.skill-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+}
+
+.skill-row-builtin {
+  padding-inline: 5px;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  line-height: 1.3;
+}
+
 .skill-row-description {
   display: -webkit-box;
   overflow: hidden;

@@ -288,6 +288,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.new": "新建任务",
   "task.open": "打开一个任务",
   "skills.title": "技能",
+  "skills.builtin": "内置",
   "skills.navigation_label": "工作台工具",
   "mcp.title": "连接器",
   "mcp.subtitle": "连接外部工具，并选择新任务可以使用的能力。",

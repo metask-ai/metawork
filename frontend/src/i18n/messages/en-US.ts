@@ -347,6 +347,7 @@ export const enUS = {
   "task.new": "New task",
   "task.open": "Open a task",
   "skills.title": "Skills",
+  "skills.builtin": "Built-in",
   "skills.navigation_label": "Workbench tools",
   "mcp.title": "Connectors",
   "mcp.subtitle": "Connect external tools and choose what new tasks can use.",

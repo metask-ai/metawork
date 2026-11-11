@@ -132,6 +132,8 @@ save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路
 
 `skillManagement.personalSourceDiscovery` 与 `workspaces[].skillSourceDiscovery` 是 nullable 根检查数组。非 null 时分别含一个/两个标准根：个人 `agents.user.default`，Workspace 额外包含 `agents.workspace.default`；每项 `{ sourceId, state, reason }`，state 为 `checking | missing | checked | error`，reason 仅 error 时为 `unreadable | unsupported_entry | changed`。无可用 base 或非已授权 Manual Workspace 不得伪造检测结果。checked 只表示根检查通过；Skill winner、冲突和查询健康仍消费既有 catalog。共享 `SkillCatalogView` 与 Task pinned catalog shape 不扩展。不提供兼容目录设置、来源写入或恢复 command，management 不发布来源设置。
 
+`skillManagement.assets[].sourceKind` 为 `local_package | local_directory | builtin | external`。`builtin` 仅用于管理投影，须由 Host 核验内置目录的精确 Core 来源、查询范围与贡献身份。内置项无 `installId`，`managementState` 为 `externally_managed`，导出、重新导入、卸载与重试权限为 false。启停继续按现有 catalog 与用户策略授权。
+
 `skillManagement.assets[].origin` 为 null 或 `{ ecosystem: agents | claude | codex, scope: personal | project }`；由 Product 通过精确来源关联提供，不代替 asset 的 policy context 或 sourceKind 导入方式。未知 origin 不允许猜测，外部来源不能因 origin 获得文件管理 authority。
 
 `skillManagement.assets[].scope` 精确为 `{ kind: personal | project | external, workspaceId }`，project 时 `workspaceId` 非空，其余为 null；asset 不携带 Workspace epoch。Renderer 只按 `workspaceId` 把 project asset 归入 `workspaces[]` 中的 Workspace；所有携带 `expectedWorkspaceEpoch` 的 command 必须取同一 snapshot 中该 Workspace 的当前 `epoch`。

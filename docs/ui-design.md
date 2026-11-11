@@ -282,7 +282,7 @@ Tasks
 - 页首右侧依次放置低强调的刷新图标、紧凑搜索入口和中性主按钮 `Import`。导入按钮使用与连接器添加按钮相同的加号。搜索复用连接器与定时任务的页首控件，关闭输入框时保留筛选，输入关键词后图标显示激活态。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
 - 资产列表展示个人范围。搜索过滤 display name、description、invocation 和 argument name；资产计数与分组从筛选结果派生。个人目录问题独立展示，搜索时仍可见；
 - `pending_verification` 独立进入“等待验证”，其他资产进入「技能」分组（英文为 `Skills`）；空分组不渲染，同一资产不重复。目录问题在资产之前按 code 和可空 invocation 独立展示与计数，即使没有 winner/资产也保持可见；asset issueCodes 仅解释关联问题，不再重复计为目录问题。不猜测冲突双方，不提供选择 winner 或通过单 Skill 启停消除冲突的动作；
-- 行主体显示线性 Skill 文档图标、display name、单行 description 和需处理的状态文字。可查看的技能正文在详情弹窗中展示；
+- 行主体显示线性 Skill 文档图标、display name、单行 description 和需处理的状态文字。由 Host 标识为内置的技能在名称旁显示带细边框的「内置」标签。可查看的技能正文在详情弹窗中展示；
 - 能精确映射到个人 catalog 的资产在行尾显示独立启用开关。catalog 或 selection 不可用、身份无法确认时，开关不可操作；
 - 打开详情的按钮与开关是并列控件。开关最小命中区为 44 × 44 px，开启时与连接器、定时任务共用绿色状态 token，关闭时使用中性边框色。控件提供文字和键盘焦点，等待 committed Snapshot 后更新。窄窗将开关移到行下方；
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。

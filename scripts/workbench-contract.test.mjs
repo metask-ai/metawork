@@ -350,6 +350,35 @@ test("Skill recovery state matches the Host fixture and enforces Retry authority
   }
 });
 
+test("Built-in Skill provenance does not grant file management", () => {
+  const candidate = clone(fixture);
+  candidate.skillManagement.assets = [
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../frontend/src/bridge/__fixtures__/skill-builtin.fixture",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  for (const forbidden of [
+    "canExport",
+    "canReimport",
+    "canUninstall",
+    "canRetry",
+  ]) {
+    const invalid = clone(candidate);
+    invalid.skillManagement.assets[0][forbidden] = true;
+    assert.throws(
+      () => decodeWorkbenchSnapshot(invalid),
+      /built-in skills cannot expose file management/,
+    );
+  }
+});
+
 test("Skill discovery is scoped root evidence, separate from shared Task catalog", () => {
   const candidate = clone(fixture);
   candidate.skillManagement.personalSourceDiscovery = [

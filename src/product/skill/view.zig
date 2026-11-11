@@ -361,8 +361,10 @@ fn writeExternalAsset(
     scope: management.Scope,
 ) Error!void {
     const owner = management.Owner.fromScope(scope);
-    writer.writeAll("{\"installId\":null,\"sourceKind\":\"external\",\"scope\":") catch
-        return error.SnapshotTooLarge;
+    const purpose: policy.QueryPurpose = if (owner == .personal) .management else .workspace;
+    writer.print("{{\"installId\":null,\"sourceKind\":\"{s}\",\"scope\":", .{
+        if (policy.isBuiltin(purpose, skill)) "builtin" else "external",
+    }) catch return error.SnapshotTooLarge;
     try writeScope(writer, owner);
     try writeOrigin(writer, owner, skill);
     writer.writeAll(",\"managementState\":\"externally_managed\",\"skillId\":") catch

@@ -1091,6 +1091,52 @@ desktopVertical: try {
     );
   }
   if (builtinOfficeOnly) {
+    const builtinManagementFixture = JSON.parse(
+      await readFile(
+        join(root, "frontend/src/bridge/__fixtures__/skill-builtin.fixture"),
+        "utf8",
+      ),
+    );
+    const verifyBuiltinManagement = () =>
+      poll(
+        async () => {
+          const current = await snapshot();
+          if (current.skillCatalog.availability !== "ready") return null;
+          const personal = current.skillManagement.assets.filter(
+            (asset) => asset.scope.kind === "personal",
+          );
+          assert.deepEqual(
+            personal
+              .filter((asset) => asset.sourceKind === "builtin")
+              .map((asset) => asset.invocationName)
+              .sort(),
+            builtinSkillNames,
+          );
+          for (const asset of personal.filter(
+            (item) => item.sourceKind === "builtin",
+          )) {
+            for (const key of [
+              "installId",
+              "canSetEnabled",
+              "canExport",
+              "canReimport",
+              "canUninstall",
+              "canRetry",
+              "managementState",
+            ]) {
+              assert.equal(
+                asset[key],
+                builtinManagementFixture[key],
+                `${asset.invocationName} ${key}`,
+              );
+            }
+          }
+          return true;
+        },
+        commandTimeoutMs,
+        "built-in Skill management provenance",
+      );
+    await verifyBuiltinManagement();
     const verifyNewTask = async (catalog) => {
       const modelSnapshot = await snapshot();
       const created = await invokeBridge("metawork.tasks.create", {
@@ -1149,6 +1195,7 @@ desktopVertical: try {
       true,
     );
     const cold = await readCatalog();
+    await verifyBuiltinManagement();
     for (const name of builtinSkillNames)
       assert.ok(
         cold.catalog.skills.some((item) => item.invocationName === name),
@@ -1900,6 +1947,7 @@ desktopVertical: try {
       for (const asset of current.skillManagement.assets) {
         if (builtinSkillNames.includes(asset.invocationName)) {
           assert.equal(asset.origin, null);
+          assert.equal(asset.sourceKind, "builtin");
           assert.equal(asset.managementState, "externally_managed");
         } else {
           assert.equal(

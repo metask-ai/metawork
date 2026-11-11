@@ -192,7 +192,12 @@ function SkillRow({
           <Icon name="skill-file" />
         </span>
         <span className="skill-row-copy">
-          <strong>{asset.displayName || asset.invocationName}</strong>
+          <span className="skill-row-title">
+            <strong>{asset.displayName || asset.invocationName}</strong>
+            {asset.sourceKind === "builtin" && (
+              <span className="skill-row-builtin">{t("skills.builtin")}</span>
+            )}
+          </span>
           <span className="skill-row-description">
             {asset.description || t("skills.no_description")}
           </span>

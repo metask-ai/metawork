@@ -196,6 +196,33 @@ test("Skills center renders a compact local management surface", () => {
   assert.doesNotMatch(markup, />\/<|installed/i);
 });
 
+test("Skills center labels only Host-identified built-in skills", () => {
+  const builtin = {
+    ...assets[0],
+    installId: null,
+    sourceKind: "builtin",
+    managementState: "externally_managed",
+    displayName: "Built-in document editor",
+    canExport: false,
+    canReimport: false,
+    canUninstall: false,
+  };
+  const external = {
+    ...builtin,
+    sourceKind: "external",
+    skillId: "external-editor",
+    displayName: "External document editor",
+  };
+  const markup = render({
+    management: { ...readyManagement, assets: [assets[0], builtin, external] },
+  });
+  assert.match(
+    markup,
+    /Built-in document editor<\/strong><span class="skill-row-builtin">Built-in<\/span>/,
+  );
+  assert.equal((markup.match(/class="skill-row-builtin"/g) ?? []).length, 1);
+});
+
 test("Skills center distinguishes physical recovery from catalog verification", () => {
   const markup = render({
     management: {

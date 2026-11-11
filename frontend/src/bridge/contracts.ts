@@ -1543,7 +1543,7 @@ export type SkillManagementView = {
   personalSourceDiscovery: SkillSourceDiscovery;
   assets: {
     installId: string | null;
-    sourceKind: "local_package" | "local_directory" | "external";
+    sourceKind: "local_package" | "local_directory" | "builtin" | "external";
     origin: {
       ecosystem: (typeof skillOriginEcosystems)[number];
       scope: (typeof skillOriginScopes)[number];

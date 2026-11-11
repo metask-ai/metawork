@@ -860,6 +860,7 @@ function decodeSkillManagement(
         sourceKind: enumValue(asset.sourceKind, `${itemPath}.sourceKind`, [
           "local_package",
           "local_directory",
+          "builtin",
           "external",
         ] as const),
         origin: decodeSkillOrigin(asset.origin, `${itemPath}.origin`),
@@ -940,6 +941,16 @@ function decodeSkillManagement(
     },
   );
   for (const asset of assets) {
+    if (
+      asset.sourceKind === "builtin" &&
+      (asset.installId !== null ||
+        asset.managementState !== "externally_managed" ||
+        asset.canExport ||
+        asset.canReimport ||
+        asset.canUninstall ||
+        asset.canRetry)
+    )
+      fail(path, "built-in skills cannot expose file management");
     if (
       asset.managementState === "recovery_required" &&
       (asset.installId === null ||

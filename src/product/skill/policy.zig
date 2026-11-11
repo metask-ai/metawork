@@ -21,6 +21,14 @@ pub fn origin(purpose: QueryPurpose, skill: catalog.SkillProjection) ?Origin {
     return sourceOrigin(purpose, skill.source_instance_id, skill.source_scope);
 }
 
+/// Management queries use the shared home/Workspace scope for all inputs.
+pub fn isBuiltin(purpose: QueryPurpose, skill: catalog.SkillProjection) bool {
+    const expected_scope: agent.CatalogSourceScope = if (purpose == .management) .workspace else .user;
+    return skill.source_scope == expected_scope and skill.contribution_id.len != 0 and
+        std.mem.eql(u8, skill.provider_id, "agents.directory") and
+        std.mem.eql(u8, skill.source_instance_id, sources.builtin_source_instance_id);
+}
+
 fn sourceOrigin(purpose: QueryPurpose, id: []const u8, scope: agent.CatalogSourceScope) ?Origin {
     for ([_]ManagedSource{ .user_default, .workspace_default }) |known| {
         if (!std.mem.eql(u8, id, known.id())) continue;
@@ -389,6 +397,33 @@ pub fn restoreSourceAllowed(skill: catalog.SkillProjection, personal_only: bool)
     if (std.mem.eql(u8, skill.source_instance_id, "agents.user.default") or
         std.mem.eql(u8, skill.source_instance_id, sources.builtin_source_instance_id)) return skill.source_scope == .user;
     return std.mem.eql(u8, skill.source_instance_id, "agents.workspace.default") and skill.source_scope == .workspace;
+}
+
+test "built-in Skill provenance requires the exact provider, source and query scope" {
+    var skill: catalog.SkillProjection = .{
+        .skill_id = "office",
+        .skill_policy_key = "docx",
+        .invocation_name = "docx",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = sources.builtin_source_instance_id,
+        .contribution_id = "office-contribution",
+        .content_revision = "revision",
+        .display_name = "docx",
+        .description = "",
+        .argument_names = &.{},
+        .max_values = 0,
+    };
+    try std.testing.expect(isBuiltin(.management, skill));
+    try std.testing.expect(!isBuiltin(.workspace, skill));
+    skill.source_scope = .user;
+    try std.testing.expect(isBuiltin(.workspace, skill));
+    try std.testing.expect(!isBuiltin(.management, skill));
+    skill.provider_id = "unrecognized.provider";
+    try std.testing.expect(!isBuiltin(.workspace, skill));
+    skill.provider_id = "agents.directory";
+    skill.source_instance_id = "agents.user.default";
+    try std.testing.expect(!isBuiltin(.workspace, skill));
 }
 
 test "Automatic policy grants only eligible resolved personal winners" {
