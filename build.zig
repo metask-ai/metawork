@@ -282,7 +282,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
-        .{ .name = "metawork-product-control-attachment-staging", .root_module = test_modules.product_control_attachment_staging },
+        .{ .name = "metawork-product-attachment-staging", .root_module = test_modules.product_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
         .{ .name = "metawork-product-workspace-configuration", .root_module = test_modules.product_workspace_configuration },
@@ -384,7 +384,7 @@ pub fn build(b: *std.Build) void {
     artifacts.tests.step.dependOn(&skill_import_measurement_tests.step);
     b.step("test-skill-import-performance", "Measure Skill file lifecycle apart from presentation and Run execution").dependOn(&b.addRunArtifact(skill_import_measurement_tests).step);
     const attachments_step = b.step("test-attachments", "Run attachment resources, staging and Bridge admission tests");
-    for ([_]*std.Build.Module{ test_modules.product_attachment, test_modules.product_control_attachment_staging }) |module|
+    for ([_]*std.Build.Module{ test_modules.product_attachment, test_modules.product_attachment_staging }) |module|
         attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_control_runtime }) |module|
         attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{ "attachment", "Attachment", "unified add", "add debt" } })).step);
@@ -819,7 +819,7 @@ const WiredModules = struct {
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
-    product_control_attachment_staging: *std.Build.Module,
+    product_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
     product_workspace_configuration: *std.Build.Module,
@@ -1729,7 +1729,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     const attachment_staging = b.createModule(.{
-        .root_source_file = b.path("src/product/control/attachment_staging.zig"),
+        .root_source_file = b.path("src/product/attachment/staging.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -2292,7 +2292,7 @@ fn wireAgentCore(
     );
     product_control_runtime.addImport("product_control_executor", executor);
     product_control_runtime.addImport("metawork_product_attachment", product_attachment);
-    product_control_runtime.addImport("product_control_attachment_staging", attachment_staging);
+    product_control_runtime.addImport("product_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
     product_control_runtime.addImport("product_permission_review", product_permission_review);
     product_control_runtime.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
@@ -2571,7 +2571,7 @@ fn wireAgentCore(
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
-        .product_control_attachment_staging = attachment_staging,
+        .product_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
         .product_workspace_configuration = product_workspace_configuration,

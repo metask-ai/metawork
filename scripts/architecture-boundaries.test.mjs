@@ -6,6 +6,23 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
+test("Attachment owns staging operations through completion and shutdown", () => {
+  const control = read("src/product/control/runtime.zig");
+  const staging = read("src/product/attachment/staging.zig");
+  assert.doesNotMatch(
+    control,
+    /\battachment_io\b|\.attachments\.(?:preparing|receiving|file_store|limits|images)\b/,
+  );
+  assert.doesNotMatch(
+    control,
+    /\.attachment_lane\.(?:take|release|continueCopy|continueValidation)\(/,
+  );
+  assert.doesNotMatch(
+    staging,
+    /@import\("(?:metawork_product_control|product_control_[^"]+)"\)/,
+  );
+});
+
 test("Skill and MCP read time independently of Schedule timers", () => {
   const control = read("src/product/control/runtime.zig");
   assert.doesNotMatch(control, /self\.schedule\.now\(/);
