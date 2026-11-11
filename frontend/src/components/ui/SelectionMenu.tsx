@@ -22,6 +22,8 @@ export function SelectionMenu({
   triggerRef,
   placeholder,
   ariaLabel,
+  ariaInvalid = false,
+  ariaDescribedBy,
   title,
   helper,
   actionLabel,
@@ -40,6 +42,8 @@ export function SelectionMenu({
   triggerRef?: Ref<HTMLButtonElement>;
   placeholder: string;
   ariaLabel: string;
+  ariaInvalid?: boolean;
+  ariaDescribedBy?: string;
   title?: string;
   helper?: string;
   actionLabel?: string;
@@ -74,6 +78,8 @@ export function SelectionMenu({
         ref={triggerRef}
         className={`selection-trigger ${triggerClassName}`.trim()}
         aria-label={ariaLabel}
+        aria-invalid={ariaInvalid || undefined}
+        aria-describedby={ariaDescribedBy}
         aria-busy={busy || undefined}
         data-busy={busy || undefined}
         data-layout={valueLayout}

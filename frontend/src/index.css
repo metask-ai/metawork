@@ -1488,6 +1488,21 @@ summary::-webkit-details-marker {
   gap: 8px;
   justify-content: flex-end;
 }
+.settings-model-form-actions button:disabled {
+  opacity: 0.5;
+}
+.settings-model-address-suggestion {
+  justify-self: start;
+  max-width: 100%;
+  height: auto;
+  min-height: 32px;
+  padding-block: 6px;
+  font-size: var(--text-control);
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .settings-model-connection-details {
   display: grid;
   gap: 12px;
@@ -2033,6 +2048,11 @@ summary::-webkit-details-marker {
   color: var(--settings-muted);
   background: var(--settings-frost);
   opacity: 1;
+}
+
+.settings-model-form .settings-custom-provider-input[aria-invalid="true"],
+.settings-model-form .selection-trigger.settings-control[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--metask-state-error) 58%, transparent);
 }
 
 .settings-control-compact {

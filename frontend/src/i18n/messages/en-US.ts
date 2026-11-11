@@ -1563,9 +1563,15 @@ export const enUS = {
   "settings.custom_model_address_error.address":
     "Enter a valid URL without credentials, query parameters, or a fragment.",
   "settings.custom_model_address_error.secure":
-    "Use HTTPS. HTTP is supported only for localhost.",
+    "The API key would be sent unencrypted. HTTP is allowed only for this computer (localhost, 127.0.0.1, [::1]); use HTTPS for services on your network.",
   "settings.custom_model_address_error.path":
     "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
+  "settings.custom_model_address_suggestion": "Use {endpoint}",
+  "settings.model_form_error.choice": "Select a model vendor first.",
+  "settings.model_form_error.address": "Enter the request URL.",
+  "settings.model_form_error.api_key": "Enter an API key.",
+  "settings.model_form_error.model_id": "Enter a model ID.",
+  "settings.model_form_error.model_choice": "Choose a model ID.",
   "settings.custom_model_test_start_failed":
     "Test start for {model} not yet confirmed",
   "settings.custom_model_remove_failed":

@@ -64,3 +64,20 @@ export function inspectModelEndpoint(value: string): {
 export function protocolFromEndpoint(value: string): Protocol | null {
   return inspectModelEndpoint(value).protocol;
 }
+
+const maxEndpointBytes = 2048;
+const encoder = new TextEncoder();
+// Vendor docs usually publish an OpenAI-compatible Base URL ending in a version
+// segment (`/v1`, `/api/paas/v4`). Offer the matching complete endpoint only as
+// an explicit suggestion; nothing is appended unless the user accepts it.
+export function suggestChatCompletionsEndpoint(value: string): string | null {
+  const address = value.trim();
+  if (inspectModelEndpoint(address).issue !== "path") return null;
+  const base = address.replace(/\/+$/u, "");
+  if (!/\/v\d+$/u.test(new URL(base).pathname)) return null;
+  const candidate = `${base}${requestPaths.openai_chat_completions}`;
+  return encoder.encode(candidate).length <= maxEndpointBytes &&
+    protocolFromEndpoint(candidate) === "openai_chat_completions"
+    ? candidate
+    : null;
+}
