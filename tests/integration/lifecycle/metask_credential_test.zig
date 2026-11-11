@@ -467,6 +467,12 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try expectSwitchedAccount(&wake_loop, &control, &account_runtime, tmp.dir, workspace, old_id, old_scope, previous_source_generation);
             return;
         }
+        // Userinfo bound the new login to the same principal: models.json is
+        // rewritten for the new credential, but its principal stays unchanged.
+        const relogged = control.modelsView().providers[0];
+        try std.testing.expectEqualStrings("credential-lifecycle", relogged.principal_ref);
+        try std.testing.expect(relogged.source_generation != previous_source_generation);
+        try expectPersistedMetaskSource(tmp.dir, "credential-lifecycle", relogged.source_generation);
         try std.testing.expect(old_scope != account_runtime.authorizationState().?.scope);
         try expectBlocked(&control, old_id, "replaced-authorization");
         try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
