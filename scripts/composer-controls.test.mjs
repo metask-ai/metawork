@@ -118,6 +118,9 @@ const { ModelSetupNotice } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
+const { suggestChatCompletionsEndpoint } = await vite.ssrLoadModule(
+  "/src/features/settings/model-connection.ts",
+);
 
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
@@ -1477,6 +1480,54 @@ test("a pasted address is checked at once without waiting for blur", async () =>
   assert.equal(address.getAttribute("aria-invalid"), "true");
 });
 
+test("a version-suffixed Base URL can be completed to a chat completions endpoint", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.click(address);
+  await user.paste("https://api.example.com/v1/");
+  await user.click(
+    within(dialog).getByRole("button", {
+      name: "Use https://api.example.com/v1/chat/completions",
+    }),
+  );
+  assert.equal(address.value, "https://api.example.com/v1/chat/completions");
+  assert.equal(document.activeElement, address);
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
+  assert.match(
+    within(dialog).getByRole("status").textContent,
+    /Detected API: OpenAI Chat Completions/,
+  );
+  await user.type(within(dialog).getByLabelText("API key"), "example-key");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "example-model",
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(submitted, [
+    {
+      displayName: "api.example.com",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: "https://api.example.com/v1/chat/completions",
+      apiKey: "example-key",
+      model: { id: "example-model" },
+    },
+  ]);
+});
+
 test("typed endpoint problems wait for blur or submission, and LAN HTTP explains the plaintext risk", async () => {
   const user = userEvent.setup({ document });
   const submitted = [];
@@ -1499,6 +1550,7 @@ test("typed endpoint problems wait for blur or submission, and LAN HTTP explains
     within(dialog).getByRole("alert").textContent,
     /endpoint ending in \/chat\/completions/,
   );
+  assert.equal(within(dialog).queryByRole("button", { name: /^Use / }), null);
   assert.equal(document.activeElement, address);
 
   await user.clear(address);
@@ -1507,6 +1559,7 @@ test("typed endpoint problems wait for blur or submission, and LAN HTTP explains
     within(dialog).getByRole("alert").textContent,
     /API key would be sent unencrypted.*localhost, 127\.0\.0\.1, \[::1\].*HTTPS/,
   );
+  assert.equal(within(dialog).queryByRole("button", { name: /^Use / }), null);
   assert.equal(submitted.length, 0);
 });
 
@@ -1649,6 +1702,40 @@ test("editing keeps Save disabled without changes and explains an emptied model 
   assert.equal(modelId.getAttribute("aria-invalid"), "true");
   assert.equal(accessibleDescription(modelId), "Enter a model ID.");
   assert.equal(document.activeElement, modelId);
+});
+
+test("only version-suffixed Base URLs get a chat completions suggestion", () => {
+  const long = `https://example.com/${"a".repeat(2020)}/v1`;
+  for (const [input, expected] of [
+    [
+      "https://api.example.com/v1",
+      "https://api.example.com/v1/chat/completions",
+    ],
+    [
+      "https://api.example.com/v1//",
+      "https://api.example.com/v1/chat/completions",
+    ],
+    [
+      " https://open.bigmodel.cn/api/paas/v4 ",
+      "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    ],
+    [
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    ],
+    ["http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1/chat/completions"],
+    ["https://api.example.com", null],
+    ["https://api.example.com/anthropic", null],
+    ["https://generativelanguage.googleapis.com/v1beta", null],
+    ["https://api.example.com/v1/chat/completions", null],
+    ["https://api.example.com/v1/responses", null],
+    ["http://192.168.1.5:1234/v1", null],
+    ["https://api.example.com/v1?key=1", null],
+    ["https://user@api.example.com/v1", null],
+    ["not a url", null],
+    [long, null],
+  ])
+    assert.equal(suggestChatCompletionsEndpoint(input), expected, input);
 });
 
 test("model test rejection and exceptions produce an actionable local message", async () => {

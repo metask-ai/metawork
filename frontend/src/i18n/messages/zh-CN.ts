@@ -1423,6 +1423,7 @@ export const zhCN: Record<MessageId, string> = {
     "API Key 会以明文发送，仅本机地址（localhost、127.0.0.1、[::1]）可使用 HTTP；局域网服务请改用 HTTPS。",
   "settings.custom_model_address_error.path":
     "请填写以 /chat/completions、/responses 或 /v1/messages 结尾的完整端点。",
+  "settings.custom_model_address_suggestion": "补全为 {endpoint}",
   "settings.model_form_error.choice": "请先选择模型厂商。",
   "settings.model_form_error.address": "请填写请求地址。",
   "settings.model_form_error.api_key": "请填写 API Key。",

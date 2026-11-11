@@ -22,6 +22,7 @@ import {
   type EndpointIssue,
   inspectModelEndpoint,
   protocolFromEndpoint,
+  suggestChatCompletionsEndpoint,
 } from "./model-connection.ts";
 
 function ModelAction({
@@ -234,6 +235,10 @@ export function CustomModelsSettings({
       (addressTouched &&
         addressProblem !== "required" &&
         addressProblem !== "root"));
+  const addressSuggestion =
+    addressProblemVisible && addressProblem === "path"
+      ? suggestChatCompletionsEndpoint(draft?.baseUrl ?? "")
+      : null;
   const rows = models.customProviders.flatMap((source) =>
     source.models.map((model) => ({ source, model })),
   );
@@ -765,16 +770,45 @@ export function CustomModelsSettings({
                           ) : addressProblemVisible &&
                             addressProblem !== null &&
                             addressProblem !== "root" ? (
-                            <p
-                              role="alert"
-                              className="text-sm text-(--ui-content-danger)"
-                            >
-                              {t(
-                                addressProblem === "required"
-                                  ? "settings.model_form_error.address"
-                                  : `settings.custom_model_address_error.${addressProblem}`,
+                            <>
+                              <p
+                                role="alert"
+                                className="text-sm text-(--ui-content-danger)"
+                              >
+                                {t(
+                                  addressProblem === "required"
+                                    ? "settings.model_form_error.address"
+                                    : `settings.custom_model_address_error.${addressProblem}`,
+                                )}
+                              </p>
+                              {addressSuggestion && (
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="sm"
+                                  className="h-auto min-h-8 max-w-full justify-self-start py-1.5 text-left leading-snug break-all whitespace-normal"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    setDraft({
+                                      ...draft,
+                                      baseUrl: addressSuggestion,
+                                      protocol:
+                                        protocolFromEndpoint(addressSuggestion),
+                                    });
+                                    document
+                                      .getElementById(fieldIds.address)
+                                      ?.focus();
+                                  }}
+                                >
+                                  {t(
+                                    "settings.custom_model_address_suggestion",
+                                    {
+                                      endpoint: addressSuggestion,
+                                    },
+                                  )}
+                                </Button>
                               )}
-                            </p>
+                            </>
                           ) : (
                             <p className="text-xs text-(--ui-content-muted)">
                               {t("settings.custom_model_protocol_automatic")}

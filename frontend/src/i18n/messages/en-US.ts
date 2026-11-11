@@ -1646,6 +1646,7 @@ export const enUS = {
     "The API key would be sent unencrypted. HTTP is allowed only for this computer (localhost, 127.0.0.1, [::1]); use HTTPS for services on your network.",
   "settings.custom_model_address_error.path":
     "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
+  "settings.custom_model_address_suggestion": "Use {endpoint}",
   "settings.model_form_error.choice": "Select a model vendor first.",
   "settings.model_form_error.address": "Enter the request URL.",
   "settings.model_form_error.api_key": "Enter an API key.",
