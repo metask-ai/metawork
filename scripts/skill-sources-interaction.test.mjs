@@ -441,10 +441,18 @@ test("Catalog issues survive zero assets and search; refreshes use the selected 
   const { refreshes, snapshot } = await fixture(ctx);
   const user = userEvent.setup({ document });
   assert.ok(screen.getByRole("region", { name: "Catalog issues" }));
-  fireEvent.change(screen.getByRole("searchbox", { name: "Search skills" }), {
-    target: { value: "no-match" },
-  });
+  const search = screen.getByRole("button", { name: "Search skills" });
+  await user.click(search);
+  fireEvent.change(
+    await screen.findByRole("searchbox", { name: "Search skills" }),
+    {
+      target: { value: "no-match" },
+    },
+  );
   assert.ok(screen.getByText(/Same-priority source conflict/));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("searchbox"), null));
+  assert.equal(search.dataset.active, "true");
   fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
   assert.deepEqual(refreshes[0].args, ["personal"]);
   fireEvent.click(
@@ -514,7 +522,7 @@ function importOperation(preparation, phase) {
 }
 async function chooseImportMenu(
   user,
-  name = "Import Skill",
+  name = "Import",
   source = "Choose folder",
 ) {
   await user.click(screen.getByRole("button", { name, exact: true }));
@@ -549,7 +557,7 @@ test("Import uses the page project, retains busy confirmation and shows Host ver
     screen.getByRole("button", { name: "Project settings", exact: true }),
   );
   const trigger = screen.getByRole("button", {
-    name: "Import Skill",
+    name: "Import",
     exact: true,
   });
   await chooseImportMenu(user);

@@ -217,9 +217,10 @@ test("Skills center renders a compact local management surface", () => {
   const markup = render();
   assert.match(markup, /<h1[^>]*tabindex="-1"[^>]*>Skills<\/h1>/);
   assert.match(markup, /Manage local Skills available to MetaWork/);
-  assert.match(markup, /type="search"/);
-  assert.match(markup, /Import Skill/);
+  assert.match(markup, /aria-label="Search skills"/);
+  assert.match(markup, />Import</);
   assert.match(markup, /Review code changes/);
+  assert.match(markup, /<code>\/code-review<\/code>/);
   assert.match(markup, /User defaults/);
   assert.match(markup, /Project settings/);
   assert.match(markup, /role="switch"/);
@@ -377,10 +378,6 @@ test("Skills route uses canonical management and Workspace enablement commands",
     join(process.cwd(), "frontend/src/features/skills/SkillsPage.tsx"),
     "utf8",
   );
-  const css = await readFile(
-    join(process.cwd(), "frontend/src/index.css"),
-    "utf8",
-  );
   assert.match(app, /management=\{snapshot\.skillManagement\}/);
   assert.match(app, /commitSkillMutation/);
   for (const command of [
@@ -412,11 +409,6 @@ test("Skills route uses canonical management and Workspace enablement commands",
     /asset\.scope\.workspaceEpoch === workspace\.epoch/,
   );
   assert.match(page, /expectedWorkspaceEpoch: currentWorkspace\.epoch/);
-  assert.match(
-    css,
-    /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,
-  );
-  assert.match(css, /\.skill-empty-state > button \{\s*min-width: 168px;/);
 });
 
 test("Skills and Task issues stay in their business contexts", () => {

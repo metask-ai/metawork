@@ -17,9 +17,9 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
+import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { Input } from "../../components/ui/input.tsx";
-import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
@@ -58,7 +58,9 @@ function ImportMenu({
       <Menu.Trigger
         ref={trigger}
         disabled={disabled}
-        render={<Button variant="primary" size="sm" />}
+        render={
+          <Button className="skill-import-button" variant="primary" size="sm" />
+        }
       >
         <Icon name="upload" />
         {label}
@@ -171,7 +173,7 @@ function scopeLabel(
     : t("skills.scope.project");
 }
 
-function SkillCard({
+function SkillRow({
   asset,
   workspaces,
   onOpen,
@@ -190,27 +192,24 @@ function SkillCard({
     asset.managementState === "pending_verification" ||
     asset.issueCodes.length > 0;
   return (
-    <li className="skill-card" data-attention={attention}>
+    <li className="skill-row" data-attention={attention}>
       <button
-        className="skill-card-open focus-ring"
+        className="skill-row-open focus-ring"
         onClick={(event) => onOpen(asset, event.currentTarget)}
       >
-        <span className="skill-card-icon" aria-hidden="true">
+        <span className="skill-row-icon" aria-hidden="true">
           <Icon name="skill-file" />
         </span>
-        <span className="skill-card-copy">
-          <span className="skill-card-heading">
-            <strong>{asset.displayName || asset.invocationName}</strong>
-            <Icon name="chevron-right" />
-          </span>
-          <span className="skill-card-description">
+        <span className="skill-row-copy">
+          <strong>{asset.displayName || asset.invocationName}</strong>
+          <span className="skill-row-description">
             {asset.description || t("skills.no_description")}
           </span>
-          <span className="skill-card-meta">
+          <span className="skill-row-meta">
             <span>{scopeLabel(asset, workspaces, t)}</span>
-            <span>{sourceLabel(asset, t)}</span>
+            {asset.invocationName && <code>/{asset.invocationName}</code>}
             {attention && (
-              <span className="skill-card-attention">
+              <span className="skill-row-attention">
                 {asset.managementState === "recovery_required"
                   ? t("skills.status.recovery_required")
                   : asset.managementState === "pending_verification"
@@ -222,7 +221,7 @@ function SkillCard({
         </span>
       </button>
       {asset.enabled !== null && (
-        <span className="skill-card-enablement">
+        <div className="skill-row-enablement">
           <span>
             {asset.scope.kind === "project" &&
             asset.enablementState === "inherit"
@@ -242,6 +241,7 @@ function SkillCard({
               </button>
             )}
           <Switch.Root
+            className="h-4 w-7 data-checked:bg-(--metask-state-complete)"
             checked={asset.enabled}
             disabled={!asset.canSetEnabled || enablementBusy}
             aria-label={t("skills.enablement.label", {
@@ -251,9 +251,9 @@ function SkillCard({
               onSetState(asset, checked ? "enabled" : "disabled")
             }
           >
-            <Switch.Thumb />
+            <Switch.Thumb className="size-3 data-checked:translate-x-3" />
           </Switch.Root>
-        </span>
+        </div>
       )}
     </li>
   );
@@ -804,14 +804,14 @@ export function SkillsPage({
   function renderGroup(label: string, assets: Asset[]) {
     if (assets.length === 0) return null;
     return (
-      <section className="skill-group">
+      <section className="skill-group" aria-label={label}>
         <header>
           <h2>{label}</h2>
           <span>{assets.length}</span>
         </header>
-        <ul className="skill-grid">
+        <ul className="skill-list" aria-label={label}>
           {assets.map((asset) => (
-            <SkillCard
+            <SkillRow
               key={skillRowIdentity(asset)}
               asset={asset}
               workspaces={workspaces}
@@ -856,10 +856,11 @@ export function SkillsPage({
     context === "project" && selectedWorkspace === null;
   const empty = contextAssets.length === 0;
   const noResults = !empty && visibleAssets.length === 0;
+  const refreshLabel = t(refreshing ? "skills.refreshing" : "skills.refresh");
 
   return (
     <section className="skills-page" aria-labelledby="skills-title">
-      <div className="skills-page-inner skill-center">
+      <div className="skills-page-inner">
         <header className="skills-header">
           <div>
             <h1 id="skills-title" ref={title} tabIndex={-1}>
@@ -869,8 +870,12 @@ export function SkillsPage({
           </div>
           <div className="skill-header-actions">
             <Button
-              variant="secondary"
-              size="sm"
+              variant="ghost"
+              size="icon"
+              className="skill-refresh-button aria-busy:[&_svg]:animate-spin motion-reduce:[&_svg]:animate-none"
+              aria-label={refreshLabel}
+              aria-busy={refreshing}
+              title={refreshLabel}
               disabled={
                 disabled ||
                 refreshing ||
@@ -882,10 +887,17 @@ export function SkillsPage({
               }}
             >
               <Icon name="refresh" />
-              {t(refreshing ? "skills.refreshing" : "skills.refresh")}
             </Button>
+            {!unavailable && (
+              <HeaderSearch
+                label={t("skills.search_label")}
+                clearLabel={t("skills.clear_search")}
+                value={query}
+                onChange={onQuery}
+              />
+            )}
             <ImportMenu
-              label={t("skills.import")}
+              label={t("skills.import.action")}
               disabled={
                 disabled ||
                 unavailable ||
@@ -922,51 +934,43 @@ export function SkillsPage({
           onRecover={onRecoverSources}
         />
 
-        <div className="skill-toolbar">
-          <SearchField
-            className="max-w-[360px] flex-1"
-            label={t("skills.search_label")}
-            value={query}
-            placeholder={t("skills.search_placeholder")}
-            onChange={(event) => onQuery(event.target.value)}
-          />
-          <div className="skill-context-controls">
-            <div
-              className="skill-scope-filter"
-              aria-label={t("skills.filter.label")}
-            >
-              {(["personal", "project"] as const).map((nextContext) => (
-                <button
-                  key={nextContext}
-                  className="focus-ring"
-                  data-active={context === nextContext}
-                  onClick={() => {
-                    if (context === nextContext) return;
-                    closeDrawer(false);
-                    setContext(nextContext);
-                  }}
-                >
-                  {t(`skills.filter.${nextContext}`)}
-                </button>
-              ))}
-            </div>
-            {context === "project" && manualWorkspaces.length > 0 && (
-              <SelectField
-                className="skill-workspace-select"
-                value={effectiveWorkspaceKey ?? ""}
-                options={manualWorkspaces.map((workspace) => ({
-                  value: skillWorkspaceKey(workspace),
-                  label: workspace.displayName,
-                }))}
-                onValueChange={(workspaceKey) => {
-                  if (workspaceKey === effectiveWorkspaceKey) return;
+        <div className="skill-context-controls">
+          <div
+            className="skill-scope-filter"
+            role="group"
+            aria-label={t("skills.filter.label")}
+          >
+            {(["personal", "project"] as const).map((nextContext) => (
+              <button
+                key={nextContext}
+                className="focus-ring"
+                aria-pressed={context === nextContext}
+                onClick={() => {
+                  if (context === nextContext) return;
                   closeDrawer(false);
-                  setSelectedWorkspaceKey(workspaceKey);
+                  setContext(nextContext);
                 }}
-                aria-label={t("skills.project_workspace")}
-              />
-            )}
+              >
+                {t(`skills.filter.${nextContext}`)}
+              </button>
+            ))}
           </div>
+          {context === "project" && manualWorkspaces.length > 0 && (
+            <SelectField
+              className="skill-workspace-select"
+              value={effectiveWorkspaceKey ?? ""}
+              options={manualWorkspaces.map((workspace) => ({
+                value: skillWorkspaceKey(workspace),
+                label: workspace.displayName,
+              }))}
+              onValueChange={(workspaceKey) => {
+                if (workspaceKey === effectiveWorkspaceKey) return;
+                closeDrawer(false);
+                setSelectedWorkspaceKey(workspaceKey);
+              }}
+              aria-label={t("skills.project_workspace")}
+            />
+          )}
         </div>
 
         {refreshRequest?.error && (
@@ -1066,7 +1070,7 @@ export function SkillsPage({
             />
           </div>
         ) : noResults ? (
-          <div className="skill-empty-state skill-empty-state-compact">
+          <div className="skill-empty-state">
             <span>
               <Icon name="search" />
             </span>
@@ -1137,7 +1141,7 @@ export function SkillsPage({
                   ) : (
                     <>
                       <div className="skill-import-preview">
-                        <span className="skill-card-icon">
+                        <span className="skill-preview-icon">
                           <Icon name="skill-file" />
                         </span>
                         <div>

@@ -635,6 +635,7 @@ export const enUS = {
   "mcp.confirm.delete.action": "Delete server",
   "skills.subtitle": "Manage local Skills available to MetaWork.",
   "skills.import": "Import Skill",
+  "skills.import.action": "Import",
   "skills.import_first": "Import your first Skill",
   "skills.install": "Install",
   "skills.reimport": "Reimport",
@@ -779,7 +780,7 @@ export const enUS = {
   "skills.refresh": "Refresh",
   "skills.refreshing": "Refreshing…",
   "skills.search_label": "Search skills",
-  "skills.search_placeholder": "Search skills",
+  "skills.clear_search": "Clear search",
   "skills.unavailable_title": "Skill management is unavailable",
   "skills.unavailable_body":
     "MetaWork could not open its local Skill inventory. Refresh to try again.",

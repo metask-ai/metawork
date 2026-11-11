@@ -276,46 +276,19 @@ Tasks
 
 Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产及用户/项目启用状态。Personal 开关定义所有项目继承的用户默认值；Project 开关写入当前 Manual Workspace 的显式 enabled/disabled 覆盖，并提供“恢复跟随用户”清除覆盖。创建和修改仍属于普通 Task；在线市场、远程更新、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
 
-中央工作面沿用定时任务页的最大宽度、标题节奏、按钮和行动优先分组，使用与 Workbench 一致的紧凑卡片，而不是管理表格或外部市场视觉：
+中央工作面与 MCP、定时任务共用 Workbench 内容底色、840 px 有界阅读宽度、标题层级和带细分隔线的单列列表。
 
-```text
-Skills                                           [ Import skill ] [ Refresh ]
-Manage skills available to MetaWork.
+页面与列表：
 
-Compatible sources    [ ] Claude    [ ] Codex
-Reads personal and all authorized project Skills. Existing tasks need a Skill refresh.
-
-[ Search skills…                              ]  [ User defaults ] [ Project settings ]
-                                                   Project: [ MetaWork ▾ ]
-
-Needs attention                                                     2
-┌────────────────────────────────┐  ┌────────────────────────────────┐
-│ [doc] Release check          ···│  │ [doc] Documentation         ···│
-│ Check versions, tests and build │  │ Keep project docs consistent.  │
-│ MetaWork · /release      ⚠ Issue│  │ Personal · /docs      ⚠ Conflict│
-└────────────────────────────────┘  └────────────────────────────────┘
-
-Skills                                                              10
-┌────────────────────────────────┐  ┌────────────────────────────────┐
-│ [doc] Code review            ···│  │ [doc] Image guide            ···│
-│ Review correctness and safety. │  │ Create consistent image briefs.│
-│ Personal · /review      ● Ready │  │ Design · /image       ● Ready │
-└────────────────────────────────┘  └────────────────────────────────┘
-```
-
-页面与卡片：
-
-- 页面保留 Workbench 左栏和约 944 px 内容宽度；标题使用现有 24–28 px Display scale，一句产品说明后直接进入 controls，不增加 Hero、统计卡、渐变、来源 Logo 或装饰插画；
-- Header 的 `Import skill` 是唯一主动作，`Refresh` 使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
+- 页首右侧依次放置低强调的刷新图标、紧凑搜索入口和中性主按钮 `Import`。搜索复用 MCP 与定时任务的页首控件，关闭输入框时保留筛选，输入关键词后图标显示激活态。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
 - 页面一次只展示一个 policy context，不提供把 Personal 与全部 Project row 相加的 `All` 入口。默认 `User defaults` 只展示 `scope.kind = personal`；`Project settings` 只展示一个已选择 Manual Workspace 的 row，并严格同时匹配 Workspace id 与 epoch；
 - Project selector 只包含 `kind = manual` 且 authorization available 的 Workspace，保持 Host authoritative recent order。当前选择仍存在时保持；失效后切换到第一个合法候选；没有合法 Workspace 时显示 `No configurable projects`，不得回退到其他 scope；
 - 搜索只过滤当前 context 已提交 projection 的 display name、description、invocation 和 argument name；资产计数、待验证组与普通列表从 visible rows 派生。目录问题独立消费当前 catalog issues，不随资产搜索隐藏。切换 context 或 Workspace 时关闭已失效的资产详情；
 - Personal row 标签为 `User defaults`；Project row 标签为 `Project settings · <Workspace display name>`。标签表达 policy context，不表达 Skill 文件来源；`sourceKind` 只用于已有 provenance 与管理动作；
 - `pending_verification` 独立进入“等待验证”，其他资产进入 `Skills`；空分组不渲染，同一资产不重复。目录问题在资产之前按 code 和可空 invocation 独立展示与计数，即使没有 winner/资产也保持可见；asset issueCodes 仅解释关联问题，不再重复计为目录问题。不猜测冲突双方，不提供选择 winner 或通过单 Skill 启停消除冲突的动作；
-- 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
-- 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed` 或来源品牌徽章。能够精确映射对应 current catalog member 的 Personal 与 Project asset 都在卡片尾部显示独立 switch：Personal 使用 `已启用/已禁用`，Project 的 inherit 状态显示 `跟随用户设置`，显式覆盖额外显示 `恢复跟随用户`。external source kind 不自动剥夺启停 authority，但 catalog/selection 不可用或 identity 不可证明时不显示可操作开关；
-- 状态颜色只复用 `live / amber / danger`，且必须同时显示文字或图标。来源、revision、资源数量和物理管理细节留在 drawer；
-- 卡片是带标题的 `article/listitem`，打开详情的按钮、启用 switch、“恢复跟随用户”与可能存在的 `···` menu button 为并列元素，禁止嵌套 interactive element。开关最小命中区 44 px，checked 使用 `--ui-action-primary`，off 使用中性边框色，并始终有文字、键盘焦点与 disabled 状态；Renderer 不 optimistic 更新，等待 committed Snapshot 后再反映新状态；
+- 行主体显示线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和需处理的状态文字。悬停时名称出现下划线。来源、revision、资源数量和物理管理细节留在 drawer；
+- 能够精确映射对应 current catalog member 的 Personal 与 Project asset 在行尾显示独立 switch。Personal 使用 `已启用/已禁用`；Project 的 inherit 状态显示 `跟随用户设置`，显式覆盖额外显示 `恢复跟随用户`。external source kind 不自动剥夺启停 authority，但 catalog/selection 不可用或 identity 不可证明时不显示可操作开关；
+- 打开详情的按钮、启用 switch 和“恢复跟随用户”为并列元素。开关最小命中区为 44 × 44 px，开启时与 MCP、定时任务共用绿色状态 token，关闭时使用中性边框色。控件提供文字、键盘焦点与 disabled 状态，等待 committed Snapshot 后更新。窄窗将操作换到行下方，状态和范围允许换行；
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
 
 兼容来源：
@@ -328,14 +301,14 @@ Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；�
 
 详情 drawer：
 
-- 点击卡片主体打开右侧 drawer；窄窗切为整页详情。顶部显示名称、description、范围和 health；正文依次显示 invocation/参数、安全渲染的 `SKILL.md`、资源/脚本/模板列表、结构化 issue 和折叠的安装信息；
+- 点击行主体打开右侧 drawer；窄窗切为整页详情。顶部显示名称、description、范围和 health；正文依次显示 invocation/参数、安全渲染的 `SKILL.md`、资源/脚本/模板列表、结构化 issue 和折叠的安装信息；
 - Markdown 禁止 raw HTML、script、远程 embed 和隐式网络加载；文件区只允许查看 package 内受支持的文本资源，不形成通用仓库或磁盘浏览器；物理路径、raw diagnostic、credential、内部 handle 和 hash 不进入普通详情；
 - Drawer 底部提供 `Export .skill`、`Modify in new task` 和 `More`。`More` 仅在有精确管理 authority 时包含 `Re-import` 与 `Uninstall`；外部管理资产显示原因并隐藏不可执行动作；
-- `Modify in new task` 只导航到预填普通 Text draft，不创建 Skill editor 或专用 Agent protocol。关闭 drawer 后焦点回到原卡片；异步刷新不抢焦点或关闭用户正在阅读的详情。
+- `Modify in new task` 只导航到预填普通 Text draft，不创建 Skill editor 或专用 Agent protocol。关闭 drawer 后焦点回到原行的详情按钮；异步刷新不抢焦点或关闭用户正在阅读的详情。
 
 导入 drawer：
 
-- `Import skill` 与 `Re-import` 先打开紧凑来源菜单，选择 `Choose .skill or .zip` 或 `Choose folder` 后打开对应 Host 原生 picker，再进入同一预览 drawer；当前产品合同尚未开放 Skill 导入拖放，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；Renderer 与 Native SDK UI/input 的边界以[高层架构](architecture.md#31-renderer)为准；
+- 页首 `Import` 与 `Re-import` 先打开紧凑来源菜单，选择 `Choose .skill or .zip` 或 `Choose folder` 后打开对应 Host 原生 picker，再进入同一预览 drawer；当前产品合同尚未开放 Skill 导入拖放，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；Renderer 与 Native SDK UI/input 的边界以[高层架构](architecture.md#31-renderer)为准；
 - Native 选择先生成 window-bound、一次性 staged capability；Renderer 只消费 opaque preview identity。Preview 显示名称、description、`SKILL.md`、文件清单、总大小、候选 invocation 和机械安全检查结果；导出同样通过 Host 原生目录选择取得一次性目标 authority，由 Host 生成规范文件名并写入，不让 Renderer提交路径；
 - 用户选择 `Personal` 或一个已注册且已授权的 Manual Workspace。范围默认沿用页面筛选，但必须在最终确认中可见；没有合法目标时安装保持禁用并提供恢复动作；
 - 同名目录、相同 invocation、project override 或 external asset 都必须在确认前说明精确影响，安全默认是取消；不提供自动重命名 invocation、静默覆盖或“仍然继续”绕过失败；
@@ -346,9 +319,9 @@ Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；�
 - 未完成的文件恢复与 catalog 等待验证都进入“需要处理”分组，分别显示“需要恢复”和“等待验证”。详情沿用现有 Retry，严格消费 Host canRetry；需要恢复时不尝试读取可能正在移动的 definition，也不显示普通导出/替换/卸载动作。management 写失败或结果不确定必须在中心级说明重启后重新加载并尝试恢复，即使已没有资产行；不得承诺重启必定修复目录访问或文件占用。
 - `ready` 展示已提交 inventory 与 health；`degraded` 保留可用资产并独立展示目录问题。issue 只使用 bounded code、scope 和可选 invocation，不显示 raw diagnostic；
 - refresh pending 只禁用 Refresh 并显示 `Refreshing…`；失败保留最后 committed view 并提供 Retry，不清空成“没有 Skill”；
-- 首次 `uninitialized/loading` 显示两列 card skeleton；`unavailable` 显示恢复说明与 Refresh；真正 ready/degraded 且当前筛选无资产才显示空状态；
+- 首次目录加载且当前范围为空时显示加载提示；`unavailable` 显示恢复说明与 Refresh；真正 ready/degraded 且当前筛选无资产才显示空状态；
 - 全局空状态提供 `Import skill` 与 `Create in new task`。后者只打开预填 Text draft；返回 Skill 中心保留搜索、范围和选中的 Project，不持久化瞬时 drawer/progress；
-- delete/uninstall 确认必须写明 personal 或具体 Project 范围，并把安全的 Cancel 作为初始焦点。成功后焦点移到相邻卡片或分组标题；失败保留资产和操作入口，不静默消失。
+- delete/uninstall 确认必须写明 personal 或具体 Project 范围，并把安全的 Cancel 作为初始焦点。成功后焦点移到相邻行或分组标题；失败保留资产和操作入口，不静默消失。
 
 ### 5.4 MCP 服务
 
