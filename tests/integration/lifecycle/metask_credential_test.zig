@@ -123,7 +123,7 @@ fn runCalls() usize {
 }
 
 fn runAndExpect(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Runtime, task_id: u64, operation: []const u8, expected: fixture.product_task.RunOutcome) !void {
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     const previous_calls = runCalls();
     const accepted = try control.sendInput(operation, task_id, .{ .text = "Reply with a short text; do not call tools." });
     try std.testing.expectEqual(.accepted, accepted.outcome);
@@ -359,7 +359,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
 
     const workspace = try control.openWorkspace(.{ .workspace_root = home, .trust = .explicitly_trusted });
     const old_id = try createTaskWithMode(&control, workspace, if (scenario == .reviewer) .auto_review else .manual);
-    const old = control.task_runtime.find(old_id).?;
+    const old = control.testTask(old_id).?;
     const old_epoch = old.durable.binding_epoch;
     const old_source = old.runtime.executionConst().?.source_generation;
     const old_revision = old.durable.model_intent.?.revision;
@@ -632,7 +632,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try drainCatalog(&coordinator);
             const other_id = try createTask(&control, workspace);
             try control.renameTask(other_id, access_a);
-            try std.testing.expect(std.mem.indexOf(u8, control.task_runtime.find(other_id).?.durable.title, access_a) == null);
+            try std.testing.expect(std.mem.indexOf(u8, control.testTask(other_id).?.durable.title, access_a) == null);
             const snapshot_buffer = try std.testing.allocator.alloc(u8, 1024 * 1024);
             defer std.testing.allocator.free(snapshot_buffer);
             const snapshot = try control_api.TestSupport.writeAggregateFixture(&control, snapshot_buffer);
@@ -820,7 +820,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try std.testing.expectEqual(@as(usize, if (scenario == .catalog_drift) 1 else 0), fake_core.session_destroyed);
         const new_id = try createTask(&control, workspace);
         try runAndExpect(&wake_loop, &control, new_id, "fresh-task-control", .completed);
-        const new = control.task_runtime.find(new_id).?;
+        const new = control.testTask(new_id).?;
         try std.testing.expectEqualStrings(access_b, new.runtime.executionConst().?.secret);
         try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[if (scenario == .catalog_drift) 2 else 1].credential_digest);
         try std.testing.expectEqualStrings(old.durable.execution_model, new.durable.execution_model);
@@ -845,7 +845,7 @@ fn expectBlocked(control: *control_api.Runtime, task_id: u64, operation: []const
     const before = runCalls();
     const result = try control.sendInput(operation, task_id, .{ .text = "No tools; this must not reach the provider." });
     try std.testing.expectEqual(.accepted, result.outcome);
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     const record = task.input_submissions.items[task.input_submissions.items.len - 1];
     try std.testing.expectEqual(.failed, record.state);
     try std.testing.expectEqual(before, runCalls());

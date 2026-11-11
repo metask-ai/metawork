@@ -36,6 +36,7 @@ pub const RunOutcome = task_state.RunOutcome;
 pub const TerminalSummary = struct {
     outcome: RunOutcome,
     permission_required: bool,
+    permission_profile: task_state.PermissionProfile,
 };
 pub const ContinuationCapability = task_state.ContinuationCapability;
 pub const ExecutionIdentity = struct {
@@ -1253,6 +1254,7 @@ pub const Runtime = struct {
     search_revision: u64 = 1,
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
+    advancing_inputs: bool = false,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
     /// Deterministic caller-path coverage without exhausting OS thread limits.
@@ -1264,6 +1266,20 @@ pub const Runtime = struct {
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
     pending_model_intent: ?PreparedModelIntent = null,
+
+    pub const testing = if (@import("builtin").is_test) struct {
+        pub fn findTask(self: *Runtime, task_id: u64) ?*task_state.Task {
+            return self.find(task_id);
+        }
+
+        pub fn findTaskConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
+            return self.findConst(task_id);
+        }
+
+        pub fn slots(self: *const Runtime) []?*task_state.Task {
+            return self.tasks;
+        }
+    } else struct {};
 
     const ApprovalJobRecipient = union(enum) {
         approval: u64,
@@ -2064,7 +2080,7 @@ pub const Runtime = struct {
         self.* = undefined;
     }
 
-    pub fn find(self: *Runtime, task_id: u64) ?*task_state.Task {
+    fn find(self: *Runtime, task_id: u64) ?*task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -2133,7 +2149,7 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
+    fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -2502,10 +2518,23 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn pendingInput(self: *Runtime, task_id: u64, index: usize) ?*InputSubmission {
+    fn pendingInput(self: *Runtime, task_id: u64, index: usize) ?*InputSubmission {
         const task = self.find(task_id) orelse return null;
         if (index >= task.input_submissions.items.len) return null;
         return &task.input_submissions.items[index];
+    }
+
+    pub const WaitingInput = struct {
+        input: RunInput,
+        skill_selection: ?task_state.SkillSelection,
+    };
+
+    /// Borrows only the payload needed by synchronous Run preparation.
+    pub fn borrowWaitingInput(self: *Runtime, task_id: u64, index: usize) ?WaitingInput {
+        const record = self.pendingInput(task_id, index) orelse return null;
+        if (record.state != .waiting) return null;
+        const payload = record.payload orelse return null;
+        return .{ .input = payload.input, .skill_selection = payload.skill_selection };
     }
 
     pub fn beginInputPreparation(self: *Runtime, task_id: u64, index: usize) bool {
@@ -2522,11 +2551,68 @@ pub const Runtime = struct {
         context: *anyopaque,
         restore_fn: *const fn (*anyopaque, u64, u64) ?RestoreFailure,
         run_fn: *const fn (*anyopaque, u64, u64, usize) RunAdmission,
-        history_blocked: bool,
+        history_blocked_fn: *const fn (*anyopaque) bool,
         release: ReleaseEffects,
     };
 
-    pub fn advanceWaitingInput(
+    pub const InputQueueEffects = struct {
+        waiting: WaitingInputEffects,
+        projection: ProjectionEffects,
+        operation: OperationEffects,
+        check_workspace_fn: *const fn (*anyopaque, u64, u64) ?SendInputReason,
+        continue_fn: *const fn (*anyopaque, u64) bool,
+        rejection_reason_fn: *const fn (anyerror) SendInputReason,
+        changed_fn: *const fn (*anyopaque) void,
+    };
+
+    pub fn advanceInputQueue(self: *Runtime, shutting_down: bool, effects: InputQueueEffects) void {
+        if (self.advancing_inputs) @panic("Task input advancement reentered");
+        self.advancing_inputs = true;
+        defer self.advancing_inputs = false;
+        const context = effects.waiting.context;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const id = task.durable.id;
+            if (shutting_down) {
+                _ = self.cancelWaitingInputs(id, .shutting_down);
+                _ = self.cancelInputContinuation(id, null, .shutting_down);
+                continue;
+            }
+            for (0..effects.operation.limits.max_pending_inputs_per_task + 1) |_| {
+                switch (self.inputAction(id)) {
+                    .none, .wait => break,
+                    .fail => |action| {
+                        self.failWaitingInput(id, action.index, action.reason, null);
+                        effects.changed_fn(context);
+                    },
+                    .continuation => if (!effects.continue_fn(context, id)) break,
+                    .submit => |action| {
+                        if (effects.check_workspace_fn(context, task.durable.workspace_id, task.durable.workspace_epoch)) |reason| {
+                            self.failWaitingInput(id, action.index, reason, null);
+                            effects.changed_fn(context);
+                            continue;
+                        }
+                        const receipt = self.submitWaitingInput(id, action.index, action.run_id, effects.operation) catch |err| {
+                            switch (err) {
+                                error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
+                                else => self.failWaitingInput(id, action.index, effects.rejection_reason_fn(err), null),
+                            }
+                            effects.changed_fn(context);
+                            continue;
+                        };
+                        effects.changed_fn(context);
+                        if (receipt.outcome == .rejected) break;
+                    },
+                    .start => |index| {
+                        if (!self.advanceWaitingInput(id, index, effects.projection, effects.waiting)) break;
+                        effects.changed_fn(context);
+                    },
+                }
+            }
+        }
+    }
+
+    fn advanceWaitingInput(
         self: *Runtime,
         task_id: u64,
         index: usize,
@@ -2534,7 +2620,7 @@ pub const Runtime = struct {
         effects: WaitingInputEffects,
     ) bool {
         const task = self.find(task_id) orelse return false;
-        if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked) return false;
+        if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked_fn(effects.context)) return false;
         const authority = projection.authority(projectionAuthorityQuery(task));
         const continuation = self.recoveryProjectionWithAuthority(task, authority).continuation;
         if (authority.shutting_down or task_policy.taskLifecycle(task) != .open or
@@ -2582,7 +2668,15 @@ pub const Runtime = struct {
 
     /// Task decides when an original is cancelled or handed to a real Run;
     /// composition executes that resource action in the attachment owner.
-    pub fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
+    pub fn settleInputResources(self: *Runtime, context: *anyopaque, settle: *const fn (*anyopaque, u64, u64, bool) void) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            const id = task.durable.id;
+            while (self.takeInputResourceAction(id)) |action|
+                settle(context, id, action.resource_id, action.keep_original);
+        };
+    }
+
+    fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
         const task = self.find(task_id) orelse return null;
         for (task.input_submissions.items) |*record| {
             if (record.state == .waiting or record.input != .multimodal) continue;
@@ -2610,6 +2704,12 @@ pub const Runtime = struct {
             payload.deinit(self.allocator);
             record.payload = null;
         }
+    }
+
+    pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            _ = self.cancelWaitingInputs(task.durable.id, .shutting_down);
+        };
     }
 
     /// Freeze the current batch by changing its records, never a sticky Task flag.
@@ -2694,7 +2794,7 @@ pub const Runtime = struct {
         return self.submitInputImpl(task_id, binding_epoch, run_id, text, effects, null);
     }
 
-    pub fn submitWaitingInput(self: *Runtime, task_id: u64, index: usize, run_id: u64, effects: OperationEffects) RunError!SendInputResult {
+    fn submitWaitingInput(self: *Runtime, task_id: u64, index: usize, run_id: u64, effects: OperationEffects) RunError!SendInputResult {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const record = self.pendingInput(task_id, index) orelse return error.InvalidInput;
         const input = (record.payload orelse return error.InvalidInput).input;
@@ -2837,10 +2937,47 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
+    pub fn hasInputContinuation(self: *Runtime, task_id: u64) bool {
+        return self.inputContinuation(task_id) != null;
+    }
+
+    fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
         const task = self.find(task_id) orelse return null;
         const slot = inputContinuationSlot(task) orelse return null;
         return &task.durable.runs[slot].?;
+    }
+
+    pub const ScheduleConfirmation = enum { confirmed, pending, failed };
+
+    pub fn gateScheduledContinuations(
+        self: *Runtime,
+        context: *const anyopaque,
+        has_pending: *const fn (*const anyopaque, u64) bool,
+    ) void {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const source = self.inputContinuation(task.durable.id) orelse continue;
+            if (has_pending(context, task.durable.id)) source.input_continuation_schedule_gate = true;
+        }
+    }
+
+    pub fn settleScheduledContinuations(
+        self: *Runtime,
+        context: *const anyopaque,
+        observe: *const fn (*const anyopaque, u64) ScheduleConfirmation,
+    ) bool {
+        var changed = false;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const source = self.inputContinuation(task.durable.id) orelse continue;
+            if (!source.input_continuation_schedule_gate) continue;
+            switch (observe(context, task.durable.id)) {
+                .confirmed => source.input_continuation_schedule_gate = false,
+                .pending => {},
+                .failed => changed = self.cancelInputContinuation(task.durable.id, source.id, .schedule_failed) or changed,
+            }
+        }
+        return changed;
     }
 
     pub fn cancelInputContinuation(self: *Runtime, task_id: u64, source_id: ?u64, reason: SendInputReason) bool {
@@ -3207,6 +3344,21 @@ pub const Runtime = struct {
             .previous_recent_order = previous_recent_order,
             .previous_next_recent_order = previous_next_recent_order,
         };
+    }
+
+    pub fn stopOperation(self: *Runtime, task_id: u64, effects: OperationEffects) ControlError!void {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        switch (task.runtime.active_operation) {
+            .run => |id| _ = try self.cancelRun(task_id, id, effects),
+            .compact => |id| _ = try self.cancelCompact(task_id, id, .user_cancel, effects),
+            .restore => self.cancelInputPreparation(task_id, effects),
+            .none => {},
+        }
+    }
+
+    pub fn checkStopInputs(self: *const Runtime, task_id: u64) error{ UnknownTask, TaskClosing }!void {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
     }
 
     pub fn cancelCompact(
@@ -3783,6 +3935,45 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn taskExists(self: *const Runtime, task_id: u64) bool {
+        return self.findConst(task_id) != null;
+    }
+
+    pub fn workspaceFileTaskMatches(self: *const Runtime, task_id: u64, workspace_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.deletion == .idle and !task.runtime.close_requested and task.durable.workspace_id == workspace_id;
+    }
+
+    pub fn runAdmissionFacts(self: *const Runtime, task_id: u64) error{ UnknownTask, TaskClosing }!struct {
+        workspace_id: u64,
+        workspace_epoch: u64,
+        validate_binding: bool,
+    } {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.durable.archived or task.read_only_history != null or task.deletion != .idle or
+            task.runtime.close_failed or task.runtime.close_requested or task.runtime.hasClosingSession()) return error.TaskClosing;
+        const attached = task.runtime.attachedConst();
+        if (attached) |value| if (value.health != .available) return error.TaskClosing;
+        return .{
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .validate_binding = attached != null,
+        };
+    }
+
+    /// Takes the owned revision prepared before automatic Task creation.
+    pub fn installInitialPersonalCatalog(self: *Runtime, task_id: u64, revision: []u8, selection_revision: u64) void {
+        const task = self.find(task_id) orelse unreachable;
+        std.debug.assert(task.initial_personal_catalog == null);
+        task.initial_personal_catalog = .{ .revision = revision, .selection_revision = selection_revision };
+    }
+
+    pub fn matchesInitialPersonalCatalog(self: *const Runtime, task_id: u64, revision: []const u8, selection_revision: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const initial = task.initial_personal_catalog orelse return false;
+        return std.mem.eql(u8, initial.revision, revision) and initial.selection_revision == selection_revision;
+    }
+
     pub fn taskWorkspaceId(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         return task.durable.workspace_id;
@@ -3857,6 +4048,76 @@ pub const Runtime = struct {
 
     pub const CredentialRenewal = enum { unrelated, unchanged, updated, deferred };
 
+    pub const ModelFacts = struct {
+        intent: ?struct { target: models_contract.ModelRef, revision: u64 },
+        intent_pending: bool,
+        installed: ?struct {
+            target: ?models_contract.ModelRef,
+            is_metask: bool,
+            source_generation: u64,
+            protocol: models_contract.Protocol,
+        },
+        metask_scope: u64,
+    };
+
+    pub fn modelFacts(self: *const Runtime, task_id: u64) ?ModelFacts {
+        const task = self.findConst(task_id) orelse return null;
+        return .{
+            .intent = if (task.durable.model_intent) |intent| .{ .target = intent.modelRef(), .revision = intent.revision } else null,
+            .intent_pending = task.model_intent_prepared,
+            .installed = if (task.runtime.executionConst()) |execution| .{
+                .target = execution.modelRef(),
+                .is_metask = std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id),
+                .source_generation = execution.source_generation,
+                .protocol = execution.protocol,
+            } else null,
+            .metask_scope = task.runtime.metask_authorization_scope,
+        };
+    }
+
+    pub fn installedModelMatchesTarget(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesTarget(candidate);
+    }
+
+    pub fn installedIntentCurrent(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const intent = task.durable.model_intent orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesIntentRevision(intent.revision);
+    }
+
+    pub fn installedModelProviderMatches(self: *const Runtime, task_id: u64, target: models_contract.ModelRef, protocol: models_contract.Protocol) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesProvider(target, protocol);
+    }
+
+    pub fn installedModelEndpointMatches(self: *const Runtime, task_id: u64, target: models_contract.Target) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesEndpoint(target);
+    }
+
+    pub fn installedCredentialCurrent(self: *const Runtime, task_id: u64, source_generation: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return !task.runtime.credential_update_failed and execution.matchesSourceGeneration(source_generation);
+    }
+
+    pub fn installedModelSourceCurrent(self: *const Runtime, task_id: u64, source_generation: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesSourceGeneration(source_generation);
+    }
+
+    pub fn installedModelNeedsSourceChange(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return !execution.matchesSource(candidate);
+    }
+
     pub fn metaskCredentialScope(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         if (task.runtime.restore_job != null) return null;
@@ -3867,12 +4128,12 @@ pub const Runtime = struct {
 
     /// Account authority is checked by Product Control. This owner enforces
     /// the Task's original scope and owns the Session/Host atomic handoff.
-    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: []const u8, explicit_retry: bool) !CredentialRenewal {
+    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: []const u8, resolved_source_generation: ?u64) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;
         const execution = task.runtime.execution() orelse return .unrelated;
         if (task.runtime.credential_update_failed and task.runtime.credential_failed_generation == generation and
-            !explicit_retry) return .unrelated;
+            resolved_source_generation == null) return .unrelated;
         task.runtime.credential_renewal_deferred = false;
         if (scope == 0 or task.runtime.metask_authorization_scope != scope or
             !std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return .unrelated;
@@ -3881,7 +4142,10 @@ pub const Runtime = struct {
             task.runtime.credential_renewal_deferred = true;
             return .deferred;
         }
-        if (!task.runtime.credential_update_failed and execution.credential_generation == generation) return .unchanged;
+        if (!task.runtime.credential_update_failed and execution.credential_generation == generation) {
+            if (resolved_source_generation) |source| execution.source_generation = source;
+            return .unchanged;
+        }
         var access = try task.runtime.acquireAccess();
         defer access.deinit();
         switch (access.sessionState()) {
@@ -3897,6 +4161,7 @@ pub const Runtime = struct {
             execution.credential_generation = generation;
             if (execution.credential_source) |source| source.replace(value);
             task.runtime.credential_update_failed = false;
+            if (resolved_source_generation) |source| execution.source_generation = source;
             return .unchanged;
         }
         const replacement = try execution.prepareCredential(value);
@@ -3926,7 +4191,51 @@ pub const Runtime = struct {
             record.credential_views.appendAssumeCapacity(replacement);
         }
         task.runtime.credential_update_failed = false;
+        if (resolved_source_generation) |source| execution.source_generation = source;
         return .updated;
+    }
+
+    pub fn needsDeferredMetaskCredential(self: *const Runtime, scope: u64) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.credential_renewal_deferred and task.runtime.active_operation != .compact and
+                self.metaskCredentialScope(task.durable.id) == scope) return true;
+        };
+        return false;
+    }
+
+    pub fn deferMetaskCredentialRenewals(self: *Runtime, scope: u64) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (self.metaskCredentialScope(task.durable.id) == scope)
+                task.runtime.credential_renewal_deferred = true;
+        };
+    }
+
+    pub fn renewMetaskExecutions(self: *Runtime, scope: u64, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
+        var changed = false;
+        for (self.tasks) |entry| if (entry) |task| {
+            const id = task.durable.id;
+            changed = self.renewMetaskImages(id, scope, generation, credential) or changed;
+            if (self.metaskCredentialScope(id) != scope) continue;
+            const value = credential orelse {
+                self.failCredentialRenewal(id, generation, true, false);
+                changed = true;
+                continue;
+            };
+            const outcome = self.renewMetaskCredential(id, scope, generation, value, null) catch |err| {
+                self.failMetaskCredentialUpdate(id, generation, err, effects);
+                changed = true;
+                continue;
+            };
+            changed = changed or outcome == .updated;
+        };
+        return changed;
+    }
+
+    pub fn failMetaskCredentialUpdate(self: *Runtime, task_id: u64, generation: u64, err: anyerror, effects: OperationEffects) void {
+        self.failCredentialRenewal(task_id, generation, err == error.OutOfMemory or err == error.CredentialUpdateResourceLimit, err == error.CredentialUpdateContract);
+        // Poisoned idle Sessions belong to the ordinary close owner.
+        if ((err == error.CredentialUpdateContract or err == error.SessionPoisoned) and !self.taskHasActiveOperation(task_id))
+            _ = self.beginDetach(task_id, effects) catch false;
     }
 
     pub fn failCredentialRenewal(self: *Runtime, task_id: u64, generation: u64, resource: bool, contract: bool) void {
@@ -4000,6 +4309,19 @@ pub const Runtime = struct {
             execution.retired_credentials.deinit(execution.allocator);
             execution.retired_credentials = .empty;
         }
+    }
+
+    pub fn retireQuiescentCredentials(self: *Runtime, effects: ReleaseEffects, reviewing: *const fn (*anyopaque, u64) bool) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            const id = task.durable.id;
+            if (reviewing(effects.context, id)) continue;
+            while (self.retiredCredential(id)) |value| {
+                if (!effects.prepareCredentialRelease(value)) break;
+                effects.redactAll(value);
+                // Unfinished history maintenance owns its own secret copy.
+                self.releaseRetiredCredential(id);
+            }
+        };
     }
 
     pub fn runExecutionIdentity(
@@ -4101,6 +4423,48 @@ pub const Runtime = struct {
     pub fn markInitialCatalog(self: *Runtime, task_id: u64, loading: bool) void {
         const task = self.find(task_id) orelse return;
         task.initial_catalog_preparation = if (loading) .loading else .unavailable;
+    }
+
+    pub const SkillPreparationResult = union(enum) { inspect, started: u64, restarted: u64, pending, stale, ready, unavailable };
+    pub const SkillPreparationAction = union(enum) { done, start: CatalogRefreshFacts, restart: CatalogRefreshFacts, poll: struct { workspace: CatalogRefreshFacts, generation: u64 }, install };
+
+    /// Consumes external catalog facts; directory I/O and authority remain in Control.
+    pub fn advanceSkillPreparation(self: *Runtime, task_id: u64, binding_epoch: u64, result: SkillPreparationResult) (CatalogRefreshError || agent.Error || std.mem.Allocator.Error || error{CatalogLoading})!SkillPreparationAction {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.durable.permission_interaction != .interactive) return .done;
+        const workspace = try self.catalogRefreshFacts(task_id, binding_epoch);
+        switch (result) {
+            .inspect => {},
+            .started, .restarted => |generation| {
+                task.skill_preparation = .{ .binding_epoch = binding_epoch, .generation = generation };
+                if (result == .restarted) return error.CatalogLoading;
+            },
+            .pending => return error.CatalogLoading,
+            .stale => return .{ .restart = workspace },
+            .ready => return .install,
+            .unavailable => {
+                try self.suspendSkills(task_id);
+                return .done;
+            },
+        }
+        if (task.skill_preparation) |preparation| if (preparation.binding_epoch == binding_epoch)
+            return .{ .poll = .{ .workspace = workspace, .generation = preparation.generation } };
+        return .{ .start = workspace };
+    }
+
+    /// The admission scope releases its completed preparation even if later
+    /// Workspace or attachment admission fails before prepareRun is reached.
+    pub const SkillAdmissionScope = struct {
+        runtime: *Runtime,
+        task_id: u64,
+        pub fn deinit(self: SkillAdmissionScope) void {
+            const task = self.runtime.find(self.task_id) orelse return;
+            task.skill_preparation = null;
+        }
+    };
+
+    pub fn skillAdmissionScope(self: *Runtime, task_id: u64) SkillAdmissionScope {
+        return .{ .runtime = self, .task_id = task_id };
     }
 
     pub fn catalogRefreshFacts(
@@ -4269,7 +4633,29 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
+    pub fn isAdvancingInputs(self: *const Runtime) bool {
+        return self.advancing_inputs;
+    }
+
+    pub const DeletionStart = union(enum) { unchanged, requested, stop_failed: ControlError };
+
+    pub fn beginDeletion(self: *Runtime, task_id: u64, effects: OperationEffects) DeletionError!DeletionStart {
+        if (!try self.requestDeletion(task_id)) return .unchanged;
+        self.stopOperation(task_id, effects) catch |err| {
+            self.find(task_id).?.deletion = .failed;
+            return .{ .stop_failed = err };
+        };
+        return .requested;
+    }
+
+    pub fn sessionReleaseFailureTaskId(self: *const Runtime) ?u64 {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_failed and task.runtime.liveConst() != null) return task.durable.id;
+        };
+        return null;
+    }
+
+    fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (deleteBlocker(task)) |blocker| switch (blocker) {
             .history_read_only => return error.TaskReadOnly,
@@ -4413,10 +4799,12 @@ pub const Runtime = struct {
             const run = if (entry.*) |*value| value else continue;
             if (initial == null or run.id < initial.?.id) initial = run;
         }
-        const terminal = task_state.productTerminalFacts(initial orelse return null) orelse return null;
+        const run = initial orelse return null;
+        const terminal = task_state.productTerminalFacts(run) orelse return null;
         return .{
             .outcome = terminal.outcome,
             .permission_required = terminal.cause == .permission_required,
+            .permission_profile = run.permission_profile,
         };
     }
 
@@ -4708,7 +5096,7 @@ pub const Runtime = struct {
 
     /// Main loop only, after terminal acquisition and this Session's queue
     /// barrier. A worker never writes these facts into the durable aggregate.
-    pub fn adoptTerminalReceipts(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!bool {
+    fn adoptTerminalReceipts(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!bool {
         const task = self.findByRouteId(route_id) orelse return false;
         const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
         if (!run.terminal_event_drain_marked or task_state.terminalPayload(run) == null) return false;
@@ -4731,7 +5119,7 @@ pub const Runtime = struct {
         return changed;
     }
 
-    pub fn finishRetainedOutput(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!void {
+    fn finishRetainedOutput(self: *Runtime, route_id: u64, run_id: u64, effects: EventEffects) task_state.EventProjectionError!void {
         const task = self.findByRouteId(route_id) orelse return;
         const run = task_state.findRun(task.durable.runs, run_id) orelse return;
         var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
@@ -4871,6 +5259,35 @@ pub const Runtime = struct {
         return rejection;
     }
 
+    /// Workers may publish text containing a credential acquired after admission.
+    /// Scrub after acquiring publication, before observing or saving terminal facts.
+    pub fn scrubPublishedTerminalData(
+        self: *Runtime,
+        context: *const anyopaque,
+        redact: *const fn (*const anyopaque, []u8) bool,
+    ) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
+                const changed = redact(context, run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
+                run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
+                if (run.terminal_payload.model_error) |observation| {
+                    const message = &observation.detail.message;
+                    observation.host_redacted = redact(context, message.bytes[0..message.len]) or observation.host_redacted;
+                    inline for (.{ "code", "type", "request_id" }) |field| {
+                        if (@field(observation.detail, field)) |*text|
+                            observation.host_redacted = redact(context, text.bytes[0..text.len]) or observation.host_redacted;
+                    }
+                }
+            };
+            for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
+                if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
+                const changed = redact(context, compact.terminal_diagnostic[0..compact.terminal_payload.diagnostic_len]);
+                compact.terminal_payload.diagnostic_redacted = changed or compact.terminal_payload.diagnostic_redacted;
+            };
+        };
+    }
+
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {
@@ -4886,6 +5303,43 @@ pub const Runtime = struct {
             changed = task_state.markTerminalRunsBeforeEventDrain(task) or changed;
         }
         return changed;
+    }
+
+    pub const TerminalOutputEffects = struct {
+        context: *anyopaque,
+        event: EventEffects,
+        publish_failure_fn: *const fn (*anyopaque) void,
+        invalidate_event_fn: *const fn (*anyopaque, u64, u64) void,
+    };
+
+    pub fn settleTerminalOutputAfterEventDrain(self: *Runtime, events: EventDrainStatus, effects: TerminalOutputEffects) void {
+        for (self.tasks) |entry| if (entry) |task| {
+            const route_id = task.runtime.routeId();
+            if (events.pending(route_id) != 0) continue;
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (!run.terminal_event_drain_marked) continue;
+                self.finishRetainedOutput(route_id, run.id, effects.event) catch |err| {
+                    self.recordTerminalOutputFailure(route_id, run.id, err, effects);
+                };
+                const execution = run.execution orelse continue;
+                if (execution.terminal_receipts.isEmpty()) continue;
+                const changed = self.adoptTerminalReceipts(route_id, run.id, effects.event) catch |err| failed: {
+                    self.recordTerminalOutputFailure(route_id, run.id, err, effects);
+                    // No borrowed receipt outlives this fact.
+                    execution.terminal_receipts = .{};
+                    break :failed true;
+                };
+                if (changed) effects.invalidate_event_fn(effects.context, task.durable.id, run.id);
+            };
+        };
+    }
+
+    fn recordTerminalOutputFailure(self: *Runtime, route_id: u64, run_id: u64, err: task_state.EventProjectionError, effects: TerminalOutputEffects) void {
+        const changed = switch (err) {
+            error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(route_id, run_id),
+            else => self.recordEventPipelineFailure(route_id, run_id),
+        };
+        if (changed) effects.publish_failure_fn(effects.context);
     }
 
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(
@@ -5877,6 +6331,107 @@ pub const Runtime = struct {
             .execution_generation = task.durable.execution_generation,
             .has_model_intent = task.durable.model_intent != null,
         };
+    }
+
+    pub const RestoreFilters = struct {
+        skill: ?*agent.SkillRestoreInputs,
+        mcp: ?*agent.McpSelection,
+        mcp_catalog_generation: ?u64,
+    };
+
+    pub const RestoreCapabilityEffects = struct {
+        context: *anyopaque,
+        prepare_fn: *const fn (*anyopaque, u64, *const agent.SessionRestoreInputs) anyerror!RestoreFilters,
+        metask_scope_fn: *const fn (*anyopaque, []const u8) ?u64,
+    };
+
+    pub fn restoreSkillFacts(self: *const Runtime, task_id: u64) ?struct {
+        workspace_id: u64,
+        workspace_epoch: u64,
+        catalog: ?product_skill.catalog.CatalogProjection,
+    } {
+        const task = self.findConst(task_id) orelse return null;
+        const pinned = task.runtime.pinnedCatalogConst() orelse
+            if (task.runtime.restore_catalog) |*snapshot| snapshot else null;
+        return .{
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .catalog = if (pinned) |snapshot| snapshot.view() else null,
+        };
+    }
+
+    pub fn modelRestoreCapabilitiesExact(self: *Runtime, task_id: u64, effects: RestoreCapabilityEffects) bool {
+        const task = self.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        if (task.durable.approval_revision != rebind.approval_revision) return false;
+        const execution = if (job.outcome == .candidate) &job.outcome.candidate.execution else &job.attempt.execution;
+        const scope = effects.metask_scope_fn(effects.context, execution.provider_id) orelse return false;
+        const expected_scope = if (rebind.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
+        if (scope != expected_scope) return false;
+        const capabilities = if (rebind.capabilities) |*value| value else return true;
+        const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
+        defer if (current.skill) |value| value.deinit() catch {};
+        defer if (current.mcp) |value| value.deinit();
+        return sameRestoreFilters(capabilities, current);
+    }
+
+    fn sameRestoreFilters(capabilities: *const RestoreCapabilities, current: RestoreFilters) bool {
+        if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
+        const before_ids = if (capabilities.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        const after_ids = if (current.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        if (before_ids.len != after_ids.len) return false;
+        for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
+        const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
+        const after_tools = if (current.mcp) |value| value.selectedTools() else &.{};
+        if (before_tools.len != after_tools.len) return false;
+        for (before_tools, after_tools) |before, after|
+            if (!std.mem.eql(u8, before.server_id, after.server_id) or !std.mem.eql(u8, before.name, after.name)) return false;
+        return true;
+    }
+
+    pub fn refreshModelRestoreCapabilities(self: *Runtime, task_id: u64, effects: RestoreCapabilityEffects) bool {
+        const task = self.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        const capabilities = if (rebind.capabilities) |*value| value else return true;
+        const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
+        if (capabilities.skill) |value| value.deinit() catch {
+            capabilities.skill = null;
+            if (current.skill) |replacement| replacement.deinit() catch {};
+            if (current.mcp) |replacement| replacement.deinit();
+            return false;
+        };
+        if (capabilities.mcp) |value| value.deinit();
+        capabilities.skill = current.skill;
+        capabilities.mcp = current.mcp;
+        capabilities.mcp_catalog_generation = current.mcp_catalog_generation;
+        return true;
+    }
+
+    pub fn restoreAdmissionDetached(self: *const Runtime, task_id: u64) error{ UnknownTask, RecoveryUnavailable }!bool {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (task.durable.model_intent == null or task.runtime.active_operation != .none)
+            return error.RecoveryUnavailable;
+        return task.runtime.attachment == .detached;
+    }
+
+    pub fn restoreCandidateNeedsRebind(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.runtime.attachment == .detached or
+            (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(candidate));
+    }
+
+    pub fn recoveryReleaseRoute(self: *const Runtime, task_id: u64) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        const attached = task.runtime.attachedConst() orelse return null;
+        return if (attached.health == .available) attached.binding.routeId() else null;
+    }
+
+    pub fn recoveryAuthorizationScope(self: *const Runtime, task_id: u64, original: bool) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        const job = task.runtime.restore_job orelse return 0;
+        return if (original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
     }
 
     /// An owned copy survives release of the live Session access.
@@ -11261,6 +11816,44 @@ test "generated image acceptance shares submission order and refresh preserves i
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
 }
 
+test "Skill preparation retains one ticket until admission and rejects stale bindings" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    const epoch = task.durable.binding_epoch;
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .inspect) == .start);
+    const poll = try runtime.advanceSkillPreparation(1, epoch, .{ .started = 7 });
+    try std.testing.expectEqual(@as(u64, 7), poll.poll.generation);
+    try std.testing.expectError(error.CatalogLoading, runtime.advanceSkillPreparation(1, epoch, .pending));
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .stale) == .restart);
+    try std.testing.expectError(error.CatalogLoading, runtime.advanceSkillPreparation(1, epoch, .{ .restarted = 8 }));
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .ready) == .install);
+    try std.testing.expectEqual(@as(u64, 8), (try runtime.advanceSkillPreparation(1, epoch, .inspect)).poll.generation);
+    runtime.skillAdmissionScope(1).deinit();
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .inspect) == .start);
+    try std.testing.expectError(error.BindingEpochMismatch, runtime.advanceSkillPreparation(1, epoch + 1, .{ .started = 9 }));
+    try std.testing.expect(task.skill_preparation == null);
+}
+
+test "deletion start owns stop failure and repeated requests" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    try std.testing.expectEqual(.requested, try runtime.beginDeletion(1, projection.effects()));
+    try std.testing.expectEqual(.unchanged, try runtime.beginDeletion(1, projection.effects()));
+    task.deletion = .idle;
+    task.runtime.active_operation = .{ .run = 999 };
+    const failed = try runtime.beginDeletion(1, projection.effects());
+    try std.testing.expectEqual(error.NoSuchRun, failed.stop_failed);
+    try std.testing.expectEqual(task_deletion.State.failed, task.deletion);
+    try std.testing.expectError(error.UnknownTask, runtime.beginDeletion(2, projection.effects()));
+}
+
 test "direct deletion preserves archive and cancels waiting inputs without accepting new messages" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
@@ -11720,6 +12313,8 @@ test "Schedule terminal observation stays with the initial Run after later Runs 
     var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(8, "later"), null, reviewHistoryTestRun(7, "scheduled") };
     task.durable.runs = &runs;
     const first = &runs[2].?;
+    first.permission_profile = .full_access;
+    task.durable.permission_profile = .approval_required;
     first.event_stream_finalized = true;
     first.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
     first.terminal_publication.store(.published, .release);
@@ -11733,6 +12328,7 @@ test "Schedule terminal observation stays with the initial Run after later Runs 
     const summary = runtime.initialRunTerminalSummary(1).?;
     try std.testing.expectEqual(task_state.RunOutcome.completed, summary.outcome);
     try std.testing.expect(!summary.permission_required);
+    try std.testing.expectEqual(task_state.PermissionProfile.full_access, summary.permission_profile);
     try std.testing.expectEqual(@as(?task_policy.NavigationSignal, .failed), task_policy.navigationSignal(&task));
     first.event_stream_finalized = false;
     try std.testing.expect(runtime.initialRunTerminalSummary(1) == null);

@@ -1,4 +1,4 @@
-//! Bounded attachment I/O jobs. Product retains identities and quotas; workers
+//! Attachment staging operations and bounded I/O jobs. Workers
 //! receive frozen files, one owned chunk, or opened source handles.
 const std = @import("std");
 const attachment = @import("metawork_product_attachment");
@@ -34,7 +34,7 @@ pub const Executor = struct {
         return self.enqueue_fn(self.context, job);
     }
 };
-pub const Error = std.mem.Allocator.Error || error{ ShuttingDown, Capacity, InvalidInput, TooManyFiles };
+pub const Error = attachment.Error || error{ ShuttingDown, Capacity, InvalidInput, TooManyFiles };
 const Job = struct {
     lane: *Lane,
     completion_id: u64,
@@ -121,6 +121,17 @@ const Job = struct {
         self.lane.allocator.destroy(self);
     }
 };
+pub const Result = union(enum) {
+    accepted,
+    cancelled,
+    ready: []const attachment.Descriptor,
+    rejected: Rejection,
+};
+pub const Sink = struct {
+    context: *anyopaque,
+    complete_fn: *const fn (*anyopaque, u64, Result) void,
+};
+
 pub const Lane = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -134,11 +145,158 @@ pub const Lane = struct {
     completion_count: usize = 0,
     active_count: usize = 0,
     accepting: bool = true,
+    // Main-thread state; workers own only the bounded Job below.
+    operation: ?struct { completion_id: u64, product_id: u64, cancel_requested: bool = false, file_index: usize = 0, offset: usize = 0, count: usize = 0 } = null,
     pub fn create(io: std.Io, allocator: std.mem.Allocator, notifier: Notifier, executor: Executor) !*Lane {
         const self = try allocator.create(Lane);
         self.* = .{ .io = io, .allocator = allocator, .notifier = notifier, .executor = executor };
         return self;
     }
+    pub fn isActive(self: *const Lane) bool {
+        return self.operation != null;
+    }
+
+    pub fn prepareAdd(self: *Lane, runtime: *attachment.Runtime) Error!u64 {
+        if (self.isActive()) return error.InputBusy;
+        return runtime.beginPreparing();
+    }
+
+    pub fn beginPreparedPaths(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, path_count: usize, paths: []const u8) Error!void {
+        if (self.operation != null) return error.InputBusy;
+        if (runtime.preparing != id) return error.StaleTransfer;
+        errdefer _ = runtime.cancelPreparing(id);
+        try self.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
+        self.operation = .{ .completion_id = completion_id, .product_id = id };
+    }
+    pub fn beginPreparedBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, files: []const attachment.ReceiveFile) Error!void {
+        if (self.operation != null) return error.InputBusy;
+        if (runtime.preparing != id) return error.StaleTransfer;
+        errdefer _ = runtime.cancelPreparing(id);
+        try runtime.reservePrepared(id, files);
+        errdefer _ = runtime.cancelReceive(id);
+        var storage: [attachment.max_files_per_message]attachment.store.File = undefined;
+        const targets = try runtime.writeFiles(id, &storage);
+        try self.beginFiles(completion_id, runtime.file_store.?, .initialized, targets, 0, &.{});
+        self.operation = .{ .completion_id = completion_id, .product_id = id };
+    }
+    pub fn appendBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, index: usize, offset: usize, bytes: []const u8) Error!void {
+        if (self.operation != null) return error.InputBusy;
+        const target = try runtime.writeTarget(id, index, offset, bytes.len);
+        try self.beginFiles(completion_id, runtime.file_store.?, .written, &.{target}, offset, bytes);
+        self.operation = .{ .completion_id = completion_id, .product_id = id, .file_index = index, .offset = offset, .count = bytes.len };
+    }
+    pub fn finishBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64) Error!void {
+        if (self.operation != null) return error.InputBusy;
+        try runtime.validateComplete(id);
+        var storage: [attachment.max_files_per_message]attachment.store.File = undefined;
+        const targets = try runtime.writeFiles(id, &storage);
+        try self.beginFiles(completion_id, runtime.file_store.?, .validated, targets, 0, &.{});
+        self.operation = .{ .completion_id = completion_id, .product_id = id };
+    }
+
+    pub fn cancelStaging(self: *Lane, completion_id: u64) bool {
+        const op = if (self.operation) |*value| value else return false;
+        if (op.completion_id != completion_id) return false;
+        op.cancel_requested = true;
+        self.cancel(completion_id);
+        return true;
+    }
+    pub fn drainCompletions(self: *Lane, runtime: *attachment.Runtime, sink: Sink) void {
+        while (self.take()) |taken| {
+            var transferred = false;
+            defer if (!transferred) self.release(taken);
+            const raw = taken.completion;
+            const op = self.operation orelse continue;
+            if (op.completion_id != raw.completion_id) continue;
+            if (op.cancel_requested or raw.cancelled or raw.rejection != null) {
+                self.operation = null;
+                _ = runtime.cancelPreparing(op.product_id);
+                _ = runtime.cancelReceiveChecked(op.product_id) catch {
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
+                    continue;
+                };
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, if (op.cancel_requested or raw.cancelled) .cancelled else .{ .rejected = raw.rejection.? });
+                continue;
+            }
+            if (raw.phase == .probed) {
+                runtime.reservePrepared(op.product_id, raw.files) catch |err| {
+                    self.operation = null;
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                    continue;
+                };
+                var file_storage: [attachment.max_files_per_message]attachment.store.File = undefined;
+                const files = runtime.writeFiles(op.product_id, &file_storage) catch unreachable;
+                self.continueCopy(taken, files) catch |err| {
+                    self.operation = null;
+                    _ = runtime.cancelReceiveChecked(op.product_id) catch {
+                        self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
+                        continue;
+                    };
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                    continue;
+                };
+                transferred = true;
+                continue;
+            }
+            self.operation = null;
+            if (raw.phase == .initialized) {
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .accepted);
+                continue;
+            }
+            if (raw.phase == .written) {
+                runtime.acknowledgeWrite(op.product_id, op.file_index, op.offset, op.count) catch |err| {
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                    continue;
+                };
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .accepted);
+                continue;
+            }
+            if (raw.phase == .copied) {
+                runtime.acknowledgeCopied(op.product_id) catch unreachable;
+                self.operation = op;
+                self.continueValidation(taken) catch |err| {
+                    self.operation = null;
+                    _ = runtime.cancelReceiveChecked(op.product_id) catch {
+                        self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
+                        continue;
+                    };
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                    continue;
+                };
+                transferred = true;
+                continue;
+            }
+            var descriptors: [attachment.max_files_per_message]attachment.Descriptor = undefined;
+            const ready = (if (raw.phase == .validated) runtime.finishValidated(op.product_id, &descriptors) else runtime.finishReceive(op.product_id, &descriptors)) catch |err| {
+                _ = runtime.cancelReceiveChecked(op.product_id) catch {
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
+                    continue;
+                };
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                continue;
+            };
+            self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .ready = ready });
+        }
+    }
+
+    fn completeAttachmentJob(self: *Lane, taken: Taken, released: *bool, sink: Sink, completion_id: u64, result: Result) void {
+        self.release(taken);
+        released.* = true;
+        sink.complete_fn(sink.context, completion_id, result);
+    }
+
+    /// The executor has joined: no worker can use the cancelled transfer.
+    pub fn finishShutdown(self: *Lane, runtime: *attachment.Runtime) void {
+        while (self.take()) |taken| self.release(taken);
+        if (self.operation) |op| {
+            _ = runtime.cancelPreparing(op.product_id);
+            _ = runtime.cancelReceiveChecked(op.product_id) catch {
+                std.log.err("attachment cleanup incomplete at shutdown", .{});
+            };
+            self.operation = null;
+        }
+    }
+
     fn allocate(self: *Lane, id: u64, store: *attachment.FileStore) Error!*Job {
         self.lock();
         defer self.unlock();
@@ -159,7 +317,7 @@ pub const Lane = struct {
             error.QueueFull => error.Capacity,
         };
     }
-    pub fn begin(self: *Lane, input: Input) Error!void {
+    fn begin(self: *Lane, input: Input) Error!void {
         if (input.path_count > input.limits.max_files) return error.TooManyFiles;
         if (input.path_count == 0 or input.paths.len == 0) return error.InvalidInput;
         const job = try self.allocate(input.completion_id, input.file_store);
@@ -172,20 +330,20 @@ pub const Lane = struct {
     }
     /// Transfer the probed job and opened source handles into a copy job. The
     /// caller must not release Taken after this succeeds.
-    pub fn continueCopy(self: *Lane, taken: Taken, files: []const attachment.store.File) Error!void {
+    fn continueCopy(self: *Lane, taken: Taken, files: []const attachment.store.File) Error!void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
         if (job.phase != .probed or files.len != job.source_count) return error.InvalidInput;
         job.targets = try self.allocator.dupe(attachment.store.File, files);
         job.phase = .copied;
         try self.enqueue(job);
     }
-    pub fn continueValidation(self: *Lane, taken: Taken) Error!void {
+    fn continueValidation(self: *Lane, taken: Taken) Error!void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
         if (job.phase != .copied) return error.InvalidInput;
         job.phase = .validated;
         try self.enqueue(job);
     }
-    pub fn beginFiles(self: *Lane, id: u64, store: *attachment.FileStore, phase: Phase, files: []const attachment.store.File, offset: usize, bytes: []const u8) Error!void {
+    fn beginFiles(self: *Lane, id: u64, store: *attachment.FileStore, phase: Phase, files: []const attachment.store.File, offset: usize, bytes: []const u8) Error!void {
         if (phase == .probed or phase == .copied or files.len == 0 or bytes.len > 128 * 1024 or (phase == .written and (files.len != 1 or bytes.len == 0))) return error.InvalidInput;
         const job = try self.allocate(id, store);
         errdefer self.release(.{ .job = job, .completion = undefined });
@@ -195,7 +353,7 @@ pub const Lane = struct {
         job.chunk = try self.allocator.dupe(u8, bytes);
         try self.enqueue(job);
     }
-    pub fn cancel(self: *Lane, id: u64) void {
+    fn cancel(self: *Lane, id: u64) void {
         self.lock();
         defer self.unlock();
         for (self.jobs) |slot| if (slot) |job| {
@@ -210,7 +368,7 @@ pub const Lane = struct {
             job.cancelled.store(true, .release);
         };
     }
-    pub fn take(self: *Lane) ?Taken {
+    fn take(self: *Lane) ?Taken {
         self.lock();
         defer self.unlock();
         if (self.completion_count == 0) return null;
@@ -220,7 +378,7 @@ pub const Lane = struct {
         self.completion_count -= 1;
         return .{ .job = job, .completion = .{ .completion_id = job.completion_id, .phase = job.phase, .rejection = job.rejection, .cancelled = job.cancelled.load(.acquire), .files = job.metadata } };
     }
-    pub fn release(self: *Lane, taken: Taken) void {
+    fn release(self: *Lane, taken: Taken) void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
         self.lock();
         for (&self.jobs) |*slot| if (slot.* == job) {

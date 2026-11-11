@@ -1518,7 +1518,7 @@ pub const Runtime = struct {
 
     /// The caller owns the returned array; its ID bytes borrow the original
     /// pinned projection until Agent's synchronous narrow call copies them.
-    pub fn restoreCeiling(self: *const Runtime, id: u64, epoch: u64, pinned: catalog.CatalogProjection) Error![][]const u8 {
+    pub fn restoreCeiling(self: *const Runtime, allocator: std.mem.Allocator, id: u64, epoch: u64, pinned: catalog.CatalogProjection) Error![][]const u8 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
@@ -1527,13 +1527,13 @@ pub const Runtime = struct {
             (pinned.availability != .ready and pinned.availability != .degraded)) return error.CatalogUnavailable;
         const scope: management.Scope = if (workspace.personal_only) .personal else .{ .project = .{ .workspace_id = id, .workspace_epoch = epoch } };
         var ids: std.ArrayList([]const u8) = .empty;
-        errdefer ids.deinit(self.allocator);
+        errdefer ids.deinit(allocator);
         for (pinned.skills) |skill| {
             if (skill.enabled and self.isSkillEnabled(scope, skill.skill_policy_key) and
                 policy.restoreSourceAllowed(skill, settings.selection, workspace.personal_only))
-                try ids.append(self.allocator, skill.skill_id);
+                try ids.append(allocator, skill.skill_id);
         }
-        return ids.toOwnedSlice(self.allocator);
+        return ids.toOwnedSlice(allocator);
     }
 
     pub fn enablementRevision(
@@ -2419,7 +2419,7 @@ test "Run preparation retains a single ticket through executor queue pressure" {
 test "Skill restore ceiling retains pinned IDs under current source and Workspace grants" {
     const Check = struct {
         fn ids(runtime: *const Runtime, workspace_id: u64, pinned: catalog.CatalogProjection, expected: []const []const u8) !void {
-            const actual = try runtime.restoreCeiling(workspace_id, 1, pinned);
+            const actual = try runtime.restoreCeiling(std.testing.allocator, workspace_id, 1, pinned);
             defer runtime.allocator.free(actual);
             try std.testing.expectEqual(expected.len, actual.len);
             for (actual, expected) |got, wanted| try std.testing.expectEqualStrings(wanted, got);
@@ -2487,24 +2487,24 @@ test "Skill restore ceiling retains pinned IDs under current source and Workspac
     try std.testing.expectEqualStrings("pinned-review", skills[0].skill_id);
     try std.testing.expect(skills[0].enabled);
     try std.testing.expectEqualStrings("original-content", skills[0].content_revision);
-    try std.testing.expectError(error.UnknownWorkspace, runtime.restoreCeiling(11, 1, pinned));
-    try std.testing.expectError(error.WorkspaceEpochMismatch, runtime.restoreCeiling(9, 2, pinned));
+    try std.testing.expectError(error.UnknownWorkspace, runtime.restoreCeiling(std.testing.allocator, 11, 1, pinned));
+    try std.testing.expectError(error.WorkspaceEpochMismatch, runtime.restoreCeiling(std.testing.allocator, 9, 2, pinned));
     pinned.redacted = true;
-    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
     pinned.redacted = false;
     for ([_]state.EnablementHealth{ .unavailable, .read_failed, .corrupt, .outcome_unknown }) |health| {
         runtime.state.enablement_health = health;
-        try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+        try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
     }
     runtime.state.enablement_health = .write_failed;
     try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project" });
     runtime.findWorkspace(9).?.authorized = false;
-    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
     runtime.findWorkspace(9).?.authorized = true;
     runtime.state.source_settings = null;
-    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
     runtime.shutting_down = true;
-    try std.testing.expectError(error.ExecutorShuttingDown, runtime.restoreCeiling(9, 1, pinned));
+    try std.testing.expectError(error.ExecutorShuttingDown, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
 }
 
 fn exerciseManagementCommitFailure(

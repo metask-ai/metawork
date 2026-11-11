@@ -8244,7 +8244,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         Host.finish();
         try capture.expect("\"reason\":\"too_many_files\"");
         try std.testing.expect(workbench.attachments.preparing == null);
-        try std.testing.expect(workbench.attachment_io == null);
+        try std.testing.expect(!workbench.attachmentWriterActive());
         try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
         var key_buffer: [80]u8 = undefined;
         const cancel_key = try std.fmt.bufPrint(&key_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\"}}", .{index + 5});
@@ -8333,7 +8333,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.wait(&workbench, &dispatcher, calls_before_cancel + 2);
     try capture.expect("\"status\":\"cleaned\"");
     try std.testing.expect(dispatcher.add_cancel == null);
-    try std.testing.expect(workbench.attachment_io == null);
+    try std.testing.expect(!workbench.attachmentWriterActive());
     try std.testing.expectEqual(@as(usize, 3), workbench.attachments.used_bytes);
     try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"9\"}");
     try other.expect("\"released\":false");
@@ -8364,7 +8364,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         try capture.invoke(native, source, commands.begin_attachment_add, input);
         Host.finish();
         try capture.expect("\"reason\":\"too_many_files\"");
-        try std.testing.expect(workbench.attachment_io == null);
+        try std.testing.expect(!workbench.attachmentWriterActive());
         try std.testing.expect(workbench.attachments.preparing == null);
         try std.testing.expectEqual(@as(usize, 1), workbench.attachments.used_bytes);
         var cancel_key: [80]u8 = undefined;
@@ -8542,7 +8542,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const payload = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("send").?, .{});
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     _ = Host.dispatch(native, source, &output, commands.send_input, payload);
     try std.testing.expect(task.durable.runs[0].?.additional_inputs[0] == null);
     _ = Host.dispatch(native, source, &output, commands.connect, "{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}");

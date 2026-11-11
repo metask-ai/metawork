@@ -82,6 +82,18 @@ pub const Runtime = struct {
     receiving: ?Receive = null,
     next_receive_id: u64 = 1,
     preparing: ?u64 = null,
+
+    pub fn available(self: *const Runtime) bool {
+        return self.file_store != null and self.images.prepare_fn != null;
+    }
+
+    pub fn cancelActiveReceive(self: *Runtime) void {
+        if (self.receiving) |receive| _ = self.cancelReceive(receive.id);
+    }
+
+    pub fn deleteTaskFiles(self: *Runtime, task_id: u64) void {
+        if (self.file_store) |store_backend| store_backend.deleteTask(task_id);
+    }
     pub fn init(allocator: std.mem.Allocator, limits: Limits, file_store: ?*FileStore, images: ImagePreparation, archive_tool: ?ArchiveTool) Error!Runtime {
         if (limits.max_files == 0 or limits.max_records < limits.max_files or limits.max_records > record_capacity or limits.max_display_name_bytes == 0 or limits.max_file_bytes == 0 or limits.max_staged_bytes == 0) return error.InvalidLimits;
         const archive_description = if (archive_tool) |tool| try tool.describe(allocator) else null;

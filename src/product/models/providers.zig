@@ -532,6 +532,14 @@ pub const Registry = struct {
         return self.providers.items[index].source_generation;
     }
 
+    pub const SourceGenerations = struct { source: u64, catalog: u64 };
+
+    pub fn sourceGenerations(self: *const Registry, provider_id: []const u8) ?SourceGenerations {
+        const index = self.findIndex(provider_id) orelse return null;
+        const provider = &self.providers.items[index];
+        return .{ .source = provider.source_generation, .catalog = provider.catalog_generation };
+    }
+
     /// Called only with a confirmed consumer selection. Catalog membership is
     /// execution authority; remembering an identity does not grant authority.
     pub fn rememberPreference(self: *Registry, target: contract.ModelRef, revision: u64) (std.mem.Allocator.Error || Error)!void {

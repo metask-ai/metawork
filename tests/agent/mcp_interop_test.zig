@@ -1643,7 +1643,7 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     if (refresh_pressure) {
         const run_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Call the selected echo tool." });
         defer control.cancel(task_id, run_id) catch {};
-        const task = control.task_runtime.find(task_id).?;
+        const task = control.testTask(task_id).?;
         const request_id = pending: {
             for (0..2000) |_| {
                 try control.drainAgentEvents();
@@ -1728,7 +1728,7 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     }
     for (0..3) |index| {
         if (index == 2) {
-            const task = control.task_runtime.find(task_id).?;
+            const task = control.testTask(task_id).?;
             _ = try control.setApprovalMode(task_id, .manual, task.durable.binding_epoch, task.durable.approval_revision);
             for (0..2000) |_| {
                 try control.drainAgentEvents();
@@ -3017,7 +3017,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
     );
     if (static_auth) {
         const run_id = try @import("lifecycle_fixture").runPreparedTask(&restarted_workbench, fresh_task_id, .{ .text = "Call the selected echo tool." });
-        const task = restarted_workbench.task_runtime.find(fresh_task_id).?;
+        const task = restarted_workbench.testTask(fresh_task_id).?;
         var previous: ?u64 = null;
         for (0..10000) |_| {
             try restarted_workbench.drainAgentEvents();
@@ -3054,7 +3054,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
     }
     if (race == .retain_disabled or race == .retain_deleted or race == .revoked_then_deleted or race == .disabled_edit) {
         const mcp = &restarted_workbench.mcp.?;
-        const task = restarted_workbench.task_runtime.find(fresh_task_id).?;
+        const task = restarted_workbench.testTask(fresh_task_id).?;
         var access = try task.runtime.acquireAccess();
         var original = access.captureRestoreInputs() catch |err| {
             access.deinit();
@@ -3074,7 +3074,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
                 for (0..2000) |_| {
                     try restarted_workbench.drainAgentEvents();
                     restarted_workbench.syncLifecycle();
-                    if (restarted_workbench.task_runtime.find(extra) == null) break;
+                    if (restarted_workbench.testTask(extra) == null) break;
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 } else return error.TestUnexpectedResult;
             }
@@ -3148,7 +3148,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
         for (0..2000) |_| {
             try restarted_workbench.drainAgentEvents();
             restarted_workbench.syncLifecycle();
-            if (restarted_workbench.task_runtime.find(fresh_task_id) == null) break;
+            if (restarted_workbench.testTask(fresh_task_id) == null) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u32, 0), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
@@ -3636,7 +3636,7 @@ fn waitTaskSwitchCatalog(control: *product_control.Runtime, workspace: u64, skil
 
 fn executeTaskSwitchRun(control: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput, choice: product_task.PermissionChoice) !usize {
     const run_id = try @import("lifecycle_fixture").runPreparedTask(control, task_id, input);
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     var previous: ?u64 = null;
     var answers: usize = 0;
     for (0..10000) |_| {
@@ -3795,7 +3795,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     _ = try control.setSkillEnabled(.{ .scope = .{ .project = .{ .workspace_id = workspace, .expected_workspace_epoch = try control.workspaceEpoch(workspace) } }, .skill_policy_key = "blocked", .state = .disabled, .expected_catalog_revision = catalog.revision, .expected_selection_revision = catalog.selection_revision.? });
     catalog = try control.workspaceCatalog(workspace);
     const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), initial, catalog.revision, catalog.selection_revision, .{ .interactive = approval_mode });
-    const task = control.task_runtime.find(task_id).?;
+    const task = control.testTask(task_id).?;
     var original_catalog = try task.runtime.pinnedCatalogConst().?.clone(std.testing.allocator, .{
         .max_catalog_skills = control.limits.max_catalog_skills,
         .max_catalog_issues = control.limits.max_catalog_issues,
@@ -4247,7 +4247,7 @@ test "real Core connects a restored expired grant only with committed new bearer
         old_retired: bool = false,
         fn now(raw: ?*anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            return self.seconds;
+            return self.seconds * 1000;
         }
         fn probe(raw: ?*anyopaque, locator: []const u8) mcp_configuration.CredentialPresence {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
@@ -4299,7 +4299,7 @@ test "real Core connects a restored expired grant only with committed new bearer
             management.locator_generator = .{ .available = true, .context = &self.durable, .fill_fn = DurableRegistry.fillIdentity };
             management.credentials = .{ .available = true, .context = self, .probe_fn = probe, .create_fn = create, .delete_fn = delete };
             return .{ .core = core, .control = try product_control.Runtime.init(allocator, std.testing.io, core, .{ .worker_count = 1, .queue_capacity = 4 }, .{
-                .schedule_timer = .{ .enabled = true, .context = self, .now_unix_seconds = now },
+                .run_clock = .{ .context = self, .now_unix_ms_fn = now },
                 .mcp = .{ .preparation = &preparation, .management = management, .host_capabilities = .{ .oauth = true, .connection_approval = true } },
             }) };
         }

@@ -2662,7 +2662,7 @@ const TestHarness = struct {
 
     fn unixNow(context: ?*anyopaque) ?u64 {
         const self: *TestHarness = @ptrCast(@alignCast(context.?));
-        return self.unix_seconds;
+        return std.math.mul(u64, self.unix_seconds orelse return null, 1000) catch null;
     }
 
     fn armAt(context: ?*anyopaque, deadline_ms: u64) bool {
@@ -2706,7 +2706,7 @@ const TestHarness = struct {
                 .context = self,
                 .notify_fn = notify,
             },
-            .unix_clock = .{ .enabled = true, .context = self, .now_seconds_fn = unixNow },
+            .unix_clock = .{ .enabled = true, .context = self, .now_ms_fn = unixNow },
         };
     }
 

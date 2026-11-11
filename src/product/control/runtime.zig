@@ -15,7 +15,7 @@ const file_preview = @import("product_control_file_preview");
 const output_check = @import("output_check.zig");
 const permission_job = @import("permission_job.zig");
 const agent_protocol = @import("product_agent_protocol_adapter");
-const attachment_staging = @import("product_control_attachment_staging");
+const attachment_staging = @import("product_attachment_staging");
 const file_change_io = @import("product_control_file_change_io");
 const product_attachment = @import("metawork_product_attachment");
 const product_workspace = @import("metawork_product_workspace");
@@ -898,19 +898,25 @@ fn mcpTimerPort(timer: McpRefreshTimer) mcp_ports.Timer {
     };
 }
 
+fn runClockUnixSeconds(clock: task_runtime.RunClock) ?u64 {
+    const milliseconds = clock.nowUnixMs() orelse return null;
+    const seconds = milliseconds / 1000;
+    return if (seconds != 0) seconds else null;
+}
+
 fn productMcpPorts(
     executor: *executor_impl.Executor,
     catalog: mcp_ports.Catalog,
     timer: McpRefreshTimer,
     notifier: ChangeNotifier,
-    clock: ScheduleTimer,
+    clock: task_runtime.RunClock,
 ) mcp_ports.Ports {
     return .{
         .executor = mcpExecutorPort(executor),
         .catalog = catalog,
         .timer = mcpTimerPort(timer),
         .notifier = mcpNotifierPort(notifier),
-        .unix_clock = .{ .enabled = clock.enabled, .context = clock.context, .now_seconds_fn = clock.now_unix_seconds },
+        .unix_clock = .{ .enabled = true, .context = clock.context, .now_ms_fn = clock.now_unix_ms_fn },
     };
 }
 
@@ -1082,16 +1088,8 @@ pub const FilePreviewSink = struct {
 };
 
 pub const AttachmentStagingRejection = attachment_staging.Rejection;
-pub const AttachmentStagingResult = union(enum) {
-    accepted,
-    cancelled,
-    ready: []const product_attachment.Descriptor,
-    rejected: AttachmentStagingRejection,
-};
-pub const AttachmentStagingSink = struct {
-    context: *anyopaque,
-    complete_fn: *const fn (*anyopaque, u64, AttachmentStagingResult) void,
-};
+pub const AttachmentStagingResult = attachment_staging.Result;
+pub const AttachmentStagingSink = attachment_staging.Sink;
 
 pub const FileChangeDiffReason = enum {
     not_recorded,
@@ -1312,6 +1310,10 @@ const ViewPreparation = struct {
 };
 
 pub const Runtime = struct {
+    pub const testTask = if (builtin.is_test) TestSupport.findTask else struct {};
+    pub const testTaskConst = if (builtin.is_test) TestSupport.findTaskConst else struct {};
+    pub const testTaskSlots = if (builtin.is_test) TestSupport.taskSlots else struct {};
+
     updates: update.Runtime,
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
@@ -1342,7 +1344,6 @@ pub const Runtime = struct {
     mcp_executor: ?*executor_impl.Executor = null,
     attachment_executor: *executor_impl.Executor,
     attachment_lane: *attachment_staging.Lane,
-    attachment_io: ?struct { completion_id: u64, product_id: u64, cancel_requested: bool = false, file_index: usize = 0, offset: usize = 0, count: usize = 0 } = null,
     preview_executor: *executor_impl.Executor,
     preview_lane: *file_preview.Lane,
     preview_images: [file_preview.max_image_slots]?struct {
@@ -1360,7 +1361,6 @@ pub const Runtime = struct {
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
-    advancing_task_inputs: bool = false,
     executor_shutdown: bool = false,
     attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
@@ -1549,7 +1549,7 @@ pub const Runtime = struct {
         errdefer if (attachment_lane_owned) {
             attachment_lane.stopAdmission();
             attachment_executor.shutdown();
-            while (attachment_lane.take()) |taken| attachment_lane.release(taken);
+            attachment_lane.finishShutdown(&attachments);
             attachment_lane.deinit();
         };
         const preview_lane = try file_preview.Lane.create(io, allocator, .{
@@ -1710,7 +1710,7 @@ pub const Runtime = struct {
                     configuration.mcp_catalog orelse mcpCatalogPort(agent_runtime),
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
-                    configuration.schedule_timer,
+                    control.run_clock,
                 ),
             );
             mcp_startup = null;
@@ -1952,8 +1952,7 @@ pub const Runtime = struct {
 
     pub fn prepareAttachmentAdd(self: *Runtime) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.attachment_io != null) return error.InputBusy;
-        return self.attachments.beginPreparing();
+        return self.attachment_lane.prepareAdd(&self.attachments);
     }
     pub fn cancelAttachmentPreparation(self: *Runtime, id: u64) bool {
         return self.attachments.cancelPreparing(id);
@@ -1964,130 +1963,25 @@ pub const Runtime = struct {
     }
     pub fn beginPreparedAttachmentStaging(self: *Runtime, completion_id: u64, id: u64, path_count: usize, paths: []const u8) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.attachment_io != null) return error.InputBusy;
-        if (self.attachments.preparing != id) return error.StaleTransfer;
-        errdefer _ = self.attachments.cancelPreparing(id);
-        try self.attachment_lane.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = self.attachments.limits, .file_store = self.attachments.file_store orelse return error.StagingCapacity });
-        self.attachment_io = .{ .completion_id = completion_id, .product_id = id };
+        return self.attachment_lane.beginPreparedPaths(&self.attachments, completion_id, id, path_count, paths);
     }
     pub fn beginPreparedAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, files: []const product_attachment.ReceiveFile) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.attachment_io != null) return error.InputBusy;
-        if (self.attachments.preparing != id) return error.StaleTransfer;
-        errdefer _ = self.attachments.cancelPreparing(id);
-        try self.attachments.reservePrepared(id, files);
-        errdefer _ = self.attachments.cancelReceive(id);
-        var storage: [lifecycle.multimodal_input_limits.max_parts]product_attachment.store.File = undefined;
-        const targets = try self.attachments.writeFiles(id, &storage);
-        try self.attachment_lane.beginFiles(completion_id, self.attachments.file_store.?, .initialized, targets, 0, &.{});
-        self.attachment_io = .{ .completion_id = completion_id, .product_id = id };
+        return self.attachment_lane.beginPreparedBytes(&self.attachments, completion_id, id, files);
     }
     pub fn appendAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, index: usize, offset: usize, bytes: []const u8) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.attachment_io != null) return error.InputBusy;
-        const target = try self.attachments.writeTarget(id, index, offset, bytes.len);
-        try self.attachment_lane.beginFiles(completion_id, self.attachments.file_store.?, .written, &.{target}, offset, bytes);
-        self.attachment_io = .{ .completion_id = completion_id, .product_id = id, .file_index = index, .offset = offset, .count = bytes.len };
+        return self.attachment_lane.appendBytes(&self.attachments, completion_id, id, index, offset, bytes);
     }
     pub fn finishAttachmentBytes(self: *Runtime, completion_id: u64, id: u64) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.attachment_io != null) return error.InputBusy;
-        try self.attachments.validateComplete(id);
-        var storage: [lifecycle.multimodal_input_limits.max_parts]product_attachment.store.File = undefined;
-        const targets = try self.attachments.writeFiles(id, &storage);
-        try self.attachment_lane.beginFiles(completion_id, self.attachments.file_store.?, .validated, targets, 0, &.{});
-        self.attachment_io = .{ .completion_id = completion_id, .product_id = id };
+        return self.attachment_lane.finishBytes(&self.attachments, completion_id, id);
     }
-
     pub fn cancelAttachmentStaging(self: *Runtime, completion_id: u64) bool {
-        const op = if (self.attachment_io) |*value| value else return false;
-        if (op.completion_id != completion_id) return false;
-        op.cancel_requested = true;
-        self.attachment_lane.cancel(completion_id);
-        return true;
+        return self.attachment_lane.cancelStaging(completion_id);
     }
     pub fn drainAttachmentStagingCompletions(self: *Runtime, sink: AttachmentStagingSink) void {
-        while (self.attachment_lane.take()) |taken| {
-            var transferred = false;
-            defer if (!transferred) self.attachment_lane.release(taken);
-            const raw = taken.completion;
-            const op = self.attachment_io orelse continue;
-            if (op.completion_id != raw.completion_id) continue;
-            if (op.cancel_requested or raw.cancelled or raw.rejection != null) {
-                self.attachment_io = null;
-                _ = self.attachments.cancelPreparing(op.product_id);
-                _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
-                    continue;
-                };
-                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, if (op.cancel_requested or raw.cancelled) .cancelled else .{ .rejected = raw.rejection.? });
-                continue;
-            }
-            if (raw.phase == .probed) {
-                self.attachments.reservePrepared(op.product_id, raw.files) catch |err| {
-                    self.attachment_io = null;
-                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
-                    continue;
-                };
-                var file_storage: [lifecycle.multimodal_input_limits.max_parts]product_attachment.store.File = undefined;
-                const files = self.attachments.writeFiles(op.product_id, &file_storage) catch unreachable;
-                self.attachment_lane.continueCopy(taken, files) catch |err| {
-                    self.attachment_io = null;
-                    _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                        self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
-                        continue;
-                    };
-                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
-                    continue;
-                };
-                transferred = true;
-                continue;
-            }
-            self.attachment_io = null;
-            if (raw.phase == .initialized) {
-                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .accepted);
-                continue;
-            }
-            if (raw.phase == .written) {
-                self.attachments.acknowledgeWrite(op.product_id, op.file_index, op.offset, op.count) catch |err| {
-                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
-                    continue;
-                };
-                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .accepted);
-                continue;
-            }
-            if (raw.phase == .copied) {
-                self.attachments.acknowledgeCopied(op.product_id) catch unreachable;
-                self.attachment_io = op;
-                self.attachment_lane.continueValidation(taken) catch |err| {
-                    self.attachment_io = null;
-                    _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                        self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
-                        continue;
-                    };
-                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
-                    continue;
-                };
-                transferred = true;
-                continue;
-            }
-            var descriptors: [lifecycle.multimodal_input_limits.max_parts]product_attachment.Descriptor = undefined;
-            const ready = (if (raw.phase == .validated) self.attachments.finishValidated(op.product_id, &descriptors) else self.attachments.finishReceive(op.product_id, &descriptors)) catch |err| {
-                _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
-                    continue;
-                };
-                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
-                continue;
-            };
-            self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .ready = ready });
-        }
-    }
-
-    fn completeAttachmentJob(self: *Runtime, taken: attachment_staging.Taken, released: *bool, sink: AttachmentStagingSink, completion_id: u64, result: AttachmentStagingResult) void {
-        self.attachment_lane.release(taken);
-        released.* = true;
-        sink.complete_fn(sink.context, completion_id, result);
+        self.attachment_lane.drainCompletions(&self.attachments, sink);
     }
 
     /// Performs only bounded identity/authority work on the main thread and
@@ -2163,8 +2057,7 @@ pub const Runtime = struct {
     }
 
     fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        return task.deletion == .idle and !task.runtime.close_requested and task.durable.workspace_id == workspace_id and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
+        return self.task_runtime.workspaceFileTaskMatches(task_id, workspace_id) and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
     }
 
     fn workspacePathHasCredential(self: *const Runtime, path: []const u8) bool {
@@ -2679,7 +2572,7 @@ pub const Runtime = struct {
         // linearized admission in this same owner-thread command.
         try self.checkSkillMutationAuthority(preparation.scope);
         const previous_health = self.skill.managementHealth();
-        const result = self.skill.commitPreparedImport(id, revision, confirmation, self.schedule.now()) catch |err| {
+        const result = self.skill.commitPreparedImport(id, revision, confirmation, runClockUnixSeconds(self.run_clock)) catch |err| {
             self.publishSkillManagementChanges(previous_health);
             self.bumpRevision();
             return err;
@@ -2703,7 +2596,7 @@ pub const Runtime = struct {
         const previous_health = self.skill.managementHealth();
         const result = self.skill.uninstall(
             install_id,
-            self.schedule.now(),
+            runClockUnixSeconds(self.run_clock),
         ) catch |err| {
             self.publishSkillManagementChanges(previous_health);
             return err;
@@ -2720,7 +2613,7 @@ pub const Runtime = struct {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const previous_health = self.skill.managementHealth();
-        const result = self.skill.retryVerification(install_id, self.schedule.now()) catch |err| {
+        const result = self.skill.retryVerification(install_id, runClockUnixSeconds(self.run_clock)) catch |err| {
             self.publishSkillManagementChanges(previous_health);
             return err;
         };
@@ -2794,7 +2687,7 @@ pub const Runtime = struct {
     }
 
     pub fn attachmentWriterActive(self: *const Runtime) bool {
-        return self.attachment_io != null;
+        return self.attachment_lane.isActive();
     }
     pub fn attachmentCleanupPending(self: *const Runtime, batch_id: ?u64, attachment_id: ?u64) bool {
         return self.attachments.hasCleanupDebt(batch_id, attachment_id);
@@ -3293,7 +3186,7 @@ pub const Runtime = struct {
         return self.skill.sync(
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
-            self.schedule.now(),
+            runClockUnixSeconds(self.run_clock),
         );
     }
 
@@ -3538,29 +3431,35 @@ pub const Runtime = struct {
     /// One fresh query per new Run, shared by waiting consumers of a scope.
     /// A failed query withdraws grants before ordinary text can proceed.
     fn prepareTaskSkills(self: *Runtime, task_id: u64, binding_epoch: u64) Error!void {
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
-        if (task.durable.permission_interaction != .interactive) return;
-        const facts = try self.task_runtime.catalogRefreshFacts(task_id, binding_epoch);
-        if (task.skill_preparation == null or task.skill_preparation.?.binding_epoch != binding_epoch) {
-            const generation = self.skill.prepareWorkspaceCatalog(facts.workspace_id, facts.workspace_epoch) catch |err| switch (err) {
-                error.CatalogUnavailable => {
-                    try self.task_runtime.suspendSkills(task_id);
-                    return;
-                },
-                else => return err,
-            };
-            task.skill_preparation = .{ .generation = generation, .binding_epoch = binding_epoch };
-            self.bumpRevision();
-        }
-        switch (try self.skill.workspacePreparation(facts.workspace_id, facts.workspace_epoch, task.skill_preparation.?.generation)) {
-            .pending => return error.CatalogLoading,
-            .stale => {
-                task.skill_preparation.?.generation = try self.skill.prepareWorkspaceCatalog(facts.workspace_id, facts.workspace_epoch);
-                return error.CatalogLoading;
+        var action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .inspect);
+        while (true) switch (action) {
+            .done => return,
+            .install => return self.installTaskCatalog(task_id, binding_epoch),
+            .start => |workspace| {
+                const generation = self.skill.prepareWorkspaceCatalog(workspace.workspace_id, workspace.workspace_epoch) catch |err| switch (err) {
+                    error.CatalogUnavailable => {
+                        action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .unavailable);
+                        continue;
+                    },
+                    else => return err,
+                };
+                action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .{ .started = generation });
+                self.bumpRevision();
             },
-            .ready => try self.installTaskCatalog(task_id, binding_epoch),
-            .unavailable => try self.task_runtime.suspendSkills(task_id),
-        }
+            .restart => |workspace| {
+                const generation = try self.skill.prepareWorkspaceCatalog(workspace.workspace_id, workspace.workspace_epoch);
+                action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .{ .restarted = generation });
+            },
+            .poll => |request| {
+                const result = try self.skill.workspacePreparation(request.workspace.workspace_id, request.workspace.workspace_epoch, request.generation);
+                action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, switch (result) {
+                    .pending => .pending,
+                    .stale => .stale,
+                    .ready => .ready,
+                    .unavailable => .unavailable,
+                });
+            },
+        };
     }
 
     pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
@@ -3948,10 +3847,8 @@ pub const Runtime = struct {
         errdefer if (automatic.workspace.isActive()) automatic.rollback(self);
         const workspace = automatic.facts(self);
         const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true);
-        if (personal_revision) |revision| {
-            const task = self.task_runtime.find(task_id) orelse unreachable;
-            task.initial_personal_catalog = .{ .revision = revision, .selection_revision = expected_skill_selection_revision.? };
-        }
+        if (personal_revision) |revision|
+            self.task_runtime.installInitialPersonalCatalog(task_id, revision, expected_skill_selection_revision.?);
         self.workspace.setAutomaticOwner(workspace.id, task_id);
         automatic.complete(self);
         _ = self.syncInitialAutomaticCatalogsNoFail();
@@ -4025,10 +3922,7 @@ pub const Runtime = struct {
 
     /// Only a Task still owning a live/closing Session can block capacity.
     pub fn sessionReleaseFailureTaskId(self: *const Runtime) ?u64 {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (task.runtime.close_failed and task.runtime.liveConst() != null) return task.durable.id;
-        };
-        return null;
+        return self.task_runtime.sessionReleaseFailureTaskId();
     }
 
     fn sessionPressureError(self: *Runtime, except_task_id: ?u64) Error {
@@ -4042,16 +3936,14 @@ pub const Runtime = struct {
         return error.SessionCapacity;
     }
 
-    fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!struct { skill: ?*lifecycle.SkillRestoreInputs, mcp: ?*lifecycle.McpSelection, mcp_catalog_generation: ?u64 } {
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+    fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!task_runtime.Runtime.RestoreFilters {
+        const facts = self.task_runtime.restoreSkillFacts(task_id) orelse return error.UnknownTask;
         var skill: ?*lifecycle.SkillRestoreInputs = null;
         errdefer if (skill) |value| value.deinit() catch {};
         if (original.skill) |captured| {
-            const pinned = task.runtime.pinnedCatalogConst() orelse retained: {
-                break :retained if (task.runtime.restore_catalog) |*snapshot| snapshot else return error.CatalogUnavailable;
-            };
-            const ids = try self.skill.restoreCeiling(task.durable.workspace_id, task.durable.workspace_epoch, pinned.view());
-            defer self.skill.allocator.free(ids);
+            const catalog = facts.catalog orelse return error.CatalogUnavailable;
+            const ids = try self.skill.restoreCeiling(self.allocator, facts.workspace_id, facts.workspace_epoch, catalog);
+            defer self.allocator.free(ids);
             skill = try captured.narrow(.{ .granted_skill_ids = ids });
         }
         if (original.mcp) |captured| {
@@ -4066,54 +3958,23 @@ pub const Runtime = struct {
         return .{ .skill = skill, .mcp = null, .mcp_catalog_generation = null };
     }
 
-    fn sameRestoreFilters(capabilities: *const task_runtime.RestoreCapabilities, current: anytype) bool {
-        if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
-        const before_ids = if (capabilities.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
-        const after_ids = if (current.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
-        if (before_ids.len != after_ids.len) return false;
-        for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
-        const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
-        const after_tools = if (current.mcp) |value| value.selectedTools() else &.{};
-        if (before_tools.len != after_tools.len) return false;
-        for (before_tools, after_tools) |before, after|
-            if (!std.mem.eql(u8, before.server_id, after.server_id) or !std.mem.eql(u8, before.name, after.name)) return false;
-        return true;
+    fn prepareModelRestoreFilters(context: *anyopaque, task_id: u64, original: *const lifecycle.SessionRestoreInputs) anyerror!task_runtime.Runtime.RestoreFilters {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.prepareTaskRestoreFilters(task_id, original);
     }
 
-    fn modelRestoreCapabilitiesExact(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.find(task_id) orelse return false;
-        const job = task.runtime.restore_job orelse return false;
-        const rebind = if (job.rebind) |*value| value else return false;
-        if (task.durable.approval_revision != rebind.approval_revision) return false;
-        const execution = if (job.outcome == .candidate) &job.outcome.candidate.execution else &job.attempt.execution;
-        const scope = self.metaskAuthorizationScope(execution.provider_id) catch return false;
-        const expected_scope = if (rebind.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
-        if (scope != expected_scope) return false;
-        const capabilities = if (rebind.capabilities) |*value| value else return true;
-        const current = self.prepareTaskRestoreFilters(task_id, &capabilities.original) catch return false;
-        defer if (current.skill) |value| value.deinit() catch {};
-        defer if (current.mcp) |value| value.deinit();
-        return sameRestoreFilters(capabilities, current);
+    fn modelRestoreMetaskScope(context: *anyopaque, provider_id: []const u8) ?u64 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.metaskAuthorizationScope(provider_id) catch null;
+    }
+
+    fn modelRestoreEffects(self: *Runtime) task_runtime.Runtime.RestoreCapabilityEffects {
+        return .{ .context = self, .prepare_fn = prepareModelRestoreFilters, .metask_scope_fn = modelRestoreMetaskScope };
     }
 
     fn refreshModelRestoreCapabilities(context: *anyopaque, task_id: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        const task = self.task_runtime.find(task_id) orelse return false;
-        const job = task.runtime.restore_job orelse return false;
-        const rebind = if (job.rebind) |*value| value else return false;
-        const capabilities = if (rebind.capabilities) |*value| value else return true;
-        const current = self.prepareTaskRestoreFilters(task_id, &capabilities.original) catch return false;
-        if (capabilities.skill) |value| value.deinit() catch {
-            capabilities.skill = null;
-            if (current.skill) |replacement| replacement.deinit() catch {};
-            if (current.mcp) |replacement| replacement.deinit();
-            return false;
-        };
-        if (capabilities.mcp) |value| value.deinit();
-        capabilities.skill = current.skill;
-        capabilities.mcp = current.mcp;
-        capabilities.mcp_catalog_generation = current.mcp_catalog_generation;
-        return true;
+        return self.task_runtime.refreshModelRestoreCapabilities(task_id, self.modelRestoreEffects());
     }
 
     fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64, approval_revision: ?u64) Error!u64 {
@@ -4184,9 +4045,18 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
     ) Error!u64 {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        try self.checkTaskConversationRestore(task_id);
         self.syncLifecycle();
+        return self.admitUserTaskConversationRestore(task_id, expected_binding_epoch);
+    }
+
+    fn checkTaskConversationRestore(self: *Runtime, task_id: u64) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.modelFacts(task_id)) |facts| if (facts.intent_pending) return error.TaskPersistenceOutcomeUnknown;
+    }
+
+    fn admitUserTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64) Error!u64 {
+        try self.checkTaskConversationRestore(task_id);
         return self.admitTaskConversationRestore(task_id, expected_binding_epoch, null) catch |err| switch (err) {
             error.McpRestoreBusy => error.RecoveryUnavailable,
             else => err,
@@ -4194,12 +4064,10 @@ pub const Runtime = struct {
     }
 
     fn admitTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64, approval_revision: ?u64) Error!u64 {
-        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
-        if (task.durable.model_intent == null or task.runtime.active_operation != .none)
-            return error.RecoveryUnavailable;
+        const detached = try self.task_runtime.restoreAdmissionDetached(task_id);
         var target = try self.resolveTaskRunModel(task_id);
         defer if (target) |*value| value.deinit();
-        if (task.runtime.attachment == .detached) {
+        if (detached) {
             _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
                 error.SessionCapacity => return self.sessionPressureError(task_id),
                 else => return err,
@@ -4211,8 +4079,7 @@ pub const Runtime = struct {
                 .unavailable => return error.RecoveryUnavailable,
             }
         }
-        if (target) |*value| if (task.runtime.attachment == .detached or
-            (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
+        if (target) |*value| if (self.task_runtime.restoreCandidateNeedsRebind(task_id, value.input()))
             return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null, approval_revision);
         return error.RecoveryUnavailable;
     }
@@ -4462,18 +4329,21 @@ pub const Runtime = struct {
 
     fn receiveTaskInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: TaskRunInput) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
-        _ = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
+        const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse return error.UnknownTask;
+        const workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id).?;
+        _ = try self.workspace.taskRunAuthority(workspace_id, workspace_epoch);
         var staged: StagedTaskInput = .{};
         defer if (staged.borrow) |*borrow| borrow.rollback();
         const task_input = try self.borrowTaskInput(task_id, input, &staged);
         var effects = self.taskRuntimeOperationEffects();
-        effects.input_catalog = if (input == .skill and task.initial_personal_catalog != null and
-            std.mem.eql(u8, input.skill.catalog_revision, task.initial_personal_catalog.?.revision) and
-            input.skill.selection_revision == task.initial_personal_catalog.?.selection_revision)
+        effects.input_catalog = if (input == .skill and self.task_runtime.matchesInitialPersonalCatalog(
+            task_id,
+            input.skill.catalog_revision,
+            input.skill.selection_revision,
+        ))
             self.skill.personalCatalogProjection()
         else
-            try self.workspaceCatalog(task.durable.workspace_id);
+            try self.workspaceCatalog(workspace_id);
         _ = try self.task_runtime.receiveInput(task_id, operation_id, task_input, effects);
         if (staged.borrow) |*borrow| {
             borrow.retainForTask();
@@ -4483,23 +4353,12 @@ pub const Runtime = struct {
 
     pub fn stopTask(self: *Runtime, task_id: u64) Error!void {
         _ = self.syncLifecycleFacts();
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
+        try self.task_runtime.checkStopInputs(task_id);
         _ = self.task_runtime.stopInputs(task_id);
-        try self.stopTaskOperation(task_id);
+        try self.task_runtime.stopOperation(task_id, self.taskRuntimeOperationEffects());
         self.reapTaskInputResources();
         self.commitTaskStateNoFail();
         self.bumpRevision();
-    }
-
-    fn stopTaskOperation(self: *Runtime, task_id: u64) Error!void {
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
-        switch (task.runtime.active_operation) {
-            .run => |id| _ = try self.task_runtime.cancelRun(task_id, id, self.taskRuntimeOperationEffects()),
-            .compact => |id| _ = try self.task_runtime.cancelCompact(task_id, id, .user_cancel, self.taskRuntimeOperationEffects()),
-            .restore => self.task_runtime.cancelInputPreparation(task_id, self.taskRuntimeOperationEffects()),
-            .none => {},
-        }
     }
 
     /// Test-only immediate Run targeting observes Core receipt semantics. The
@@ -4527,7 +4386,7 @@ pub const Runtime = struct {
 
     fn admitInput(self: *Runtime, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        const task = self.testTask(task_id) orelse return error.UnknownTask;
         if (task.durable.binding_epoch != binding_epoch) return error.BindingEpochMismatch;
         const result = &task.send_input_result.?;
         switch (target) {
@@ -4649,9 +4508,7 @@ pub const Runtime = struct {
         self.output_checks.stopAdmission();
         self.cancelSnapshot();
         self.shutting_down = true;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
-        };
+        self.task_runtime.cancelWaitingInputsForShutdown();
         self.reapTaskInputResources();
     }
 
@@ -4746,28 +4603,23 @@ pub const Runtime = struct {
 
     fn admitTaskRunInternal(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: AdmissionInput, source: ?u64) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.inputContinuation(task_id) != null) return error.TaskBusy;
+        if (self.task_runtime.hasInputContinuation(task_id)) return error.TaskBusy;
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
             return error.BindingEpochMismatch;
-        const current_task = self.task_runtime.findConst(task_id).?;
-        if (current_task.durable.archived or current_task.read_only_history != null or current_task.deletion != .idle or
-            current_task.runtime.close_failed or current_task.runtime.close_requested or current_task.runtime.hasClosingSession()) return error.TaskClosing;
-        if (current_task.runtime.attachedConst()) |attached| if (attached.health != .available) return error.TaskClosing;
-        _ = self.workspace.taskRunAuthority(current_task.durable.workspace_id, current_task.durable.workspace_epoch) catch return error.TaskClosing;
-        if (current_task.runtime.attachedConst()) |attached| if (attached.health == .available and !current_task.runtime.close_failed)
-            try self.task_runtime.validateExecutionBinding(task_id);
+        const facts = try self.task_runtime.runAdmissionFacts(task_id);
+        _ = self.workspace.taskRunAuthority(facts.workspace_id, facts.workspace_epoch) catch return error.TaskClosing;
+        if (facts.validate_binding) try self.task_runtime.validateExecutionBinding(task_id);
         var model_target = try self.resolveTaskRunModel(task_id);
         defer if (model_target) |*target| target.deinit();
         if (model_target) |*target| {
-            const task = self.task_runtime.findConst(task_id).?;
-            if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
+            if (self.task_runtime.installedModelNeedsSourceChange(task_id, target.input())) {
                 if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
                     return error.ExecutionUnavailable;
                 _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
                 return error.RestoreBusy;
-            };
+            }
         }
         if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
@@ -4788,25 +4640,21 @@ pub const Runtime = struct {
             .queued => null,
         };
         try self.prepareTaskSkills(task_id, binding_epoch);
-        defer self.task_runtime.find(task_id).?.skill_preparation = null;
+        defer self.task_runtime.skillAdmissionScope(task_id).deinit();
         var staged: StagedTaskInput = .{};
         var acceptance_context: AttachmentRunAcceptanceContext = undefined;
         defer if (staged.borrow) |*borrow| borrow.rollback();
-        const original_input = switch (input) {
+        const prepared_input: task_runtime.Runtime.WaitingInput = switch (input) {
             .command => |command| blk: {
                 const value = try self.borrowTaskInput(task_id, command, &staged);
                 if (value == .multimodal) for (staged.items[0..value.multimodal.attachments.len]) |*item| {
                     item.resource_id = 0;
                 };
-                break :blk value;
+                break :blk .{ .input = value, .skill_selection = command_selection };
             },
-            .queued => |index| (self.task_runtime.pendingInput(task_id, index) orelse return error.InvalidInput).payload.?.input,
+            .queued => |index| self.task_runtime.borrowWaitingInput(task_id, index) orelse return error.InvalidInput,
         };
-        const selection = switch (input) {
-            .queued => |index| self.task_runtime.pendingInput(task_id, index).?.payload.?.skill_selection,
-            .command => command_selection,
-        };
-        const task_input = try task_runtime.compileSkillInput(original_input, selection, try self.taskCatalog(task_id));
+        const task_input = try task_runtime.compileSkillInput(prepared_input.input, prepared_input.skill_selection, try self.taskCatalog(task_id));
         var order_preparation = if (workspace.kind == .manual)
             try self.workspace.prepareOrder(workspace.id)
         else
@@ -5115,7 +4963,7 @@ pub const Runtime = struct {
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         ) catch |err| switch (err) {
-            error.PreviousTaskActive, error.TaskHistoryWriterBusy => error.TaskBusy,
+            error.PreviousTaskActive, error.ScheduleAdmissionWaiting => error.TaskBusy,
             else => return @errorCast(err),
         };
     }
@@ -5150,15 +4998,15 @@ pub const Runtime = struct {
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-        const requested = try self.task_runtime.requestDeletion(task_id);
-        if (requested) {
-            self.stopTaskOperation(task_id) catch |err| {
-                self.task_runtime.find(task_id).?.deletion = .failed;
+        const requested = switch (try self.task_runtime.beginDeletion(task_id, self.taskRuntimeOperationEffects())) {
+            .unchanged => false,
+            .requested => true,
+            .stop_failed => |err| {
                 self.reapTaskInputResources();
                 self.bumpRevision();
                 return err;
-            };
-        }
+            },
+        };
         self.reapTaskInputResources();
         if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
             if (self.workspace.facts(id)) |workspace| {
@@ -5475,6 +5323,7 @@ pub const Runtime = struct {
     }
 
     fn syncLifecycleFactsWithScheduleTimer(self: *Runtime, timer_elapsed: bool) bool {
+        if (self.task_runtime.isAdvancingInputs()) @panic("Product lifecycle sync during Task input advancement");
         self.scrubPublishedTerminalData();
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
@@ -5504,28 +5353,13 @@ pub const Runtime = struct {
             changed = true;
             durable_changed = true;
         }
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (self.task_runtime.inputContinuation(task.durable.id)) |source| {
-                if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id))
-                    source.input_continuation_schedule_gate = true;
-            }
-        };
+        self.task_runtime.gateScheduledContinuations(&self.schedule, scheduleHasPendingContinuation);
         if (self.schedule.reconcileNoFail(
             self.scheduleExecutionBinding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         )) changed = true;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (self.task_runtime.inputContinuation(task.durable.id)) |source| {
-                if (!source.input_continuation_schedule_gate) continue;
-                const pending = self.schedule.hasPendingSubmittedOccurrence(task.durable.id);
-                if (self.schedule.persistenceHealth() != .ready or
-                    (pending and self.schedule.completion_confirmation_failed_task == task.durable.id))
-                {
-                    changed = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .schedule_failed) or changed;
-                } else if (!pending) source.input_continuation_schedule_gate = false;
-            }
-        };
+        changed = self.task_runtime.settleScheduledContinuations(&self.schedule, scheduleContinuationConfirmation) or changed;
         if (durable_changed) self.approval_history_dirty = true;
         if (self.task_runtime.syncDeletions(
             self.checkpoint_store_health.load(.acquire) != .unavailable,
@@ -5549,74 +5383,75 @@ pub const Runtime = struct {
         return task_sync.mcp_refresh_needed;
     }
 
+    fn scheduleHasPendingContinuation(context: *const anyopaque, task_id: u64) bool {
+        const schedule: *const product_schedule.Runtime = @ptrCast(@alignCast(context));
+        return schedule.hasPendingSubmittedOccurrence(task_id);
+    }
+
+    fn scheduleContinuationConfirmation(context: *const anyopaque, task_id: u64) task_runtime.Runtime.ScheduleConfirmation {
+        const schedule: *const product_schedule.Runtime = @ptrCast(@alignCast(context));
+        return switch (schedule.continuationConfirmation(task_id)) {
+            .confirmed => .confirmed,
+            .pending => .pending,
+            .failed => .failed,
+        };
+    }
+
     fn advanceTaskInputs(self: *Runtime) void {
-        if (self.advancing_task_inputs) return;
-        self.advancing_task_inputs = true;
-        defer self.advancing_task_inputs = false;
         defer self.reapTaskInputResources();
-        for (self.task_runtime.tasks) |*entry| {
-            const task = entry.* orelse continue;
-            if (self.shutting_down) {
-                _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
-                _ = self.task_runtime.cancelInputContinuation(task.durable.id, null, .shutting_down);
-                continue;
-            }
-            for (0..self.limits.max_pending_inputs_per_task + 1) |_| {
-                switch (self.task_runtime.inputAction(task.durable.id)) {
-                    .none, .wait => break,
-                    .fail => |action| {
-                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason, null);
-                        self.bumpRevision();
-                    },
-                    .continuation => {
-                        if (!self.advanceInputContinuation(task.durable.id)) break;
-                    },
-                    .submit => |action| {
-                        _ = self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch) catch |err| {
-                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null);
-                            self.bumpRevision();
-                            continue;
-                        };
-                        const receipt = self.task_runtime.submitWaitingInput(task.durable.id, action.index, action.run_id, self.taskRuntimeOperationEffects()) catch |err| {
-                            switch (err) {
-                                error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
-                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null),
-                            }
-                            self.bumpRevision();
-                            continue;
-                        };
-                        self.bumpRevision();
-                        if (receipt.outcome == .rejected) break;
-                    },
-                    .start => |index| {
-                        if (!self.task_runtime.advanceWaitingInput(task.durable.id, index, self.taskRuntimeProjectionEffects(), .{
-                            .context = self,
-                            .restore_fn = restoreWaitingInput,
-                            .run_fn = admitWaitingInput,
-                            .history_blocked = self.approvalHistoryBlocked(),
-                            .release = self.taskRuntimeReleaseEffects(),
-                        })) break;
-                        self.bumpRevision();
-                    },
-                }
-            }
-        }
+        self.task_runtime.advanceInputQueue(self.shutting_down, .{
+            .waiting = .{
+                .context = self,
+                .restore_fn = restoreWaitingInput,
+                .run_fn = admitWaitingInput,
+                .history_blocked_fn = waitingInputHistoryBlocked,
+                .release = self.taskRuntimeReleaseEffects(),
+            },
+            .projection = self.taskRuntimeProjectionEffects(),
+            .operation = self.taskRuntimeOperationEffects(),
+            .check_workspace_fn = checkWaitingInputWorkspace,
+            .continue_fn = advanceWaitingInputContinuation,
+            .rejection_reason_fn = sendInputRejection,
+            .changed_fn = publishWaitingInputChange,
+        });
+    }
+
+    fn waitingInputHistoryBlocked(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.approvalHistoryBlocked();
+    }
+
+    fn checkWaitingInputWorkspace(context: *anyopaque, workspace_id: u64, epoch: u64) ?task_runtime.SendInputReason {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        _ = self.workspace.taskRunAuthority(workspace_id, epoch) catch |err| return sendInputRejection(err);
+        return null;
+    }
+
+    fn advanceWaitingInputContinuation(context: *anyopaque, task_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.advanceInputContinuation(task_id);
+    }
+
+    fn publishWaitingInputChange(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.bumpRevision();
     }
 
     fn reapTaskInputResources(self: *Runtime) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            while (self.task_runtime.takeInputResourceAction(task.durable.id)) |action| {
-                self.attachments.settleTaskInput(action.resource_id, task.durable.id, action.keep_original) catch |err| switch (err) {
-                    error.CleanupFailed => self.bumpRevision(),
-                    else => @panic("Task attachment ownership invariant violated"),
-                };
-            }
+        self.task_runtime.settleInputResources(self, settleTaskInputResource);
+    }
+
+    fn settleTaskInputResource(context: *anyopaque, task_id: u64, resource_id: u64, keep_original: bool) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.attachments.settleTaskInput(resource_id, task_id, keep_original) catch |err| switch (err) {
+            error.CleanupFailed => self.bumpRevision(),
+            else => @panic("Task attachment ownership invariant violated"),
         };
     }
 
     fn restoreWaitingInput(context: *anyopaque, task_id: u64, binding_epoch: u64) ?task_runtime.Runtime.WaitingInputEffects.RestoreFailure {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        _ = self.restoreTaskConversation(task_id, binding_epoch) catch |err| return .{
+        _ = self.admitUserTaskConversationRestore(task_id, binding_epoch) catch |err| return .{
             .reason = sendInputRejection(err),
             .blocking_task_id = if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null,
         };
@@ -5649,8 +5484,7 @@ pub const Runtime = struct {
                     return true;
                 };
                 defer if (target) |*value| value.deinit();
-                const task = self.task_runtime.findConst(task_id).?;
-                if (target) |*value| if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(value.input())) {
+                if (target) |*value| if (self.task_runtime.installedModelNeedsSourceChange(task_id, value.input())) {
                     _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id, null) catch |err| {
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
@@ -5663,7 +5497,6 @@ pub const Runtime = struct {
                 self.prepareTaskSkills(task_id, batch.binding_epoch) catch |err| switch (err) {
                     error.CatalogLoading, error.TaskBusy => return false,
                     else => {
-                        self.task_runtime.find(task_id).?.skill_preparation = null;
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
                         return true;
@@ -5832,30 +5665,13 @@ pub const Runtime = struct {
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
     }
 
-    /// Workers hold immutable initial/request snapshots. A response may contain
-    /// a later token, so acquire its publication and scrub against the complete
-    /// Host set before Task observes or persists any terminal text.
     fn scrubPublishedTerminalData(self: *Runtime) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
-                if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
-                const changed = self.redactWithKnownCredentialsNoFail(run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
-                run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
-                if (run.terminal_payload.model_error) |observation| {
-                    const message = &observation.detail.message;
-                    observation.host_redacted = self.redactWithKnownCredentialsNoFail(message.bytes[0..message.len]) or observation.host_redacted;
-                    inline for (.{ "code", "type", "request_id" }) |field| {
-                        if (@field(observation.detail, field)) |*text|
-                            observation.host_redacted = self.redactWithKnownCredentialsNoFail(text.bytes[0..text.len]) or observation.host_redacted;
-                    }
-                }
-            };
-            for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
-                if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
-                const changed = self.redactWithKnownCredentialsNoFail(compact.terminal_diagnostic[0..compact.terminal_payload.diagnostic_len]);
-                compact.terminal_payload.diagnostic_redacted = changed or compact.terminal_payload.diagnostic_redacted;
-            };
-        };
+        self.task_runtime.scrubPublishedTerminalData(self, redactTerminalText);
+    }
+
+    fn redactTerminalText(context: *const anyopaque, value: []u8) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.redactWithKnownCredentialsNoFail(value);
     }
 
     fn mcpInstallationValueSensitive(self: *const Runtime, value: std.json.Value) bool {
@@ -6517,31 +6333,12 @@ pub const Runtime = struct {
     }
 
     fn finalizeTerminalRunsAfterDrain(self: *Runtime, events: task_runtime.EventDrainStatus) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (events.pending(task.runtime.routeId()) != 0) continue;
-            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
-                if (!run.terminal_event_drain_marked) continue;
-                self.task_runtime.finishRetainedOutput(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| {
-                    switch (err) {
-                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
-                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
-                    }
-                };
-                const execution = run.execution orelse continue;
-                if (execution.terminal_receipts.isEmpty()) continue;
-                const changed = self.task_runtime.adoptTerminalReceipts(task.runtime.routeId(), run.id, self.taskEventEffects()) catch |err| failed: {
-                    switch (err) {
-                        error.ProjectionCapacity, error.ToolCapacity => self.recordEventProjectionFailure(task.runtime.routeId(), run.id),
-                        else => self.recordEventPipelineFailure(task.runtime.routeId(), run.id),
-                    }
-                    // No borrowed receipt or Agent pointer outlives this fact.
-                    // Physical allocation failures retain the real Host failure.
-                    execution.terminal_receipts = .{};
-                    break :failed true;
-                };
-                if (changed) self.encoded_views.invalidateEvent(task.durable.id, run.id);
-            };
-        };
+        self.task_runtime.settleTerminalOutputAfterEventDrain(events, .{
+            .context = self,
+            .event = self.taskEventEffects(),
+            .publish_failure_fn = publishTerminalOutputFailure,
+            .invalidate_event_fn = invalidateTerminalOutputEvent,
+        });
         const finished_at_ms = self.run_clock.now();
         const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
@@ -6555,6 +6352,17 @@ pub const Runtime = struct {
         }
     }
 
+    fn publishTerminalOutputFailure(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    fn invalidateTerminalOutputEvent(context: *anyopaque, task_id: u64, run_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.encoded_views.invalidateEvent(task_id, run_id);
+    }
+
     // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.
     pub const writeAggregateFixture = if (builtin.is_test) TestSupport.writeAggregateFixture else {};
     pub const writeViewFixture = if (builtin.is_test) TestSupport.writeViewFixture else {};
@@ -6564,7 +6372,7 @@ pub const Runtime = struct {
             self.schedule.persistenceHealth() == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
         const background_schedule_wake = self.schedule.backgroundAvailable();
-        const attachments_available = self.attachments.file_store != null and self.attachments.images.prepare_fn != null;
+        const attachments_available = self.attachments.available();
         const mcp_capabilities = if (self.mcp) |*runtime|
             runtime.capabilities()
         else
@@ -7452,14 +7260,7 @@ pub const Runtime = struct {
         if (self.attachment_executor_shutdown) return;
         self.attachment_lane.stopAdmission();
         self.attachment_executor.shutdown();
-        while (self.attachment_lane.take()) |taken| self.attachment_lane.release(taken);
-        if (self.attachment_io) |op| {
-            _ = self.attachments.cancelPreparing(op.product_id);
-            _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                std.log.err("attachment cleanup incomplete at shutdown", .{});
-            };
-            self.attachment_io = null;
-        }
+        self.attachment_lane.finishShutdown(&self.attachments);
         self.attachment_executor_shutdown = true;
     }
 
@@ -7483,7 +7284,7 @@ pub const Runtime = struct {
         });
         if (self.executor_shutdown) return;
         self.shutting_down = true;
-        if (self.attachments.receiving) |receive| _ = self.attachments.cancelReceive(receive.id);
+        self.attachments.cancelActiveReceive();
         if (self.mcp) |*runtime| runtime.beginShutdown();
         self.schedule.cancelTimer();
         self.skill.beginShutdown();
@@ -7706,16 +7507,12 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const task = self.task_runtime.findConst(query.task_id);
         const model_rebind_required = self.taskModelNeedsRebind(query.task_id);
-        const releasing_route_id: ?u64 = if (task != null and model_rebind_required and task.?.runtime.attachedConst() != null and
-            task.?.runtime.attachedConst().?.health == .available)
-            task.?.runtime.attachedConst().?.binding.routeId()
-        else
-            null;
-        const execution_available = if (task != null and task.?.durable.model_intent != null) intent: {
+        const releasing_route_id = if (model_rebind_required) self.task_runtime.recoveryReleaseRoute(query.task_id) else null;
+        const facts = self.task_runtime.modelFacts(query.task_id);
+        const execution_available = if (facts != null and facts.?.intent != null) intent: {
             const authority = self.taskModelIntentAuthority(query.task_id) orelse break :intent false;
-            break :intent self.custom_providers.sourceModelProtocol(task.?.durable.model_intent.?.modelRef(), authority.source_generation, authority.catalog_generation) != null;
+            break :intent self.custom_providers.sourceModelProtocol(facts.?.intent.?.target, authority.source_generation, authority.catalog_generation) != null;
         } else self.installedTaskModelAvailable(query.task_id);
         return .{
             .shutting_down = self.shutting_down,
@@ -7759,86 +7556,79 @@ pub const Runtime = struct {
     }
 
     fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        const intent = task.durable.model_intent orelse return false;
-        const installed = task.runtime.executionConst() orelse return false;
-        if (installed.model_intent_revision == intent.revision and task.runtime.metask_authorization_scope == 0) return false;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return false;
+        const intent = facts.intent orelse return false;
+        if (facts.installed == null) return false;
+        if (self.task_runtime.installedIntentCurrent(task_id) and facts.metask_scope == 0) return false;
         const authority = self.taskModelIntentAuthority(task_id) orelse return false;
-        const protocol = self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) orelse return false;
-        const provider_matches = if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id))
-            std.mem.eql(u8, installed.provider_id, "metask")
-        else
-            std.mem.startsWith(u8, installed.provider_id, "custom_provider:") and std.mem.eql(u8, installed.provider_id["custom_provider:".len..], intent.source_id);
-        if (installed.protocol != protocol or !provider_matches) return true;
-        if (installed.source_generation == authority.source_generation) return false;
-        if (task.runtime.metask_authorization_scope == 0) return true;
-        var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
+        const protocol = self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) orelse return false;
+        if (!self.task_runtime.installedModelProviderMatches(task_id, intent.target, protocol)) return true;
+        if (self.task_runtime.installedModelSourceCurrent(task_id, authority.source_generation)) return false;
+        if (facts.metask_scope == 0) return true;
+        var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
         defer candidate.deinit();
-        return !installed.matchesTarget(candidate.input());
+        return !self.task_runtime.installedModelMatchesTarget(task_id, candidate.input());
     }
 
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
-        const task = self.task_runtime.findConst(task_id) orelse return null;
-        const intent = task.durable.model_intent orelse return null;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return null;
+        const intent = facts.intent orelse return null;
         // Account identity replacement revokes new Metask credential use.
         // Independent Custom Providers do not inherit that Account gate.
-        if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id)) {
+        if (std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)) {
             self.validateTaskMetaskAuthorization(task_id) catch return null;
         }
-        const models = self.modelsView();
-        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
-            return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
-        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
-            return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
-        return null;
+        const generations = self.custom_providers.sourceGenerations(intent.target.source_id) orelse return null;
+        return .{
+            .source_id = intent.target.source_id,
+            .selection_revision = intent.revision,
+            .source_generation = generations.source,
+            .catalog_generation = generations.catalog,
+        };
     }
 
     fn installedTaskModelAvailable(self: *Runtime, task_id: u64) bool {
-        const task = self.task_runtime.findConst(task_id) orelse return false;
-        const installed = task.runtime.executionConst() orelse return false;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return false;
+        const installed = facts.installed orelse return false;
         self.validateTaskMetaskAuthorization(task_id) catch return false;
-        const source = if (std.mem.eql(u8, installed.provider_id, models_contract.metask_source_id))
-            models_contract.metask_source_id
-        else if (std.mem.startsWith(u8, installed.provider_id, "custom_provider:"))
-            installed.provider_id["custom_provider:".len..]
-        else
-            return false;
-        return self.custom_providers.installedModelAvailable(.{ .source_id = source, .model_id = installed.model }, installed.source_generation, installed.protocol);
+        const target = installed.target orelse return false;
+        return self.custom_providers.installedModelAvailable(target, installed.source_generation, installed.protocol);
     }
 
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
-        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
-        if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
+        if (facts.intent_pending) return error.TaskPersistenceOutcomeUnknown;
         try self.validateTaskMetaskAuthorization(task_id);
-        const intent = task.durable.model_intent orelse {
+        const intent = facts.intent orelse {
             if (!self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
             return null;
         };
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        if (task.runtime.executionConst()) |installed|
-            if (installed.model_intent_revision == intent.revision) {
+        if (facts.installed != null)
+            if (self.task_runtime.installedIntentCurrent(task_id)) {
                 // Membership is checked against current source authority. A
                 // renewed Metask credential must reach the renewal path below,
                 // rather than being rejected for the old owned generation.
-                if (self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == null and
+                if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null and
                     !self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
-                if (task.runtime.metask_authorization_scope == 0) return null;
+                if (facts.metask_scope == 0) return null;
                 const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-                if (!task.runtime.credential_update_failed and installed.source_generation == current.source_generation) return null;
+                if (self.task_runtime.installedCredentialCurrent(task_id, current.source_generation)) return null;
             };
-        if (self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == null)
+        if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null)
             return error.ExecutionUnavailable;
-        var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
+        var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
-        try self.prepareTaskCredential(candidate.input().api_key);
-        if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.matchesTarget(candidate.input())) {
+        const input = candidate.input();
+        try self.prepareTaskCredential(input.api_key);
+        if (facts.installed != null) if (facts.metask_scope != 0 and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
             const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
             const current = check.current() orelse return error.ExecutionUnavailable;
-            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, candidate.input().api_key, true) catch |err| {
-                self.failMetaskCredentialUpdate(task_id, current.generation, err);
+            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, input.api_key, input.source_generation) catch |err| {
+                self.task_runtime.failMetaskCredentialUpdate(task_id, current.generation, err, self.taskRuntimeOperationEffects());
                 return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionUnavailable;
             };
             switch (renewal) {
@@ -7846,15 +7636,13 @@ pub const Runtime = struct {
                 .deferred => return error.TaskBusy,
                 .updated, .unchanged => {},
             }
-            self.task_runtime.find(task_id).?.runtime.execution().?.source_generation = candidate.input().source_generation;
-            if (installed.model_intent_revision == intent.revision) {
+            if (self.task_runtime.installedIntentCurrent(task_id)) {
                 candidate.deinit();
                 return null;
             }
         };
-        if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.model_intent_revision == intent.revision) {
-            const input = candidate.input();
-            if (installed.protocol != input.target.protocol or !std.mem.eql(u8, installed.base_url, input.target.base_url))
+        if (facts.installed != null) if (facts.metask_scope != 0 and self.task_runtime.installedIntentCurrent(task_id)) {
+            if (!self.task_runtime.installedModelEndpointMatches(task_id, input.target))
                 return error.ExecutionUnavailable;
         };
         return candidate;
@@ -8029,14 +7817,18 @@ pub const Runtime = struct {
         return self.task_runtime.taskHasActiveOperation(task_id);
     }
 
-    fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
+    fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) product_schedule.TaskPreflight {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (self.requiredHistoryBlocked()) return error.TaskHistoryWriterBusy;
-        try self.validateScheduledBinding(.{
+        if (self.requiredHistoryBlocked()) return .wait;
+        self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
             .protocol = input.protocol,
-        });
+        }) catch |err| return switch (err) {
+            error.ExecutionUnavailable, error.ExecutionInUse, error.ExecutionGenerationMismatch => .{ .retry = err },
+            else => .{ .rejected = err },
+        };
+        return .ready;
     }
 
     fn scheduleTaskLaunch(
@@ -8092,12 +7884,12 @@ pub const Runtime = struct {
         task_id: u64,
     ) product_schedule.TaskObservation {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (self.task_runtime.findConst(task_id) == null) return .unavailable;
+        if (!self.task_runtime.taskExists(task_id)) return .unavailable;
         const terminal = self.task_runtime.initialRunTerminalSummary(task_id) orelse
             return .pending;
         return .{ .terminal = .{
             .outcome = scheduledTaskOutcome(terminal.outcome),
-            .permission_required = terminal.permission_required,
+            .permission_failure_profile = if (terminal.permission_required) scheduledPermissionProfile(terminal.permission_profile) else null,
         } };
     }
 
@@ -8632,7 +8424,7 @@ pub const Runtime = struct {
 
     fn deleteTaskRuntimeAttachments(context: *anyopaque, task_id: u64) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (self.attachments.file_store) |store| store.deleteTask(task_id);
+        self.attachments.deleteTaskFiles(task_id);
     }
 
     fn taskResourcesQuiescent(context: *anyopaque, task_id: u64, workspace_id: u64) bool {
@@ -8784,19 +8576,17 @@ pub const Runtime = struct {
             query.task_id,
         );
         const model_intent_exact = if (query.model_intent) |authority| exact: {
-            const task = self.task_runtime.findConst(query.task_id) orelse break :exact false;
-            const intent = task.durable.model_intent orelse break :exact false;
+            const facts = self.task_runtime.modelFacts(query.task_id) orelse break :exact false;
+            const intent = facts.intent orelse break :exact false;
             const current = self.taskModelIntentAuthority(query.task_id) orelse break :exact false;
-            if (task.model_intent_prepared or intent.revision != authority.selection_revision or !std.mem.eql(u8, intent.source_id, authority.source_id) or
-                !std.mem.eql(u8, intent.model_id, query.task_model) or current.source_generation != authority.source_generation or
+            if (facts.intent_pending or intent.revision != authority.selection_revision or !std.mem.eql(u8, intent.target.source_id, authority.source_id) or
+                !std.mem.eql(u8, intent.target.model_id, query.task_model) or current.source_generation != authority.source_generation or
                 current.catalog_generation != authority.catalog_generation) break :exact false;
-            break :exact self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == query.protocol and
-                self.modelRestoreCapabilitiesExact(query.task_id);
-        } else if (query.original_restore) self.modelRestoreCapabilitiesExact(query.task_id) else false;
+            break :exact self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == query.protocol and
+                self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects());
+        } else if (query.original_restore) self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects()) else false;
         const authorization_exact = scope: {
-            const task = self.task_runtime.findConst(query.task_id) orelse break :scope false;
-            const job = task.runtime.restore_job orelse break :scope true;
-            const expected = if (query.original_restore) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
+            const expected = self.task_runtime.recoveryAuthorizationScope(query.task_id, query.original_restore) orelse break :scope false;
             if (expected == 0) break :scope true;
             const check = self.metask_authorization_check orelse break :scope false;
             const current = check.current() orelse break :scope false;
@@ -9080,7 +8870,7 @@ pub const Runtime = struct {
         const previous_health = self.skill.managementHealth();
         self.skill.recoverTransactionsForScopeNoFail(
             scope,
-            self.schedule.now(),
+            runClockUnixSeconds(self.run_clock),
         );
         self.publishSkillManagementChanges(previous_health);
     }
@@ -9337,7 +9127,7 @@ pub const Runtime = struct {
         const reservation = try control.allocTrackedCapacity(remaining);
         defer control.freeTracked(reservation);
 
-        const task = control.task_runtime.tasks[0].?;
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         run.execution.?.automatic_title.state.store(.ready, .release);
         const sync = control.task_runtime.syncAutomaticTitles(
@@ -9352,7 +9142,7 @@ pub const Runtime = struct {
         var control = try testRuntime();
         defer control.deinit();
 
-        const task = control.task_runtime.tasks[0].?;
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         try control.replaceTracked(
             &task.durable.title,
@@ -9942,12 +9732,7 @@ pub const Runtime = struct {
 
     fn needsDeferredMetaskCredential(context: *anyopaque, authority: control_ports.MetaskAuthorization) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (!self.currentRenewalAuthority(authority)) return false;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            if (!task.runtime.credential_renewal_deferred or self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
-            if (task.runtime.active_operation != .compact) return true;
-        };
-        return false;
+        return self.currentRenewalAuthority(authority) and self.task_runtime.needsDeferredMetaskCredential(authority.scope);
     }
 
     fn renewMetaskExecutionCredentials(context: *anyopaque, authority: control_ports.MetaskAuthorization, credential: ?[]const u8) void {
@@ -9957,58 +9742,28 @@ pub const Runtime = struct {
             const previous = self.learned_renewal;
             if (previous == null or previous.?.scope != authority.scope or previous.?.generation != authority.generation) {
                 self.prepareTaskCredential(value) catch {
-                    for (self.task_runtime.tasks) |entry| if (entry) |task| {
-                        if (self.task_runtime.metaskCredentialScope(task.durable.id) == authority.scope)
-                            task.runtime.credential_renewal_deferred = true;
-                    };
+                    self.task_runtime.deferMetaskCredentialRenewals(authority.scope);
                     self.bumpRevision();
                     return;
                 };
                 self.learned_renewal = authority;
             }
         }
-        var changed = false;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            changed = self.task_runtime.renewMetaskImages(task.durable.id, authority.scope, authority.generation, credential) or changed;
-            if (self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
-            const value = credential orelse {
-                self.task_runtime.failCredentialRenewal(task.durable.id, authority.generation, true, false);
-                changed = true;
-                continue;
-            };
-            const outcome = self.task_runtime.renewMetaskCredential(task.durable.id, authority.scope, authority.generation, value, false) catch |err| {
-                self.failMetaskCredentialUpdate(task.durable.id, authority.generation, err);
-                changed = true;
-                continue;
-            };
-            changed = changed or outcome == .updated;
-        };
+        const changed = self.task_runtime.renewMetaskExecutions(authority.scope, authority.generation, credential, self.taskRuntimeOperationEffects());
         self.retireQuiescentCredentials();
         if (changed) self.bumpRevision();
     }
 
-    fn failMetaskCredentialUpdate(self: *Runtime, task_id: u64, generation: u64, err: anyerror) void {
-        self.task_runtime.failCredentialRenewal(task_id, generation, err == error.OutOfMemory or err == error.CredentialUpdateResourceLimit, err == error.CredentialUpdateContract);
-        // A poisoned idle Session cannot accept any new work. Give it to the
-        // ordinary close owner; an explicit later admission can restore it.
-        if ((err == error.CredentialUpdateContract or err == error.SessionPoisoned) and !self.task_runtime.taskHasActiveOperation(task_id))
-            _ = self.task_runtime.beginDetach(task_id, self.taskRuntimeOperationEffects()) catch false;
+    fn retireQuiescentCredentials(self: *Runtime) void {
+        self.task_runtime.retireQuiescentCredentials(self.taskRuntimeReleaseEffects(), taskHasPendingReview);
     }
 
-    fn retireQuiescentCredentials(self: *Runtime) void {
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            const reviewing = for (self.permission_jobs) |job| {
-                if (job != null and job.?.prepared.identity.task_id == task.durable.id) break true;
-            } else false;
-            if (reviewing) continue;
-            while (self.task_runtime.retiredCredential(task.durable.id)) |value| {
-                if (!prepareTaskRuntimeCredentialRelease(self, value)) break;
-                self.retireProjectionCredential(value);
-                // Unfinished history maintenance owns its own secret copy.
-                // Do not reissue retirement and its wake on every drain.
-                self.task_runtime.releaseRetiredCredential(task.durable.id);
-            }
+    fn taskHasPendingReview(context: *anyopaque, task_id: u64) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        for (self.permission_jobs) |entry| if (entry) |job| {
+            if (job.prepared.identity.task_id == task_id) return true;
         };
+        return false;
     }
 
     fn metaskAuthorizationScope(self: *Runtime, provider_id: []const u8) Error!u64 {
@@ -10027,11 +9782,13 @@ pub const Runtime = struct {
     }
 
     fn validateTaskMetaskAuthorization(self: *Runtime, task_id: u64) Error!void {
-        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
-        const provider_id = if (task.durable.model_intent) |intent| intent.source_id else if (task.runtime.executionConst()) |execution| execution.provider_id else return;
-        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
-        const scope = try self.metaskAuthorizationScope(provider_id);
-        if (task.runtime.metask_authorization_scope != 0 and task.runtime.metask_authorization_scope != scope)
+        const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
+        const uses_metask = if (facts.intent) |intent|
+            std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
+        else if (facts.installed) |installed| installed.is_metask else false;
+        if (!uses_metask) return;
+        const scope = try self.metaskAuthorizationScope(models_contract.metask_source_id);
+        if (facts.metask_scope != 0 and facts.metask_scope != scope)
             return error.ExecutionUnavailable;
     }
 
@@ -10249,6 +10006,16 @@ test "updates Control publishes committed facts through the canonical live conte
 }
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn findTask(control: *Runtime, task_id: u64) ?*TestTask {
+        return task_testing.findTask(&control.task_runtime, task_id);
+    }
+    pub fn findTaskConst(control: *const Runtime, task_id: u64) ?*const TestTask {
+        return task_testing.findTaskConst(&control.task_runtime, task_id);
+    }
+    pub fn taskSlots(control: *const Runtime) []?*TestTask {
+        return task_testing.slots(&control.task_runtime);
+    }
+
     pub fn clearModelPreference(control: *Runtime) void {
         models_aggregate.TestSupport.clearFixturePreference(&control.custom_providers);
     }
@@ -10277,8 +10044,8 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn skillImportFixture(control: *Runtime, root: []const u8, store: *skill_runtime.testing.ManagementFileStore) !void {
         const Clock = struct {
-            fn now(_: ?*anyopaque) ?u64 {
-                return 100;
+            fn unixMs(_: ?*anyopaque) ?u64 {
+                return 100_000;
             }
             fn catalog(_: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
                 return error.CatalogUnavailable;
@@ -10286,7 +10053,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         };
         try initTestRuntimeWithLimits(control, testLimits(), .{
             .skill_management = .{ .file_store = store, .staging_root = root },
-            .schedule_timer = .{ .enabled = true, .now_unix_seconds = Clock.now },
+            .run_clock = .{ .now_unix_ms_fn = Clock.unixMs },
         });
         errdefer control.deinit();
         // Install fixture ports before supplying a home: normal init immediately
@@ -10298,8 +10065,8 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn finishSkillImportFixture(control: *Runtime) void {
         // initTestRuntimeWithLimits has a projection-only Run, no worker.
-        control.task_runtime.tasks[0].?.runtime.active_operation = .none;
-        control.task_runtime.tasks[0].?.runtime.active_run_id = 0;
+        control.testTaskSlots()[0].?.runtime.active_operation = .none;
+        control.testTaskSlots()[0].?.runtime.active_run_id = 0;
     }
 
     pub fn filePreviewFixture(control: *Runtime, root: []const u8) !void {
@@ -10322,7 +10089,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         return maximumProjectionFixtureWithTools(control, true, .{ .max_tasks = 1, .max_runs_per_task = 1 });
     }
     pub fn installResultFixture(control: *Runtime, sparse: bool) !void {
-        const first = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        const first = &control.testTaskSlots()[0].?.durable.runs[0].?;
         control.projection_bytes -= first.assistant.list.capacity;
         first.assistant.list.deinit(control.allocator);
         first.assistant = .{};
@@ -10346,7 +10113,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         defer control.allocator.free(result);
         const large_input = if (sparse) try std.json.Stringify.valueAlloc(control.allocator, .{ .command = stdout }, .{}) else null;
         defer if (large_input) |value| control.allocator.free(value);
-        for (control.task_runtime.tasks[0].?.durable.runs) |*entry| if (entry.*) |*run| {
+        for (control.testTaskSlots()[0].?.durable.runs) |*entry| if (entry.*) |*run| {
             if (!sparse and run.id > 4 and run.id < 13) continue;
             for (run.tools, 0..) |*tool_entry, index| {
                 if (sparse and index >= 5) break;
@@ -10431,7 +10198,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     pub fn fixtureExecution(control: *Runtime) *task_test_execution_binding.OwnedTaskExecution {
-        return control.task_runtime.find(3).?.runtime.execution().?;
+        return control.testTask(3).?.runtime.execution().?;
     }
 
     pub fn installFixtureCredential(control: *Runtime, value: []const u8) !void {
@@ -10450,7 +10217,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     pub fn cloneFixtureExecution(control: *Runtime, allocator: std.mem.Allocator) !OwnedTaskExecution {
-        for (control.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.executionConst()) |execution| return OwnedTaskExecution.clone(allocator, execution.input());
+        for (control.testTaskSlots()) |entry| if (entry) |task| if (task.runtime.executionConst()) |execution| return OwnedTaskExecution.clone(allocator, execution.input());
         const selection = try fixtureModelSelection(control);
         var source = (try control.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation)) orelse return error.ExecutionUnavailable;
         defer source.deinit();
@@ -10967,7 +10734,7 @@ test "approval checkpoint restores before the first Run independently of the Tas
         });
         defer restored.deinit();
         if (case.anchor_revision == 2) {
-            const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+            const task = restored.testTask(3) orelse return error.TestUnexpectedResult;
             try std.testing.expect(restored.task_persistence_health != .degraded);
             try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
             try std.testing.expectEqual(.full_access, task.durable.permission_profile);
@@ -10980,7 +10747,7 @@ test "approval checkpoint restores before the first Run independently of the Tas
             try std.testing.expectEqualStrings("session-before-first-run", record.session.logical_session_id);
             try std.testing.expect(task_test_policy.checkpointMatchesCurrentHistory(task, record));
         } else {
-            try std.testing.expect(restored.task_runtime.find(3) == null);
+            try std.testing.expect(restored.testTask(3) == null);
             try std.testing.expectEqual(.degraded, restored.task_persistence_health);
         }
     }
@@ -11573,6 +11340,32 @@ fn testRuntime() !Runtime {
     return testRuntimeWith(.{});
 }
 
+test "queued input recovery does not run global lifecycle reconciliation" {
+    const Clock = struct {
+        reads: usize = 0,
+
+        fn now(context: ?*anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.reads += 1;
+            return 1_000;
+        }
+    };
+    var clock: Clock = .{};
+    var control = try testRuntimeWith(.{
+        .run_clock = .{ .context = &clock, .now_unix_ms_fn = Clock.now },
+    });
+    defer control.deinit();
+    const missing_task = std.math.maxInt(u64);
+    const reads_before = clock.reads;
+    const failure = Runtime.restoreWaitingInput(&control, missing_task, 1).?;
+    try std.testing.expectEqual(.task_unavailable, failure.reason);
+    try std.testing.expectEqual(reads_before, clock.reads);
+
+    // The explicit command still synchronizes other lifecycle facts.
+    try std.testing.expectError(error.UnknownTask, control.restoreTaskConversation(missing_task, 1));
+    try std.testing.expect(clock.reads > reads_before);
+}
+
 test "non-Skill executor completion wakes queued source recovery without a Skill completion" {
     const Harness = struct {
         wakes: std.atomic.Value(usize) = .init(0),
@@ -11779,8 +11572,8 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
         .initial_credentials = .{ task_execution.input().api_key, &.{} },
     };
-    control.task_runtime.tasks[0] = try control.allocator.create(TestTask);
-    control.task_runtime.tasks[0].?.* = .{
+    control.testTaskSlots()[0] = try control.allocator.create(TestTask);
+    control.testTaskSlots()[0].?.* = .{
         .durable = .{
             .id = 3,
             .recent_order = 1,
@@ -12112,7 +11905,7 @@ fn finalizeTestTerminalDrain(control: *Runtime) void {
 test "terminal Run waits for its Session queue before publishing completion" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     const run = &task.durable.runs[0].?;
     _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
     control.markTerminalRunsBeforeEventDrain();
@@ -12477,7 +12270,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
         .trust = .explicitly_trusted,
     });
     try std.testing.expect(root_id != 0);
-    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.testTaskSlots()[0] == null);
 
     const source_id = try control.openWorkspace(.{
         .workspace_root = source_path,
@@ -12623,7 +12416,7 @@ test "Project removal retains running Task state, Workspace epoch and durable Ta
     var persistence = TestTaskPersistence{ .storage = storage };
     var control = try testRuntimeWith(.{ .task_persistence = persistence.capability(null) });
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     var before_wire = try control.buildTaskStateWire();
     defer before_wire.deinit();
     const before = try std.json.Stringify.valueAlloc(std.testing.allocator, before_wire.state.tasks, .{});
@@ -12635,7 +12428,7 @@ test "Project removal retains running Task state, Workspace epoch and durable Ta
     try std.testing.expect(workspace.visible);
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspace.authorization);
     try std.testing.expectEqual(epoch, workspace.epoch);
-    try std.testing.expect(control.task_runtime.tasks[0].? == task);
+    try std.testing.expect(control.testTaskSlots()[0].? == task);
     _ = try control.workspace.taskRunAuthority(1, epoch);
     try std.testing.expectEqualStrings(workspace.canonical_root, try control.workspaceDirectoryForOpen(1, epoch));
     var wire = try control.buildTaskStateWire();
@@ -12653,7 +12446,7 @@ test "hidden Workspace record with Task history cannot be reused" {
     control.limits.max_workspaces = 1;
     product_workspace.testing.setManualLimit(&control.workspace, 1);
 
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
@@ -12722,22 +12515,22 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqual(@as(u32, 1), running[0].signals.running);
     try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
 
-    control.task_runtime.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
+    control.testTaskSlots()[0].?.durable.runs[0].?.active_phase = .waiting_ui;
     const attention = Runtime.workspaceViewSignals(&control, 1);
     try std.testing.expectEqual(@as(u32, 0), attention.running);
     try std.testing.expectEqual(@as(u32, 1), attention.attention);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     _ = commitTerminal(run, .failed, .failed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
     const failed = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(u32, 1), failed[0].signals.failed_or_interrupted);
 
-    const task_root = control.task_runtime.tasks[0].?.durable.workspace_root;
-    control.releaseTaskAttachmentNoFail(control.task_runtime.tasks[0].?, .cold_start);
+    const task_root = control.testTaskSlots()[0].?.durable.workspace_root;
+    control.releaseTaskAttachmentNoFail(control.testTaskSlots()[0].?, .cold_start);
     try control.removeWorkspace(1);
-    try std.testing.expect(control.task_runtime.tasks[0] != null);
-    try std.testing.expectEqualStrings(task_root, control.task_runtime.tasks[0].?.durable.workspace_root);
+    try std.testing.expect(control.testTaskSlots()[0] != null);
+    try std.testing.expectEqualStrings(task_root, control.testTaskSlots()[0].?.durable.workspace_root);
     const removed = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 0), removed.len);
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
@@ -12754,10 +12547,8 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
     var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
     defer store.deinit();
-    var control = try testRuntime();
+    var control = try testRuntimeWith(.{ .attachment_store = &store, .attachment_images = .{ .prepare_fn = testAttachmentPreview } });
     defer control.deinit();
-    control.attachments.file_store = &store;
-    control.attachments.images.prepare_fn = testAttachmentPreview;
     product_workspace.testing.makeAutomatic(&control.workspace, 1, 3);
     try control.skill.setWorkspaceCatalogAuthorized(1, 1, false, control.skillProjectionBudget());
 
@@ -12812,10 +12603,8 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
     const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
     var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
     defer store.deinit();
-    var control = try testRuntime();
+    var control = try testRuntimeWith(.{ .attachment_store = &store, .attachment_images = .{ .prepare_fn = testAttachmentPreview } });
     defer control.deinit();
-    control.attachments.file_store = &store;
-    control.attachments.images.prepare_fn = testAttachmentPreview;
 
     try std.testing.expectEqual(
         CatalogAvailability.uninitialized,
@@ -12847,7 +12636,7 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
 test "Product Control snapshot serializer keeps model intent independent of installed execution" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     task.durable.model_intent = try task_test_state.ModelIntent.init(std.testing.allocator, .{
         .source_id = "another-provider",
         .model_id = "next-model",
@@ -12940,7 +12729,7 @@ test "Task completion receipt is identity-bound idempotent and order-neutral" {
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
@@ -12978,7 +12767,7 @@ test "Task completion receipt is identity-bound idempotent and order-neutral" {
 test "Restore permission stats are projected as runtime health" {
     var control = try testRuntime();
     defer control.deinit();
-    control.task_runtime.tasks[0].?.runtime.last_restore_permission = .{
+    control.testTaskSlots()[0].?.runtime.last_restore_permission = .{
         .restored_rules = 2,
         .invalidated_rules = 1,
     };
@@ -12998,7 +12787,7 @@ test "a Task saved by a newer build restores read-only and commits keep its fram
         var source = try testRuntime();
         defer source.deinit();
         try source.replaceTracked(
-            &source.task_runtime.tasks[0].?.durable.workspace_root,
+            &source.testTaskSlots()[0].?.durable.workspace_root,
             "/tmp/metawork-test",
             source.limits.max_workspace_bytes,
         );
@@ -13024,7 +12813,7 @@ test "a Task saved by a newer build restores read-only and commits keep its fram
     );
     defer restored.deinit();
     try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
-    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    const task = restored.testTask(3) orelse return error.TestUnexpectedResult;
     try std.testing.expect(task.read_only_history != null);
     try std.testing.expectError(error.TaskReadOnly, restored.renameTask(3, "renamed"));
     try std.testing.expectError(error.TaskReadOnly, restored.setTaskArchived(3, true));
@@ -13054,7 +12843,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         try initTestRuntimeWithLimits(source, testLimits(), .{});
         defer source.deinit();
         try source.replaceTracked(
-            &source.task_runtime.tasks[0].?.durable.workspace_root,
+            &source.testTaskSlots()[0].?.durable.workspace_root,
             "/tmp/metawork-test",
             source.limits.max_workspace_bytes,
         );
@@ -13086,7 +12875,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         defer file_changes.deinit();
         try source.applyEvent(&file_changes);
         try std.testing.expectEqual(@as(usize, 3), persistence.commits);
-        const persisted_run = &source.task_runtime.tasks[0].?.durable.runs[0].?;
+        const persisted_run = &source.testTaskSlots()[0].?.durable.runs[0].?;
         persisted_run.assistant_output_kind = .final;
         persisted_run.assistant_output_start = 0;
         try source.commitTaskState();
@@ -13165,7 +12954,7 @@ test "Task state round trip restores product history without fabricating a Sessi
             },
         );
         defer terminal_restore.deinit();
-        const terminal_task = terminal_restore.task_runtime.find(3) orelse
+        const terminal_task = terminal_restore.testTask(3) orelse
             return error.TestUnexpectedResult;
         const terminal_run = findRun(terminal_task.durable.runs, 7) orelse
             return error.TestUnexpectedResult;
@@ -13221,7 +13010,7 @@ test "Task state round trip restores product history without fabricating a Sessi
             },
         );
         defer failed_restore.deinit();
-        const failed_task = failed_restore.task_runtime.find(3) orelse
+        const failed_task = failed_restore.testTask(3) orelse
             return error.TestUnexpectedResult;
         const failed_run = findRun(failed_task.durable.runs, 7) orelse
             return error.TestUnexpectedResult;
@@ -13252,7 +13041,7 @@ test "Task state round trip restores product history without fabricating a Sessi
             },
         );
         defer interrupted_compact_restore.deinit();
-        const restored_compact_task = interrupted_compact_restore.task_runtime.find(3) orelse
+        const restored_compact_task = interrupted_compact_restore.testTask(3) orelse
             return error.TestUnexpectedResult;
         const interrupted_compact = task_test_state.findCompact(
             restored_compact_task.durable.compacts,
@@ -13303,7 +13092,7 @@ test "Task state round trip restores product history without fabricating a Sessi
             .{ .task_persistence = persistence.capability(legacy_bytes) },
         );
         defer legacy_restore.deinit();
-        const legacy_task = legacy_restore.task_runtime.find(3) orelse
+        const legacy_task = legacy_restore.testTask(3) orelse
             return error.TestUnexpectedResult;
         const legacy_run = findRun(legacy_task.durable.runs, 7) orelse
             return error.TestUnexpectedResult;
@@ -13325,7 +13114,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         },
     );
     defer restored.deinit();
-    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    const task = restored.testTask(3) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!task.runtime.hasAttachedSession());
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(ActiveOperation.none, task.runtime.active_operation);
@@ -13396,7 +13185,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         },
     );
     defer deleted_restore.deinit();
-    try std.testing.expect(deleted_restore.task_runtime.find(3) == null);
+    try std.testing.expect(deleted_restore.testTask(3) == null);
 }
 
 test "clean shutdown persists an acknowledged completion without an eager commit" {
@@ -13409,7 +13198,7 @@ test "clean shutdown persists an acknowledged completion without an eager commit
         defer source.deinit();
         source.task_persistence = persistence.capability(null);
         source.task_persistence_health = .ready;
-        const run = &source.task_runtime.tasks[0].?.durable.runs[0].?;
+        const run = &source.testTaskSlots()[0].?.durable.runs[0].?;
         _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
         finalizeTestTerminalEvents(&source);
         const commits_before_mark = persistence.commits;
@@ -13429,7 +13218,7 @@ test "clean shutdown persists an acknowledged completion without an eager commit
         ) },
     );
     defer restored.deinit();
-    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    const task = restored.testTask(3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 7), task.durable.completion_seen_run_id);
     try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(task));
 }
@@ -13464,7 +13253,7 @@ test "one damaged Task record does not poison surviving history" {
         .{ .task_persistence = persistence.capability(bytes) },
     );
     defer restored.deinit();
-    try std.testing.expect(restored.task_runtime.find(3) != null);
+    try std.testing.expect(restored.testTask(3) != null);
     try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try restored.writeAggregateFixture(&snapshot_storage);
@@ -13516,7 +13305,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     try std.testing.expectEqual(@as(usize, 1), workspaces.len);
     try std.testing.expectEqual(WorkspaceKind.automatic, workspaces[0].kind);
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspaces[0].authorization);
-    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    const task = restored.testTask(3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
@@ -13574,7 +13363,7 @@ test "explicit Task history recovery is revision bound and preserves live Produc
     defer control.deinit();
     control.task_persistence = persistence.capability(null);
     control.task_persistence_health = .corrupt;
-    const title_before = control.task_runtime.tasks[0].?.durable.title;
+    const title_before = control.testTaskSlots()[0].?.durable.title;
     const revision = control.currentRevision();
 
     try std.testing.expect(control.canCreateTask());
@@ -13589,7 +13378,7 @@ test "explicit Task history recovery is revision bound and preserves live Produc
         control.recoverTaskHistory(revision),
     );
     try std.testing.expectEqual(TaskPersistenceHealth.outcome_unknown, control.task_persistence_health);
-    try std.testing.expectEqualStrings(title_before, control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings(title_before, control.testTaskSlots()[0].?.durable.title);
     try std.testing.expect(control.canCreateTask());
     try std.testing.expect(control.taskHistoryRecoveryAvailable());
 
@@ -13602,7 +13391,7 @@ test "explicit Task history recovery is revision bound and preserves live Produc
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
     try std.testing.expectEqual(@as(usize, 1), persistence.recoveries);
     try std.testing.expectEqual(@as(usize, 1), persistence.resolutions);
-    try std.testing.expectEqualStrings(title_before, control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings(title_before, control.testTaskSlots()[0].?.durable.title);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -13626,12 +13415,12 @@ test "Task persistence failure publishes metadata and retries the next save" {
     try control.renameTask(3, "published in memory");
     try std.testing.expectEqualStrings(
         "published in memory",
-        control.task_runtime.tasks[0].?.durable.title,
+        control.testTaskSlots()[0].?.durable.title,
     );
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
     persistence.result = .committed;
     try control.renameTask(3, "saved on retry");
-    try std.testing.expectEqualStrings("saved on retry", control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings("saved on retry", control.testTaskSlots()[0].?.durable.title);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
@@ -13650,7 +13439,7 @@ test "ordinary unknown retains original token and backfills newer memory only af
     try control.renameTask(3, "newer memory");
     try std.testing.expectEqual(commits, persistence.commits);
     try std.testing.expectEqualSlices(u8, &token, &control.ordinary_history_unknown.?);
-    try std.testing.expectEqualStrings("newer memory", control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings("newer memory", control.testTaskSlots()[0].?.durable.title);
     persistence.resolution_result = .committed;
     persistence.result = .committed;
     try control.renameTask(3, "confirmed backfill");
@@ -13749,7 +13538,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     task.runtime.active_run_id = 0;
     const completed = &task.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
@@ -13761,7 +13550,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     const tracked_before_delete = control.projection_bytes;
 
     try std.testing.expectError(error.TaskPersistenceFailed, control.deleteTask(3));
-    try std.testing.expect(control.task_runtime.find(3) != null);
+    try std.testing.expect(control.testTask(3) != null);
     try std.testing.expectEqual(tracked_before_delete, control.projection_bytes);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
     var snapshot_storage: [128 * 1024]u8 = undefined;
@@ -13773,7 +13562,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     ) != null);
     persistence.result = .committed;
     try control.deleteTask(3);
-    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expect(control.testTask(3) == null);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
@@ -13806,13 +13595,13 @@ test "idle history writer admits unrelated model selection and deletion during a
     try installTestExecution(&control);
 
     // A has local checkpoint work in progress, without a history writer.
-    const pending = control.task_runtime.find(3).?;
+    const pending = control.testTask(3).?;
     pending.approval_change = .{ .revision = 2, .target = .full_access, .phase = .baseline_export };
     try std.testing.expect(!control.approvalHistoryBlocked());
     const before = persistence.commits;
     _ = try control.selectTaskModel(4, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     try control.deleteTask(4);
-    try std.testing.expect(control.task_runtime.find(4) == null);
+    try std.testing.expect(control.testTask(4) == null);
     try std.testing.expect(pending.approval_change != null);
     try std.testing.expectEqual(before + 2, persistence.commits);
 }
@@ -13824,7 +13613,7 @@ test "writer release advances pending deletion before deferred history projectio
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     task.runtime.active_run_id = 0;
     _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
@@ -13836,14 +13625,14 @@ test "writer release advances pending deletion before deferred history projectio
     try held.hold(&control);
     defer held.finish();
     try control.deleteTask(3);
-    try std.testing.expectEqual(.deleting, control.task_runtime.find(3).?.deletion);
+    try std.testing.expectEqual(.deleting, control.testTask(3).?.deletion);
     try std.testing.expect(!control.approval_history_dirty);
     try std.testing.expectEqual(@as(usize, 0), persistence.commits);
 
     control.approval_history_dirty = true;
     held.finish();
     control.syncLifecycle();
-    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expect(control.testTask(3) == null);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
     try std.testing.expect(!control.approval_history_dirty);
     try std.testing.expect(!control.approvalHistoryBlocked());
@@ -13878,7 +13667,7 @@ test "pending Task deletion reads back an earlier ordinary history write" {
     const token = control.ordinary_history_unknown.?;
     persistence.result = .committed;
     try control.deleteTask(3);
-    try std.testing.expectEqual(.deleting, control.task_runtime.find(3).?.deletion);
+    try std.testing.expectEqual(.deleting, control.testTask(3).?.deletion);
     try std.testing.expectEqual(token, control.ordinary_history_unknown.?);
     try std.testing.expectEqual(@as(usize, 1), persistence.resolutions);
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
@@ -13886,7 +13675,7 @@ test "pending Task deletion reads back an earlier ordinary history write" {
 
     persistence.resolution_result = .committed;
     control.syncLifecycle();
-    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expect(control.testTask(3) == null);
     try std.testing.expectEqual(@as(usize, 2), persistence.resolutions);
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
@@ -13980,7 +13769,7 @@ test "explicit Schedule recovery is revision bound and reopens only its Product 
 test "Product Control snapshot serializer keeps durable Metask intent after authorization loss" {
     var control = try testRuntime();
     defer control.deinit();
-    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const task_id = control.testTaskSlots()[0].?.durable.id;
     const before = control.modelsView();
     const default_selection = before.default_selection orelse
         return error.TestUnexpectedResult;
@@ -14986,7 +14775,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     );
     workspace_catalog = undefined;
     control.projection_bytes += task_catalog.projected_bytes;
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     task.runtime.attached().?.pinned_catalog = task_catalog;
     const run = &task.durable.runs[0].?;
     const history_input: RunInputRecord = history: {
@@ -15083,13 +14872,13 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, &.{0xff}));
 
     try control.renameTask(3, "Review release readiness");
-    try std.testing.expectEqualStrings("Review release readiness", control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings("Review release readiness", control.testTaskSlots()[0].?.durable.title);
 
-    control.task_runtime.tasks[0].?.runtime.active_run_id = 0;
-    const completed = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    control.testTaskSlots()[0].?.runtime.active_run_id = 0;
+    const completed = &control.testTaskSlots()[0].?.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     var action_storage: [16 * 1024]u8 = undefined;
     const idle_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
     try std.testing.expect(std.mem.indexOf(u8, idle_view, "\"compactBlocker\":null") != null);
@@ -15119,28 +14908,28 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     try std.testing.expectError(error.TaskBusy, control.deleteTask(3));
     task.model_intent_prepared = false;
     try control.setTaskArchived(3, true);
-    try std.testing.expect(control.task_runtime.tasks[0].?.durable.archived);
+    try std.testing.expect(control.testTaskSlots()[0].?.durable.archived);
 
-    control.task_runtime.tasks[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
+    control.testTaskSlots()[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
     try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, false));
-    control.task_runtime.tasks[0].?.runtime.active_operation = .none;
-    control.task_runtime.tasks[0].?.deletion = .failed;
+    control.testTaskSlots()[0].?.runtime.active_operation = .none;
+    control.testTaskSlots()[0].?.deletion = .failed;
     try control.setTaskArchived(3, false);
-    try std.testing.expectEqual(task_test_deletion.State.idle, control.task_runtime.tasks[0].?.deletion);
+    try std.testing.expectEqual(task_test_deletion.State.idle, control.testTaskSlots()[0].?.deletion);
     try control.setTaskArchived(3, true);
-    control.releaseTaskAttachmentNoFail(control.task_runtime.tasks[0].?, .cold_start);
-    var deletion_lease = try control.task_runtime.tasks[0].?.runtime.worker_leases.acquire();
+    control.releaseTaskAttachmentNoFail(control.testTaskSlots()[0].?, .cold_start);
+    var deletion_lease = try control.testTaskSlots()[0].?.runtime.worker_leases.acquire();
     try control.deleteTask(3);
-    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    try std.testing.expect(control.testTaskSlots()[0] != null);
     const deleting_view = try control.writeViewFixture(&action_storage, .{ .task_id = 3 });
     try std.testing.expect(std.mem.indexOf(u8, deleting_view, "\"archiveBlocker\":\"deleting\",\"deleteBlocker\":\"deleting\"") != null);
     try std.testing.expectError(error.TaskBusy, control.renameTask(3, "too late"));
     deletion_lease.deinit();
     const tracked_before_delete = control.projection_bytes;
     _ = control.currentRevision();
-    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    try std.testing.expect(control.testTaskSlots()[0] != null);
     control.syncLifecycle();
-    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.testTaskSlots()[0] == null);
     try std.testing.expect(control.projection_bytes < tracked_before_delete);
     try std.testing.expectError(error.UnknownTask, control.renameTask(3, "gone"));
 }
@@ -15148,7 +14937,7 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
 test "Run admission reserves a stable generation and rolls back every fallible allocation" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const tracked_before = control.projection_bytes;
     const generation_before = task.durable.next_run_generation;
     var oversized_prompt: [1025]u8 = undefined;
@@ -15546,10 +15335,10 @@ test "Product Control non-destructively recovers Models admission without touchi
     const selection = try createReadyTestCustomProvider(&control);
     try std.testing.expect(control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
     try std.testing.expect(control.canCreateTask());
-    const task_route = control.task_runtime.tasks[0].?.runtime.routeId();
-    const task_execution = control.task_runtime.tasks[0].?.runtime.executionConst().?;
-    const task_model = control.task_runtime.tasks[0].?.durable.execution_model;
-    const task_run_id = control.task_runtime.tasks[0].?.durable.runs[0].?.id;
+    const task_route = control.testTaskSlots()[0].?.runtime.routeId();
+    const task_execution = control.testTaskSlots()[0].?.runtime.executionConst().?;
+    const task_model = control.testTaskSlots()[0].?.durable.execution_model;
+    const task_run_id = control.testTaskSlots()[0].?.durable.runs[0].?.id;
     const revision = control.currentRevision();
     try std.testing.expectEqual(
         models_contract.ManagementError.generation_mismatch,
@@ -15577,16 +15366,16 @@ test "Product Control non-destructively recovers Models admission without touchi
     try std.testing.expect(control.modelsView().default_selection != null);
     try std.testing.expect(control.newTaskAdmissionView().available);
     try std.testing.expect(vault.present);
-    try std.testing.expectEqual(task_route, control.task_runtime.tasks[0].?.runtime.routeId());
-    try std.testing.expectEqual(task_execution, control.task_runtime.tasks[0].?.runtime.executionConst().?);
-    try std.testing.expectEqualStrings(task_model, control.task_runtime.tasks[0].?.durable.execution_model);
-    try std.testing.expectEqual(task_run_id, control.task_runtime.tasks[0].?.durable.runs[0].?.id);
+    try std.testing.expectEqual(task_route, control.testTaskSlots()[0].?.runtime.routeId());
+    try std.testing.expectEqual(task_execution, control.testTaskSlots()[0].?.runtime.executionConst().?);
+    try std.testing.expectEqualStrings(task_model, control.testTaskSlots()[0].?.durable.execution_model);
+    try std.testing.expectEqual(task_run_id, control.testTaskSlots()[0].?.durable.runs[0].?.id);
 }
 
 test "identity replacement does not disturb live Task runtime references" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
     control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
@@ -15627,7 +15416,7 @@ test "busy Task model selection commits the last intent without changing install
         .{ .id = "fixture-model-3", .display_name = "Fixture model 3" },
     };
     try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const binding_epoch = task.durable.binding_epoch;
     var cross_source = testTaskModelSelectionInput(
         &control,
@@ -15689,7 +15478,7 @@ test "Product Control publishes Task model selection availability from cross-own
     const custom = try createReadyTestCustomProvider(&control);
     try TestSupport.configureMetaskSource(&control, 17);
 
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     var query: task_runtime.ProjectionAuthorityQuery = .{
         .task_id = task.durable.id,
@@ -15803,7 +15592,7 @@ test "Task model selection unknown commit resolves the original candidate before
             .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
         };
         try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
-        const task = control.task_runtime.find(3).?;
+        const task = control.testTask(3).?;
         history.result = .outcome_unknown;
         try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model-2")));
         try std.testing.expect(task.model_intent_prepared);
@@ -15844,10 +15633,50 @@ test "Task model selection unknown commit resolves the original candidate before
     }
 }
 
+test "Skill and MCP Unix time remains available without a Schedule timer" {
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            const value: *u64 = @ptrCast(@alignCast(context.?));
+            return value.*;
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var milliseconds: u64 = 123_456;
+    control.run_clock = .{ .context = &milliseconds, .now_unix_ms_fn = Clock.now };
+    try std.testing.expect(!control.schedule.timerEnabled());
+    const ports = productMcpPorts(control.executor, mcpCatalogPort(control.agent_runtime), .{}, .{}, control.run_clock);
+    try std.testing.expectEqual(@as(?u64, 123), runClockUnixSeconds(control.run_clock));
+    try std.testing.expectEqual(@as(?u64, 123_456), ports.unix_clock.nowMs());
+    milliseconds = 0;
+    try std.testing.expectEqual(@as(?u64, null), runClockUnixSeconds(control.run_clock));
+    try std.testing.expectEqual(@as(?u64, null), ports.unix_clock.nowMs());
+}
+
+test "unchanged Task binding skips candidate allocation and credential publication" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.testTask(3).?;
+    _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
+    var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
+    const original = control.custom_providers.metask_catalog.allocator;
+    control.custom_providers.metask_catalog.allocator = failing.allocator();
+    defer control.custom_providers.metask_catalog.allocator = original;
+    const revision = control.currentRevision();
+    const security_epoch = control.projection_security_epoch;
+    try std.testing.expect((try control.resolveTaskRunModel(3)) == null);
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    try std.testing.expectEqual(revision, control.currentRevision());
+    try std.testing.expectEqual(security_epoch, control.projection_security_epoch);
+    task.runtime.execution().?.model_intent_revision = 0;
+    try std.testing.expectError(error.OutOfMemory, control.resolveTaskRunModel(3));
+}
+
 test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
     const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
@@ -15868,7 +15697,7 @@ test "Task model selection does not depend on a starting preference" {
     var control = try testRuntime();
     defer control.deinit();
     models_aggregate.TestSupport.clearFixturePreference(&control.custom_providers);
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     try std.testing.expectEqualStrings("metask", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
@@ -15877,7 +15706,7 @@ test "Task model selection does not depend on a starting preference" {
 test "a removed installed model cannot start another Run while its Task retains explicit alternatives" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
     try models_aggregate.TestSupport.installMetaskDefault(&control.custom_providers, "account-1", "SECRET-KEY", &.{.{ .id = "fixture-model-2", .display_name = "Second", .metadata = .{} }}, "fixture-model-2", 1, 1, 1, 5);
@@ -15890,7 +15719,7 @@ test "a removed installed model cannot start another Run while its Task retains 
 test "released Task credential is permanently scrubbed from every product projection" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
 
     try control.replaceTracked(
@@ -16058,7 +15887,7 @@ test "known credential matching chooses the longest overlapping secret" {
         control.matchedKnownCredentialLen("SECRET-KEY suffix"),
     );
     try control.replaceTracked(
-        &control.task_runtime.tasks[0].?.durable.title,
+        &control.testTaskSlots()[0].?.durable.title,
         "SECRET-KEY suffix",
         control.limits.max_task_title_bytes,
     );
@@ -16107,7 +15936,7 @@ test "opaque credential redaction preserves UTF-8 projection validity" {
 test "opaque credential redaction is UTF-8 safe across product inputs and assistant chunks" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     try replaceTaskCredentialForTest(task, &.{0xa9});
 
     const slot = try control.reserveRunRecord(task, .{ .text = "café" });
@@ -16177,16 +16006,16 @@ test "assistant redaction withholds a UTF-8 codepoint across credential chunks" 
 test "product Task identity is independent from Agent Session route identity" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
     defer routed.deinit();
     try control.applyEvent(&routed);
-    try std.testing.expectEqual(@as(u64, 3), control.task_runtime.tasks[0].?.durable.id);
+    try std.testing.expectEqual(@as(u64, 3), control.testTaskSlots()[0].?.durable.id);
     try std.testing.expectEqualStrings(
         "routed",
-        control.task_runtime.tasks[0].?.durable.runs[0].?.output_segment.list.items,
+        control.testTaskSlots()[0].?.durable.runs[0].?.output_segment.list.items,
     );
 
     var product_id_is_not_route = try testEnvelope(3, 7, "{\"text_chunk\":\"wrong\"}");
@@ -16200,12 +16029,12 @@ test "product Task identity is independent from Agent Session route identity" {
 test "streaming Run events do not reorder Task navigation" {
     var control = try testRuntime();
     defer control.deinit();
-    const before = control.task_runtime.tasks[0].?.durable.recent_order;
+    const before = control.testTaskSlots()[0].?.durable.recent_order;
 
     var text = try testEnvelope(3, 7, "{\"text_chunk\":\"streaming\"}");
     defer text.deinit();
     try control.applyEvent(&text);
-    try std.testing.expectEqual(before, control.task_runtime.tasks[0].?.durable.recent_order);
+    try std.testing.expectEqual(before, control.testTaskSlots()[0].?.durable.recent_order);
 
     var usage = try testEnvelope(
         3,
@@ -16214,7 +16043,7 @@ test "streaming Run events do not reorder Task navigation" {
     );
     defer usage.deinit();
     try control.applyEvent(&usage);
-    try std.testing.expectEqual(before, control.task_runtime.tasks[0].?.durable.recent_order);
+    try std.testing.expectEqual(before, control.testTaskSlots()[0].?.durable.recent_order);
 }
 
 test "Run elapsed projection samples an injected clock without publishing revisions" {
@@ -16228,7 +16057,7 @@ test "Run elapsed projection samples an injected clock without publishing revisi
     };
     var now: u64 = 1250;
     control.run_clock = .{ .context = &now, .now_ms_fn = Clock.now };
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     run.admitted_at_ms = 1000;
     var storage: [96 * 1024]u8 = undefined;
     for ([_]task_test_state.ActiveRunPhase{ .queued, .running, .waiting_ui, .stopping }) |phase| {
@@ -16260,7 +16089,7 @@ test "Run elapsed projection samples an injected clock without publishing revisi
 test "thinking is private and content chunks do not establish an activity phase" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -16309,7 +16138,7 @@ test "thinking is private and content chunks do not establish an activity phase"
 test "output segments commit commentary and a continued final while discarding rollback" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -16365,7 +16194,7 @@ test "output segments commit commentary and a continued final while discarding r
 test "Product retains Agent-validated segment index gaps without retry group assumptions" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const events = [_][]const u8{
         "{\"output_segment_begin\":{\"index\":8,\"turn\":1,\"group\":3}}",
@@ -16389,7 +16218,7 @@ test "commentary capacity omits the group and closes the retained segment" {
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_commentary_segments_per_run = 1;
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const accepted = [_][]const u8{
@@ -16421,7 +16250,7 @@ test "commentary capacity omits the group and closes the retained segment" {
 test "output reserve capacity closes the segment and marks an incomplete response" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -16454,7 +16283,7 @@ test "output reserve capacity closes the segment and marks an incomplete respons
 test "assistant output budget is aggregate across committed and open segments" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     control.limits.max_assistant_message_bytes = 8;
@@ -16489,7 +16318,7 @@ test "discarded oversized provisional text does not mark a committed recording g
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_assistant_message_bytes = 4;
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const events = [_][]const u8{
         "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
@@ -16512,7 +16341,7 @@ test "discarded oversized provisional text does not mark a committed recording g
 test "partial output stays provisional until the segment is classified" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -16561,7 +16390,7 @@ test "partial output stays provisional until the segment is classified" {
 test "provisional output exposes only credential-safe committed bytes" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -16600,7 +16429,7 @@ test "provisional output exposes only credential-safe committed bytes" {
 test "output partition redacts a known credential across commentary boundaries" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     run.initial_credentials[0] = &.{};
@@ -16635,7 +16464,7 @@ test "output partition redacts a known credential across commentary boundaries" 
 test "event projection preserves commentary groups split by its credential suffix" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -16670,7 +16499,7 @@ test "event projection preserves commentary groups split by its credential suffi
 test "unframed output counts and projects before committing separately from the final answer" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     var first = try testEnvelope(route, run.id, "{\"text_chunk\":\"SECRET-\"}");
@@ -16704,7 +16533,7 @@ test "unframed capacity gaps still open the next segment and retain its answer" 
     for ([_]bool{ false, true }) |empty_pending| {
         var control = try testRuntime();
         defer control.deinit();
-        const task = control.task_runtime.tasks[0].?;
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         const budget = control.limits.max_projection_bytes;
         if (empty_pending) control.limits.max_projection_bytes = control.projection_bytes;
@@ -16743,8 +16572,8 @@ test "output after a classified answer is a retention gap with restorable histor
     for ([_][]const u8{ "final", "partial" }) |kind| {
         var control = try testRuntime();
         defer control.deinit();
-        defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
-        const task = control.task_runtime.tasks[0].?;
+        defer detachTaskForTest(&control, control.testTaskSlots()[0].?);
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         var end_storage: [256]u8 = undefined;
         const end = try std.fmt.bufPrint(&end_storage, "{{\"output_segment_end\":{{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"{s}\",\"bytes\":6}}}}", .{kind});
@@ -16783,8 +16612,8 @@ test "terminal drain retains unframed commentary and closed continued text" {
     for ([_]bool{ false, true }) |continued| {
         var control = try testRuntime();
         defer control.deinit();
-        defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
-        const task = control.task_runtime.tasks[0].?;
+        defer detachTaskForTest(&control, control.testTaskSlots()[0].?);
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         const events: []const []const u8 = if (continued) &.{
             "{\"output_segment_begin\":{\"index\":7,\"turn\":1,\"group\":3}}",
@@ -16811,7 +16640,7 @@ test "terminal drain retains unframed commentary and closed continued text" {
 test "discarded output permits a new group without committing discarded bytes" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -16841,7 +16670,7 @@ test "discarded output permits a new group without committing discarded bytes" {
 test "AgentCore RunState refines typed activity without owning RunPhase and rejects stale transitions" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const route = task.runtime.routeId();
 
     var starting = try testEnvelope(
@@ -16907,7 +16736,7 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
 test "generic Core progress preserves typed activity across model and parallel tool turns" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     // Core emits progress after generating and executing_tools observations,
@@ -17033,7 +16862,7 @@ test "Core hard phases override nested model content without leaking reasoning" 
     for (cases) |case| {
         var control = try testRuntime();
         defer control.deinit();
-        const task = control.task_runtime.tasks[0].?;
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         const route = task.runtime.routeId();
         var storage: [1024]u8 = undefined;
@@ -17083,7 +16912,7 @@ test "Core hard phases override nested model content without leaking reasoning" 
 test "provider stream and output boundaries do not prematurely finish a multi-turn Run" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const steps = [_]struct { event: []const u8, activity: task_test_state.RunActivity }{
@@ -17127,7 +16956,7 @@ test "provider stream and output boundaries do not prematurely finish a multi-tu
 test "model activity is scoped by turn phase and stream rather than content classification" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const steps = [_]struct {
@@ -17184,7 +17013,7 @@ test "model activity is scoped by turn phase and stream rather than content clas
 test "Core activity degrades on rejected snapshots or tool count evidence and recovers without replay" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const steps = [_]struct {
@@ -17233,7 +17062,7 @@ test "Core activity degrades on rejected snapshots or tool count evidence and re
 test "activity recovery never bypasses a finalizing transition guard" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const steps = [_]struct {
@@ -17265,7 +17094,7 @@ test "activity recovery never bypasses a finalizing transition guard" {
 test "protocol retry is replaced by the next forward activity" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -17314,7 +17143,7 @@ test "protocol retry is replaced by the next forward activity" {
 test "Conversation context observation survives Runs and clears with attachment" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -17377,7 +17206,7 @@ test "Conversation context observation survives Runs and clears with attachment"
 test "AgentCore RunState accepts a zero first transition sequence" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const route = task.runtime.routeId();
     var first = try testEnvelope(
         route,
@@ -17394,7 +17223,7 @@ test "AgentCore RunState accepts a zero first transition sequence" {
 test "event projection failure routes by Agent Session identity not product Task identity" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     control.recordEventProjectionFailure(task.durable.id, 7);
@@ -17427,8 +17256,8 @@ test "Runtime shutdown releases Task-owned credential versions" {
 test "terminal publication is allocation-free write-once bounded history" {
     var control = try testRuntime();
     defer control.deinit();
-    defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    defer detachTaskForTest(&control, control.testTaskSlots()[0].?);
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
     defer std.testing.allocator.free(diagnostic);
     @memset(diagnostic, 'x');
@@ -17525,7 +17354,7 @@ test "compact terminal publication is write-once and outranks late cancellation"
 test "terminal disposition folds exactly once without reopening a closing Task" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     defer detachTaskForTest(&control, task);
 
     foldTerminalDisposition(task, .poisoned);
@@ -17576,7 +17405,7 @@ test "poisoned Session close preserves ownership until successful release" {
     for (cases) |case| {
         var control = try testRuntime();
         defer control.deinit();
-        const task = control.task_runtime.tasks[0].?;
+        const task = control.testTaskSlots()[0].?;
         defer detachTaskForTest(&control, task);
         task.runtime.active_operation = .none;
         task.runtime.discarding_restore = case.discarding_restore;
@@ -17681,7 +17510,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
         defer control.deinit();
         control.canonical_user_home = try control.allocator.dupe(u8, home);
         control.skill.ports.catalog.query_fn = Catalog.query;
-        const task = control.task_runtime.find(3).?;
+        const task = control.testTask(3).?;
         _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
         finalizeTestTerminalEvents(&control);
         _ = try control.setApprovalMode(3, .auto_review, task.durable.binding_epoch, 1);
@@ -17749,7 +17578,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
 
     try control.renameTask(task.durable.id, "Review SECRET-KEY usage");
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "SECRET-KEY") == null);
@@ -17797,7 +17626,7 @@ test "published model errors are scrubbed against Account credentials before ter
     defer control.deinit();
     var account: u8 = 0;
     control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     const storage = try control.allocator.create(task_test_state.RunModelError);
     run.model_error_storage = storage;
@@ -17825,7 +17654,7 @@ test "published model errors are scrubbed against Account credentials before ter
 test "model error projection matches the shared Renderer fixture after Host credential cleaning" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const storage = try control.allocator.create(task_test_state.RunModelError);
     run.model_error_storage = storage;
@@ -17888,7 +17717,7 @@ test "Renderer transport failures never own Agent Run termination" {
 test "Task deletion scrubs retained projections before releasing its credential" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     product_workspace.testing.overwriteProjectedRoot(
         &control.workspace,
         1,
@@ -17909,7 +17738,7 @@ test "Task deletion scrubs retained projections before releasing its credential"
     finalizeTestTerminalEvents(&control);
 
     try control.deleteTask(3);
-    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.testTaskSlots()[0] == null);
     const workspace_projection = product_workspace.testing.projectedRoot(
         &control.workspace,
         1,
@@ -17934,7 +17763,7 @@ test "Runtime projection preserves text bytes with bounded geometric growth" {
         defer envelope.deinit();
         try control.applyEvent(&envelope);
     }
-    const run = findRun(control.task_runtime.tasks[0].?.durable.runs, 7).?;
+    const run = findRun(control.testTaskSlots()[0].?.durable.runs, 7).?;
     try std.testing.expectEqual(@as(usize, chunk.len * 2048), run.output_segment.list.items.len);
     for (0..2048) |index|
         try std.testing.expectEqualStrings(chunk, run.output_segment.list.items[index * chunk.len ..][0..chunk.len]);
@@ -17968,7 +17797,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
 
     var control = try testRuntime();
     defer control.deinit();
-    const run = findRun(control.task_runtime.tasks[0].?.durable.runs, 7).?;
+    const run = findRun(control.testTaskSlots()[0].?.durable.runs, 7).?;
     const remaining = @min(
         control.limits.max_assistant_message_bytes,
         control.limits.max_projection_bytes - control.projection_bytes,
@@ -18188,8 +18017,8 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
                 ),
             };
         }
-        control.task_runtime.tasks[task_index] = try control.allocator.create(TestTask);
-        control.task_runtime.tasks[task_index].?.* = .{
+        control.testTaskSlots()[task_index] = try control.allocator.create(TestTask);
+        control.testTaskSlots()[task_index].?.* = .{
             .durable = .{
                 .id = @intCast(task_index + 1),
                 .recent_order = @intCast(task_index + 1),
@@ -18219,9 +18048,9 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
                 .detail_truncated = true,
             };
             @memset(record.detail[0..], 'x');
-            control.task_runtime.tasks[task_index].?.durable.ui_history[record_index] = record;
+            control.testTaskSlots()[task_index].?.durable.ui_history[record_index] = record;
         }
-        control.task_runtime.tasks[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
+        control.testTaskSlots()[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
     }
     product_workspace.testing.setIdentity(
         &control.workspace,
@@ -18235,17 +18064,17 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
     defer std.testing.allocator.free(escaped_assistant);
     @memset(escaped_assistant, 1);
     try control.appendTrackedText(
-        &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
+        &control.testTaskSlots()[0].?.durable.runs[0].?.assistant,
         escaped_assistant,
         limits.max_assistant_message_bytes,
     );
     _ = control.redactTrackedText(
-        &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
-        control.task_runtime.tasks[0].?.durable.runs[0].?.initial_credentials[0],
+        &control.testTaskSlots()[0].?.durable.runs[0].?.assistant,
+        control.testTaskSlots()[0].?.durable.runs[0].?.initial_credentials[0],
     );
-    control.task_runtime.tasks[0].?.durable.runs[0].?.commentary_count = 1;
-    control.task_runtime.tasks[0].?.durable.runs[0].?.commentary_ends[0] = @intCast(
-        control.task_runtime.tasks[0].?.durable.runs[0].?.assistant.committed_len,
+    control.testTaskSlots()[0].?.durable.runs[0].?.commentary_count = 1;
+    control.testTaskSlots()[0].?.durable.runs[0].?.commentary_ends[0] = @intCast(
+        control.testTaskSlots()[0].?.durable.runs[0].?.assistant.committed_len,
     );
     const remaining_projection = limits.max_projection_bytes - control.projection_bytes;
     const escaped_tool = try std.testing.allocator.alloc(
@@ -18255,7 +18084,7 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
     defer std.testing.allocator.free(escaped_tool);
     @memset(escaped_tool, 2);
     try control.replaceTracked(
-        &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.content,
+        &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.content,
         escaped_tool,
         limits.max_tool_field_bytes,
     );
@@ -18664,7 +18493,7 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
         var envelope = try testEnvelope(3, 7, event);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
-        const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+        const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
         tool.input_truncated = case.input_truncated;
         tool.content_truncated = case.content_truncated;
         var storage: [96 * 1024]u8 = undefined;
@@ -18807,7 +18636,7 @@ test "Runtime projects typed file changes without turning loss into Run failure"
     // Replayed callback identity is idempotent.
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     const change = &run.file_changes[0].?;
     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
     try std.testing.expectEqual(task_test_state.FileChangeKind.modified, change.kind);
@@ -18846,7 +18675,7 @@ test "Runtime preserves the complete visible file change protocol matrix" {
     try control.applyEvent(&envelope);
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.incomplete,
         run.file_change_observation.?,
@@ -18901,7 +18730,7 @@ test "Runtime explicitly ignores non-visible file change statuses without loss" 
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.collecting,
         run.file_change_observation.?,
@@ -18921,14 +18750,14 @@ test "Runtime degrades file change record path and diff capacity without rejecti
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
-        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
         try std.testing.expectEqual(
             task_test_state.FileChangeObservation.incomplete,
             run.file_change_observation.?,
         );
         try std.testing.expect(run.file_changes[0] == null);
         try std.testing.expect(run.event_projection_failure == null);
-        control.task_runtime.tasks[0].?.runtime.active_run_id = 0;
+        control.testTaskSlots()[0].?.runtime.active_run_id = 0;
         _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
         finalizeTestTerminalEvents(&control);
         try std.testing.expectEqual(task_test_state.RunOutcome.completed, run.terminal_payload.outcome);
@@ -18946,7 +18775,7 @@ test "Runtime degrades file change record path and diff capacity without rejecti
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
-        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
         try std.testing.expect(run.file_changes[0] != null);
         try std.testing.expect(run.file_changes[1] != null);
         try std.testing.expectEqual(
@@ -18977,7 +18806,7 @@ test "Runtime degrades file change record path and diff capacity without rejecti
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
-        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
         try std.testing.expect(run.file_changes[0] != null);
         try std.testing.expect(run.file_changes[0].?.artifact == null);
         try std.testing.expectEqual(
@@ -18998,7 +18827,7 @@ test "Runtime accepts only file change locators inside the owning workspace" {
     else
         "/workspace";
     try control.replaceTracked(
-        &control.task_runtime.tasks[0].?.durable.workspace_root,
+        &control.testTaskSlots()[0].?.durable.workspace_root,
         workspace_root,
         control.limits.max_workspace_bytes,
     );
@@ -19022,7 +18851,7 @@ test "Runtime accepts only file change locators inside the owning workspace" {
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expectEqualStrings("src/a.zig", run.file_changes[0].?.display_path);
     try std.testing.expectEqualStrings("src/b.zig", run.file_changes[1].?.display_path);
     try std.testing.expect(run.file_changes[2] == null);
@@ -19067,7 +18896,7 @@ test "Runtime degrades saturated file change artifact admission without dropping
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expectEqual(
         @as(u32, file_change_io.max_in_flight),
         run.pending_file_change_artifacts,
@@ -19113,7 +18942,7 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expectEqual(@as(u32, 1), run.pending_file_change_artifacts);
     for (0..1_000) |_| {
         control.drainFileChangeCompletions(.{
@@ -19292,7 +19121,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     for (0..1_000) |_| {
         control.drainFileChangeCompletions(.{
             .context = &control,
@@ -19428,7 +19257,7 @@ test "Task deletion waits for FileChange workers before removing retained artifa
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const change_order = run.file_changes[0].?.order;
     var digest: [file_change_store.digest_bytes]u8 = undefined;
@@ -19455,8 +19284,8 @@ test "Task deletion waits for FileChange workers before removing retained artifa
     try control.setTaskArchived(3, true);
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     try control.deleteTask(3);
-    try std.testing.expect(control.task_runtime.tasks[0] != null);
-    try std.testing.expectEqual(@as(@TypeOf(control.task_runtime.tasks[0].?.deletion), .deleting), control.task_runtime.tasks[0].?.deletion);
+    try std.testing.expect(control.testTaskSlots()[0] != null);
+    try std.testing.expectEqual(@as(@TypeOf(control.testTaskSlots()[0].?.deletion), .deleting), control.testTaskSlots()[0].?.deletion);
 
     control.shutdownFileChangeExecutor();
     control.drainFileChangeCompletions(.{
@@ -19464,7 +19293,7 @@ test "Task deletion waits for FileChange workers before removing retained artifa
         .complete_fn = discardFileChangeDiffCompletion,
     });
     control.syncLifecycle();
-    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.testTaskSlots()[0] == null);
     try std.testing.expectError(
         error.BlobMissing,
         store.readAlloc(
@@ -19501,7 +19330,7 @@ test "completed terminal drain closes collecting file change observation" {
         .now_ms_fn = Clock.now,
         .now_unix_ms_fn = Clock.nowUnix,
     };
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     run.admitted_at_ms = 1_000;
     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
     try std.testing.expect(commitTerminal(
@@ -19566,7 +19395,7 @@ test "file observation closure agrees after event drain and delayed artifact com
         for ([_]bool{ false, true }) |delayed_artifact| {
             var control = try testRuntime();
             defer control.deinit();
-            const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+            const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
             if (case.running_tool or case.closed_tool) {
                 var tool = try testEnvelope(3, 7, if (case.running_tool)
                     "{\"tool_start\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\"}}"
@@ -19607,7 +19436,7 @@ test "file observation closure agrees after event drain and delayed artifact com
 test "failed file artifact remains incomplete after a model failure" {
     var control = try testRuntime();
     defer control.deinit();
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     var change_event = try testEnvelope(3, 7, "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"result.txt\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}");
     defer change_event.deinit();
     try control.applyEvent(&change_event);
@@ -19622,7 +19451,7 @@ test "failed file artifact remains incomplete after a model failure" {
 test "terminal persistence degrades pending file change observation without mutating the live Run" {
     var control = try testRuntime();
     defer control.deinit();
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     run.pending_file_change_artifacts = 1;
     try std.testing.expect(commitTerminal(
         run,
@@ -19635,7 +19464,7 @@ test "terminal persistence degrades pending file change observation without muta
     ));
     control.markTerminalRunsBeforeEventDrain();
     finalizeTestTerminalDrain(&control);
-    control.task_runtime.tasks[0].?.runtime.active_operation = .none;
+    control.testTaskSlots()[0].?.runtime.active_operation = .none;
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.collecting,
         run.file_change_observation.?,
@@ -19718,7 +19547,7 @@ fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
         .display_name_len = 7,
         .recent_order = 2,
     });
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     task.durable.workspace_id = 2;
     try control.replaceTracked(&task.durable.workspace_root, root, control.limits.max_workspace_bytes);
     var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"preview-tool\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"image.jpg\"},\"title\":\"image\",\"kind\":\"text\"}]}}");
@@ -19786,7 +19615,7 @@ test "file preview workspace directory authority redacts names and rejects stale
     try std.testing.expect(capture.redacted);
     capture = .{};
     _ = control.beginWorkspaceFile(92, 3, 2, 1, "", true);
-    control.task_runtime.tasks[0].?.durable.workspace_id = 1;
+    control.testTaskSlots()[0].?.durable.workspace_id = 1;
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -19879,7 +19708,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
         defer envelope.deinit();
         try control.applyEvent(&envelope);
     }
-    const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
     for ([_][]const u8{
         tool.id,
         tool.name,
@@ -19934,8 +19763,8 @@ test "Runtime product tool identities remain unique after raw ID redaction" {
         try control.applyEvent(&envelope);
     }
 
-    const first = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
-    const second = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[1].?;
+    const first = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
+    const second = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[1].?;
     try std.testing.expectEqualStrings("tool-1", first.id);
     try std.testing.expectEqualStrings("tool-2", second.id);
     try std.testing.expectEqualStrings("first progress", first.progress);
@@ -19946,7 +19775,7 @@ test "Runtime product tool identities remain unique after raw ID redaction" {
 test "assistant credential redaction finalizes ordinary chunks without rescanning history" {
     var control = try testRuntime();
     defer control.deinit();
-    const assistant = &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant;
+    const assistant = &control.testTaskSlots()[0].?.durable.runs[0].?.assistant;
 
     for (0..4096) |_| {
         try control.appendTrackedText(assistant, "x", control.limits.max_assistant_message_bytes);
@@ -19958,7 +19787,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try control.appendTrackedText(assistant, "SECRET-", control.limits.max_assistant_message_bytes);
     try std.testing.expect(!control.redactTrackedText(assistant, TestSupport.fixtureExecution(&control).input().api_key));
     try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     run.commentary_count = 1;
     run.commentary_ends[0] = @intCast(assistant.committed_len);
 
@@ -20011,8 +19840,8 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
         run.commentary_ends[0],
     );
     try std.testing.expectEqual(
-        @as(@TypeOf(control.task_runtime.tasks[0].?.runtime.active_operation), .none),
-        control.task_runtime.tasks[0].?.runtime.active_operation,
+        @as(@TypeOf(control.testTaskSlots()[0].?.runtime.active_operation), .none),
+        control.testTaskSlots()[0].?.runtime.active_operation,
     );
     try std.testing.expectEqual(revision_before_finalization + 1, control.revision);
 
@@ -20028,7 +19857,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expectEqual(late_count_before + 1, control.task_runtime.late_terminal_event_count);
     try std.testing.expectEqual(revision_before_late_event, control.revision);
     try std.testing.expect(
-        std.mem.indexOf(u8, control.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
+        std.mem.indexOf(u8, control.testTaskSlots()[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
     );
 }
 
@@ -20048,7 +19877,7 @@ test "projection gap preserves completion, continuation and completion-seen pers
         try control.applyEvent(&envelope);
     }
 
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(
         run,
         .completed,
@@ -20077,14 +19906,14 @@ test "projection gap preserves completion, continuation and completion-seen pers
     // Continuation stays with the Session disposition; the projection loss is
     // a Run-level product fact only.
     try std.testing.expect(control.task_runtime.continuationAvailable(
-        control.task_runtime.tasks[0].?.durable.id,
+        control.testTaskSlots()[0].?.durable.id,
         control.taskRuntimeProjectionEffects(),
     ));
 
     try std.testing.expect(control.task_runtime.markCompletionSeen(3, run.id));
     control.task_persistence = persistence.capability(null);
     control.task_persistence_health = .ready;
-    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.workspace_root, "/tmp/metawork-test", control.limits.max_workspace_bytes);
+    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.workspace_root, "/tmp/metawork-test", control.limits.max_workspace_bytes);
     try control.commitTaskState();
     var restored = try task_persistence.decode(std.testing.allocator, storage[0..persistence.len], control.taskPersistenceLimits());
     defer restored.deinit();
@@ -20105,11 +19934,11 @@ test "event capacity causes serialize to the shared Renderer fixture" {
     for (cases.value) |expected| {
         var control = try testRuntime();
         defer control.deinit();
-        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
         try std.testing.expect(commitTerminal(run, .failed, .failed, std.meta.stringToEnum(RunCause, expected.cause).?, .reusable, "", false));
         control.markTerminalRunsBeforeEventDrain();
         finalizeTestTerminalDrain(&control);
-        detachTaskForTest(&control, control.task_runtime.tasks[0].?);
+        detachTaskForTest(&control, control.testTaskSlots()[0].?);
         var storage: [96 * 1024]u8 = undefined;
         const snapshot = try control.writeAggregateFixture(&storage);
         const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
@@ -20145,7 +19974,7 @@ test "Product view shares Run feedback and navigation with the index, manifest a
     for (cases) |case| {
         var control = try testRuntime();
         defer control.deinit();
-        const task = control.task_runtime.find(3).?;
+        const task = control.testTask(3).?;
         const run = &task.durable.runs[0].?;
         const phase: RunPhase = switch (case.outcome) {
             .dependency_contract_failure => .failed,
@@ -20211,7 +20040,7 @@ test "Product view shares Run feedback and navigation with the index, manifest a
 test "event drain barrier atomically publishes terminal product state" {
     var control = try testRuntime();
     defer control.deinit();
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
 
     try control.appendTrackedText(
         &run.assistant,
@@ -20248,7 +20077,7 @@ test "event drain barrier atomically publishes terminal product state" {
     // asynchronous Agent Session close path. Detach before snapshot lifecycle
     // reconciliation so the terminal-publication assertion stays scoped to
     // its event-drain barrier instead of starting a fake close worker.
-    detachTaskForTest(&control, control.task_runtime.tasks[0].?);
+    detachTaskForTest(&control, control.testTaskSlots()[0].?);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
@@ -20271,7 +20100,7 @@ test "close and delete wait for terminal event drain" {
 
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
@@ -20311,7 +20140,7 @@ test "close and delete wait for terminal event drain" {
     try control.applyEvent(&queued_event);
 
     finalizeTestTerminalEvents(&control);
-    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.testTaskSlots()[0] == null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
@@ -20332,7 +20161,7 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
 
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
     task.runtime.close_completion.store(.running, .release);
@@ -20386,7 +20215,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     try std.testing.expect(projected.truncated);
     try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
 
-    const view = control.task_runtime.tasks[0].?;
+    const view = control.testTaskSlots()[0].?;
     for (1..11) |request_id| {
         var record = UiRecord{
             .request_id = request_id,
@@ -20614,7 +20443,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             mcpCatalogPort(control.agent_runtime),
             .{},
             .{},
-            .{},
+            control.run_clock,
         ),
         .{
             .preparation = preparation.take(),
@@ -21464,7 +21293,7 @@ test "full approval lane keeps confirmation pending and retires confirmed blob a
         try control.task_runtime.queueApprovalRetirement(&store, nonexistent, job.executor(), control.approvalNotifier());
     }
 
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     task.approval_change = .{ .revision = 2, .target = .auto_review, .phase = .mode_commit };
     Runtime.retireRecoveryCheckpoint(&control, retired);
     try store.verify(retired);
@@ -21507,7 +21336,7 @@ test "approval shutdown settles joined history outcomes before releasing Task re
         defer control.deinit();
         control.canonical_user_home = try control.allocator.dupe(u8, home);
         control.skill.ports.catalog.query_fn = Catalog.query;
-        const task = control.task_runtime.find(3).?;
+        const task = control.testTask(3).?;
         const run_id = task.runtime.active_run_id;
         // This fixture Run has no live Agent RunControl. Settle it before
         // admission, so lifecycle reconciliation cannot accept the history
@@ -21661,7 +21490,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         defer history.released.store(true, .release);
         control.canonical_user_home = try control.allocator.dupe(u8, home);
         control.skill.ports.catalog.query_fn = Harness.query;
-        const task = control.task_runtime.find(3).?;
+        const task = control.testTask(3).?;
         _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
         finalizeTestTerminalEvents(&control);
         control.commitTaskStateNoFail();
@@ -21773,7 +21602,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
 test "empty catalog rejects its explicit model without closing generic admission or changing owned execution" {
     var control = try testRuntime();
     defer control.deinit();
-    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const task_id = control.testTaskSlots()[0].?.durable.id;
     const old_admission = control.newTaskAdmissionView();
     try std.testing.expect(old_admission.available);
     // This case changes only the catalog; credential rotation is tested separately.
@@ -21837,7 +21666,7 @@ test "Product Control snapshot serializer omits image formats when attachments a
 test "active input wire identity borrows stable Run memory until history encoding completes" {
     var control = try testRuntime();
     defer control.deinit();
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     const operation_id = "stable-operation";
     run.additional_inputs[0] = .{ .id = 1, .after_output_count = 0, .operation_id_len = operation_id.len, .text = try control.copyBounded("constraint", control.limits.max_user_message_bytes), .sequence = 1, .redacted = false };
     @memcpy(run.additional_inputs[0].?.operation_id[0..operation_id.len], operation_id);
@@ -21852,7 +21681,7 @@ test "active input wire identity borrows stable Run memory until history encodin
 test "catalog capability refresh leaves Task execution frozen until explicit preparation" {
     var control = try testRuntime();
     defer control.deinit();
-    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const task_id = control.testTaskSlots()[0].?.durable.id;
     const old_execution = try control.task_runtime.testExecutionInput(task_id);
     const generation = old_execution.execution_generation;
     const old_capabilities = (try control.task_runtime.testExecutionInput(task_id)).target.image_capabilities;
@@ -21914,7 +21743,7 @@ test "Product view credential matcher preserves UTF-8 and clears its owned scan 
     var control = try testRuntime();
     defer control.deinit();
     try TestSupport.installFixtureCredential(&control, &.{0xa9});
-    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "caf\xc3\xa9 SECRET-KEY", control.limits.max_task_title_bytes);
+    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.title, "caf\xc3\xa9 SECRET-KEY", control.limits.max_task_title_bytes);
     var storage: [96 * 1024]u8 = undefined;
     const bytes = try control.writeViewFixture(&storage, .{ .task_id = 3 });
     try std.testing.expect(std.unicode.utf8ValidateSlice(bytes));
@@ -21941,7 +21770,7 @@ test "Product view frozen read survives business updates and rejects replaced re
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &unrelated_storage, 64, 64));
     var first: [64]u8 = undefined;
     @memcpy(&first, output[0..64]);
-    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "new committed title", control.limits.max_task_title_bytes);
+    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.title, "new committed title", control.limits.max_task_title_bytes);
     control.bumpRevision();
     try control.writeSnapshotRange(read.id, &output, 0, 64);
     try std.testing.expectEqualSlices(u8, &first, output[0..64]);
@@ -22008,8 +21837,8 @@ test "Product view history versions ignore unrelated revisions and observe termi
     try maximumProjectionFixture(control);
     defer control.deinit();
     const epoch = control.projection_history_epoch;
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
-    const unrelated = control.task_runtime.tasks[1].?.durable.runs[0].?.projection_content_version;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const unrelated = control.testTaskSlots()[1].?.durable.runs[0].?.projection_content_version;
     const version = run.projection_content_version;
     control.bumpRevision(); // Account, Schedule or other Task header changes.
     try std.testing.expectEqual(epoch, control.projection_history_epoch);
@@ -22019,7 +21848,7 @@ test "Product view history versions ignore unrelated revisions and observe termi
     try std.testing.expect(control.task_runtime.completeFileChangeArtifact(1, run.generation, change.order, null, false));
     control.bumpRevision();
     try std.testing.expect(run.projection_content_version > version);
-    try std.testing.expectEqual(unrelated, control.task_runtime.tasks[1].?.durable.runs[0].?.projection_content_version);
+    try std.testing.expectEqual(unrelated, control.testTaskSlots()[1].?.durable.runs[0].?.projection_content_version);
     try std.testing.expectEqual(epoch, control.projection_history_epoch);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
@@ -22043,7 +21872,7 @@ test "Product view preparation owns frozen tools and cannot clean a changed cach
     try std.testing.expectEqual(@as(usize, 1), control.view_preparation.tools.items.len);
     try std.testing.expect(control.view_preparation.credentials != null);
     try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 0, 1));
-    const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
     try control.replaceTracked(&tool.content, "new result", control.limits.max_tool_field_bytes);
     control.bumpRevision();
     while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
@@ -22076,7 +21905,7 @@ test "Product view failed formatter stage releases partially prepared source and
     @memset(command, '\n');
     const input = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
     defer std.testing.allocator.free(input);
-    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.input, input, control.limits.max_tool_field_bytes);
+    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.input, input, control.limits.max_tool_field_bytes);
     var output: [96 * 1024]u8 = undefined;
     var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     read = try control.continueSnapshot(read.id, &output);
@@ -22175,7 +22004,7 @@ test "rejected credential-bearing history frees the encoded candidate on every a
     var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
     control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
-    try control.replaceTracked(&control.task_runtime.find(3).?.durable.title, "unredacted-history-key", control.limits.max_task_title_bytes);
+    try control.replaceTracked(&control.testTask(3).?.durable.title, "unredacted-history-key", control.limits.max_task_title_bytes);
     const before = history.commits;
     for (0..8) |_| try std.testing.expectError(error.TaskStoreEncodeFailed, control.commitTaskState());
     try std.testing.expectEqual(before, history.commits);
@@ -22190,10 +22019,10 @@ test "learned short credentials scrub Runtime retained and readonly originals wi
     const original = try std.json.Stringify.valueAlloc(control.allocator, record, .{});
     defer control.allocator.free(original);
     const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
-    control.task_runtime.find(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
+    control.testTask(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
     try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
     control.redactAllProductProjectionsNoFail("none");
-    const payload = control.task_runtime.find(record.id).?.read_only_history.?.payload;
+    const payload = control.testTask(record.id).?.read_only_history.?.payload;
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
@@ -22379,7 +22208,7 @@ test "Outputs require trusted delivery sideband and reject conflicting or excess
     var envelope = try testEnvelope(3, 7, encoded);
     defer envelope.deinit();
     try control.applyEvent(&envelope);
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expect(run.outputs[0] == null);
     const baseline_bytes = control.projection_bytes;
     envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "成果/final.docx", 42, @splat(2));
@@ -22411,7 +22240,7 @@ test "Outputs require trusted delivery sideband and reject conflicting or excess
 test "terminal receipt tail is adopted before completion and deduplicates queued delivery" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     const receipt = try lifecycle.FileDeliveryReceipt.init(@splat(7), "outputs/tail.docx", 17, @splat(8));
     var queued = try testEnvelope(task.runtime.routeId(), run.id, "{\"tool_result\":{\"id\":\"queued-delivery\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified\",\"is_error\":false}}");
@@ -22452,7 +22281,7 @@ test "trusted delivery and image metadata survive full Tool and display capacity
         var history = TestTaskPersistence{ .storage = &storage };
         var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
         defer control.deinit();
-        const task = control.task_runtime.tasks[0].?;
+        const task = control.testTaskSlots()[0].?;
         const run = &task.durable.runs[0].?;
         for ([_][]const u8{
             "{\"tool_start\":{\"id\":\"one\",\"name\":\"Read\",\"input\":\"first file\"}}",
@@ -22526,7 +22355,7 @@ test "Outputs persist through real history restore and sanitized locators lose f
         try control.applyEvent(&envelope);
         envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "SECRET-KEY/final.xlsx", 100, @splat(4));
         try control.applyEvent(&envelope);
-        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
         try std.testing.expect(run.outputs[1].?.redacted);
         var image = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"image-receipt\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
         defer image.deinit();
@@ -22544,7 +22373,7 @@ test "Outputs persist through real history restore and sanitized locators lose f
         .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
     });
     defer restored.deinit();
-    const run = &restored.task_runtime.find(3).?.durable.runs[0].?;
+    const run = &restored.testTask(3).?.durable.runs[0].?;
     try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
     try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(2))), &run.outputs[0].?.sha256);
     try std.testing.expect(run.outputs[1].?.redacted);
@@ -22566,7 +22395,7 @@ test "late credential discovery revokes Output locators in current and durable p
     defer envelope.deinit();
     envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "late-secret/report.docx", 42, @splat(2));
     try control.applyEvent(&envelope);
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     try std.testing.expect(!run.outputs[0].?.redacted);
     control.redactAllProductProjectionsNoFail("late-secret");
@@ -22601,7 +22430,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     try std.testing.expect(output.object.get("locator") == null);
     try std.testing.expect(output.object.get("sha256") == null);
     // Even an inconsistent stale flag must not expose a newly known credential.
-    const record = &control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?;
+    const record = &control.testTaskSlots()[0].?.durable.runs[0].?.outputs[0].?;
     @memcpy(record.locator[0.."SECRET-KEY/".len], "SECRET-KEY/");
     try std.testing.expect(!record.redacted);
     const safe = try control.writeAggregateFixture(&storage);
@@ -22637,7 +22466,7 @@ test "Output file target requires an explicit receipt in the exact owning Task a
     try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(0)));
     try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(4)));
 
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const record = &task.durable.runs[0].?.outputs[0].?;
     try std.testing.expect(target.relative_path.ptr != record.locator.ptr);
     try std.testing.expect(target.workspace_root.ptr != task.durable.workspace_root.ptr);
@@ -22664,7 +22493,7 @@ test "Output file target rechecks revocation deletion redaction and security bef
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
     defer target.deinit();
-    const task = control.task_runtime.tasks[0].?;
+    const task = control.testTaskSlots()[0].?;
     const record = &task.durable.runs[0].?.outputs[0].?;
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
     try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
@@ -23132,7 +22961,7 @@ test "Product view bounded Host search matches the independent Renderer fixture 
 test "Product view search continues across unrelated Product revisions and expires on content edits" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     const run = &task.durable.runs[0].?;
     var input: [1024]u8 = @splat('a');
     input[input.len - 1] = 'b';
@@ -23182,9 +23011,9 @@ test "Product view search continues across unrelated Product revisions and expir
 test "Product view queued recovery failure preserves the shared Session blocker fixture" {
     var control = try testRuntime();
     defer control.deinit();
-    const index = control.task_runtime.find(3).?.input_submissions.items.len;
+    const index = control.testTask(3).?.input_submissions.items.len;
     _ = try control.task_runtime.receiveInput(3, "pressure-send", .{ .text = "Keep my draft" }, control.taskRuntimeOperationEffects());
-    const record = control.task_runtime.pendingInput(3, index).?;
+    const record = &control.testTask(3).?.input_submissions.items[index];
     record.submission.received_at_unix_ms = null;
     record.submission.presentation_order = null;
     record.submission.anchor_run_id = null;
@@ -23211,7 +23040,7 @@ test "history allowance admits more than sixteen Runs beyond the old shared proj
     defer control.deinit();
     control.limits.max_history_bytes = 8 * 1024 * 1024;
     control.limits.max_user_message_bytes = 256 * 1024;
-    const task = control.task_runtime.find(3).?;
+    const task = control.testTask(3).?;
     const body = try control.allocator.alloc(u8, 128 * 1024);
     defer control.allocator.free(body);
     @memset(body, 'x');

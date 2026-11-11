@@ -715,9 +715,9 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.now_ms;
         }
-        fn seconds(raw: ?*anyopaque) ?u64 {
+        fn unixMs(raw: ?*anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            return self.now_ms / 1000;
+            return self.now_ms;
         }
         fn arm(raw: *anyopaque, due: u64) bool {
             const self: *@This() = @ptrCast(@alignCast(raw));
@@ -824,7 +824,7 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
         .catalog = .{ .context = &fixture, .activate_fn = Fixture.activate, .create_admission_selection_fn = Fixture.selection, .prepare_restore_selection_fn = Fixture.restore },
         .timer = .{ .enabled = false, .context = null, .now_fn = Fixture.noClock, .arm_at_fn = Fixture.noArm, .cancel_fn = Fixture.noCancel },
         .notifier = .{ .context = null, .notify_fn = Fixture.productNotify },
-        .unix_clock = .{ .enabled = true, .context = &fixture, .now_seconds_fn = Fixture.seconds },
+        .unix_clock = .{ .enabled = true, .context = &fixture, .now_ms_fn = Fixture.unixMs },
     }, .{ .preparation = preparation.take(), .activation = null, .activation_failed = false, .management = management, .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } }, .host_capabilities = .{}, .committed = true });
     defer runtime.deinit();
     fixture.runtime = &runtime;

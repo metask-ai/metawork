@@ -5322,7 +5322,7 @@ export default function App() {
             disabled={
               bridgeUnavailable || !snapshot.capabilities.scheduledTasks
             }
-            recoveryDisabled={bridgeUnavailable}
+            bridgeUnavailable={bridgeUnavailable}
             onCreate={(input) =>
               commitScheduleMutation(() => client.createScheduledTask(input))
             }
