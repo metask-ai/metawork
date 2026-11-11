@@ -234,12 +234,12 @@ pub const Dispatcher = struct {
     };
     const PreviewGrant = struct {
         token: [48]u8,
-        image: product_control.FilePreviewImage,
+        media: product_control.FilePreviewMedia,
         generation: u64,
         window_id: native_sdk.platform.WindowId,
         preview_id: u64,
     };
-    const PreviewImage = struct { token: []const u8, image: product_control.FilePreviewImage };
+    const PreviewMedia = struct { token: []const u8, media: product_control.FilePreviewMedia };
     const PreviewInFlight = struct {
         directory: bool = false,
         active: bool = false,
@@ -335,7 +335,7 @@ pub const Dispatcher = struct {
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
     preview_high_water: u64 = 0,
-    preview_grants: [2]?PreviewGrant = @splat(null),
+    preview_grants: [product_control.max_file_preview_media]?PreviewGrant = @splat(null),
     preview_timer_armed: bool = false,
     output_timer_armed: bool = false,
     output_in_flight: [2]?OutputInFlight = @splat(null),
@@ -410,6 +410,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
+            .{ .name = commands.read_preview_video, .function = readPreviewVideo },
             .{ .name = commands.open_external_link, .function = openExternalLink },
             .{ .name = commands.updates_check, .function = checkUpdates },
             .{ .name = commands.updates_open_download, .function = openUpdateDownload },
@@ -641,7 +642,7 @@ pub const Dispatcher = struct {
             if (self.control) |control| {
                 control.drainFilePreviewCompletions(self.filePreviewSink());
                 for (&self.preview_grants) |*entry| if (entry.*) |grant| {
-                    if (!control.hasFilePreviewImage(grant.image.id)) entry.* = null;
+                    if (!control.hasFilePreviewMedia(grant.media.id)) entry.* = null;
                 };
             }
             self.updatePreviewTimer();
@@ -1388,20 +1389,20 @@ pub const Dispatcher = struct {
             var state = result.state;
             const connected = if (self.delivery.validateConnection(pending.generation, pending.window_id)) |_| true else |_| false;
             if (pending.cancelled or !connected) state = .failed;
-            var descriptor: ?PreviewImage = null;
-            if (result.image) |image| {
+            var descriptor: ?PreviewMedia = null;
+            if (result.media) |media| {
                 if (state == .ready) {
                     const vacant = for (&self.preview_grants) |*entry| {
                         if (entry.* == null) break entry;
                     } else null;
                     var random: [24]u8 = undefined;
                     if (vacant != null and self.platform.random_fn(self.platform.context, &random)) {
-                        vacant.?.* = .{ .token = std.fmt.bytesToHex(random, .lower), .image = image, .generation = pending.generation, .window_id = pending.window_id, .preview_id = pending.preview_id };
-                        descriptor = .{ .token = &vacant.?.*.?.token, .image = image };
+                        vacant.?.* = .{ .token = std.fmt.bytesToHex(random, .lower), .media = media, .generation = pending.generation, .window_id = pending.window_id, .preview_id = pending.preview_id };
+                        descriptor = .{ .token = &vacant.?.*.?.token, .media = media };
                     } else state = .failed;
                 }
                 if (descriptor == null) if (self.control) |control| {
-                    _ = control.releaseFilePreview(image.id);
+                    _ = control.releaseFilePreview(media.id);
                 };
             }
             if (pending.directory) respondDirectory(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.entries, result.truncated, result.redacted) else respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.content, result.truncated, result.redacted, descriptor);
@@ -1409,8 +1410,8 @@ pub const Dispatcher = struct {
             self.updatePreviewTimer();
             return;
         }
-        if (result.image) |image| if (self.control) |control| {
-            _ = control.releaseFilePreview(image.id);
+        if (result.media) |media| if (self.control) |control| {
+            _ = control.releaseFilePreview(media.id);
         };
     }
     fn respondPreviewRelease(responder: native_sdk.bridge.AsyncResponder, id: []const u8, generation: u64, preview_id: u64) void {
@@ -1443,7 +1444,7 @@ pub const Dispatcher = struct {
         }
         for (&self.preview_grants) |*entry| if (entry.*) |grant| {
             if (grant.generation != key.generation or grant.preview_id != key.preview_id) continue;
-            _ = (try self.requireProductControl()).releaseFilePreview(grant.image.id);
+            _ = (try self.requireProductControl()).releaseFilePreview(grant.media.id);
             entry.* = null;
             break;
         };
@@ -1452,6 +1453,13 @@ pub const Dispatcher = struct {
     }
     fn readPreviewImage(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
+        return self.readPreviewMedia(invocation, output, false);
+    }
+    fn readPreviewVideo(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        return self.readPreviewMedia(invocation, output, true);
+    }
+    fn readPreviewMedia(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, output: []u8, video: bool) ![]const u8 {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         var parsed = try handlers.parsePayload(handlers.FilePreviewChunkRequest, invocation.request.payload);
@@ -1463,13 +1471,14 @@ pub const Dispatcher = struct {
             return std.fmt.bufPrint(output, "{{\"state\":\"stale_security\"}}", .{});
         for (&self.preview_grants) |*entry| if (entry.*) |*grant| {
             if (grant.generation != key.generation or grant.preview_id != key.preview_id or grant.window_id != invocation.source.window_id or !std.mem.eql(u8, &grant.token, parsed.value.token)) continue;
-            if (grant.image.security_epoch != control.projectionSecurityEpoch()) {
-                _ = control.releaseFilePreview(grant.image.id);
+            if (video != std.mem.eql(u8, grant.media.media_type, "video/mp4")) break;
+            if (grant.media.security_epoch != control.projectionSecurityEpoch()) {
+                _ = control.releaseFilePreview(grant.media.id);
                 entry.* = null;
                 return std.fmt.bufPrint(output, "{{\"state\":\"stale_security\"}}", .{});
             }
-            const bytes = control.readFilePreviewImage(grant.image.id, offset) catch |err| {
-                _ = control.releaseFilePreview(grant.image.id);
+            const bytes = control.readFilePreviewMedia(grant.media.id, offset) catch |err| {
+                _ = control.releaseFilePreview(grant.media.id);
                 entry.* = null;
                 return std.fmt.bufPrint(output, "{{\"state\":\"{s}\"}}", .{switch (err) {
                     error.StaleSecurityEpoch => "stale_security",
@@ -1507,7 +1516,7 @@ pub const Dispatcher = struct {
                 _ = control.releaseFilePreview(slot.completion_id);
             };
             for (&self.preview_grants) |*entry| if (entry.*) |grant| {
-                _ = control.releaseFilePreview(grant.image.id);
+                _ = control.releaseFilePreview(grant.media.id);
                 entry.* = null;
             };
         }
@@ -1545,7 +1554,7 @@ pub const Dispatcher = struct {
         };
         responder.success(request_id, writer.buffered()) catch {};
     }
-    fn respondFilePreview(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, content: []const u8, truncated: bool, redacted: bool, image: ?PreviewImage) void {
+    fn respondFilePreview(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, content: []const u8, truncated: bool, redacted: bool, media: ?PreviewMedia) void {
         var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         writer.print("{{\"state\":\"{s}\",\"content\":", .{switch (state) {
@@ -1571,9 +1580,8 @@ pub const Dispatcher = struct {
                 return;
             };
         }
-        if (state == .ready) if (image) |descriptor| {
-            const info = descriptor.image;
-            writer.print(",\"image\":{{\"token\":\"{s}\",\"mediaType\":\"{s}\",\"sizeBytes\":\"{d}\",\"width\":{d},\"height\":{d},\"chunkBytes\":\"{d}\",\"securityEpoch\":\"{d}\"}}", .{ descriptor.token, info.media_type, info.size_bytes, info.width, info.height, product_control.file_preview_chunk_bytes, info.security_epoch }) catch {
+        if (state == .ready) if (media) |descriptor| {
+            writePreviewMedia(&writer, descriptor) catch {
                 responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
                 return;
             };
@@ -1583,6 +1591,14 @@ pub const Dispatcher = struct {
             return;
         };
         responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn writePreviewMedia(writer: *std.Io.Writer, descriptor: PreviewMedia) !void {
+        const info = descriptor.media;
+        const video = std.mem.eql(u8, info.media_type, "video/mp4");
+        try writer.print(",\"{s}\":{{\"token\":\"{s}\",\"mediaType\":\"{s}\",\"sizeBytes\":\"{d}\",\"chunkBytes\":\"{d}\",\"securityEpoch\":\"{d}\"", .{ if (video) "video" else "image", descriptor.token, info.media_type, info.size_bytes, product_control.file_preview_chunk_bytes, info.security_epoch });
+        if (!video) try writer.print(",\"width\":{d},\"height\":{d}", .{ info.width, info.height });
+        try writer.writeByte('}');
     }
 
     fn requireReceiveKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, batch_text: []const u8) !struct { generation: u64, batch_id: u64 } {
@@ -6409,7 +6425,7 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.testing.expect(!control.hasFilePreviews());
     try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
     try opened.wait(&boundary, 4);
-    product_control.TestSupport.expirePreview(control, boundary.preview_grants[0].?.image.id);
+    product_control.TestSupport.expirePreview(control, boundary.preview_grants[0].?.media.id);
     try std.testing.expect(boundary.onTimer(preview_timer_id));
     try std.testing.expect(!control.hasFilePreviews());
     for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
@@ -6528,7 +6544,7 @@ test "file preview async response preserves the exact bounded wire shape" {
     );
     try std.testing.expect(!restricted_result.get("truncated").?.bool);
     try std.testing.expect(!restricted_result.get("redacted").?.bool);
-    const descriptor: Dispatcher.PreviewImage = .{ .token = "000000000000000000000000000000000000000000000000", .image = .{ .id = 1, .size_bytes = 10 * 1024 * 1024, .width = 1600, .height = 1600, .media_type = "image/png", .security_epoch = 1 } };
+    const descriptor: Dispatcher.PreviewMedia = .{ .token = "000000000000000000000000000000000000000000000000", .media = .{ .id = 1, .size_bytes = 10 * 1024 * 1024, .width = 1600, .height = 1600, .media_type = "image/png", .security_epoch = 1 } };
     capture.reset();
     Dispatcher.respondFilePreview(responder, "preview-image", .ready, "", false, false, descriptor);
     var image = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
@@ -6550,6 +6566,14 @@ test "file preview async response preserves the exact bounded wire shape" {
     try std.testing.expectEqualStrings("busy", busy_result.get("state").?.string);
     try std.testing.expect(busy_result.get("image") == null);
     try std.testing.expectEqualStrings("", busy_result.get("content").?.string);
+    capture.reset();
+    const video_descriptor: Dispatcher.PreviewMedia = .{ .token = descriptor.token, .media = .{ .id = 2, .size_bytes = 1546, .media_type = "video/mp4", .security_epoch = 1 } };
+    Dispatcher.respondFilePreview(responder, "preview-video", .ready, "", false, false, video_descriptor);
+    var video = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer video.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, video.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @embedFile("file_preview_video.fixture"), "\r\n"), encoded);
 }
 
 test "file preview workspace directory response matches the cross language fixture" {

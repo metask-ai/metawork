@@ -4,6 +4,7 @@ import {
   skillImportEffects,
   skillImportPhases,
   outputActionStates,
+  maxPreviewVideoBytes,
   modelErrorCategories,
   runGuidances,
   taskActionBlockers,
@@ -1890,19 +1891,31 @@ function decodePresentationAnchor(value: unknown, path: string) {
 }
 function decodeFileReference(value: unknown, path: string): FileReferenceView {
   const raw = record(value, path);
-  const generated = Object.hasOwn(raw, "generatedImage");
+  const image = Object.hasOwn(raw, "generatedImage");
+  const video = Object.hasOwn(raw, "generatedVideo");
+  const generated = image || video;
   const item = object(value, path, [
     "id",
     "title",
     "displayPath",
-    ...(generated ? ["generatedImage", "presentationAnchor"] : []),
+    ...(image ? ["generatedImage"] : []),
+    ...(video ? ["generatedVideo"] : []),
+    ...(generated ? ["presentationAnchor"] : []),
   ]);
-  if (generated && item.generatedImage !== true)
-    fail(path, "invalid generated image attestation");
+  if (
+    (image && item.generatedImage !== true) ||
+    (video &&
+      (image ||
+        item.generatedVideo !== true ||
+        item.presentationAnchor === null))
+  )
+    fail(path, "invalid generated media attestation");
   return {
     ...(generated
       ? {
-          generatedImage: true as const,
+          ...(video
+            ? { generatedVideo: true as const }
+            : { generatedImage: true as const }),
           presentationAnchor:
             item.presentationAnchor === null
               ? null
@@ -1970,9 +1983,13 @@ export function decodeWorkspaceDirectory(
 export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const raw = record(value, "$");
   const hasImage = Object.hasOwn(raw, "image");
+  const hasVideo = Object.hasOwn(raw, "video");
   const hasReason = Object.hasOwn(raw, "reason");
+  if (hasVideo && (hasImage || hasReason))
+    fail("$", "unexpected preview media");
   const item = object(value, "$", [
     ...(hasImage ? ["image"] : []),
+    ...(hasVideo ? ["video"] : []),
     ...(hasReason ? ["reason"] : []),
     "state",
     "content",
@@ -2000,6 +2017,41 @@ export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const content = stringValue(item.content, "$.content");
   const truncated = booleanValue(item.truncated, "$.truncated");
   const redacted = booleanValue(item.redacted, "$.redacted");
+  let video: FilePreviewResponse["video"];
+  if (hasVideo) {
+    const entry = object(item.video, "$.video", [
+      "token",
+      "mediaType",
+      "sizeBytes",
+      "chunkBytes",
+      "securityEpoch",
+    ]);
+    const token = stringValue(entry.token, "$.video.token");
+    const mediaType = enumValue(entry.mediaType, "$.video.mediaType", [
+      "video/mp4",
+    ] as const);
+    const sizeBytes = Number(
+      positiveU64WireId(entry.sizeBytes, "$.video.sizeBytes"),
+    );
+    const chunkBytes = Number(
+      positiveU64WireId(entry.chunkBytes, "$.video.chunkBytes"),
+    );
+    const securityEpoch = positiveU64WireId(
+      entry.securityEpoch,
+      "$.video.securityEpoch",
+    );
+    if (
+      content !== "" ||
+      truncated ||
+      redacted ||
+      !/^[a-f0-9]{48}$/.test(token) ||
+      sizeBytes < 16 ||
+      sizeBytes > maxPreviewVideoBytes ||
+      chunkBytes !== 262143
+    )
+      fail("$.video", "invalid MP4 preview descriptor");
+    video = { token, mediaType, sizeBytes, chunkBytes, securityEpoch };
+  }
   let image: FilePreviewResponse["image"];
   if (hasImage) {
     const entry = object(item.image, "$.image", [
@@ -2056,7 +2108,7 @@ export function decodeFilePreview(value: unknown): FilePreviewResponse {
   }
   if (
     state !== "ready" &&
-    (hasImage || content !== "" || truncated || redacted)
+    (hasImage || hasVideo || content !== "" || truncated || redacted)
   )
     fail("$", "non-ready preview must not publish content or success facts");
   return {
@@ -2065,6 +2117,7 @@ export function decodeFilePreview(value: unknown): FilePreviewResponse {
     truncated,
     redacted,
     ...(image ? { image } : {}),
+    ...(video ? { video } : {}),
     ...(reason ? { reason } : {}),
   };
 }

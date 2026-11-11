@@ -2,6 +2,7 @@ import {
   GeneratedImagePreview,
   type FilePreviewLoader,
 } from "./GeneratedImagePreview.tsx";
+import { GeneratedVideoPreview } from "./GeneratedVideoPreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
@@ -784,6 +785,39 @@ export function TaskContent({
             run.finishedAtUnixMs,
             nowUnixMs,
           );
+          const videoPreviewLoader =
+            synchronized && !responseDisabled ? loadFilePreview : undefined;
+          const responseIndex = responseCopyable
+            ? readingFlow.findIndex(
+                (entry) =>
+                  entry.kind === "assistant" &&
+                  entry.parts.some(
+                    (part) =>
+                      part.disposition === "final" ||
+                      part.disposition === "partial",
+                  ),
+              )
+            : -1;
+          let responseInfoAt = readingFlow[responseIndex]?.identity;
+          if (responseInfoAt) {
+            for (const entry of readingFlow.slice(responseIndex + 1)) {
+              if (
+                entry.kind === "image" ||
+                (entry.kind === "video" && videoPreviewLoader)
+              )
+                responseInfoAt = entry.identity;
+              else if (entry.kind !== "video") break;
+            }
+          }
+          const responseInfo = responseInfoAt && (
+            <MessageInfoBar
+              role="assistant"
+              time={finishedTime}
+              model={run.execution.model}
+              latest={run.id === latestCopyableId}
+              onCopy={() => copyResponseMarkdown(run.output.response)}
+            />
+          );
           const runLinks = runFileReferenceLinks(run);
           const referenceLink = (reference: FileReferenceView) => ({
             label: t("file_preview.open", { path: reference.displayPath }),
@@ -865,6 +899,34 @@ export function TaskContent({
                 ))}
               </details>
             ) : null;
+          const deliveredVideos = [];
+          const otherOutputs = [];
+          for (const output of outputsEnabled ? run.outputs : []) {
+            if (
+              !output.redacted &&
+              readingFlow.some(
+                (entry) =>
+                  entry.kind === "video" &&
+                  entry.reference.displayPath === output.displayPath,
+              )
+            ) {
+              deliveredVideos.push(output);
+            } else {
+              otherOutputs.push(output);
+            }
+          }
+          const deliveryActions = outputsEnabled &&
+            onOutputAction &&
+            deliveredVideos.length > 0 && (
+              <RunOutputs
+                outputs={deliveredVideos}
+                taskId={task.id}
+                runId={run.id}
+                disabled={responseDisabled || !synchronized}
+                onAction={onOutputAction}
+                layout="file-actions"
+              />
+            );
           const supplement = (
             <>
               {renderRunSupplement?.({
@@ -920,7 +982,7 @@ export function TaskContent({
                 ))}
               {outputsEnabled && (
                 <RunOutputs
-                  outputs={run.outputs}
+                  outputs={otherOutputs}
                   taskId={task.id}
                   runId={run.id}
                   disabled={responseDisabled || !synchronized}
@@ -940,6 +1002,7 @@ export function TaskContent({
                 <RunProcess
                   presentation={presentation}
                   approvalHistory={approvalHistory}
+                  deliveryActions={deliveryActions}
                   reviewingPermission={false}
                   fileChanges={fileChangesEnabled ? run.fileChanges : null}
                   elapsedMs={run.elapsedMs}
@@ -1104,7 +1167,24 @@ export function TaskContent({
                           )
                         }
                       />
+                      {entry.identity === responseInfoAt && responseInfo}
                     </Message>
+                  ) : entry.kind === "video" ? (
+                    videoPreviewLoader && (
+                      <Message
+                        role="assistant"
+                        key={entry.identity}
+                        data-reading-id={entry.identity}
+                      >
+                        <GeneratedVideoPreview
+                          taskId={task.id}
+                          runId={run.id}
+                          referenceId={entry.reference.id}
+                          load={videoPreviewLoader}
+                        />
+                        {entry.identity === responseInfoAt && responseInfo}
+                      </Message>
+                    )
                   ) : entry.kind === "supplement" ? (
                     <Fragment key={entry.identity}>{supplement}</Fragment>
                   ) : entry.parts.some((part) => part.content) ||
@@ -1159,22 +1239,7 @@ export function TaskContent({
                             {t("privacy.sensitive_hidden")}
                           </p>
                         )}
-                        {responseCopyable &&
-                          entry.parts.some(
-                            (part) =>
-                              part.disposition === "final" ||
-                              part.disposition === "partial",
-                          ) && (
-                            <MessageInfoBar
-                              role="assistant"
-                              time={finishedTime}
-                              model={run.execution.model}
-                              latest={run.id === latestCopyableId}
-                              onCopy={() =>
-                                copyResponseMarkdown(run.output.response)
-                              }
-                            />
-                          )}
+                        {entry.identity === responseInfoAt && responseInfo}
                       </Message>
                     </Fragment>
                   ) : null,

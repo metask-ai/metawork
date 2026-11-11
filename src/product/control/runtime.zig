@@ -1055,23 +1055,24 @@ fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
 
 pub const FilePreviewState = file_preview.State;
 pub const DirectoryEntry = file_preview.DirectoryEntry;
-pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
+pub const file_preview_chunk_bytes = file_preview.media_chunk_bytes;
+pub const max_file_preview_media = file_preview.max_media_slots;
 const file_preview_scan_bytes = 256 * 1024;
 
 /// Callback-scoped safe projection. `content` has already passed current
 /// authority and known-credential redaction and must not be retained by the
 /// sink after `complete_fn` returns.
-pub const FilePreviewImage = struct {
+pub const FilePreviewMedia = struct {
     id: u64,
     size_bytes: usize,
-    width: u32,
-    height: u32,
+    width: u32 = 0,
+    height: u32 = 0,
     media_type: []const u8,
     security_epoch: u64,
 };
 pub const FilePreviewResult = struct {
     entries: []const DirectoryEntry = &.{},
-    image: ?FilePreviewImage = null,
+    media: ?FilePreviewMedia = null,
     completion_id: u64,
     state: FilePreviewState,
     content: []const u8,
@@ -1343,7 +1344,7 @@ pub const Runtime = struct {
     attachment_lane: *attachment_staging.Lane,
     preview_executor: *executor_impl.Executor,
     preview_lane: *file_preview.Lane,
-    preview_images: [file_preview.max_image_slots]?struct {
+    preview_media: [file_preview.max_media_slots]?struct {
         taken: file_preview.Taken,
         security_epoch: u64,
         overlap: usize,
@@ -1387,6 +1388,7 @@ pub const Runtime = struct {
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
+    video_run_preparation: ?control_ports.VideoRunPreparation = null,
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
@@ -1999,7 +2001,7 @@ pub const Runtime = struct {
         ) orelse return .{ .immediate = .missing };
         if (!self.filePreviewWorkspaceAuthorized(reference))
             return .{ .immediate = .restricted };
-        if (reference.locator_kind == .uri)
+        if (reference.locator_kind == .uri or (reference.generated_video and reference.locator_kind != .workspace_path))
             return .{ .immediate = .unsupported };
 
         var relative_storage: [4096]u8 = undefined;
@@ -2017,6 +2019,7 @@ pub const Runtime = struct {
 
         self.preview_lane.begin(.{
             .completion_id = completion_id,
+            .generated_video = reference.generated_video,
             .task_id = task_id,
             .run_id = run_id,
             .workspace_id = reference.workspace_id,
@@ -2024,7 +2027,7 @@ pub const Runtime = struct {
             .reference_id = reference.id,
             .workspace_root = reference.workspace_root,
             .relative_path = relative,
-            .max_bytes = self.limits.max_file_preview_bytes,
+            .max_bytes = if (reference.generated_video) lifecycle.max_generated_video_bytes else self.limits.max_file_preview_bytes,
             .max_lines = self.limits.max_file_preview_lines,
             .max_line_bytes = self.limits.max_file_preview_line_bytes,
         }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
@@ -2075,7 +2078,7 @@ pub const Runtime = struct {
             .absolute_path => absoluteReferenceRelativePath(reference.workspace_root, reference.locator, &relative_storage) orelse return .restricted,
             .uri => return .restricted,
         };
-        if (!std.mem.eql(u8, relative, raw.relative_path)) return .restricted;
+        if (reference.generated_video != raw.generated_video or !std.mem.eql(u8, relative, raw.relative_path)) return .restricted;
         return .ready;
     }
 
@@ -2109,14 +2112,14 @@ pub const Runtime = struct {
                 self.preview_lane.release(taken);
                 continue;
             }
-            if (state == .ready and raw.image_info != null) {
+            if (state == .ready and (raw.image_info != null or raw.generated_video)) {
                 if (self.projection_security_epoch == 0) state = .failed else {
                     const overlap = self.filePreviewCredentialOverlap() catch {
                         self.preview_lane.release(taken);
                         sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = .failed, .content = "", .truncated = false, .redacted = false });
                         continue;
                     };
-                    const vacant = for (&self.preview_images) |*slot| {
+                    const vacant = for (&self.preview_media) |*slot| {
                         if (slot.* == null) break slot;
                     } else unreachable;
                     const timestamp: std.Io.Timestamp = .now(self.io, .awake);
@@ -2168,7 +2171,7 @@ pub const Runtime = struct {
             self.preview_lane.release(taken);
             sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = state, .content = safe_content, .truncated = truncated, .redacted = redacted });
         }
-        for (&self.preview_images) |*slot| {
+        for (&self.preview_media) |*slot| {
             const image = if (slot.*) |*value| value else continue;
             const raw = image.taken.completion;
             var failure = self.filePreviewAuthority(raw);
@@ -2199,8 +2202,18 @@ pub const Runtime = struct {
                 continue;
             }
             image.announced = true;
-            const info = raw.image_info.?;
-            sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = .ready, .content = "", .truncated = false, .redacted = false, .image = .{ .id = raw.completion_id, .size_bytes = raw.content.len, .width = info.width, .height = info.height, .media_type = info.mediaType(), .security_epoch = image.security_epoch } });
+            var media: FilePreviewMedia = .{
+                .id = raw.completion_id,
+                .size_bytes = raw.content.len,
+                .media_type = "video/mp4",
+                .security_epoch = image.security_epoch,
+            };
+            if (raw.image_info) |info| {
+                media.media_type = info.mediaType();
+                media.width = info.width;
+                media.height = info.height;
+            }
+            sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = .ready, .content = "", .truncated = false, .redacted = false, .media = media });
         }
     }
 
@@ -2221,7 +2234,7 @@ pub const Runtime = struct {
 
     /// true means no read/scan still owns bytes; false waits for its completion.
     pub fn releaseFilePreview(self: *Runtime, id: u64) bool {
-        for (&self.preview_images) |*slot| if (slot.*) |*image| {
+        for (&self.preview_media) |*slot| if (slot.*) |*image| {
             if (image.taken.completion.completion_id != id) continue;
             if (image.announced) {
                 self.preview_lane.release(image.taken);
@@ -2237,8 +2250,8 @@ pub const Runtime = struct {
         return !pending;
     }
 
-    pub fn readFilePreviewImage(self: *Runtime, id: u64, offset: usize) error{ MissingPreview, StaleSecurityEpoch, RestrictedPreview, InvalidOffset }![]const u8 {
-        for (&self.preview_images) |*slot| if (slot.*) |*image| {
+    pub fn readFilePreviewMedia(self: *Runtime, id: u64, offset: usize) error{ MissingPreview, StaleSecurityEpoch, RestrictedPreview, InvalidOffset }![]const u8 {
+        for (&self.preview_media) |*slot| if (slot.*) |*image| {
             if (image.taken.completion.completion_id != id) continue;
             if (image.security_epoch != self.projection_security_epoch) {
                 _ = self.releaseFilePreview(id);
@@ -2256,7 +2269,7 @@ pub const Runtime = struct {
                 return error.RestrictedPreview;
             }
             if (!image.announced or image.cancelled or offset != image.next_offset or offset >= image.taken.completion.content.len) return error.InvalidOffset;
-            const end = offset + @min(file_preview.image_chunk_bytes, image.taken.completion.content.len - offset);
+            const end = offset + @min(file_preview_chunk_bytes, image.taken.completion.content.len - offset);
             image.next_offset = end;
             image.touched_at = .now(self.io, .awake);
             return image.taken.completion.content[offset..end];
@@ -2268,8 +2281,8 @@ pub const Runtime = struct {
         return self.preview_lane.hasActive();
     }
 
-    pub fn hasFilePreviewImage(self: *const Runtime, id: u64) bool {
-        for (self.preview_images) |entry| if (entry) |image| {
+    pub fn hasFilePreviewMedia(self: *const Runtime, id: u64) bool {
+        for (self.preview_media) |entry| if (entry) |image| {
             if (image.announced and image.taken.completion.completion_id == id) return true;
         };
         return false;
@@ -4645,9 +4658,21 @@ pub const Runtime = struct {
         operation_effects.prepared_input = task_input;
         var image = self.prepareRunImage(workspace);
         defer if (image) |*value| value.deinit();
+        var video = video: {
+            const preparation = self.video_run_preparation orelse break :video null;
+            if (self.task_runtime.taskPermissionInteraction(task_id) != .interactive) break :video null;
+            var prepared = preparation.prepare(workspace) orelse break :video null;
+            self.prepareTaskCredential(prepared.candidate.input().bearer) catch {
+                prepared.deinit();
+                break :video null;
+            };
+            break :video prepared;
+        };
+        defer if (video) |*value| value.deinit();
         var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(workspace) else null;
         defer if (delivery) |*value| value.deinit();
         operation_effects.image_execution = &image;
+        operation_effects.video_execution = &video;
         operation_effects.file_delivery = &delivery;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         if (staged.borrow != null) {
@@ -7207,7 +7232,7 @@ pub const Runtime = struct {
         self.executor.deinit();
         self.approval_executor.deinit();
         if (self.mcp_executor) |lane| lane.deinit();
-        for (&self.preview_images) |*slot| if (slot.*) |image| {
+        for (&self.preview_media) |*slot| if (slot.*) |image| {
             self.preview_lane.release(image.taken);
             slot.* = null;
         };
@@ -9772,6 +9797,10 @@ pub const Runtime = struct {
         self.image_run_preparation = preparation;
     }
 
+    pub fn setVideoRunPreparation(self: *Runtime, preparation: ?control_ports.VideoRunPreparation) void {
+        self.video_run_preparation = preparation;
+    }
+
     pub fn setFileDeliveryPreparation(self: *Runtime, preparation: ?control_ports.FileDeliveryPreparation) void {
         self.file_delivery_preparation = preparation;
     }
@@ -9790,7 +9819,7 @@ pub const Runtime = struct {
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
-            .prepare_image_candidate_fn = controlPrepareImageCandidate,
+            .prepare_media_candidate_fn = controlPrepareMediaCandidate,
             .start_custom_providers_fn = controlStartCustomProviders,
             .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
             .stop_custom_providers_fn = controlStopCustomProviders,
@@ -10053,7 +10082,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         control.invalidateProjectionSecurity();
     }
     pub fn expirePreview(control: *Runtime, id: u64) void {
-        for (&control.preview_images) |*entry| if (entry.*) |*image| {
+        for (&control.preview_media) |*entry| if (entry.*) |*image| {
             if (image.taken.completion.completion_id == id) image.touched_at = image.touched_at.subDuration(.fromMilliseconds(16000));
         };
     }
@@ -10337,8 +10366,8 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
 }
-fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
-    return controlOwner(context).custom_providers.prepareImageCandidate(input);
+fn controlPrepareMediaCandidate(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
+    return controlOwner(context).custom_providers.prepareMediaCandidate(input);
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
@@ -11539,7 +11568,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
-        .initial_credentials = .{ task_execution.input().api_key, &.{} },
+        .initial_credentials = .{ task_execution.input().api_key, &.{}, &.{} },
     };
     control.testTaskSlots()[0] = try control.allocator.create(TestTask);
     control.testTaskSlots()[0].?.* = .{
@@ -19527,18 +19556,81 @@ fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
 const PreviewTestCapture = struct {
     calls: usize = 0,
     state: FilePreviewState = .failed,
-    image: ?FilePreviewImage = null,
+    image: ?FilePreviewMedia = null,
     fn receive(context: *anyopaque, result: FilePreviewResult) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.state = result.state;
-        self.image = result.image;
+        self.image = result.media;
         std.debug.assert(result.content.len == 0);
     }
     fn sink(self: *@This()) FilePreviewSink {
         return .{ .context = self, .complete_fn = receive };
     }
+
+    fn wait(self: *@This(), control: *Runtime) !void {
+        for (0..5000) |_| {
+            control.drainFilePreviewCompletions(self.sink());
+            if (self.calls != 0) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.PreviewDidNotComplete;
+    }
 };
+
+test "file preview opens the trusted generated MP4 reference and rejects malformed files and foreign Runs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const io = std.testing.io;
+    const path = "clip.mp4";
+    const bytes = try std.testing.allocator.alloc(u8, file_preview_chunk_bytes + 17);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'a');
+    @memcpy(bytes[0..16], "\x00\x00\x00\x10ftypisom\x00\x00\x00\x00");
+    try tmp.dir.writeFile(io, .{ .sub_path = path, .data = bytes });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"generated-video\",\"name\":\"GenerateVideo\",\"input\":\"{}\",\"content\":\"{}\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.generated_video_path = try std.testing.allocator.dupe(u8, path);
+    try control.applyEvent(&envelope);
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const id = found: for (run.tools) |entry| {
+        if (entry) |tool| if (tool.file_refs) |refs| {
+            for (refs) |ref| if (ref) |value| if (value.generated_video) break :found value.id;
+        };
+    } else return error.MissingGeneratedVideo;
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFilePreview(1, 3, 8, id));
+
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(2, 3, 7, id));
+    var capture: PreviewTestCapture = .{};
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    try std.testing.expectEqualStrings("video/mp4", capture.image.?.media_type);
+    const first = try control.readFilePreviewMedia(2, 0);
+    try std.testing.expectEqualSlices(u8, bytes[0..file_preview_chunk_bytes], first);
+    const rest = try control.readFilePreviewMedia(2, first.len);
+    try std.testing.expectEqualSlices(u8, bytes[first.len..], rest);
+    try std.testing.expect(control.releaseFilePreview(2));
+
+    bytes[4] = 'b';
+    try tmp.dir.writeFile(io, .{ .sub_path = path, .data = bytes });
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, 3, 7, id));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.unsupported, capture.state);
+    try std.testing.expect(capture.image == null);
+    try tmp.dir.deleteFile(io, path);
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, 3, 7, id));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.missing, capture.state);
+    try std.testing.expect(!control.hasFilePreviews());
+}
 
 test "file preview workspace directory authority redacts names and rejects stale workspace bindings" {
     var tmp = std.testing.tmpDir(.{});
@@ -19651,13 +19743,13 @@ test "file preview immutable original transfer is sequential and revoked by secu
     const image = capture.image.?;
     try std.testing.expectEqual(bytes.len, image.size_bytes);
     try std.testing.expectEqualStrings("image/jpeg", image.media_type);
-    try std.testing.expectError(error.InvalidOffset, control.readFilePreviewImage(image.id, 1));
+    try std.testing.expectError(error.InvalidOffset, control.readFilePreviewMedia(image.id, 1));
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = "replaced on disk" });
-    const first = try control.readFilePreviewImage(image.id, 0);
+    const first = try control.readFilePreviewMedia(image.id, 0);
     try std.testing.expectEqualSlices(u8, bytes[0..file_preview_chunk_bytes], first);
-    try std.testing.expectError(error.InvalidOffset, control.readFilePreviewImage(image.id, 0));
+    try std.testing.expectError(error.InvalidOffset, control.readFilePreviewMedia(image.id, 0));
     control.invalidateProjectionSecurity();
-    try std.testing.expectError(error.StaleSecurityEpoch, control.readFilePreviewImage(image.id, file_preview_chunk_bytes));
+    try std.testing.expectError(error.StaleSecurityEpoch, control.readFilePreviewMedia(image.id, file_preview_chunk_bytes));
     try std.testing.expect(!control.hasFilePreviews());
     try std.testing.expect(control.releaseFilePreview(image.id));
 }

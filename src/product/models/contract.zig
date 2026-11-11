@@ -27,6 +27,9 @@ pub const metask_anthropic_messages_url =
 pub const metask_default_image_model = "gemini-3.1-flash-image-preview";
 pub const metask_images_generations_url =
     "https://www.metask-ai.com/v1/images/generations";
+pub const metask_default_video_model = "wan3.0-video-prime";
+pub const metask_videos_url = "https://www.metask-ai.com/v1/videos";
+pub const MediaKind = enum { image, video };
 
 pub fn metaskEndpoint(protocol: Protocol) ?[]const u8 {
     return switch (protocol) {
@@ -393,21 +396,22 @@ pub const CustomModelRemoveCommand = struct {
 
 /// Borrowed only during preparation, from the Host's current authorization
 /// lease. Models does not acquire, cache, refresh or persist this authorization.
-pub const ImagePreparationInput = struct {
+pub const MediaPreparationInput = struct {
+    kind: MediaKind = .image,
     principal_ref: []const u8,
     authorization_generation: u64,
     bearer: []const u8,
 };
 
-pub const ImageCandidateInput = struct {
+pub const MediaCandidateInput = struct {
     selection: ModelRef,
     endpoint: []const u8,
     bearer: []const u8,
     catalog_generation: u64,
 };
 
-pub const ImagePreparation = union(enum) {
-    ready: OwnedImageCandidate,
+pub const MediaPreparation = union(enum) {
+    ready: OwnedMediaCandidate,
     rejected: ManagementError,
 };
 
@@ -540,17 +544,19 @@ const OwnedBuffer = struct {
 
 /// Linear image input with one Models-owned target. No dialogue protocol,
 /// principal or authorization generation is transferred to the executor.
-pub const OwnedImageCandidate = struct {
+pub const OwnedMediaCandidate = struct {
+    kind: MediaKind,
     model: OwnedBuffer,
     secret: SecretBuffer,
     catalog_generation: u64,
 
     pub fn copy(
         allocator: std.mem.Allocator,
+        kind: MediaKind,
         model: []const u8,
         bearer: []const u8,
         catalog_generation: u64,
-    ) (ValidationError || std.mem.Allocator.Error)!OwnedImageCandidate {
+    ) (ValidationError || std.mem.Allocator.Error)!OwnedMediaCandidate {
         try validateRequired(model, Limits.model_id_bytes);
         for (model) |byte| if (std.ascii.isControl(byte)) return error.InvalidEncoding;
         try validateOpaqueRequired(bearer, Limits.credential_bytes);
@@ -559,30 +565,35 @@ pub const OwnedImageCandidate = struct {
         errdefer allocator.free(owned_model);
         const owned_bearer = try allocator.dupe(u8, bearer);
         return .{
+            .kind = kind,
             .model = .initOwned(allocator, owned_model),
             .secret = .initOwned(allocator, owned_bearer),
             .catalog_generation = catalog_generation,
         };
     }
 
-    pub fn input(self: *const OwnedImageCandidate) ImageCandidateInput {
+    pub fn input(self: *const OwnedMediaCandidate) MediaCandidateInput {
         return .{
             .selection = .{ .source_id = metask_source_id, .model_id = self.model.view() },
-            .endpoint = metask_images_generations_url,
+            .endpoint = switch (self.kind) {
+                .image => metask_images_generations_url,
+                .video => metask_videos_url,
+            },
             .bearer = self.secret.view(),
             .catalog_generation = self.catalog_generation,
         };
     }
 
-    pub fn take(self: *OwnedImageCandidate) OwnedImageCandidate {
+    pub fn take(self: *OwnedMediaCandidate) OwnedMediaCandidate {
         return .{
+            .kind = self.kind,
             .model = self.model.take(),
             .secret = self.secret.take(),
             .catalog_generation = self.catalog_generation,
         };
     }
 
-    pub fn deinit(self: *OwnedImageCandidate) void {
+    pub fn deinit(self: *OwnedMediaCandidate) void {
         self.secret.deinit();
         self.model.deinit();
         self.catalog_generation = 0;
@@ -1208,7 +1219,7 @@ test "image candidate owns borrowed inputs and zeroes moved credentials" {
     var observing: ObservingAllocator = .{ .backing = std.testing.allocator };
     var model = "image-model".*;
     var bearer = "lease-secret".*;
-    var candidate = try OwnedImageCandidate.copy(observing.allocator(), &model, &bearer, 7);
+    var candidate = try OwnedMediaCandidate.copy(observing.allocator(), .image, &model, &bearer, 7);
     observing.observe(candidate.secret.bytes);
     @memset(&model, 'x');
     @memset(&bearer, 0);
@@ -1222,11 +1233,11 @@ test "image candidate owns borrowed inputs and zeroes moved credentials" {
     moved.deinit();
     try std.testing.expect(observing.saw_secret_free);
     try std.testing.expect(observing.secret_was_zero);
-    try std.testing.expectError(error.FieldEmpty, OwnedImageCandidate.copy(std.testing.allocator, "image", "", 7));
-    try std.testing.expectError(error.InvalidGeneration, OwnedImageCandidate.copy(std.testing.allocator, "image", "secret", 0));
+    try std.testing.expectError(error.FieldEmpty, OwnedMediaCandidate.copy(std.testing.allocator, .image, "image", "", 7));
+    try std.testing.expectError(error.InvalidGeneration, OwnedMediaCandidate.copy(std.testing.allocator, .image, "image", "secret", 0));
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator) !void {
-            var owned = try OwnedImageCandidate.copy(allocator, "image", "secret", 7);
+            var owned = try OwnedMediaCandidate.copy(allocator, .image, "image", "secret", 7);
             defer owned.deinit();
         }
     }.run, .{});

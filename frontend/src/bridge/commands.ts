@@ -57,6 +57,7 @@ export const commands = {
   listDirectory: "metawork.files.listDirectory",
   previewWorkspaceFile: "metawork.files.previewWorkspace",
   readPreviewImage: "metawork.files.preview.readImageChunk",
+  readPreviewVideo: "metawork.files.preview.readVideoChunk",
   releasePreview: "metawork.files.preview.release",
   fileChangeDiff: "metawork.files.diff",
   beginAttachmentAdd: "metawork.attachments.beginAdd",

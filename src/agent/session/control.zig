@@ -253,11 +253,15 @@ pub const TerminalReceipts = struct {
     };
     delivered_files: [delivery.max_receipts_per_run]?delivery.Receipt = @splat(null),
     generated_images: [images.production_limits.sends_per_run]?GeneratedImage = @splat(null),
+    generated_video: ?struct {
+        tool_route_digest: [tool_route_digest_bytes]u8,
+        receipt: @import("../generate_video.zig").Receipt,
+    } = null,
 
     pub fn isEmpty(self: *const TerminalReceipts) bool {
         for (self.delivered_files) |entry| if (entry != null) return false;
         for (self.generated_images) |entry| if (entry != null) return false;
-        return true;
+        return self.generated_video == null;
     }
 };
 

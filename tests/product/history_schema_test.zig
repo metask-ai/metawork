@@ -1302,6 +1302,7 @@ test "history file reference JSON preserves Host image provenance and defaults o
     const state = try history.fixture(allocator);
     const reference = &state.tasks[0].runs[0].tools[0].file_refs.?[0];
     try std.testing.expect(!reference.generated_image);
+    try std.testing.expect(!reference.isGeneratedVideo());
     for ([_]bool{ false, true }) |generated| {
         reference.generated_image = generated;
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
@@ -1310,6 +1311,7 @@ test "history file reference JSON preserves Host image provenance and defaults o
         try expectSame(allocator, database.capability(), state);
         const loaded = try history.load(allocator, database.capability());
         try std.testing.expectEqual(generated, loaded.tasks[0].runs[0].tools[0].file_refs.?[0].generated_image);
+        try std.testing.expect(!loaded.tasks[0].runs[0].tools[0].file_refs.?[0].isGeneratedVideo());
     }
 }
 
@@ -1323,6 +1325,71 @@ test "production SQL history preserves Outputs metadata without file contents" {
     defer database.destroy() catch unreachable;
     _ = try save(arena.allocator(), database.capability(), state);
     try expectSame(arena.allocator(), database.capability(), state);
+}
+
+test "history schema upgrades legacy video references and fences out the previous reader" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    const task = &state.tasks[0];
+    task.presentation_format = 1;
+    task.next_presentation_order = 2;
+    for (task.input_submissions) |*input| input.submission.presentation_state = "legacy";
+    for (task.runs) |*run| {
+        if (run.submission) |*submission| submission.presentation_state = "legacy";
+        for (run.additional_inputs) |*input| {
+            if (input.submission) |*submission| submission.presentation_state = "legacy";
+        }
+    }
+    const reference = &task.runs[0].tools[0].file_refs.?[0];
+    reference.locator = "generated-videos/clip.mp4";
+    reference.locator_kind = "workspace_path";
+    reference.kind = "video";
+    reference.presentation_state = "legacy";
+    const path = try temporaryPath(allocator, temporary.dir);
+    const previous_migrations = schema.migrations[0 .. schema.migrations.len - 1];
+    var legacy = reference.*;
+    legacy.presentation_state = "generated_video";
+    legacy.presentation_anchor = .{ .after_output_count = 0, .presentation_order = 1 };
+    const update = "UPDATE run_tools SET file_refs_json=?1 WHERE file_refs_json IS NOT NULL";
+    {
+        const previous = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
+        defer previous.destroy() catch unreachable;
+        _ = try save(allocator, previous.capability(), state);
+        const json = try std.json.Stringify.valueAlloc(allocator, &.{legacy}, .{ .emit_null_optional_fields = false });
+        try std.testing.expectEqual(sql.MutationOutcome.committed, previous.capability().mutate(&.{.{
+            .statement = .{ .sql = update, .params = &.{.{ .text = json }} },
+            .expected_changes = .{ .exactly = 1 },
+        }}));
+    }
+
+    reference.generated_video = true;
+    reference.presentation_state = "anchored";
+    reference.presentation_anchor = legacy.presentation_anchor;
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    try expectSame(allocator, database.capability(), state);
+    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations));
+    const loaded = try history.load(allocator, database.capability());
+    const restored = loaded.tasks[0].runs[0].tools[0].file_refs.?[0];
+    try std.testing.expect(restored.isGeneratedVideo());
+    try std.testing.expectEqual(@as(u64, 1), restored.presentation_anchor.?.presentation_order);
+
+    const rewritten = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer rewritten.destroy() catch unreachable;
+    _ = try save(allocator, rewritten.capability(), loaded);
+    try expectSame(allocator, rewritten.capability(), state);
+
+    legacy.presentation_anchor = null;
+    const invalid_json = try std.json.Stringify.valueAlloc(allocator, &.{legacy}, .{ .emit_null_optional_fields = false });
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{
+        .statement = .{ .sql = update, .params = &.{.{ .text = invalid_json }} },
+        .expected_changes = .{ .exactly = 1 },
+    }}));
+    try std.testing.expectError(error.Invalid, history.load(allocator, database.capability()));
 }
 
 test "largest legal Tool value exceeds the old SQL cap and round-trips" {

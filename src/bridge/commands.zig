@@ -59,6 +59,7 @@ pub const preview_file = "metawork.files.preview";
 pub const list_directory = "metawork.files.listDirectory";
 pub const preview_workspace_file = "metawork.files.previewWorkspace";
 pub const read_preview_image = "metawork.files.preview.readImageChunk";
+pub const read_preview_video = "metawork.files.preview.readVideoChunk";
 pub const release_preview = "metawork.files.preview.release";
 pub const diff_file = "metawork.files.diff";
 pub const begin_attachment_add = "metawork.attachments.beginAdd";
@@ -171,6 +172,7 @@ pub const product = [_][]const u8{
     list_directory,
     preview_workspace_file,
     read_preview_image,
+    read_preview_video,
     release_preview,
     diff_file,
     begin_attachment_add,

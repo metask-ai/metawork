@@ -132,6 +132,9 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
   const tools = orderedTools(run.tools);
   const runningTools = tools.filter((tool) => tool.state === "running");
   const responseVisible = run.output.response.length > 0;
+  const generatedVideoVisible = tools.some((tool) =>
+    tool.fileRefs.some((reference) => reference.generatedVideo),
+  );
   const processCanCollapse = tools.length > 0;
 
   return {
@@ -145,7 +148,7 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
       (run.terminal.recordingIncomplete ||
         run.output.responseKind === "partial" ||
         run.terminal.outcome !== "completed" ||
-        !responseVisible),
+        (!responseVisible && !generatedVideoVisible)),
     tools,
     runningToolName:
       activity?.kind === "executing_tools" &&

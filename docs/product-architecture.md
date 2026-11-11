@@ -53,7 +53,7 @@ Renderer password form → typed Bridge create/replace → Models credential mut
 
 两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 固定为 `metask`；Models 按目标模型 `capabilities.endpoints` 中明确 `supported = true` 的端点选择 protocol，固定优先级为 `messages → anthropic_messages`、`responses → openai_responses`、`chat_completions → openai_chat_completions`。缺失、null、false 或只有 status 声明的端点不参与选择；端点内部 input/output 不作为第二套能力判定。所选 protocol 分别绑定固定的 `https://www.metask-ai.com/v1/messages`、`/v1/responses`、`/v1/chat/completions` URL；不按模型名猜测、不因执行失败自动换协议重发。目录与调用 credential 均来自当前 OAuth authorization lease；Custom Provider source id 为稳定 Provider id。`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision 与 Product binding generation是不同轴，不能互相替代或假设有序。
 
-同一 Metask catalog 请求和有界解析同时分类对话与生图用途，共享目录 owner、快照和刷新生命周期，不建立第二目录 worker。对话候选排除明确支持 `images_generations` 或 `videos` 的成员；生图候选只要求 `capabilities.endpoints.images_generations.supported == true`，混合声明仍只进入生图用途。缺失、null、false、名称、旧 alias 或 `output.image` 都不能补授生图资格。生图成员不要求或伪装成对话 protocol。两类成员共用总量上限和严格已知字段校验；Renderer 只取得对话候选，对话候选为空不等于图片能力不可用。目录声明只表示服务能力，不保证特定返回格式或生成成功。
+同一 Metask catalog 请求和有界解析同时分类对话、生图与生视频，共享目录 owner、快照和刷新生命周期。对话候选排除明确支持 `images_generations` 或 `videos` 的成员。生图和生视频分别要求对应 `capabilities.endpoints` 条目显式 `supported == true`，同一模型可以具备两种生成资格并计为一个目录成员。缺失、null、false、名称、旧 alias 或 `output` 都不能补授资格。生成候选无需对话 protocol，各用途共用总量上限和严格已知字段校验。Renderer 只取得对话候选；目录声明表示服务能力。
 
 Task attachment 和后台消费者各自持有所需 owned copy；Session、恢复、测试和标题使用已解析完整配置，不按厂商、名称或 source id 猜测 protocol。Task model intent 可保存无 secret source id；credential locator 不进入历史。
 
@@ -130,9 +130,9 @@ Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 
 Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
 
 
-生图默认模型与正式服务 target 的机器定义由 [Models 值合同](../src/product/models/contract.zig)唯一拥有。每次 Run preparation 优先采用当前目录中具备明确生图资格的默认模型；默认模型缺失或不合格时，按该次目录返回顺序采用第一个具备生图资格的成员。没有合格成员时返回不可用，不从对话默认、名称、输出 metadata 或旧持久选择推断模型。此回退仅在请求发送前解析配置，不构成发送失败后的自动重试或模型切换。
+生图与生视频的默认模型和正式服务 target 由 [Models 值合同](../src/product/models/contract.zig)拥有。每次 Run preparation 优先采用当前目录中具备对应资格的默认模型，缺失或不合格时按目录顺序采用第一个具备对应资格的成员。没有合格成员时返回不可用。模型解析仅在请求发送前发生。
 
-图片执行 candidate 只在 Models 接收当次 Host authorization lease 的借用输入后构造：principal、authorization generation 必须与已接纳目录匹配；目录加载中或授权不可用均拒绝新解析。Models 在同一主线程调用内解析模型并复制该次 lease 的有界 credential，不借用 catalog 缓存的执行 token，也不获取、刷新或持久化授权。其 owned model、固定 Metask Images Generation target、catalog generation 与 credential 构成独立配置，不包含对话 protocol、Product execution generation、principal 或授权代次。消费者不提交或覆盖模型与 URL；已接纳 Run 的目标、模型与可用性不随目录或 logout 热替换，其中 credential 按前述连续 scope 续期规则消费，执行 owner 静止后清零释放。
+生成执行 candidate 只在 Models 接收当次 Host authorization lease 的借用输入后构造。principal、authorization generation 必须与已接纳目录匹配，目录加载中或授权不可用时拒绝新解析。Models 在同一主线程调用内解析模型并复制该次 lease 的有界 credential，不借用 catalog 缓存的执行 token，也不获取、刷新或持久化授权。owned model、固定 Metask target、catalog generation 与 credential 构成生成配置，不包含对话 protocol、Product execution generation、principal 或授权代次。消费者不提交或覆盖模型与 URL。已接纳 Run 冻结目标、模型与可用性，credential 按连续 scope 续期规则消费，执行 owner 静止后清零释放。
 
 Bootstrap 只严格读取当前 canonical 格式。退休 schema 1/2 先保留 exact bytes quarantine，再以原子提交安装空的当前 store 并继续，不迁移、不双读、不重放旧记录。quarantine 或安装失败必须发布真实 persistence health，旧 bytes 不丢失；quarantine 不进入任何 active decoder。canonical 缺失时初始化空 store；`preferences.json` 与 `custom-providers.json` 不参与读取、恢复或 fallback。
 
@@ -152,6 +152,8 @@ Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用�
 Manual、Scheduled 首次创建及后续 Run、自动 follow-up 共用图片准备规则：Product 在 admission 中取得当前 Workspace authority，Application Models coordinator 借用 Account 当次 authorization lease，将 principal、授权代次与 bearer 交给 Models 解析默认或目录回退模型。准备不发起登录、刷新、目录请求或生成，也不创建文件；主线程 handoff 不需要第二份选择快照或 CAS。没有合格模型、授权过期、解析拒绝或 Application 图片准备资源不足时，本 Run 的图片配置为空，文本接纳继续；同一 Run 不因后续授权或目录变化而升级、替换配置或自动重发，下一 Run 重新准备。effect capability 只提供执行输入，不改变 Host Tool 注册集合。
 
 Product 的每 Run owned 图片 candidate 与输出 effect 在准备失败、回滚或执行结束后按所有权释放。Agent 的执行副本在 callback/I/O 静止后清零；Product 的独立投影清理副本须等该 Task 的 worker 静止且该 Run canonical event drain 已完成，先清洗已知产品投影再清零释放。增量文本、工具字段、权限记录、review、标题及终态诊断同时覆盖对话和图片 credential；未决文本后缀不能因新增凭据类型而提前公开。上述图片配置、secret 和 effect owner 都是临时执行数据，不进入历史或 checkpoint；恢复后的新 Run 重新取得当前配置。
+
+交互 Task 在相同 Run 接纳边界准备视频配置，并与图片、文件交付一同交给 Agent。视频配置、下载 effect 和凭据遵守同一冻结、续期、脱敏和释放规则。成片在 owning Workspace 内限量暂存并排他发布，`DeliverFile` 的可信回执进入既有成果登记。远端任务由 Metask 网关持有，本地等待和下载归当次 Run。
 
 图片输出的 Workspace authority 由 Product 在 Run admission 校验并冻结，Application 文件 effect 只复制执行所需的 Workspace identity、epoch 与有界 canonical root，不保存可变 Task/Workspace 指针。捕获不打开目录或预创建文件；Agent 只借用窄 output port，Application 对象必须存活到全部调用与文件 I/O 静止。实际效果在 worker 上逐级以 no-follow 打开并检查目录句柄类型，拒绝 symlink/reparse 跳转；Host 在固定 `generated-images/` 内以随机名称独占创建文件，不覆盖既存文件，名称冲突只在同一次落盘中有界换名。文件名和 receipt 在写入前准备，完整写入、同步、命名文件及目录身份复核均在关闭前完成，关闭后返回 committed receipt。该结果不承诺崩溃持久性或对任意 Workspace 写入者的完整原子隔离。
 
@@ -402,6 +404,7 @@ Update aggregate 独占正式版本比较、官方 manifest 接受规则、进�
 - 文档预览的物理资源调度由 Product Control 拥有，转换不占 File Preview lane。XLSX 的只读网格与保存值版面属于同一冻结源、同一资源及授权生命周期，切换不重新准备；版面不支持/超限只撤销该视图，独立验证的网格可以继续使用。源正文、实际网格与可用的生成 PDF 文字在任何内容发布前通过当前安全代次的凭据检查；Application 只发布 owned 文档 effect：worker 准备、读取和清理，主线程仅在 worker 完成后借用材料，清理成功后释放组件 pin；尚未排队的新 effect 可直接放弃。每份资源串行执行，关闭先撤销读取并取消在途工作，不能把逻辑 handle 消失当作物理槽归还。无法确认进程静止或清理失败的资源保留槽位和引用，不自动重试取得删除权限；shutdown 先 join 执行，再在 worker 清理，主线程最终释放。该内部调度边界不授予 Renderer 内容权限；Runtime 仍须独立校验目标、Task/Workspace、连接、安全代次、期限及正文凭据检查，Bridge 合同未开放的文档操作不得据此暴露；
 - 文档源冻结区分交付成果和普通文件引用：成果必须与交付时的大小、摘要一致；普通引用由 worker 捕获实际源身份，再验证复制及后续读取的同一份字节，不能在源变化后静默重新采纳新版本。会话的授权 policy 只在主线程调用期间借用，不保存在 worker effect 中。发布摘要或内容前须在当前安全代次下完成提取正文和实际网格投影字符串的有界分步检查，匹配跨步边界的已知 credential；命中、检查失败或未完成均不得发布 ready。检查范围不包含 OCR，栅格字节扫描不替代正文检查。一次页面读取核验源并冻结该次传输的页面字节；分块运输重新校验 Product authority、安全代次和连接 grant，不在主线程重复文件哈希。页传输释放与文档会话释放分别收口；撤销、组件变更和期限失效不得交付迟到内容。正式 Runtime、Bridge 和 timer 接入须各自验收，内部会话状态机或注入 policy 的回归不能单独证明整条产品链路；
 - Host 生图文件引用使用 Agent 验证的当次保存凭据，来源随既有 file reference 持久化；旧记录缺省为普通引用，恢复不解析工具文本补授来源。该来源只允许直接图片预览，不等同于 typed Output 或文件变更；
+- Host 生视频引用复用生图的回执接纳、助手展示锚点和历史持久化。历史记录将视频来源与锚点状态分别编码，读入时将旧视频状态归一为可信视频来源及锚点状态，再按同一规则验证。文件读取沿用 File Preview 的引用授权和生命周期。资源上限与释放规则由 [Renderer Bridge 合同](renderer-bridge-contract.md#generated-mp4-preview) 定义。
 - File Changes 使用独立单 worker、有界 in-flight 的 artifact lane。diff 在入队前按当前及历史 Task credential 脱敏，worker 只持有 immutable Task/run/change identity、owned diff 和专用 store capability；完成回主线程后重新校验 Product artifact ownership。stale 或 Task 已删除的成功写入立即回收，读取结果在跨 Bridge 前再次校验引用仍属于同一 Task/Run/change；
 - async completion 必须按开始时冻结的 attempt、object identity、epoch/generation、attachment 与 shutdown token 全量重新校验。任一 token stale 都只销毁 candidate，不安装、不自动重放原请求；
 - capability 只在同步调用或明确的 worker lifetime 内借用；关闭开始后不得建立新的 job、timer、callback 或 responder 对 owner 的引用。

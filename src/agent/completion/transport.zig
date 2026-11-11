@@ -10,6 +10,15 @@ pub const HttpRequest = struct {
     url: []const u8,
     headers: []const Header,
     body: []const u8,
+    method: enum { post, get } = .post,
+    stream: ?ResponseStream = null,
+};
+
+/// A successful response is borrowed only while the transport worker runs
+/// this callback. Header strings must be consumed before reading the body.
+pub const ResponseStream = struct {
+    context: *anyopaque,
+    receive_fn: *const fn (*anyopaque, ?[]const u8, ?u64, *std.Io.Reader) void,
 };
 
 pub const Cancellation = struct {

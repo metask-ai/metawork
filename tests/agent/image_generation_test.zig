@@ -43,8 +43,8 @@ const CoreProbe = struct {
             return active.original.runtime().create()(&copy, plugins, output, diagnostic);
         }
         if (active.changed_schema) {
-            std.debug.assert(copy.host_tool_count == 3);
-            var tools = [_]sdk.types.HostToolV1{ copy.host_tools.?[0], copy.host_tools.?[1], copy.host_tools.?[2] };
+            std.debug.assert(copy.host_tool_count == 4);
+            var tools = copy.host_tools.?[0..4].*;
             const tool = &tools[0];
             tool.input_schema_json = sdk.bytesView("{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"maxLength\":1000}},\"required\":[\"prompt\"],\"additionalProperties\":false}");
             copy.host_tools = &tools;
@@ -56,9 +56,9 @@ const CoreProbe = struct {
         var copy = config.?.*;
         var host = copy.host.?.*;
         if (active.legacy_tools) {
-            std.debug.assert(host.allowed_tool_count == 13);
+            std.debug.assert(host.allowed_tool_count == 14);
             std.debug.assert(std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage"));
-            host.allowed_tool_count -= 3 - active.legacy_host_count;
+            host.allowed_tool_count -= 4 - active.legacy_host_count;
             copy.host = &host;
         }
         return active.original.session().create()(runtime, &copy, callbacks, output, diagnostic);
@@ -268,7 +268,10 @@ const Harness = struct {
         self.fixture = try Fixture.start(trace_path, mode);
         errdefer self.fixture.deinit();
         self.network = .{ .allocator = std.testing.allocator, .io = std.testing.io };
-        self.runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, .{ .transport = self.network.transport(), .limits = limits });
+        self.runtime = if (std.mem.startsWith(u8, mode, "video"))
+            try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 })
+        else
+            try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, .{ .transport = self.network.transport(), .limits = limits });
         self.sink = .{ .dir = self.tmp.dir };
     }
     fn deinit(self: *Harness) void {
@@ -324,7 +327,11 @@ fn permissionRun(h: *Harness, session: *agent.Session, choice: agent.PermissionC
 }
 
 fn permissionRunText(runtime: *agent.Runtime, session: *agent.Session, text: []const u8, choice: agent.PermissionChoice, host: bool) !usize {
-    var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = text }) };
+    return permissionRunPrepared(runtime, session, try session.prepareRun(.{ .text = text }), choice, host);
+}
+
+fn permissionRunPrepared(runtime: *agent.Runtime, session: *agent.Session, run_id: u64, choice: agent.PermissionChoice, host: bool) !usize {
+    var work: Work = .{ .session = session, .id = run_id };
     const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
     defer {
         if (!work.done.load(.acquire)) {
@@ -374,12 +381,12 @@ const RestoreBytes = struct {
     }
 };
 
-fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !void {
+fn checkpointTools(old_host_count: usize, grant: bool, target: enum { current, changed_image_schema, added_video }) !void {
     var h: Harness = undefined;
     try h.init("restore", .{});
     defer h.deinit();
     var legacy_probe: CoreProbe = undefined;
-    if (old_host_count < 3) {
+    if (old_host_count < 4) {
         try h.runtime.shutdown();
         h.runtime.deinit();
         try legacy_probe.init(false);
@@ -413,7 +420,7 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     try h.runtime.shutdown();
     h.runtime.deinit();
     var probe: CoreProbe = undefined;
-    try probe.init(changed_schema);
+    try probe.init(target == .changed_image_schema);
     h.runtime = try agent.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &probe.api, .{ .max_sessions = 2 }, .{ .transport = h.network.transport() });
     const restored = try h.runtime.restoreSessionRoute(.{
         .session = .{
@@ -434,7 +441,7 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     defer described.deinit();
     // Changing only GenerateImage's schema does not invalidate an unrelated
     // built-in Write grant. Host tools cannot have persisted Session grants.
-    const changed = old_host_count < 3 and grant;
+    const changed = old_host_count < 4 and grant;
     try std.testing.expectEqual(if (changed) agent.CheckpointRestoreHealth.degraded else .complete, restored.report.health);
     try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), restored.report.invalidated_permission_rules);
     try std.testing.expectEqual(@as(u32, if (grant and !changed) 1 else 0), restored.report.restored_permission_rules);
@@ -451,9 +458,10 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
     const answers = try permissionRunText(h.runtime, restored.session, "Write the checkpoint fixture.", .allow_once, false);
     try std.testing.expectEqual(@as(usize, if (!grant or changed) 1 else 0), answers);
     // Host authorization must still be requested independently of any Write grant.
-    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, restored.session, "Generate the fixture image.", .allow_once, true));
+    const prompt = if (target == .added_video) video_prompt else "Generate the fixture image.";
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, restored.session, prompt, .allow_once, true));
     try h.evidence(0, 0, "unavailable");
-    if (changed_schema) {
+    if (target == .changed_image_schema) {
         const trace = try h.trace();
         defer std.testing.allocator.free(trace);
         try std.testing.expect(std.mem.indexOf(u8, trace, "\"maxLength\":1000") != null);
@@ -461,13 +469,13 @@ fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !vo
 }
 
 test "GenerateImage canonical checkpoint invalidates changed tool authority and preserves unchanged grants" {
-    try checkpointTools(0, true, false);
-    try checkpointTools(3, true, false);
-    try checkpointTools(3, true, true);
+    try checkpointTools(0, true, .current);
+    try checkpointTools(4, true, .current);
+    try checkpointTools(4, true, .changed_image_schema);
 }
 
 test "GenerateImage legacy checkpoint without grants restores complete and requires fresh approval" {
-    try checkpointTools(0, false, false);
+    try checkpointTools(0, false, .current);
 }
 
 test "GenerateImage canonical Core updates credentials during approval without restarting the Run" {
@@ -747,7 +755,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
         .binding = .{ .endpoint = &endpoint, .model = &model, .credential = &credential, .output = h.sink.output() },
         .transport = first.transport(),
     };
-    const id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, input, null, null);
+    const id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, input, null, null, null);
     @memset(&endpoint, 'x');
     @memset(&model, 'x');
     @memset(&credential, 0);
@@ -766,7 +774,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
 
     // Explicit unavailability also overrides the Session's synthetic fixture
     // source. Neither the previous production input nor the fixture is reused.
-    var missing: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, null, null, null) };
+    var missing: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, null, null, null, null) };
     const missing_thread = try std.Thread.spawn(.{}, Work.run, .{&missing});
     missing_thread.join();
     defer missing.result.?.deinit();
@@ -781,11 +789,11 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
         },
         .transport = second.transport(),
     };
-    const cancelled = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null, null);
+    const cancelled = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null, null, null);
     try session.cancelPreparedRun(cancelled);
     try std.testing.expect(session.run_image == null);
     try std.testing.expectEqual(@as(usize, 0), second.calls.load(.acquire));
-    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null, null) };
+    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null, null, null) };
     const renewed_thread = try std.Thread.spawn(.{}, Work.run, .{&renewed});
     renewed_thread.join();
     defer renewed.result.?.deinit();
@@ -1143,6 +1151,7 @@ const image_product = struct {
         endpoint: []const u8,
         trace_dir: std.Io.Dir,
         fallback: bool = false,
+        video_catalog: bool = false,
         image_calls: std.atomic.Value(usize) = .init(0),
         catalog_calls: std.atomic.Value(usize) = .init(0),
         key: [64]u8 = undefined,
@@ -1175,7 +1184,9 @@ const image_product = struct {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (request.kind != .models or !std.mem.eql(u8, request.bearer orelse "", "synthetic-image-key")) return error.ProtocolFailed;
             _ = self.catalog_calls.fetchAdd(1, .monotonic);
-            const body = if (self.fallback)
+            const body = if (self.video_catalog)
+                "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"fallback-video\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"videos\":{\"supported\":true}}}},{\"id\":\"" ++ models.metask_default_video_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"videos\":{\"supported\":true}}}}]}"
+            else if (self.fallback)
                 "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"fixture-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}"
             else
                 "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ models.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
@@ -1215,6 +1226,35 @@ const image_product = struct {
     };
 
     const History = @import("lifecycle_fixture").TypedHistory;
+
+    fn rotateCredential(account: *account_api.Runtime, control: *control_api.Runtime, coordinator: *coordinator_api.Coordinator) !void {
+        const scope = account.authorizationState().?.scope;
+        var refresh = switch (account.prepareTokenRefresh()) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        try std.testing.expect(account.admitEffect(&refresh));
+        account.commit(&refresh);
+        try std.testing.expect(account.dispatchCommitted(&refresh) == null);
+        account_api.TestSupport.joinNetwork(account);
+        var rotated = switch (account.prepareNextCompletion().?) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer rotated.deinit();
+        try std.testing.expect(account.admitEffect(&rotated));
+        account.commit(&rotated);
+        try std.testing.expect(account.dispatchCommitted(&rotated) == null);
+        control.commitAccountFactNoFail(account.preparedFact(&rotated));
+        coordinator.authorizationChanged();
+        for (0..5000) |_| {
+            coordinator.drain();
+            if (coordinator.catalog_job == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(scope, account.authorizationState().?.scope);
+    }
 
     fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8, image_input: bool) !void {
         try std.testing.expect(control.createCustomProviderWithCredential("synthetic-dialogue-key", .{
@@ -1398,34 +1438,9 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         coordinator.authorizationChanged();
     }
     if (rotate_after_admission) {
-        const scope = account.authorizationState().?.scope;
-        var refresh = switch (account.prepareTokenRefresh()) {
-            .prepared => |value| value,
-            else => return error.TestUnexpectedResult,
-        };
-        defer refresh.deinit();
-        try std.testing.expect(account.admitEffect(&refresh));
-        account.commit(&refresh);
-        try std.testing.expect(account.dispatchCommitted(&refresh) == null);
-        image_product.account_api.TestSupport.joinNetwork(&account);
-        var rotated = switch (account.prepareNextCompletion().?) {
-            .prepared => |value| value,
-            else => return error.TestUnexpectedResult,
-        };
-        defer rotated.deinit();
-        try std.testing.expect(account.admitEffect(&rotated));
-        account.commit(&rotated);
-        try std.testing.expect(account.dispatchCommitted(&rotated) == null);
-        control.commitAccountFactNoFail(account.preparedFact(&rotated));
-        coordinator.authorizationChanged();
-        for (0..5000) |_| {
-            coordinator.drain();
-            if (coordinator.catalog_job == null) break;
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        } else return error.TestUnexpectedResult;
-        try std.testing.expectEqual(scope, account.authorizationState().?.scope);
+        try image_product.rotateCredential(&account, &control, &coordinator);
         try std.testing.expectEqualStrings("synthetic-dialogue-key", task.runtime.executionConst().?.secret);
-        try std.testing.expectEqual(@as(usize, 1), task.durable.runs[0].?.image_execution.?.credential_versions.items.len);
+        try std.testing.expectEqual(@as(usize, 1), task.durable.runs[0].?.image_execution.?.authorization.versions.items.len);
     }
     const cancelled = std.mem.eql(u8, mode, "hold");
     try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);
@@ -1625,7 +1640,7 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
             self.calls += 1;
             self.state = result.state;
             std.debug.assert(result.content.len == 0 and !result.truncated and !result.redacted);
-            if (result.image) |image| {
+            if (result.media) |image| {
                 self.image_len = image.size_bytes;
                 self.image_id = image.id;
             }
@@ -1644,7 +1659,7 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expectEqual(image_product.control_api.FilePreviewState.ready, capture.state);
     try std.testing.expect(capture.image_len > 0);
-    const chunk = try control.readFilePreviewImage(capture.image_id, 0);
+    const chunk = try control.readFilePreviewMedia(capture.image_id, 0);
     try std.testing.expect(chunk.len > 0);
     try std.testing.expect(control.releaseFilePreview(capture.image_id));
     var snapshot: [256 * 1024]u8 = undefined;
@@ -1653,13 +1668,282 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
 }
 
 test "DeliverFile previous GenerateImage-only checkpoints restore without recreating file authority" {
-    try checkpointTools(1, false, false);
-    try checkpointTools(1, true, false);
+    try checkpointTools(1, false, .current);
+    try checkpointTools(1, true, .current);
 }
 
 test "InstallMcpServer restores genuine two-Host-tool checkpoints without restoring proposal authority" {
-    try checkpointTools(2, false, false);
-    try checkpointTools(2, true, false);
+    try checkpointTools(2, false, .current);
+    try checkpointTools(2, true, .current);
+}
+
+const video_prompt = "Generate the fixture video.";
+const VideoGateway = struct {
+    harness: *Harness,
+    fail_next_poll_tls: bool = false,
+
+    fn transport(self: *VideoGateway) agent.CompletionTransport {
+        return .{ .context = self, .perform_fn = send, .signal_cancellation_fn = signal };
+    }
+
+    fn send(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, output: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+        const self: *VideoGateway = @ptrCast(@alignCast(context.?));
+        const base = image_product.models.metask_videos_url;
+        if (!std.mem.startsWith(u8, request.url, base)) return error.InvalidHttp;
+        const suffix = request.url[base.len..];
+        if (suffix.len != 0 and suffix[0] != '/') return error.InvalidHttp;
+        if (self.fail_next_poll_tls and request.method == .get and suffix.len != 0 and !std.mem.endsWith(u8, suffix, "/content")) {
+            self.fail_next_poll_tls = false;
+            return error.TlsFailed;
+        }
+        const fixture = self.harness.fixture.endpoint;
+        const origin = fixture[0 .. fixture.len - "/v1/images/generations".len];
+        var url: [1024]u8 = undefined;
+        var local = request;
+        local.url = std.fmt.bufPrint(&url, "{s}/v1/videos{s}", .{ origin, suffix }) catch return error.InvalidHttp;
+        return self.harness.network.transport().perform(local, cancellation, output);
+    }
+
+    fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
+        const self: *VideoGateway = @ptrCast(@alignCast(context.?));
+        const network = self.harness.network.transport();
+        network.signal_cancellation_fn.?(network.context, cancellation);
+    }
+
+    fn credential(_: *anyopaque, buffer: []u8) ?usize {
+        const token = "synthetic-image-key";
+        @memcpy(buffer[0..token.len], token);
+        return token.len;
+    }
+
+    fn input(self: *VideoGateway, output: agent.VideoGenerationOutput) agent.VideoGenerationRunInput {
+        return .{
+            .endpoint = image_product.models.metask_videos_url,
+            .model = image_product.models.metask_default_video_model,
+            .credential = .{ .context = self, .read_fn = credential },
+            .transport = self.transport(),
+            .output = output,
+        };
+    }
+};
+
+fn initVideoOutput(h: *Harness) !@import("video_output").Output {
+    return @import("video_output").Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+        .id = 1,
+        .epoch = 1,
+        .kind = .manual,
+        .canonical_root = h.root,
+        .trust = .explicitly_trusted,
+    });
+}
+
+fn onlyVideoPath(h: *Harness) ![]u8 {
+    var directory = try h.tmp.dir.openDir(std.testing.io, "generated-videos", .{ .iterate = true });
+    defer directory.close(std.testing.io);
+    var entries = directory.iterate();
+    const entry = (try entries.next(std.testing.io)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry.kind == .file and std.mem.endsWith(u8, entry.name, ".mp4"));
+    const path = try std.fmt.allocPrint(std.testing.allocator, "generated-videos/{s}", .{entry.name});
+    errdefer std.testing.allocator.free(path);
+    try std.testing.expect((try entries.next(std.testing.io)) == null);
+    return path;
+}
+
+test "GenerateVideo canonical Core approves a saved MP4 and rejects denied or absent execution" {
+    var h: Harness = undefined;
+    try h.init("video", .{});
+    defer h.deinit();
+    const session = try h.session(.default, false);
+    var gateway: VideoGateway = .{ .harness = &h };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+
+    const denied = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port()));
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunPrepared(h.runtime, session, denied, .deny_once, true));
+    try std.testing.expectError(error.FileNotFound, onlyVideoPath(&h));
+    const allowed = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port()));
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunPrepared(h.runtime, session, allowed, .allow_once, true));
+    const path = try onlyVideoPath(&h);
+    defer std.testing.allocator.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.mp4_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(bytes);
+    const saved = try h.tmp.dir.readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(saved);
+    try std.testing.expectEqualSlices(u8, bytes, saved);
+
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, session, video_prompt, .allow_once, true));
+    try h.evidence(0, 0, "unavailable");
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_poll"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_download"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video/mp4"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, path));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+}
+
+test "GenerateVideo canonical Core cancels and joins HTTP on stop close and shutdown" {
+    for ([_]enum { stop, close, shutdown, stop_backoff }{ .stop, .close, .shutdown, .stop_backoff }) |action| {
+        var h: Harness = undefined;
+        const backoff = action == .stop_backoff;
+        try h.init(if (backoff) "video-poll-backoff" else "video-hold", .{});
+        defer h.deinit();
+        const session = try h.session(.full_access, false);
+        var gateway: VideoGateway = .{ .harness = &h };
+        var output = try initVideoOutput(&h);
+        defer output.deinit();
+        var work: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port())) };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        defer {
+            if (!work.done.load(.acquire)) _ = session.requestTermination(work.id, .{ .interrupted = .user_cancel }) catch {};
+            thread.join();
+            if (work.result) |*result| result.deinit();
+        }
+        const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + (if (backoff) @as(i96, 10) else 5) * std.time.ns_per_s;
+        while (std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < deadline and !work.done.load(.acquire)) {
+            const trace = h.trace() catch |err| {
+                if (err != error.FileNotFound) return err;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                continue;
+            };
+            defer std.testing.allocator.free(trace);
+            if (count(trace, if (backoff) "video_poll" else "video_create") == 1) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        switch (action) {
+            .stop, .stop_backoff => _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel }),
+            .close => try session.close(.session_close),
+            .shutdown => try h.runtime.shutdown(),
+        }
+        const finished_deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 3 * std.time.ns_per_s;
+        while (!work.done.load(.acquire) and std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < finished_deadline)
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
+        try std.testing.expectError(error.FileNotFound, onlyVideoPath(&h));
+        if (backoff) {
+            const trace = try h.trace();
+            defer std.testing.allocator.free(trace);
+            try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+            try std.testing.expectEqual(@as(usize, 1), count(trace, "video_poll"));
+            try std.testing.expectEqual(@as(usize, 0), count(trace, "video_download"));
+        }
+        try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+    }
+}
+
+fn expectVideoPollRecovery(mode: []const u8, polls: usize, fail_first_poll_tls: bool) !void {
+    var h: Harness = undefined;
+    try h.init(mode, .{});
+    defer h.deinit();
+    const session = try h.session(.full_access, false);
+    var gateway: VideoGateway = .{ .harness = &h, .fail_next_poll_tls = fail_first_poll_tls };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+    var run = try session.beginRun(try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port())));
+    defer run.deinit();
+    var terminal = run.execute();
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
+    try std.testing.expect(!gateway.fail_next_poll_tls);
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+    try std.testing.expectEqual(polls, count(trace, "video_poll"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_download"));
+    const path = try onlyVideoPath(&h);
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, path));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+}
+
+test "GenerateVideo retries HTTP 429 and 502 status queries without creating a second job" {
+    try expectVideoPollRecovery("video-poll-retry", 3, false);
+}
+
+test "GenerateVideo retries a disconnected status query without creating a second job" {
+    try expectVideoPollRecovery("video-poll-connection", 2, false);
+}
+
+test "GenerateVideo retries a TLS handshake failure during status polling" {
+    try expectVideoPollRecovery("video", 1, true);
+}
+
+test "GenerateVideo reports a failed content request as a download failure" {
+    var h: Harness = undefined;
+    try h.init("video-download-failed", .{});
+    defer h.deinit();
+    const session = try h.session(.default, false);
+    var gateway: VideoGateway = .{ .harness = &h };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+    const id = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port()));
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunPrepared(h.runtime, session, id, .allow_once, true));
+    try h.evidence(0, 0, "download_failed");
+    try std.testing.expectError(error.FileNotFound, onlyVideoPath(&h));
+}
+
+test "GenerateVideo canonical Core cannot submit a second request after an uncertain outcome" {
+    var h: Harness = undefined;
+    try h.init("video-repeat", .{});
+    defer h.deinit();
+    const session = try h.session(.default, false);
+    var gateway: VideoGateway = .{ .harness = &h };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+    const run_id = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port()));
+    try std.testing.expectEqual(@as(usize, 2), try permissionRunPrepared(h.runtime, session, run_id, .allow_once, true));
+    try h.evidence(0, 0, "outcome_unknown");
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "capacity"));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+}
+
+test "GenerateVideo cancels a streamed download and removes the partial file" {
+    var h: Harness = undefined;
+    try h.init("video-download-hold", .{});
+    defer h.deinit();
+    const session = try h.session(.full_access, false);
+    var gateway: VideoGateway = .{ .harness = &h };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+    var work: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port())) };
+    const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+    defer {
+        if (!work.done.load(.acquire)) _ = session.requestTermination(work.id, .{ .interrupted = .user_cancel }) catch {};
+        thread.join();
+        if (work.result) |*result| result.deinit();
+    }
+    const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 10 * std.time.ns_per_s;
+    while (!work.done.load(.acquire) and std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < deadline) {
+        if (h.tmp.dir.openDir(std.testing.io, "generated-videos", .{ .iterate = true })) |directory| {
+            defer directory.close(std.testing.io);
+            var entries = directory.iterate();
+            if (try entries.next(std.testing.io)) |entry| {
+                try std.testing.expect(std.mem.endsWith(u8, entry.name, ".partial"));
+                break;
+            }
+        } else |err| if (err != error.FileNotFound) return err;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel });
+    const stop_deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 3 * std.time.ns_per_s;
+    while (!work.done.load(.acquire) and std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < stop_deadline)
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    try std.testing.expect(work.done.load(.acquire));
+    try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
+    var directory = try h.tmp.dir.openDir(std.testing.io, "generated-videos", .{ .iterate = true });
+    defer directory.close(std.testing.io);
+    var entries = directory.iterate();
+    try std.testing.expect((try entries.next(std.testing.io)) == null);
+}
+
+test "GenerateVideo canonical Core restores the previous three Host tools with or without a Write grant" {
+    try checkpointTools(3, false, .added_video);
+    try checkpointTools(3, true, .added_video);
 }
 
 test "InstallMcpServer canonical Core submits without a main-thread drain and releases owned results" {
@@ -1690,7 +1974,7 @@ test "InstallMcpServer canonical Core submits without a main-thread drain and re
     defer if (ingress.draft) |*draft| draft.deinit();
     for (0..3) |index| {
         const input: ?agent.McpInstallationInput = if (index == 0) null else .{ .context = &ingress, .allocator = std.testing.allocator, .task_id = 42, .try_put_fn = Ingress.put, .wake_fn = Ingress.wake };
-        const id = try session.prepareRunWithTools(.{ .text = "Install the fixture MCP server." }, null, null, input);
+        const id = try session.prepareRunWithTools(.{ .text = "Install the fixture MCP server." }, null, null, input, null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         thread.join();
@@ -1758,7 +2042,7 @@ test "DeliverFile canonical Core checks actual Workspace bytes and sends one tru
     var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() };
     for (0..3) |index| {
         if (index == 2) try h.tmp.dir.deleteFile(std.testing.io, "result.docx");
-        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, if (index == 1) null else reader.input(), null);
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, if (index == 1) null else reader.input(), null, null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         thread.join();
@@ -1806,7 +2090,7 @@ test "DeliverFile canonical Core cancellation joins file callbacks on stop close
         defer h.deinit();
         const session = try h.session(.full_access, false);
         var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId(), .hold = true };
-        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input(), null);
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input(), null, null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         defer {
@@ -1851,7 +2135,7 @@ test "DeliverFile canonical Core approval gates file reads and refuses Session g
         try file.writeStreamingAll(std.testing.io, "approved bytes");
         file.close(std.testing.io);
         var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() };
-        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input(), null);
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input(), null, null);
         var work: Work = .{ .session = session, .id = id };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         defer {
@@ -1902,6 +2186,152 @@ const ProductDeliveryEffect = struct {
         self.released += 1;
     }
 };
+
+test "GenerateVideo canonical Product prepares an ordinary Run and delivers its MP4 through DeliverFile" {
+    var h: Harness = undefined;
+    try h.init("video-product", .{});
+    defer h.deinit();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.mp4_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(bytes);
+    var delivery: ProductDeliveryEffect = .{ .reader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() } };
+
+    var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir, .video_catalog = true };
+    var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
+    var platform: image_product.account_api.TestSupport.Platform = .{};
+    image_product.account_api.TestSupport.attachPlatform(&account, &platform);
+    defer {
+        image_product.account_api.TestSupport.detachPlatform(&account);
+        account.deinit();
+    }
+    var authenticated = try image_product.account_api.TestSupport.prepareAuthenticated(&account, "image-account", "Media User", "synthetic-image-key", "synthetic-refresh-key", 1000);
+    defer authenticated.deinit();
+    account.commit(&authenticated);
+    var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
+    defer history.deinit();
+    var typed_history: image_product.History = .{ .file_store = &history };
+    defer typed_history.deinit();
+    var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
+    defer checkpoints.deinit();
+    var configuration = image_product.fixture_api.productControlConfiguration();
+    configuration.task_persistence = typed_history.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    configuration.directories.canonical_user_home = h.root;
+    const limits: image_product.control_api.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 };
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
+    defer {
+        control.stopCustomProviders();
+        control.deinit();
+    }
+    try control.startCustomProviders(h.root, effects.vault());
+    try image_product.configureDialogue(&control, h.fixture.provider_endpoint, false);
+    control.setAccountProjectionCredentials(account.accessTokenProjection());
+    var gateway: VideoGateway = .{ .harness = &h };
+    var coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
+    coordinator.setCompletionTransport(gateway.transport());
+    control.setMetaskAuthorizationCheck(coordinator.metaskAuthorizationCheck());
+    coordinator.setCredentialRenewal(control.metaskCredentialRenewal());
+    defer {
+        control.setVideoRunPreparation(null);
+        coordinator.shutdown();
+        coordinator.drain();
+    }
+    try std.testing.expect(coordinator.refreshCatalog().accepted);
+    for (0..5000) |_| {
+        coordinator.drain();
+        const catalog = control.modelsView().providers[0];
+        if (catalog.catalog_state == .ready) break;
+        if (catalog.catalog_state != .loading) return error.TestUnexpectedResult;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    control.setVideoRunPreparation(coordinator.videoRunPreparation());
+    control.setFileDeliveryPreparation(.{ .context = &delivery, .prepare_fn = ProductDeliveryEffect.prepare });
+    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual }, try image_product.control_api.TestSupport.fixtureModelSelection(&control));
+    const run_id = try image_product.fixture_api.runPreparedTask(&control, task_id, .{ .text = video_prompt });
+    const task = control.testTask(task_id).?;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expectEqual(run_id, run.id);
+    try std.testing.expect(run.video_execution != null and run.file_delivery != null);
+
+    var saved_path: ?[]u8 = null;
+    defer if (saved_path) |path| std.testing.allocator.free(path);
+    var previous_request: ?u64 = null;
+    var approvals: usize = 0;
+    var renewed = false;
+    for (0..10_000) |_| {
+        try control.drainAgentEvents();
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive() and run.execution == null) break;
+        var access = try task.runtime.acquireAccess();
+        defer access.deinit();
+        if (access.pendingUiObservation()) |request| if (previous_request != request.request_id) {
+            try std.testing.expectEqual(run_id, request.run_id);
+            try std.testing.expect(run.outputs[0] == null);
+            try std.testing.expect(!delivery.reader.entered.load(.acquire));
+            try std.testing.expect(run.video_execution != null);
+            switch (approvals) {
+                0 => try std.testing.expectError(error.FileNotFound, onlyVideoPath(&h)),
+                1 => {
+                    saved_path = try onlyVideoPath(&h);
+                    try std.testing.expectEqual(bytes.len, (try h.tmp.dir.statFile(std.testing.io, saved_path.?, .{})).size);
+                    var inline_storage: [64 * 1024]u8 = undefined;
+                    const inline_snapshot = try control.writeAggregateFixture(&inline_storage);
+                    try std.testing.expect(std.mem.indexOf(u8, inline_snapshot, "\"generatedVideo\":true,\"presentationAnchor\":{") != null);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            try control.respondUi(task_id, run_id, request.request_id, .{ .permission = .allow_once });
+            previous_request = request.request_id;
+            approvals += 1;
+        };
+        if (!renewed and approvals == 1) {
+            const trace = try h.trace();
+            defer std.testing.allocator.free(trace);
+            if (count(trace, "video_create") == 1) {
+                try image_product.rotateCredential(&account, &control, &coordinator);
+                try std.testing.expectEqual(@as(usize, 1), run.video_execution.?.authorization.versions.items.len);
+                try std.testing.expectEqualStrings("synthetic-dialogue-key", task.runtime.executionConst().?.secret);
+                renewed = true;
+            }
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), approvals);
+    try std.testing.expect(renewed);
+    const terminal = image_product.task_api.testing.state_module.productTerminalFacts(run) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(image_product.task_api.RunOutcome.completed, terminal.outcome);
+    try std.testing.expect(run.video_execution == null and run.file_delivery == null);
+    try std.testing.expectEqual(@as(usize, 1), delivery.released);
+
+    const video_path = saved_path orelse return error.TestUnexpectedResult;
+    const output = run.outputs[0] orelse return error.TestUnexpectedResult;
+    try std.testing.expect(run.outputs[1] == null);
+    try std.testing.expectEqualStrings(video_path, output.locator);
+    try std.testing.expectEqual(bytes.len, output.size_bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    try std.testing.expectEqual(digest, output.sha256);
+    var snapshot_storage: [64 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
+    var expected_storage: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_storage, "\"outputs\":[{{\"id\":\"{s}\",\"displayPath\":\"{s}\",\"sizeBytes\":\"{d}\",\"redacted\":false}}]", .{
+        std.fmt.bytesToHex(output.id, .lower), video_path, bytes.len,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, expected) != null);
+    const saved = (try history.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, video_path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"generated_video\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "video_execution") == null);
+    try std.testing.expectEqual(@as(usize, 1), effects.catalog_calls.load(.acquire));
+    try h.evidence(0, 0, "verified_for_delivery");
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_poll"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_download"));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.delivery_results_outstanding.load(.acquire));
+}
 
 const CheckedXlsxReport = struct {
     status: []const u8,

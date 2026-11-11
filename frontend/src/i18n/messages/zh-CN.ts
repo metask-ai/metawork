@@ -969,6 +969,8 @@ export const zhCN: Record<MessageId, string> = {
   "outputs.state.edit_too_long": "输入已接近容量限制，未修改草稿。",
   "outputs.state.edit_unavailable": "当前无法准备修改，请重新检查文件。",
   "outputs.check": "检查文件",
+  "video_preview.label": "生成的视频",
+  "video_preview.failed": "无法播放视频",
   "outputs.reveal": "定位文件",
   "outputs.cancel": "取消",
   "outputs.checking": "正在校验文件…",

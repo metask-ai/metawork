@@ -561,7 +561,7 @@ AgentCore typed CoreEvent
 | Process surface   | Run active，或 terminal Run 存在 Tool 或已自动允许的记录                 | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开     |
 | Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                          |
 | Terminal notice   | partial、非 completed outcome 或完成但无 response                         | 与 partial 合并为唯一准确提示，不重复成功结果                          |
-| Response metadata | Run 已 terminal 且存在非空 final/partial response                         | 紧随所属 final/partial 回复正文；纯图标复制入口 + 可用时的弱化完成时间 |
+| Response metadata | Run 已 terminal 且存在非空 final/partial response                         | 位于所属回复块末尾，有生成图片或视频时排在最后一个预览下方；复制动作、完成时间和本轮模型同一行 |
 
 `RunProcess` 同时承担 active Run 的唯一 live status 与 terminal Run 的历史 Tool 入口：
 
@@ -575,16 +575,16 @@ active Run:
 terminal Run:
   User instruction + optional submitted time + input copy action
   Assistant output interleaved with optional user interjections
-    response copy action + optional finished time inside the final/partial message
+    final/partial text → generated media → response copy, optional finished time and model
   optional File Changes
   optional collapsed RunProcess when Tools or automatic approvals exist
   terminal notice
-  trailing user messages after the last Assistant text/image entry
+  trailing user messages after the last Assistant text or generated media entry
 ```
 
-终态辅助内容整体位于本轮最后一个 Assistant 内容条目之后、尾部用户消息之前；没有 Assistant 内容时位于根指令之后、尾部消息之前。Assistant 内容包含文字与可信生成图片；位于输出段落之间的插话保持原位置。已采纳但没有后续输出的尾部插话也遵守此阅读规则，结束提示表达所属 Run 的结果，不宣称还原精确执行时间线。
+终态辅助内容整体位于本轮最后一个 Assistant 内容条目之后、尾部用户消息之前；没有 Assistant 内容时位于根指令之后、尾部消息之前。Assistant 内容包含文字与可信生成图片、视频；位于输出段落之间的插话保持原位置。已采纳但没有后续输出的尾部插话也遵守此阅读规则，结束提示表达所属 Run 的结果。
 
-用户消息与生成图片按 Host 的 Task 范围 `presentationOrder` 排列，使用各自 `afterOutputCount` 插入 canonical 输出槽位之间；按此顺序对槽位锚点取前缀最大值，再限制到当前槽位数。空槽位和脱敏占位先参与定位，再过滤不可见正文。图片沿槽位边界作为 Assistant 消息显示，不切开同一流式 Markdown；后续输出、采纳和终态切换不得颠倒已接纳图片与用户消息的顺序。文字增长、解码或 provisional 撤回允许改变几何位置及相对文字槽位位置，稳定性指逻辑顺序和用户阅读位置。
+用户消息与生成媒体按 Host 的 Task 范围 `presentationOrder` 排列，使用各自 `afterOutputCount` 确定 canonical 输出槽位之间的边界。按此顺序对槽位锚点取前缀最大值，再限制到当前槽位数。空槽位和脱敏占位先参与定位，再过滤不可见正文。同一段 Assistant 回复先显示文字，再按接纳顺序显示图片和视频。生成媒体与用户插话的相对顺序保留，预览沿用稳定 identity，流式文字增长或撤回可改变几何位置。
 
 本地点击发送即保存会话内临时 Run、输出槽位、已观察展示序号 frontier 与点击顺序，进入状态及审批之前的阅读流；Host 到达后以同一 operation identity 接管并使用权威位置。没有新事实时确认不换槽。接收 receipt 只结束发送不确定状态，只有带安全正文和锚点的可见 canonical 记录接管后才释放唯一展示项；范围不足通过有界读取补齐，不自动重发。New Task 与已有 Task 共用提交消息展示组件，提交事务和草稿仍归 App。
 
@@ -923,9 +923,10 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 ### 12.1 文件预览
 
-> Capability：**当前**。可预览目标来自 AgentCore `tool_result.file_refs` 或 Agent 验证的 Host 生图保存凭据，并由 Workbench 持久化为结构化文件引用；对话引用预览是按需读取当前文件内容的只读能力，不是 Files changed 或 Output。工作区文件树与对话中未匹配引用的显式本地 Markdown 链接另以当前 Task + Workspace id/epoch + 相对路径经 Host 授权打开文件，复用相同的正文、图片、容量与失败呈现；不要求 Run 或已有引用，也不因此新增 File Changes 或 Output。
+> Capability：**当前**。可预览目标来自 AgentCore `tool_result.file_refs` 或 Agent 验证的 Host 生成媒体保存凭据，并由 Workbench 持久化为结构化文件引用；对话引用预览是按需读取当前文件内容的只读能力。工作区文件树与对话中未匹配引用的显式本地 Markdown 链接另以当前 Task + Workspace id/epoch + 相对路径经 Host 授权打开文件，复用相同的正文、图片、容量与失败呈现；不要求 Run 或已有引用，也不因此新增 File Changes 或 Output。
 
-- Host 来源标记的生成图片按 §7.2 展示锚点作为所属 Run 的 Assistant 内容提供直接预览，最大宽度不超过正文宽度，缩略图保持比例，不裁切；图片本身是键盘可达的预览入口，点击激活现有右侧文件标签；图片下方不重复展示路径或“打开预览”文字栏，完整 accessible name 仍标识目标文件。仅这类可信图片在接近可见区域时读取，其他文件继续按需打开。加载、失败和显式重试原位呈现；引用/Task/连接失效后不显示旧图或接受迟到响应。历史记录缺少来源标记时不猜测，不把普通工具 JSON、文件后缀或 provisional Markdown 转成自动加载图片；
+- Host 来源标记的生成图片按 §7.2 展示锚点作为所属 Run 的 Assistant 内容提供直接预览，最大宽度不超过正文宽度，缩略图保持比例，不裁切；图片本身是键盘可达的预览入口，点击激活现有右侧文件标签；图片下方不重复展示路径或“打开预览”文字栏，完整 accessible name 仍标识目标文件。可信图片在接近可见区域时读取。加载、失败和显式重试原位呈现；引用/Task/连接失效后不显示旧图或接受迟到响应。历史记录缺少来源标记时不猜测，不把普通工具 JSON、文件后缀或 provisional Markdown 转成自动加载图片；
+- Host 来源标记的生成视频复用生成图片的 Assistant 展示锚点和可见区域加载规则。图片和视频左对齐正文，共用桌面预览宽度上限，窄窗中随正文可用宽度缩放。视频直接显示首帧与原生播放控件，由用户发起播放。播放器周围无路径、标题、文件操作或交付成果卡片。同一 Run 对该视频另有可信交付记录时，在结束后的「执行详情」里提供定位和另存为，沿用交付文件操作的 Host 校验和反馈。离开保留区域、切换 Task 或引用失效时暂停并释放。
 - 主要入口位于所属 Run 的已闭合 commentary 与 final/partial 回复中：普通文字中的完整文件名、行内代码和显式 Markdown 文件链接能匹配本 Run 结构化引用时呈现为可点击内联入口；显式 Markdown 文件链接未匹配时按下述工作区链接处理，普通文字与行内代码仍只匹配引用。保持原文字与正文行高，使用链接色、下划线、完整 accessible name 和可见键盘焦点；点击直接在右栏预览，不要求展开工作过程。provisional 虽按 Markdown 排版但保持惰性交互，不执行引用识别；代码块、图片说明和外部链接不做文件识别，也不把未知文件文本伪装成可打开入口；
 - 匹配只使用 Host `displayPath`、其显式相对写法及无歧义文件名，区分大小写，不查询文件系统、不从 Tool 参数拼装 authority。同一路径的重复引用为正文入口选择最后一条有序引用以读取当前内容，不宣称它是该句的历史版本或新文件身份；不同目录的同名文件不得仅按文件名选中，未匹配的本地 Markdown 路径不作为网页导航。引用晚到或失效随 Snapshot 更新可点击状态，不触发自动读取；
 - 未匹配引用的显式本地 Markdown 链接（相对路径、`<…>` 包裹路径、绝对路径或本机 `file:` URL）按 URL 语义换算为 Workspace 相对路径：相对路径以 Workspace 根为基准，绝对路径须位于 Host 发布且未脱敏的 Workspace 根内，忽略 query/fragment，并按 Host 工作区路径规则预先拒绝越界和不支持的写法；可换算且当前 Task Workspace 可浏览时，呈现与引用相同的内联入口，点击在右栏打开或激活工作区文件标签。换算不查询文件系统、不建立 Run 引用事实；换算后的路径按上述规则匹配本 Run 引用 `displayPath` 时仍用该引用身份，文件缺失或受限由标签如实呈现。工作区授权与可用状态随 Snapshot 更新入口；

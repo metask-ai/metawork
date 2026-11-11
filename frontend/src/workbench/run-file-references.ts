@@ -26,7 +26,8 @@ export function runFileReferenceLinks(
   );
   for (const tool of tools) {
     for (const reference of tool.fileRefs) {
-      if (reference.displayPath) paths.set(reference.displayPath, reference);
+      if (reference.displayPath && !reference.generatedVideo)
+        paths.set(reference.displayPath, reference);
     }
   }
   const candidates = new Map<string, FileReferenceView | null>();

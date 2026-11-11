@@ -215,6 +215,15 @@ test "history capacity executes more than sixteen Runs through worker retirement
         try settleInputScenario(scenario);
         try std.testing.expectEqual(task, scenario.control.testTask(scenario.task_id).?);
     }
+    // The final lease can retire after a drain pass has checked for Run effects.
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        const retired = for (task.durable.runs) |entry| {
+            if (entry) |run| if (run.execution != null) break false;
+        } else true;
+        if (retired) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
     var count: usize = 0;
     for (task.durable.runs) |entry| if (entry) |run| {
         count += 1;
@@ -4014,7 +4023,7 @@ test "restart recovery revalidates live authority and continues the same Convers
             .argument_values = &.{},
         } }),
     );
-    try std.testing.expectEqual(@as(usize, 13), fake_core.last_restored_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 14), fake_core.last_restored_allowed_tool_count);
 
     _ = try runPreparedTask(&restored, task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
@@ -11435,7 +11444,7 @@ const ImageAdmissionProbe = struct {
         self.workspace_epoch = authority.epoch;
         if (!self.available) return null;
         return .{
-            .candidate = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, self.secret, 7) catch unreachable,
+            .candidate = models_contract.OwnedMediaCandidate.copy(std.testing.allocator, .image, self.model, self.secret, 7) catch unreachable,
             .transport = .{ .perform_fn = imageHttp },
             .output = .{ .context = self, .commit_fn = output },
             .output_owner = self,

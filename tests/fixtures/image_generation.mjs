@@ -53,9 +53,13 @@ if (mode === "read-large") {
 }
 const trace = (event) =>
   appendFileSync(tracePath, `${JSON.stringify(event)}\n`);
+const mp4 = mode.startsWith("video")
+  ? readFileSync(new URL("./generated-video.mp4", import.meta.url))
+  : null;
 let active = 0;
 let imageCalls = 0;
 let dialogueCalls = 0;
+let videoPolls = 0;
 const pending = [];
 function image(response) {
   response.writeHead(200, { "content-type": "application/json" });
@@ -75,6 +79,80 @@ const server = createServer(async (request, response) => {
   try {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
+    if (request.url === "/v1/videos" || request.url.startsWith("/v1/videos/")) {
+      const videoToken =
+        mode === "video-product" && request.method === "GET"
+          ? "synthetic-image-key-b"
+          : "synthetic-image-key";
+      if (!mp4 || request.headers.authorization !== `Bearer ${videoToken}`)
+        throw Error("video credential or fixture mode");
+      const id = "video_fixture";
+      if (request.method === "POST" && request.url === "/v1/videos") {
+        const video = JSON.parse(Buffer.concat(chunks));
+        if (
+          video.model !== "wan3.0-video-prime" ||
+          video.input?.prompt !== "A black screen" ||
+          video.parameters?.duration !== 5 ||
+          video.parameters.resolution !== "720P" ||
+          video.parameters.ratio !== "16:9" ||
+          video.parameters.audio !== true
+        )
+          throw Error("video payload");
+        trace({ kind: "video_create" });
+        if (mode === "video-hold") {
+          setTimeout(() => response.destroy(), 10_000).unref();
+          return;
+        }
+        if (mode === "video-repeat") return request.socket.destroy();
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end(JSON.stringify({ task_id: id, status: "queued" }));
+      }
+      if (request.method !== "GET" || chunks.length)
+        throw Error("video read method");
+      if (request.url === `/v1/videos/${id}`) {
+        trace({ kind: "video_poll" });
+        videoPolls++;
+        if (mode === "video-poll-connection" && videoPolls === 1)
+          return request.socket.destroy();
+        if (mode === "video-poll-retry") {
+          if (videoPolls <= 2) {
+            response.writeHead(videoPolls === 1 ? 429 : 502);
+            return response.end();
+          }
+        }
+        if (mode === "video-poll-backoff") {
+          response.writeHead(429);
+          return response.end();
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end(
+          JSON.stringify({
+            id,
+            status: "completed",
+            metadata: { url: "https://ignored.invalid/clip.mp4" },
+          }),
+        );
+      }
+      if (request.url !== `/v1/videos/${id}/content`)
+        throw Error("video read path");
+      trace({ kind: "video_download" });
+      if (mode === "video-download-failed") {
+        response.writeHead(502);
+        return response.end();
+      }
+      if (mode === "video-download-hold") {
+        response.writeHead(200, { "content-type": "video/mp4" });
+        response.write(mp4);
+        response.write(Buffer.alloc(128 * 1024));
+        setTimeout(() => response.destroy(), 10_000).unref();
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "video/mp4",
+        "content-length": mp4.length,
+      });
+      return response.end(mp4);
+    }
     const payload = JSON.parse(Buffer.concat(chunks));
     if (request.method !== "POST") throw Error("unexpected method");
     if (request.url === "/v1/images/generations") {
@@ -214,6 +292,69 @@ const server = createServer(async (request, response) => {
       schema: declaration?.input_schema,
       results: images.length ? "[image result verified]" : results,
     });
+    if (
+      mode.startsWith("video") ||
+      (restoreProbe &&
+        JSON.stringify(last).includes("Generate the fixture video."))
+    ) {
+      const video = payload.tools.find((tool) => tool.name === "GenerateVideo");
+      if (
+        !video ||
+        JSON.stringify(Object.keys(video.input_schema.properties)) !==
+          '["prompt"]' ||
+        video.input_schema.properties.prompt.type !== "string" ||
+        video.input_schema.additionalProperties !== false ||
+        JSON.stringify(video.input_schema.required) !== '["prompt"]'
+      )
+        throw Error("video schema");
+      const videoCalls = messages
+        .flatMap((message) =>
+          Array.isArray(message.content) ? message.content : [],
+        )
+        .filter(
+          (part) => part.type === "tool_use" && part.name === "GenerateVideo",
+        );
+      const requestAgain = mode === "video-repeat" && videoCalls.length === 1;
+      if (mode === "video-product" && results.length) {
+        const result = results[0];
+        const resultText =
+          typeof result.content === "string"
+            ? result.content
+            : result.content.find((part) => part.type === "text")?.text;
+        const value = JSON.parse(resultText);
+        if (result.is_error) throw Error("video Product tool failed");
+        if (value.status === "saved") {
+          if (
+            value.media_type !== "video/mp4" ||
+            !value.path ||
+            value.size_bytes <= 0
+          )
+            throw Error("video save receipt");
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          return response.end(
+            protocolToolSse(
+              "anthropic",
+              payload.messages.length,
+              "DeliverFile",
+              { path: value.path },
+            ),
+          );
+        }
+        if (value.status !== "verified_for_delivery")
+          throw Error("video delivery receipt");
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(
+        results.length && !requestAgain
+          ? protocolTextSse("anthropic", "video fixture completed")
+          : protocolToolSse(
+              "anthropic",
+              payload.messages.length,
+              "GenerateVideo",
+              { prompt: "A black screen" },
+            ),
+      );
+    }
     if (mode === "mcp-installation") {
       const tool = payload.tools.find(
         (entry) => entry.name === "InstallMcpServer",

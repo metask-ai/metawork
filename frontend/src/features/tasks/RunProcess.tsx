@@ -385,6 +385,7 @@ export function RunProcess({
   presentation,
   reviewingPermission,
   approvalHistory = null,
+  deliveryActions = null,
   fileChanges = null,
   elapsedMs = null,
   snapshotReceivedAt = null,
@@ -399,6 +400,7 @@ export function RunProcess({
   presentation: RunPresentation;
   reviewingPermission: boolean;
   approvalHistory?: ReactNode;
+  deliveryActions?: ReactNode;
   fileChanges?: RunFileChanges | null;
   elapsedMs?: string | null;
   snapshotReceivedAt?: number | null;
@@ -415,7 +417,8 @@ export function RunProcess({
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
-  if (!presentation.processVisible && !approvalHistory) return null;
+  if (!presentation.processVisible && !approvalHistory && !deliveryActions)
+    return null;
 
   const activity = presentation.activity;
   const unsynchronized = presentation.active && !synchronized;
@@ -442,7 +445,8 @@ export function RunProcess({
         ? activityDetail(activity, locale, t)
         : null;
   const collapsible =
-    presentation.processCanCollapse || Boolean(approvalHistory);
+    presentation.processCanCollapse ||
+    Boolean(approvalHistory || deliveryActions);
   const showBody = expanded && collapsible;
 
   return (
@@ -499,6 +503,7 @@ export function RunProcess({
             </ul>
           )}
           {approvalHistory}
+          {deliveryActions}
         </div>
       )}
     </section>
