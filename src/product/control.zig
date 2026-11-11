@@ -50,7 +50,6 @@ pub const SkillImportTarget = runtime_impl.SkillImportTarget;
 pub const SkillImportEffect = runtime_impl.SkillImportEffect;
 pub const SkillImportSourceKind = runtime_impl.SkillImportSourceKind;
 pub const skillImportReason = runtime_impl.skillImportReason;
-pub const SkillSourceBrand = runtime_impl.SkillSourceBrand;
 pub const PermissionChoice = runtime_impl.PermissionChoice;
 pub const UiResponse = runtime_impl.UiResponse;
 pub const Configuration = runtime_impl.Configuration;

@@ -3405,7 +3405,7 @@ pub const LifecycleWakeLoop = struct {
 };
 
 pub fn productControlConfiguration() product_control.Configuration {
-    return .{ .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } } };
+    return .{};
 }
 
 pub fn installProductControlExecution(

@@ -1393,7 +1393,7 @@ test("App composes MCP installation cards only into their owning Task and Run", 
   await screen.findByText("Current installation");
   assert.equal(screen.queryByText("Another Task installation"), null);
   assert.equal(screen.queryByText("Another Run installation"), null);
-  assert.ok(screen.getByText(/MCP configuration could not be created/));
+  assert.ok(screen.getByText(/Could not create the connector/));
   await user.click(screen.getByRole("button", { name: "Cancel installation" }));
   assert.deepEqual(calls, [[operation.serverId, operation.revision]]);
 
@@ -1403,9 +1403,7 @@ test("App composes MCP installation cards only into their owning Task and Run", 
   };
   await fixture.publish();
   await waitFor(() =>
-    assert.ok(
-      screen.queryByText(/MCP configuration could not be created/) === null,
-    ),
+    assert.ok(screen.queryByText(/Could not create the connector/) === null),
   );
   assert.ok(screen.getByText("Current installation"));
 });

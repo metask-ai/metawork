@@ -128,15 +128,9 @@ save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路
 
 “继续修改”复用 check：通过 owning Task/Run/成果 ID 校验后，Renderer 在同一 Task 的普通可编辑草稿中引用相对显示文本；该文本不是 Host locator authority，不调用文件读取/编辑 command、不伪造 Attachment token，也不自动发送。用户手动发送后仍沿原 Task 输入、权限和 Skill/Shell 路径执行。准备草稿须复核当前 UI audience、Task、成果呈现及输入准入，保留现有文字和附件；Skill 或未完成的斜杠输入发生冲突时保留原草稿，超限不得截断。换 Task、断连或源呈现失效后的旧检查结果不能修改其他草稿。
 
-## Skill source settings
+## Skill directory discovery
 
-revision 1 的 Skill 来源设置提供两个 typed 写入口：`metawork.skills.setSourceEnabled` 的 payload 精确为 `{ sourceId, enabled, expectedRevision }`，sourceId 仅为品牌 `claude | codex`，Host 在一次 CAS/持久提交中将该品牌的个人和项目来源同时设为 enabled；拒绝逐根 ID、目录路径或 Workspace target，不提供旧逐目录写入兼容路径。`metawork.skills.recoverSourceSettings` 精确为 `{ action, expectedRecoveryToken }`，action 仅为 `reread | reset`。revision/token 是非零 canonical decimal u64。结果精确为 `{ applied, revision, reason }`；成功（含两个值均未变化的 no-op）给出可信 revision 与 null reason，失败给出 null revision 与闭合原因。no-op 不写盘、不调度、不通知；失败若改变 health、token 或 authority 仍发布 Product revision。保存成功不表示查询成功。超时只 resync，不自动重放。
-
-原因仅为 `stale_revision | busy | source_settings_unavailable | write_failed | persistence_outcome_unknown | stale_recovery_token | recovery_not_allowed | read_failed | revision_exhausted | shutting_down`。Renderer 不能将失败的 null revision 覆盖 committed 选择，不能用恢复按钮绕过 Host 对新鲜恢复 token 和实际文件状态的校验。
-
-`skillManagement.sourceSettings` 精确发布 `{ revision, health, entries, recovery }`。entries 恰好包含四个唯一固定 ID，每项为 `{ sourceId, enabled, canSetEnabled }`；可信值的 revision 非空且 enabled 为 boolean，未知值均为 null 且不可操作。health 为 `unavailable | ready | read_failed | corrupt | missing | unsupported_schema | too_large | write_failed | outcome_unknown`；仅 ready 或明确 write_failed 可以持有可信旧值。recovery 为 `{ canReread, canReset, token }`，token 仅可重读时非空；reset 仅可在未知且 corrupt/missing 的可重读状态开放，不以读取失败、超限或不支持格式冒充损坏。
-
-`skillManagement.personalSourceDiscovery` 与 `workspaces[].skillSourceDiscovery` 是 nullable 根检查数组。非 null 时分别含完整的三个/六个逻辑根：个人/项目默认 `agents.user.default`、`agents.workspace.default` 与适用兼容 ID；每项 `{ sourceId, state, reason }`，state 为 `disabled | checking | missing | checked | error`，reason 仅 error 时为 `unreadable | unsupported_entry | changed`。关闭的兼容根为 disabled，默认根不能 disabled。未知配置、无可用 base、非已授权 Manual Workspace 不得伪造检测结果。checked 只表示根检查通过；Skill winner、冲突和查询健康仍消费既有 catalog。共享 `SkillCatalogView` 与 Task pinned catalog shape 不扩展。
+`skillManagement.personalSourceDiscovery` 与 `workspaces[].skillSourceDiscovery` 是 nullable 根检查数组。非 null 时分别含一个/两个标准根：个人 `agents.user.default`，Workspace 额外包含 `agents.workspace.default`；每项 `{ sourceId, state, reason }`，state 为 `checking | missing | checked | error`，reason 仅 error 时为 `unreadable | unsupported_entry | changed`。无可用 base 或非已授权 Manual Workspace 不得伪造检测结果。checked 只表示根检查通过；Skill winner、冲突和查询健康仍消费既有 catalog。共享 `SkillCatalogView` 与 Task pinned catalog shape 不扩展。不提供兼容目录设置、来源写入或恢复 command，management 不发布来源设置。
 
 `skillManagement.assets[].origin` 为 null 或 `{ ecosystem: agents | claude | codex, scope: personal | project }`；由 Product 通过精确来源关联提供，不代替 asset 的 policy context 或 sourceKind 导入方式。未知 origin 不允许猜测，外部来源不能因 origin 获得文件管理 authority。
 

@@ -1514,28 +1514,7 @@ export type SkillCatalogView = {
     invocationName: string | null;
   }[];
 };
-export const skillSourceBrands = ["claude", "codex"] as const;
-export type SkillSourceBrand = (typeof skillSourceBrands)[number];
-export const skillSourceIds = [
-  "compat.claude.user",
-  "compat.claude.workspace",
-  "compat.codex.user",
-  "compat.codex.workspace",
-] as const;
-export type SkillSourceId = (typeof skillSourceIds)[number];
-export const skillSourceHealthStates = [
-  "unavailable",
-  "ready",
-  "read_failed",
-  "corrupt",
-  "missing",
-  "unsupported_schema",
-  "too_large",
-  "write_failed",
-  "outcome_unknown",
-] as const;
 export const skillSourceCheckStates = [
-  "disabled",
   "checking",
   "missing",
   "checked",
@@ -1546,22 +1525,10 @@ export const skillSourceCheckReasons = [
   "unsupported_entry",
   "changed",
 ] as const;
-export const skillSourceSettingsReasons = [
-  "stale_revision",
-  "busy",
-  "source_settings_unavailable",
-  "write_failed",
-  "persistence_outcome_unknown",
-  "stale_recovery_token",
-  "recovery_not_allowed",
-  "read_failed",
-  "revision_exhausted",
-  "shutting_down",
-] as const;
 export const skillOriginEcosystems = ["agents", "claude", "codex"] as const;
 export const skillOriginScopes = ["personal", "project"] as const;
 export type SkillSourceRootId =
-  SkillSourceId | "agents.user.default" | "agents.workspace.default";
+  "agents.user.default" | "agents.workspace.default";
 export type SkillSourceDiscovery =
   | {
       sourceId: SkillSourceRootId;
@@ -1569,38 +1536,10 @@ export type SkillSourceDiscovery =
       reason: (typeof skillSourceCheckReasons)[number] | null;
     }[]
   | null;
-export type SkillSourceSettings = {
-  revision: string | null;
-  health: (typeof skillSourceHealthStates)[number];
-  entries: {
-    sourceId: SkillSourceId;
-    enabled: boolean | null;
-    canSetEnabled: boolean;
-  }[];
-  recovery: {
-    canReread: boolean;
-    canReset: boolean;
-    token: string | null;
-  };
-};
-export type SkillSourceSettingsReason =
-  (typeof skillSourceSettingsReasons)[number];
-export type SkillSourceSettingsResult =
-  | {
-      applied: true;
-      revision: string;
-      reason: null;
-    }
-  | {
-      applied: false;
-      revision: null;
-      reason: SkillSourceSettingsReason;
-    };
 export type SkillManagementView = {
   importOperation: SkillImportOperation | null;
   availability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
   enablementAvailability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
-  sourceSettings: SkillSourceSettings;
   personalSourceDiscovery: SkillSourceDiscovery;
   assets: {
     installId: string | null;

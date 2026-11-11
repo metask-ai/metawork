@@ -91,7 +91,6 @@ pub const ManagementInput = struct {
     state: *const state.State,
     workspaces: WorkspaceCatalogs,
     text: TextProjection,
-    source_settings: state.SourceSettingsView,
     personal_source_discovery: ?state.SourceDiscoveryView,
     retry: RetryAvailability,
     owner: OwnerResolver,
@@ -210,11 +209,11 @@ pub fn writeManagementProjection(
     writer: *std.Io.Writer,
     input: ManagementInput,
 ) Error!void {
-    writer.print("{{\"availability\":\"{s}\",\"enablementAvailability\":\"{s}\",\"sourceSettings\":", .{
+    writer.print("{{\"availability\":\"{s}\",\"enablementAvailability\":\"{s}\"", .{
         @tagName(input.state.management_health),
         @tagName(input.state.enablement_health),
     }) catch return error.SnapshotTooLarge;
-    try writeSourceSettings(writer, input.source_settings);
+
     writer.writeAll(",\"importOperation\":") catch return error.SnapshotTooLarge;
     try writeImportOperation(writer, input);
     writer.writeAll(",\"personalSourceDiscovery\":") catch return error.SnapshotTooLarge;
@@ -261,21 +260,6 @@ pub fn writeManagementProjection(
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
 
-fn writeSourceSettings(writer: *std.Io.Writer, settings: state.SourceSettingsView) Error!void {
-    writer.writeAll("{\"revision\":") catch return error.SnapshotTooLarge;
-    if (settings.settings) |value| writer.print("\"{d}\"", .{value.revision}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.print(",\"health\":\"{s}\",\"entries\":[", .{@tagName(settings.health)}) catch return error.SnapshotTooLarge;
-    for (sources.definitions, 0..) |source, index| {
-        if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-        writer.print("{{\"sourceId\":\"{s}\",\"enabled\":", .{source.source_instance_id}) catch return error.SnapshotTooLarge;
-        if (settings.settings) |value| writer.print("{}", .{value.selection.enabled(source.id)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"canSetEnabled\":{}}}", .{settings.can_set_enabled}) catch return error.SnapshotTooLarge;
-    }
-    writer.print("],\"recovery\":{{\"canReread\":{},\"canReset\":{},\"token\":", .{ settings.can_reread, settings.can_reset }) catch return error.SnapshotTooLarge;
-    if (settings.recovery_token) |token| writer.print("\"{d}\"", .{token}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll("}}") catch return error.SnapshotTooLarge;
-}
-
 pub fn writeSourceDiscovery(writer: *std.Io.Writer, purpose: policy.QueryPurpose, discovery: ?state.SourceDiscoveryView) Error!void {
     const value = discovery orelse {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -290,12 +274,6 @@ pub fn writeSourceDiscovery(writer: *std.Io.Writer, purpose: policy.QueryPurpose
     if (purpose == .workspace) {
         writer.writeByte(',') catch return error.SnapshotTooLarge;
         try writeRootCheck(writer, "agents.workspace.default", if (value.checks) |checks| checks.default_workspace else null);
-    }
-    for (sources.definitions) |source| {
-        if (purpose == .management and source.scope == .workspace) continue;
-        writer.writeByte(',') catch return error.SnapshotTooLarge;
-        const check: ?sources.RootCheck = if (!value.selection.enabled(source.id)) .disabled else if (value.checks) |checks| checks.checks[@intFromEnum(source.id)] else null;
-        try writeRootCheck(writer, source.source_instance_id, check);
     }
     writer.writeByte(']') catch return error.SnapshotTooLarge;
 }
@@ -435,7 +413,7 @@ fn writeAssetTail(
         try input.text.writeJson(writer, name);
     }
     const enablement_available = policy.enablementTrusted(input.state.enablement_health) and
-        input.state.source_settings != null and snapshot != null;
+        snapshot != null;
     const selection_revision = if (enablement_available and runtime_skill != null)
         snapshot.?.selection_revision
     else
@@ -445,8 +423,8 @@ fn writeAssetTail(
     writer.print("],\"maxValues\":{d},\"canExport\":{},\"canReimport\":{},\"canUninstall\":{},\"canRetry\":{},\"enabled\":", .{
         max_values,
         manageable and input.state.management_health == .ready,
-        manageable and input.state.management_health == .ready and input.state.source_settings != null,
-        (manageable or pending) and input.state.management_health == .ready and input.state.source_settings != null,
+        manageable and input.state.management_health == .ready,
+        (manageable or pending) and input.state.management_health == .ready,
         can_retry,
     }) catch return error.SnapshotTooLarge;
     if (runtime_skill) |skill| {
@@ -652,7 +630,6 @@ test "snapshot structure bounds cover maximum identities arguments issues and un
     defer product_state.inventory.?.deinit();
     defer product_state.enablement_store.deinit();
     product_state.enablement_health = .ready;
-    product_state.source_settings = .{};
     const inventory = &product_state.inventory.?;
     const id: management.InstallId = @splat(1);
     _ = try inventory.add(.{ .install_id = id, .source_kind = .local_directory, .scope = Fixture.scope, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
@@ -693,7 +670,6 @@ test "snapshot structure bounds cover maximum identities arguments issues and un
         .retry = .{ .context = undefined, .available_fn = testRetryAvailable },
         .owner = .{ .context = undefined, .resolve_fn = testOwnerResolve },
         .text = text,
-        .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
         .personal_source_discovery = null,
         .workspaces = .{ .context = &snapshot, .slot_count = 1, .get_fn = Fixture.get },
     };
@@ -757,7 +733,6 @@ test "same-name external winner is not suppressed or attached to a managed asset
     defer product_state.inventory.?.deinit();
     defer product_state.enablement_store.deinit();
     product_state.enablement_health = .ready;
-    product_state.source_settings = .{};
     _ = try product_state.inventory.?.add(.{
         .install_id = @splat(7),
         .source_kind = .local_directory,
@@ -789,7 +764,6 @@ test "same-name external winner is not suppressed or attached to a managed asset
         .state = &product_state,
         .retry = .{ .context = undefined, .available_fn = testRetryAvailable },
         .owner = .{ .context = undefined, .resolve_fn = testOwnerResolve },
-        .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
         .personal_source_discovery = null,
         .text = .{ .context = undefined, .contains_sensitive_fn = Fixture.contains, .write_json_fn = Fixture.write },
         .workspaces = .{ .context = undefined, .slot_count = 0, .get_fn = Fixture.workspace },

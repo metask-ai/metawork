@@ -290,9 +290,8 @@ if (process.platform === "win32") {
     mode: 0o600,
   });
 }
-// The real desktop must discover and run this Skill through a persisted fixed
-// compatibility switch, not through a default source or a mock catalog.
-const skillSourceDirectory = ".claude";
+// The real desktop discovers and runs the standard project Skill.
+const skillSourceDirectory = ".agents";
 const skillDirectory = join(
   canonicalWorkspace,
   skillSourceDirectory,
@@ -320,7 +319,7 @@ await writeFile(
 if (process.env.METAWORK_AGENT_BOUNDARY_ONLY === "1") {
   const directory = join(
     canonicalWorkspace,
-    ".claude",
+    ".agents",
     "skills",
     "boundary-fork",
   );
@@ -928,17 +927,6 @@ desktopVertical: try {
     break desktopVertical;
   }
   if (boundaryOnly) {
-    const sources = afterChoose.skillManagement.sourceSettings;
-    assert.equal(
-      (
-        await invokeBridge("metawork.skills.setSourceEnabled", {
-          sourceId: "claude",
-          enabled: true,
-          expectedRevision: sources.revision,
-        })
-      ).applied,
-      true,
-    );
     const catalog = await poll(
       async () => {
         const current = (await snapshot()).workspaces.find(
@@ -982,78 +970,83 @@ desktopVertical: try {
     );
     break desktopVertical;
   }
-  const initialSources = afterChoose.skillManagement.sourceSettings;
-  assert.equal(initialSources.health, "ready");
-  assert.equal(initialSources.entries.length, 4);
-  assert.ok(initialSources.entries.every((entry) => entry.enabled === false));
-  let sourceRevision = initialSources.revision;
-  // Exercise real reparse points on Windows (no symlink privilege required)
-  // and directory symlinks on POSIX at both fixed-root components. A linked
-  // enabled root must fail the entire scope, not silently omit that source.
-  for (const component of [".codex", ".claude/skills"]) {
+  // A failed refresh retains the last committed projection and publishes
+  // root failure evidence instead of accepting the linked directory.
+  const lastGoodCatalog = await poll(
+    async () => {
+      const catalog = (await snapshot()).workspaces.find(
+        (item) => item.id === workspaceId,
+      )?.skillCatalog;
+      return catalog?.availability === "ready" ? catalog : null;
+    },
+    commandTimeoutMs,
+    "standard Skill catalog before linked root check",
+  );
+  for (const component of [".agents", ".agents/skills"]) {
     const linkPath = path.join(canonicalWorkspace, component);
-    const isOuter = component === ".codex";
-    const sourceId = isOuter
-      ? "compat.codex.workspace"
-      : "compat.claude.workspace";
-    const target = path.join(
-      canonicalWorkspace,
-      isOuter ? ".claude" : "linked-skill-target",
-    );
-    if (!isOuter) {
-      // Keep the existing Skill fixture intact; only rename the test-owned
-      // directory while checking its aliased root, then restore it exactly.
-      await rename(path.join(canonicalWorkspace, ".claude/skills"), target);
-    }
+    const target = path.join(canonicalWorkspace, "linked-skill-target");
+    await rename(linkPath, target);
     await symlink(
       target,
       linkPath,
       process.platform === "win32" ? "junction" : "dir",
     );
     try {
-      const enabled = await invokeBridge("metawork.skills.setSourceEnabled", {
-        sourceId: isOuter ? "codex" : "claude",
-        enabled: true,
-        expectedRevision: sourceRevision,
-      });
-      assert.equal(enabled.applied, true);
-      sourceRevision = enabled.revision;
+      assert.equal(
+        (
+          await invokeBridge("metawork.workspaces.refreshSkillCatalog", {
+            workspaceId,
+            expectedWorkspaceEpoch,
+          })
+        ).accepted,
+        true,
+      );
       await poll(
         async () => {
-          const current = await snapshot();
-          const selected = current.workspaces.find(
+          const selected = (await snapshot()).workspaces.find(
             (item) => item.id === workspaceId,
           );
           const check = selected?.skillSourceDiscovery?.find(
-            (entry) => entry.sourceId === sourceId,
+            (entry) => entry.sourceId === "agents.workspace.default",
           );
           if (check?.state !== "error") return null;
           assert.equal(check.reason, "unsupported_entry");
-          assert.equal(selected.skillCatalog.availability, "unavailable");
+          assert.deepEqual(selected.skillCatalog, lastGoodCatalog);
           return true;
         },
         commandTimeoutMs,
-        `linked fixed Skill root ${component}`,
+        `linked standard Skill root ${component}`,
       );
-      const disabled = await invokeBridge("metawork.skills.setSourceEnabled", {
-        sourceId: isOuter ? "codex" : "claude",
-        enabled: false,
-        expectedRevision: sourceRevision,
-      });
-      assert.equal(disabled.applied, true);
-      sourceRevision = disabled.revision;
     } finally {
       await unlink(linkPath);
-      if (!isOuter)
-        await rename(target, path.join(canonicalWorkspace, ".claude/skills"));
+      await rename(target, linkPath);
     }
+    assert.equal(
+      (
+        await invokeBridge("metawork.workspaces.refreshSkillCatalog", {
+          workspaceId,
+          expectedWorkspaceEpoch,
+        })
+      ).accepted,
+      true,
+    );
+    await poll(
+      async () => {
+        const selected = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        );
+        const check = selected?.skillSourceDiscovery?.find(
+          (entry) => entry.sourceId === "agents.workspace.default",
+        );
+        return check?.state === "checked" &&
+          selected.skillCatalog.availability === "ready"
+          ? true
+          : null;
+      },
+      commandTimeoutMs,
+      "restored standard Skill root",
+    );
   }
-  const sourceCommit = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "claude",
-    enabled: true,
-    expectedRevision: sourceRevision,
-  });
-  assert.equal(sourceCommit.applied, true);
   const readCatalog = () =>
     poll(
       async () => {
@@ -1497,35 +1490,6 @@ desktopVertical: try {
     commandTimeoutMs,
     "Run submission",
   );
-  // A source change leaves the already-admitted Run on its captured authority.
-  const sourceOff = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "claude",
-    enabled: false,
-    expectedRevision: sourceCommit.revision,
-  });
-  assert.equal(sourceOff.applied, true);
-  await poll(
-    async () => {
-      const current = await readObservedRun();
-      const workspaceCatalog = current.workspaces.find(
-        (item) => item.id === workspaceId,
-      )?.skillCatalog;
-      if (workspaceCatalog?.availability !== "ready") return null;
-      assert.equal(
-        workspaceCatalog.skills.some(
-          (item) => item.invocationName === "review",
-        ),
-        false,
-      );
-      assert.equal(
-        current.tasks.find((item) => item.id === taskId)?.skillCatalog.revision,
-        catalogSnapshot.catalog.revision,
-      );
-      return true;
-    },
-    commandTimeoutMs,
-    "disabled compatibility source with pinned Task",
-  );
   const runId = submittedRun.id;
   if (!isWireId(runId)) throw new Error("Run submission omitted its identity");
   if (acceptedRunId !== null && submittedRun.id !== acceptedRunId)
@@ -1815,6 +1779,34 @@ desktopVertical: try {
       `Edit did not update the workspace: ${JSON.stringify(edited)}`,
     );
 
+  const refreshReviewInWorkspace = async (expectedPresent) => {
+    assert.equal(
+      (
+        await invokeBridge("metawork.workspaces.refreshSkillCatalog", {
+          workspaceId,
+          expectedWorkspaceEpoch,
+        })
+      ).accepted,
+      true,
+    );
+    await poll(
+      async () => {
+        const catalog = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return (
+          catalog?.availability === "ready" &&
+          catalog.skills.some((item) => item.invocationName === "review") ===
+            expectedPresent
+        );
+      },
+      commandTimeoutMs,
+      expectedPresent ? "restored project Skill" : "removed project Skill",
+    );
+  };
+  const removedSkill = path.join(canonicalWorkspace, "removed-review");
+  await rename(skillDirectory, removedSkill);
+  await refreshReviewInWorkspace(false);
   const refreshOff = await invokeBridge("metawork.tasks.refreshSkillCatalog", {
     taskId,
     expectedBindingEpoch,
@@ -1833,34 +1825,10 @@ desktopVertical: try {
         : null;
     },
     commandTimeoutMs,
-    "idle Task explicit refresh adopts disabled source",
+    "idle Task explicit refresh adopts removed Skill",
   );
-  const sourceOn = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "claude",
-    enabled: true,
-    expectedRevision: sourceOff.revision,
-  });
-  assert.equal(sourceOn.applied, true);
-  await poll(
-    async () => {
-      const current = await snapshot();
-      const effective = current.workspaces.find(
-        (item) => item.id === workspaceId,
-      )?.skillCatalog;
-      if (!effective?.skills.some((item) => item.invocationName === "review"))
-        return null;
-      assert.deepEqual(
-        current.tasks
-          .find((item) => item.id === taskId)
-          ?.skillCatalog.skills.map((item) => item.invocationName)
-          .sort(),
-        builtinSkillNames,
-      );
-      return true;
-    },
-    commandTimeoutMs,
-    "source reenabled without implicit Task rebinding",
-  );
+  await rename(removedSkill, skillDirectory);
+  await refreshReviewInWorkspace(true);
   const refreshOn = await invokeBridge("metawork.tasks.refreshSkillCatalog", {
     taskId,
     expectedBindingEpoch,
@@ -1876,31 +1844,35 @@ desktopVertical: try {
         : null;
     },
     commandTimeoutMs,
-    "idle Task adopts reenabled compatible Skill",
+    "idle Task adopts restored standard Skill",
   );
 
-  // The automation fixture intentionally shares home and Workspace. Cover
-  // all four persisted switches here, including physical-root deduplication;
-  // the canonical Agent suite separately covers distinct home/project roots.
-  const codexSkill = join(
+  // The automation fixture shares home and Workspace. Verify refreshed standard roots.
+  const secondSkill = join(
     canonicalWorkspace,
-    ".codex",
+    ".agents",
     "skills",
-    "codex-proof",
+    "standard-proof",
   );
-  await mkdir(codexSkill, { recursive: true });
+  await mkdir(secondSkill, { recursive: true });
   await writeFile(
-    join(codexSkill, "SKILL.md"),
-    "---\nname: Codex proof\ndescription: Fixed-source discovery fixture\ndisable-model-invocation: true\n---\nA supported Skill from the Codex compatibility directory.\n",
+    join(secondSkill, "SKILL.md"),
+    "---\nname: Standard proof\ndescription: Standard-root discovery fixture\ndisable-model-invocation: true\n---\nA supported Skill from the standard directory.\n",
     { mode: 0o600 },
   );
-  const codexOn = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "codex",
-    enabled: true,
-    expectedRevision: sourceOn.revision,
-  });
-  assert.equal(codexOn.applied, true);
-  sourceRevision = codexOn.revision;
+  assert.equal(
+    (await invokeBridge("metawork.skills.refreshCatalog", {})).accepted,
+    true,
+  );
+  assert.equal(
+    (
+      await invokeBridge("metawork.workspaces.refreshSkillCatalog", {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      })
+    ).accepted,
+    true,
+  );
   await poll(
     async () => {
       const current = await snapshot();
@@ -1912,7 +1884,11 @@ desktopVertical: try {
         project?.skillCatalog.availability !== "ready"
       )
         return null;
-      const expected = [...builtinSkillNames, "codex-proof", "review"].sort();
+      const expected = [
+        ...builtinSkillNames,
+        "standard-proof",
+        "review",
+      ].sort();
       assert.deepEqual(
         current.skillCatalog.skills.map((skill) => skill.invocationName).sort(),
         expected,
@@ -1920,11 +1896,6 @@ desktopVertical: try {
       assert.deepEqual(
         project.skillCatalog.skills.map((skill) => skill.invocationName).sort(),
         expected,
-      );
-      assert.ok(
-        current.skillManagement.sourceSettings.entries.every(
-          (entry) => entry.enabled === true,
-        ),
       );
       for (const asset of current.skillManagement.assets) {
         if (builtinSkillNames.includes(asset.invocationName)) {
@@ -1944,7 +1915,7 @@ desktopVertical: try {
       return true;
     },
     commandTimeoutMs,
-    "all four fixed switches and source scopes",
+    "standard Skill roots and source scopes",
   );
 
   const attachmentChoice = await invokeBridge(
@@ -2273,12 +2244,6 @@ desktopVertical: try {
   await verifyActiveRestart();
   const restoredTask = restoredSnapshot.tasks.find(
     (item) => item.id === taskId,
-  );
-  assert.equal(
-    restoredSnapshot.skillManagement.sourceSettings.entries.every(
-      (entry) => entry.enabled === true,
-    ),
-    true,
   );
   if (
     restoredSnapshot.capabilities?.conversationRecovery !== true ||

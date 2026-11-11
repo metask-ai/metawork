@@ -1625,7 +1625,6 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
         .task_persistence = typed_history.capability(),
         .checkpoint_store = .{ .file_store = &checkpoints },
         .skill_enablement = .{ .file_store = &enablement },
-        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         .mcp = .{ .preparation = &preparation, .activation = activation, .management = managementConfiguration(&durable_registry, &runtime_manifest) },
     });
     preparation_owned = false;
@@ -2956,7 +2955,6 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
         .{ .worker_count = 1, .queue_capacity = 4 },
         .{
             .directories = .{ .canonical_user_home = if (static_auth) root_storage[0..root_len] else null },
-            .skill_sources = if (static_auth) .{ .restored = .{ .loaded = .{ .ready = .{} } } } else .{},
             .mcp_refresh_timer = refresh_timer.capability(),
             .mcp = .{
                 .preparation = &restarted_preparation,
@@ -3767,7 +3765,6 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
         .task_persistence = typed_history.capability(),
         .checkpoint_store = .{ .file_store = &checkpoints },
         .skill_enablement = .{ .file_store = &enablement },
-        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         .attachment_store = &originals,
         .attachment_images = .{ .prepare_fn = prepareTaskSwitchPng },
         .mcp = .{ .preparation = &preparation, .activation = activation, .management = managementConfiguration(&registry, &manifest), .host_capabilities = .{ .connection_approval = true } },
@@ -4530,7 +4527,7 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     defer typed_history.deinit();
     var enablement = try product_skill.enablement.FileStore.init(std.testing.io, root);
     defer enablement.deinit();
-    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .directories = .{ .canonical_user_home = root }, .task_persistence = typed_history.capability(), .checkpoint_store = .{ .file_store = &checkpoints }, .skill_enablement = .{ .file_store = &enablement }, .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .mcp = .{ .preparation = &preparation, .management = configuration } });
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .directories = .{ .canonical_user_home = root }, .task_persistence = typed_history.capability(), .checkpoint_store = .{ .file_store = &checkpoints }, .skill_enablement = .{ .file_store = &enablement }, .mcp = .{ .preparation = &preparation, .management = configuration } });
     runtime_owned = false;
     preparation_owned = false;
     manifest_owned = false;

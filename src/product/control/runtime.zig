@@ -371,7 +371,6 @@ pub const CatalogAvailability = catalog_snapshot.CatalogAvailability;
 pub const SkillProjection = catalog_snapshot.SkillProjection;
 pub const CatalogIssueProjection = catalog_snapshot.CatalogIssueProjection;
 pub const CatalogProjection = catalog_snapshot.CatalogProjection;
-pub const SkillSourceBrand = @import("metawork_product_skill").sources.Brand;
 pub const NewTaskAdmissionView = execution_state.NewTaskAdmissionView;
 
 pub const ExecutionIdentity = struct {
@@ -431,7 +430,6 @@ pub const Configuration = struct {
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
-    skill_sources: skill_runtime.SourceConfiguration = .{},
     builtin_skill_root: ?[]const u8 = null,
     custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
@@ -546,7 +544,6 @@ const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
 const skill_snapshot_structure = skill_runtime.Runtime.snapshotStructureBounds();
 const skill_asset_snapshot_overhead = skill_snapshot_structure.asset;
-const skill_source_settings_snapshot_bytes: usize = 1024;
 const skill_source_discovery_snapshot_bytes: usize = 1024;
 // Output identities, decimal sizes and object syntax are fixed overhead;
 // locator bytes already belong to the globally bounded text projection.
@@ -1602,7 +1599,6 @@ pub const Runtime = struct {
                 .state = .{
                     .management = configuration.skill_management,
                     .enablement = configuration.skill_enablement,
-                    .sources = configuration.skill_sources,
                 },
                 .max_workspaces = workspace_capacity,
                 .canonical_user_home = canonical_user_home,
@@ -3377,26 +3373,6 @@ pub const Runtime = struct {
         self.syncLifecycle();
         try self.skill.refreshPersonal();
         self.bumpRevision();
-    }
-
-    pub fn setSkillSourceEnabled(self: *Runtime, brand: SkillSourceBrand, enabled: bool, expected_revision: u64) skill_runtime.SourceSettingsResult {
-        self.syncLifecycle();
-        const result = self.skill.setSourceEnabled(brand, enabled, expected_revision, self.skillProjectionBudget());
-        if (result.changed) {
-            _ = self.syncSkillCatalogsNoFail();
-            self.bumpRevision();
-        }
-        return result;
-    }
-
-    pub fn recoverSkillSourceSettings(self: *Runtime, action: skill_runtime.SourceRecoveryAction, expected_token: u64) skill_runtime.SourceSettingsResult {
-        self.syncLifecycle();
-        const result = self.skill.recoverSourceSettings(action, expected_token, self.skillProjectionBudget());
-        if (result.changed) {
-            _ = self.syncSkillCatalogsNoFail();
-            self.bumpRevision();
-        }
-        return result;
     }
 
     pub fn setSkillEnabled(
@@ -11311,7 +11287,7 @@ fn skillManagementAdditionalSnapshotBytes(limits: Limits) ?usize {
     total = std.math.add(usize, total, issue_codes) catch return null;
     total = std.math.add(usize, total, discovery) catch return null;
     total = std.math.add(usize, total, skill_snapshot_structure.import_operation) catch return null;
-    return std.math.add(usize, total, skill_source_settings_snapshot_bytes) catch return null;
+    return total;
 }
 
 fn pendingUiSnapshotBytes(limits: Limits) ?usize {
@@ -11573,83 +11549,6 @@ fn testRuntime() !Runtime {
     return testRuntimeWith(.{});
 }
 
-test "non-Skill executor completion wakes queued source recovery without a Skill completion" {
-    const Harness = struct {
-        wakes: std.atomic.Value(usize) = .init(0),
-        queries: std.atomic.Value(usize) = .init(0),
-        fn wake(context: ?*anyopaque) bool {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            _ = self.wakes.fetchAdd(1, .release);
-            return true;
-        }
-        fn query(context: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            _ = self.queries.fetchAdd(1, .release);
-            return error.CatalogUnavailable;
-        }
-    };
-    const Blocker = struct {
-        harness: *Harness,
-        entered: std.atomic.Value(bool) = .init(false),
-        released: std.atomic.Value(bool) = .init(false),
-        fn execute(context: *anyopaque) void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.entered.store(true, .release);
-            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
-            _ = Harness.wake(self.harness);
-        }
-        fn cancel(_: *anyopaque) void {}
-        fn job(self: *@This()) executor_impl.Job {
-            return .{ .identity = self, .context = self, .execute_fn = execute, .cancel_fn = cancel };
-        }
-    };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-    var store: @import("metawork_product_skill").sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    try store.commit(.{});
-    var harness: Harness = .{};
-    var first: Blocker = .{ .harness = &harness };
-    var second: Blocker = .{ .harness = &harness };
-    var limits = testLimits();
-    limits.worker_count = 1;
-    limits.queue_capacity = 1;
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{
-        .directories = .{ .canonical_user_home = home },
-        .change_notifier = .{ .context = &harness, .wake = Harness.wake },
-        .skill_sources = .{ .file_store = &store, .restored = .read_failed },
-    });
-    defer {
-        first.released.store(true, .release);
-        second.released.store(true, .release);
-        control.deinit();
-    }
-    control.skill.ports.catalog.context = &harness;
-    control.skill.ports.catalog.query_fn = Harness.query;
-    try control.executor.enqueue(first.job());
-    while (!first.entered.load(.acquire)) std.Thread.yield() catch {};
-    try control.executor.enqueue(second.job());
-    const recovered = control.recoverSkillSourceSettings(.reread, control.skill.sourceSettings().recovery_token.?);
-    try std.testing.expect(recovered.applied);
-    try std.testing.expect(control.skill.personalSourceDiscovery().?.checking);
-    try std.testing.expectEqual(@as(usize, 0), harness.queries.load(.acquire));
-    const wakes = harness.wakes.load(.acquire);
-    first.released.store(true, .release);
-    while (!second.entered.load(.acquire)) std.Thread.yield() catch {};
-    try std.testing.expect(harness.wakes.load(.acquire) > wakes);
-    control.syncLifecycle();
-    second.released.store(true, .release);
-    while (harness.wakes.load(.acquire) < wakes + 3) std.Thread.yield() catch {};
-    control.syncLifecycle();
-    try std.testing.expectEqual(@as(usize, 1), harness.queries.load(.acquire));
-    try std.testing.expect(!control.skill.personalSourceDiscovery().?.checking);
-    // A non-QueueFull query failure is not retried on unrelated future wakes.
-    control.syncLifecycle();
-    try std.testing.expectEqual(@as(usize, 1), harness.queries.load(.acquire));
-}
-
 fn testTaskModelSelectionInput(
     control: *Runtime,
     expected_revision: u64,
@@ -11680,16 +11579,12 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
 
 fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: Configuration) !void {
     test_agent_runtime.io = std.testing.io;
-    // This fixture models a known default source configuration. Source-store
-    // recovery tests supply their own Runtime and explicit restore evidence.
-    var fixture_configuration = configuration;
-    fixture_configuration.skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } };
     control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         limits,
-        fixture_configuration,
+        configuration,
     );
     try installTestExecution(control);
     var task_execution = try TestSupport.cloneFixtureExecution(control, control.allocator);
@@ -22541,7 +22436,6 @@ test "Outputs persist through real history restore and sanitized locators lose f
     }
     var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
         .task_persistence = history.capability(storage[0..history.len]),
-        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
     });
     defer restored.deinit();
     const run = &restored.task_runtime.find(3).?.durable.runs[0].?;

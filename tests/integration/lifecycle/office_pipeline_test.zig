@@ -486,7 +486,6 @@ test "Skill resource context reads a managed import through tool and typed input
         }.now;
         configuration.skill_management = .{ .file_store = &store, .staging_root = stage };
         configuration.skill_enablement = .{ .file_store = &enablement };
-        configuration.skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } };
         var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
             .worker_count = 1,
             .queue_capacity = 4,

@@ -13,10 +13,10 @@ pub const SourceRoots = struct {
     builtin_root: ?[]const u8 = null,
     builtin_lifetime: ?agent.CatalogSourceLifetime = null,
     context: ?*anyopaque = null,
-    discover_fn: *const fn (?*anyopaque, std.Io, std.mem.Allocator, []const u8, ?[]const u8, sources.Selection) anyerror!sources.Discovery = discover,
+    discover_fn: *const fn (?*anyopaque, std.Io, std.mem.Allocator, []const u8, ?[]const u8) anyerror!sources.Discovery = discover,
 
-    fn discover(_: ?*anyopaque, io: std.Io, allocator: std.mem.Allocator, home: []const u8, workspace: ?[]const u8, selection: sources.Selection) anyerror!sources.Discovery {
-        return sources.discover(io, allocator, home, workspace, selection);
+    fn discover(_: ?*anyopaque, io: std.Io, allocator: std.mem.Allocator, home: []const u8, workspace: ?[]const u8) anyerror!sources.Discovery {
+        return sources.discover(io, allocator, home, workspace);
     }
 };
 

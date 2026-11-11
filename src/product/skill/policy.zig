@@ -27,11 +27,7 @@ fn sourceOrigin(purpose: QueryPurpose, id: []const u8, scope: agent.CatalogSourc
         if (scope != known.scope() or (purpose == .management and known == .user_default)) return null;
         return .{ .ecosystem = .agents, .scope = if (purpose == .management or scope == .user) .personal else .project };
     }
-    const compatibility = sources.definition(sources.findId(id) orelse return null);
-    if (purpose == .management) {
-        if (compatibility.scope != .user or scope != .workspace) return null;
-    } else if (scope != compatibility.scope) return null;
-    return .{ .ecosystem = compatibility.ecosystem, .scope = if (compatibility.scope == .user) .personal else .project };
+    return null;
 }
 
 /// The query owner supplies the known default source for its exact managed
@@ -256,17 +252,9 @@ test "managed contribution correlation requires known provenance rather than inv
     skill.source_scope = .user;
     try std.testing.expectEqual(ContributionMatch.matched, matchManagedContribution(.workspace, .user_default, "review", skill));
     try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .workspace_default, "review", skill));
-    for (sources.definitions) |source| {
-        skill.source_instance_id = source.source_instance_id;
-        skill.source_scope = source.scope;
-        try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .user_default, "review", skill));
-        try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .workspace_default, "review", skill));
-        skill.source_scope = .workspace;
-        if (source.scope == .user) {
-            try std.testing.expectEqual(Origin{ .ecosystem = source.ecosystem, .scope = .personal }, origin(.management, skill).?);
-            try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.management, .workspace_default, "review", skill));
-        } else try std.testing.expect(origin(.management, skill) == null);
-    }
+    skill.source_instance_id = "compat.claude.user";
+    try std.testing.expect(origin(.workspace, skill) == null);
+    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace, .user_default, "review", skill));
     skill.source_instance_id = "unrecognized.source";
     try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace, .workspace_default, "review", skill));
     skill.source_instance_id = "agents.workspace.default";
@@ -389,19 +377,15 @@ test "catalog compilation applies user and Workspace enablement policy" {
 /// when the resolved winner came from workspace data.
 pub fn restrictToPersonalSources(snapshot: *catalog.Snapshot) void {
     for (snapshot.skills) |*skill| {
-        skill.enabled = skill.enabled and restoreSourceAllowed(skill.*, .{ .values = @splat(true) }, true);
+        skill.enabled = skill.enabled and restoreSourceAllowed(skill.*, true);
     }
 }
 
 /// A pinned winner keeps its original concrete ID and content. Current source
-/// switches can withdraw that authority; a newly resolved winner cannot add it.
-pub fn restoreSourceAllowed(skill: catalog.SkillProjection, selection: sources.Selection, personal_only: bool) bool {
+/// restrictions can withdraw that authority; a newly resolved winner cannot add it.
+pub fn restoreSourceAllowed(skill: catalog.SkillProjection, personal_only: bool) bool {
     if (!std.mem.eql(u8, skill.provider_id, "agents.directory")) return false;
     if (personal_only and skill.source_scope != .user) return false;
-    if (sources.findId(skill.source_instance_id)) |id| {
-        const definition = sources.definition(id);
-        return definition.scope == skill.source_scope and selection.enabled(id);
-    }
     if (std.mem.eql(u8, skill.source_instance_id, "agents.user.default") or
         std.mem.eql(u8, skill.source_instance_id, sources.builtin_source_instance_id)) return skill.source_scope == .user;
     return std.mem.eql(u8, skill.source_instance_id, "agents.workspace.default") and skill.source_scope == .workspace;
@@ -428,7 +412,7 @@ test "Automatic policy grants only eligible resolved personal winners" {
     skills[2].enabled = false;
     skills[3].source_instance_id = "unknown.user";
     skills[4].provider_id = "unknown.provider";
-    skills[5].source_instance_id = sources.definition(.codex_user).source_instance_id;
+    skills[5].source_instance_id = "compat.codex.user";
     var snapshot: catalog.Snapshot = .{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .revision = "revision",
@@ -441,7 +425,6 @@ test "Automatic policy grants only eligible resolved personal winners" {
     defer snapshot.arena.deinit();
     restrictToPersonalSources(&snapshot);
     try std.testing.expect(skills[0].enabled);
-    for (skills[1..5]) |skill| try std.testing.expect(!skill.enabled);
-    try std.testing.expect(skills[5].enabled);
+    for (skills[1..]) |skill| try std.testing.expect(!skill.enabled);
     try std.testing.expectEqualStrings("agents.workspace.default", skills[1].source_instance_id);
 }

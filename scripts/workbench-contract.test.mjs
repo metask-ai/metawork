@@ -25,7 +25,6 @@ import {
   decodeSkillExportResult,
   decodeSkillImportPreview,
   decodeSkillMutationResult,
-  decodeSkillSourceSettingsResult,
   decodeMcpMutationResult,
   decodeMcpInstallation,
   decodeMcpCreateResult,
@@ -351,76 +350,10 @@ test("Skill recovery state matches the Host fixture and enforces Retry authority
   }
 });
 
-test("Skill source settings preserve unknown oversized formats without reset authority", () => {
-  for (const health of [
-    "too_large",
-    "unsupported_schema",
-    "read_failed",
-    "outcome_unknown",
-    "corrupt",
-    "missing",
-  ]) {
-    const candidate = clone(fixture);
-    const settings = candidate.skillManagement.sourceSettings;
-    settings.health = health;
-    settings.revision = null;
-    settings.entries.forEach((entry) => {
-      entry.enabled = null;
-      entry.canSetEnabled = false;
-    });
-    settings.recovery = {
-      canReread: true,
-      canReset: health === "corrupt" || health === "missing",
-      token: "18446744073709551615",
-    };
-    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
-    if (health !== "corrupt" && health !== "missing") {
-      settings.recovery.canReset = true;
-      assert.throws(
-        () => decodeWorkbenchSnapshot(candidate),
-        /source recovery authority/,
-      );
-    }
-  }
-  for (const mutate of [
-    (settings) => {
-      settings.entries.pop();
-    },
-    (settings) => {
-      settings.entries[1] = clone(settings.entries[0]);
-    },
-    (settings) => {
-      settings.entries[0].sourceId = "agents.user.default";
-    },
-    (settings) => {
-      settings.entries[0].path = "/tmp/skills";
-    },
-    (settings) => {
-      settings.entries[0].enabled = null;
-    },
-    (settings) => {
-      settings.revision = 1;
-    },
-    (settings) => {
-      settings.recovery = { canReread: true, canReset: false, token: null };
-    },
-  ]) {
-    const candidate = clone(fixture);
-    mutate(candidate.skillManagement.sourceSettings);
-    assert.throws(() => decodeWorkbenchSnapshot(candidate));
-  }
-});
-
 test("Skill discovery is scoped root evidence, separate from shared Task catalog", () => {
   const candidate = clone(fixture);
-  const ids = candidate.skillManagement.sourceSettings.entries.map(
-    (entry) => entry.sourceId,
-  );
   candidate.skillManagement.personalSourceDiscovery = [
     { sourceId: "agents.user.default", state: "missing", reason: null },
-    ...ids
-      .filter((id) => id.endsWith(".user"))
-      .map((sourceId) => ({ sourceId, state: "disabled", reason: null })),
   ];
   candidate.workspaces[0].skillSourceDiscovery = [
     { sourceId: "agents.user.default", state: "checked", reason: null },
@@ -429,7 +362,6 @@ test("Skill discovery is scoped root evidence, separate from shared Task catalog
       state: "error",
       reason: "unsupported_entry",
     },
-    ...ids.map((sourceId) => ({ sourceId, state: "disabled", reason: null })),
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
   assert.equal(candidate.tasks[0].skillCatalog.sourceDiscovery, undefined);
@@ -478,40 +410,6 @@ test("Skill discovery is scoped root evidence, separate from shared Task catalog
     mutate(next);
     assert.throws(() => decodeWorkbenchSnapshot(next));
   }
-});
-
-test("Skill source results use bounded typed rejections and lossless u64 revisions", () => {
-  for (const reason of [
-    "stale_revision",
-    "busy",
-    "source_settings_unavailable",
-    "write_failed",
-    "persistence_outcome_unknown",
-    "stale_recovery_token",
-    "recovery_not_allowed",
-    "read_failed",
-    "revision_exhausted",
-    "shutting_down",
-  ]) {
-    const result = { applied: false, revision: null, reason };
-    assert.deepEqual(decodeSkillSourceSettingsResult(result), result);
-  }
-  assert.deepEqual(
-    decodeSkillSourceSettingsResult({
-      applied: true,
-      revision: "18446744073709551615",
-      reason: null,
-    }),
-    { applied: true, revision: "18446744073709551615", reason: null },
-  );
-  for (const result of [
-    { applied: true, revision: null, reason: null },
-    { applied: true, revision: "1", reason: "busy" },
-    { applied: false, revision: "1", reason: "busy" },
-    { applied: false, revision: null, reason: "arbitrary error" },
-    { applied: true, revision: "01", reason: null },
-  ])
-    assert.throws(() => decodeSkillSourceSettingsResult(result));
 });
 
 test("Run elapsed time is nullable, bounded, and frozen for terminal history", () => {

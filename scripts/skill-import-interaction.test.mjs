@@ -159,9 +159,6 @@ async function fixture(ctx, configure = () => {}) {
     ),
   );
   snapshot.skillManagement.availability = "ready";
-  snapshot.skillManagement.sourceSettings.entries.forEach((entry) => {
-    entry.canSetEnabled = true;
-  });
   snapshot.skillManagement.assets = [];
   snapshot.skillCatalog = {
     availability: "degraded",
@@ -182,9 +179,7 @@ async function fixture(ctx, configure = () => {}) {
     epoch: "8",
     displayName: "Project B",
   });
-  const writes = [],
-    recoveries = [],
-    refreshes = [];
+  const refreshes = [];
   configure(snapshot);
   for (const [name, fn] of Object.entries({
     available: () => true,
@@ -196,10 +191,6 @@ async function fixture(ctx, configure = () => {}) {
     disconnect: async () => {},
     ping: async () => {},
     fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
-    setSkillSourceEnabled: (...args) =>
-      new Promise((resolve, reject) => writes.push({ args, resolve, reject })),
-    recoverSkillSourceSettings: (...args) =>
-      new Promise((resolve) => recoveries.push({ args, resolve })),
     refreshSkillCatalog: () =>
       new Promise((resolve) => refreshes.push({ args: ["personal"], resolve })),
     refreshWorkspaceSkillCatalog: (...args) =>
@@ -223,222 +214,11 @@ async function fixture(ctx, configure = () => {}) {
     await screen.findByRole("button", { name: "Skills", exact: true }),
   );
   await screen.findByRole("heading", { name: "Skills", exact: true });
-  return { snapshot, writes, recoveries, refreshes };
+  return { snapshot, refreshes };
 }
 
-test("Inline brand controls retain the App mutation latch across navigation and show only committed selections", async (ctx) => {
-  const { snapshot, writes } = await fixture(ctx);
-  const user = userEvent.setup({ document });
-  assert.equal(
-    screen.queryByRole("button", { name: "Compatible sources" }),
-    null,
-  );
-  assert.equal(screen.queryByRole("dialog"), null);
-  let checkboxes = screen.getAllByRole("checkbox");
-  assert.equal(checkboxes.length, 2);
-  await user.click(checkboxes[0]);
-  assert.deepEqual(writes[0].args, ["claude", true, "1"]);
-  assert.equal(checkboxes[0].getAttribute("aria-checked"), "false");
-  assert.ok(
-    checkboxes.every((entry) => entry.getAttribute("aria-disabled") === "true"),
-  );
-  await user.click(screen.getByRole("button", { name: "MCP", exact: true }));
-  await user.click(screen.getByRole("button", { name: "Skills", exact: true }));
-  checkboxes = screen.getAllByRole("checkbox");
-  await user.click(checkboxes[1]);
-  assert.equal(writes.length, 1);
-  snapshot.skillManagement.sourceSettings.revision = "2";
-  snapshot.skillManagement.sourceSettings.entries[0].enabled = true;
-  snapshot.skillManagement.sourceSettings.entries[1].enabled = true;
-  snapshot.revision = "50";
-  await act(async () =>
-    writes[0].resolve({ applied: true, revision: "2", reason: null }),
-  );
-  await waitFor(() =>
-    assert.equal(
-      screen.getAllByRole("checkbox")[0].getAttribute("aria-checked"),
-      "true",
-    ),
-  );
-  await user.click(screen.getAllByRole("checkbox")[1]);
-  assert.deepEqual(writes[1].args, ["codex", true, "2"]);
-  await act(async () =>
-    writes[1].resolve({
-      applied: false,
-      revision: null,
-      reason: "stale_revision",
-    }),
-  );
-  await screen.findByText(/Settings changed elsewhere/);
-  assert.equal(writes.length, 2);
-  assert.equal(
-    screen.getAllByRole("checkbox")[1].getAttribute("aria-checked"),
-    "false",
-  );
-});
-
-test("committed source settings with a failed read report only the connection problem", async (ctx) => {
-  const { writes } = await fixture(ctx);
-  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
-    throw new Error("source-read-unavailable");
-  });
-  fireEvent.click(screen.getAllByRole("checkbox")[0]);
-  await act(async () =>
-    writes[0].resolve({ applied: true, revision: "2", reason: null }),
-  );
-  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
-    timeout: 3500,
-  });
-  assert.ok(
-    document.querySelector(".skill-source-controls .skill-enablement-error") ===
-      null,
-  );
-  assert.equal(writes.length, 1);
-});
-
-test("security refresh retains the source write latch and its failure", async (ctx) => {
-  const { snapshot, writes, refreshes } = await fixture(ctx);
-  fireEvent.click(screen.getAllByRole("checkbox")[0]);
-  snapshot.securityEpoch = "2";
-  snapshot.revision = "60";
-  fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
-  await act(async () => refreshes[0].resolve({ accepted: true, reason: null }));
-  await waitFor(() => assert.ok(screen.getAllByRole("checkbox").length > 1));
-  assert.equal(
-    screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
-    "true",
-  );
-  fireEvent.click(screen.getAllByRole("checkbox")[1]);
-  assert.equal(writes.length, 1);
-  await act(async () =>
-    writes[0].resolve({
-      applied: false,
-      revision: null,
-      reason: "write_failed",
-    }),
-  );
-  await waitFor(() =>
-    assert.ok(
-      document.querySelector(".skill-source-controls .skill-enablement-error"),
-    ),
-  );
-  assert.notEqual(
-    screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
-    "true",
-  );
-});
-
-test("Unknown and oversized settings stay indeterminate and cannot be reset", async (ctx) => {
-  const { snapshot, writes, recoveries } = await fixture(ctx);
-  // First request returns an uncertain outcome and a new authoritative snapshot.
-  fireEvent.click(screen.getAllByRole("checkbox")[0]);
-  Object.assign(snapshot.skillManagement.sourceSettings, {
-    revision: null,
-    health: "too_large",
-    entries: snapshot.skillManagement.sourceSettings.entries.map((entry) => ({
-      ...entry,
-      enabled: null,
-      canSetEnabled: false,
-    })),
-    recovery: { canReread: true, canReset: false, token: "7" },
-  });
-  snapshot.revision = "51";
-  await act(async () => writes[0].reject(new Error("timeout")));
-  await screen.findByText(/Settings exceed the read limit/);
-  assert.ok(
-    screen
-      .getAllByRole("checkbox")
-      .every(
-        (entry) =>
-          entry.getAttribute("aria-disabled") === "true" &&
-          entry.getAttribute("aria-checked") === "mixed",
-      ),
-  );
-  assert.equal(
-    screen.queryByRole("button", { name: "Turn off all compatible sources" }),
-    null,
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Reread settings" }));
-  assert.deepEqual(recoveries[0].args, ["reread", "7"]);
-  await act(async () =>
-    recoveries[0].resolve({
-      applied: false,
-      revision: null,
-      reason: "recovery_not_allowed",
-    }),
-  );
-  assert.equal(writes.length, 1);
-});
-
-test("Partial persisted selections remain visible until an explicit atomic brand update succeeds", async (ctx) => {
-  const { snapshot, writes } = await fixture(ctx, (value) => {
-    value.skillManagement.sourceSettings.entries[0].enabled = true;
-  });
-  const user = userEvent.setup({ document });
-  const claude = screen.getByRole("checkbox", { name: /^Claude/ });
-  assert.equal(claude.getAttribute("aria-checked"), "mixed");
-  assert.ok(screen.getByText("Partially enabled"));
-  assert.equal(writes.length, 0);
-  claude.focus();
-  await user.keyboard(" ");
-  assert.deepEqual(writes[0].args, ["claude", true, "1"]);
-  await act(async () =>
-    writes[0].resolve({
-      applied: false,
-      revision: null,
-      reason: "write_failed",
-    }),
-  );
-  await screen.findByText(/previous settings remain valid/);
-  assert.equal(claude.getAttribute("aria-checked"), "mixed");
-  await user.click(claude);
-  snapshot.skillManagement.sourceSettings.entries[1].enabled = true;
-  snapshot.skillManagement.sourceSettings.revision = "2";
-  snapshot.revision = "52";
-  await act(async () =>
-    writes[1].resolve({ applied: true, revision: "2", reason: null }),
-  );
-  await waitFor(() =>
-    assert.equal(claude.getAttribute("aria-checked"), "true"),
-  );
-  assert.equal(screen.queryByText("Partially enabled"), null);
-  await user.click(claude);
-  assert.deepEqual(writes[2].args, ["claude", false, "2"]);
-  snapshot.skillManagement.sourceSettings.entries[0].enabled = false;
-  snapshot.skillManagement.sourceSettings.entries[1].enabled = false;
-  snapshot.skillManagement.sourceSettings.revision = "3";
-  snapshot.revision = "53";
-  await act(async () =>
-    writes[2].resolve({ applied: true, revision: "3", reason: null }),
-  );
-  await waitFor(() =>
-    assert.equal(claude.getAttribute("aria-checked"), "false"),
-  );
-});
-
-test("Only real directory errors are shown; a missing root does not turn off the brand", async (ctx) => {
-  const { writes } = await fixture(ctx, (snapshot) => {
-    for (const entry of snapshot.skillManagement.sourceSettings.entries)
-      entry.enabled = true;
-    snapshot.skillManagement.personalSourceDiscovery = [
-      { sourceId: "agents.user.default", state: "checked", reason: null },
-      { sourceId: "compat.claude.user", state: "missing", reason: null },
-      { sourceId: "compat.codex.user", state: "error", reason: "unreadable" },
-    ];
-  });
-  assert.equal(
-    screen
-      .getByRole("checkbox", { name: "Claude" })
-      .getAttribute("aria-checked"),
-    "true",
-  );
-  assert.ok(screen.getByText(/Codex · Personal directory.*Unreadable/));
-  assert.equal(screen.queryByText(/Root checked|Directory missing/), null);
-  assert.equal(writes.length, 0);
-});
-
-test("Catalog issues survive zero assets and search; refreshes use the selected scope and epoch", async (ctx) => {
-  const { refreshes, snapshot } = await fixture(ctx);
+test("Catalog issues survive zero assets and search; page refresh uses the personal catalog", async (ctx) => {
+  const { refreshes } = await fixture(ctx);
   const user = userEvent.setup({ document });
   assert.ok(screen.getByRole("region", { name: "Catalog issues" }));
   const search = screen.getByRole("button", { name: "Search skills" });
@@ -455,33 +235,32 @@ test("Catalog issues survive zero assets and search; refreshes use the selected 
   assert.equal(search.dataset.active, "true");
   fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
   assert.deepEqual(refreshes[0].args, ["personal"]);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Project settings", exact: true }),
-  );
-  const refresh = screen.getByRole("button", { name: "Refresh", exact: true });
-  assert.equal(refresh.disabled, false);
-  fireEvent.click(refresh);
-  assert.deepEqual(refreshes[1].args, [
-    snapshot.workspaces[0].id,
-    snapshot.workspaces[0].epoch,
-  ]);
-  await user.click(
-    screen.getByRole("combobox", { name: "Project to configure" }),
-  );
-  await user.click(await screen.findByRole("option", { name: "Project B" }));
+  assert.equal(refreshes.length, 1);
   await act(async () =>
-    refreshes[1].resolve({ accepted: false, reason: "workspace_changed" }),
+    refreshes[0].resolve({ accepted: false, reason: "catalog_unavailable" }),
   );
-  assert.equal(
-    screen.queryByText("The Skill catalog could not be refreshed."),
-    null,
+  assert.ok(
+    await screen.findByText("The Skill catalog could not be refreshed."),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
-  assert.deepEqual(refreshes[2].args, ["99", "8"]);
-  await act(async () => {
-    refreshes[0].resolve({ accepted: true, reason: null });
-    refreshes[2].resolve({ accepted: true, reason: null });
+});
+
+test("The standard personal directory still reports a root error after removing compatibility controls", async (ctx) => {
+  await fixture(ctx, (snapshot) => {
+    snapshot.skillManagement.personalSourceDiscovery = [
+      {
+        sourceId: "agents.user.default",
+        state: "error",
+        reason: "unsupported_entry",
+      },
+    ];
   });
+  assert.ok(
+    screen.getByText(
+      "Could not check the personal Skill directory: unsupported directory entry.",
+    ),
+  );
+  assert.equal(screen.queryByRole("checkbox", { name: /Claude|Codex/ }), null);
+  assert.ok(screen.getByRole("button", { name: "Import", exact: true }));
 });
 
 function importPreparation(overrides = {}) {
@@ -493,7 +272,7 @@ function importPreparation(overrides = {}) {
     sourceKind: "local_directory",
     effect: "update",
     installId: "00112233445566778899aabbccddeeff",
-    scope: { kind: "project", workspaceId: "1", workspaceEpoch: "1" },
+    scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
     invocationName: "demo",
     displayName: "Demo Skill",
     description: "Check resources.",
@@ -531,7 +310,7 @@ async function chooseImportMenu(
   );
 }
 
-test("Import uses the page project, retains busy confirmation and shows Host verification after one acceptance", async (ctx) => {
+test("Import uses the personal scope, retains busy confirmation and shows Host verification after one acceptance", async (ctx) => {
   const choices = [],
     commits = [];
   const prepared = importPreparation();
@@ -553,19 +332,17 @@ test("Import uses the page project, retains busy confirmation and shows Host ver
   );
   const { snapshot } = await fixture(ctx);
   const user = userEvent.setup({ document });
-  await user.click(
-    screen.getByRole("button", { name: "Project settings", exact: true }),
-  );
   const trigger = screen.getByRole("button", {
     name: "Import",
     exact: true,
   });
   await chooseImportMenu(user);
   await screen.findByRole("dialog");
-  assert.deepEqual(choices, [
-    ["directory", { kind: "project", workspaceId: "1", workspaceEpoch: "1" }],
-  ]);
+  assert.deepEqual(choices, [["directory", { kind: "personal" }]]);
   assert.ok(screen.getByText(/Read note.txt/));
+  assert.ok(screen.getByText(/A Skill named “demo” already exists/));
+  assert.equal(commits.length, 0);
+  assert.equal(screen.queryByRole("combobox", { name: "Install for" }), null);
   assert.equal(screen.queryByText("Replace folder"), null);
   await user.click(
     screen.getByRole("button", { name: "Update Skill", exact: true }),
@@ -608,16 +385,10 @@ test("Import uses the page project, retains busy confirmation and shows Host ver
   assert.equal(commits.length, 2);
 });
 
-test("Changing import scope obtains a new revision and explicit replacement confirmation", async (ctx) => {
-  const changes = [],
-    commits = [];
+test("A same-name unmanaged folder requires explicit replacement confirmation", async (ctx) => {
+  const commits = [];
   ctx.mock.method(BridgeClient.prototype, "chooseSkillImport", async () =>
-    importPreparation(),
-  );
-  ctx.mock.method(BridgeClient.prototype, "prepareSkillImport", (...args) =>
-    args[2] === null
-      ? Promise.resolve({ status: "cancelled" })
-      : new Promise((resolve) => changes.push({ args, resolve })),
+    importPreparation({ effect: "replace_directory", installId: null }),
   );
   ctx.mock.method(BridgeClient.prototype, "installSkill", async (...args) => {
     commits.push(args);
@@ -630,41 +401,60 @@ test("Changing import scope obtains a new revision and explicit replacement conf
   });
   await fixture(ctx);
   const user = userEvent.setup({ document });
-  await user.click(
-    screen.getByRole("button", { name: "Project settings", exact: true }),
-  );
   await chooseImportMenu(user);
-  await user.click(
-    await screen.findByRole("combobox", { name: "Install for" }),
+  await screen.findByRole("dialog");
+  assert.ok(screen.getByText(/A folder named “demo” already exists/));
+  assert.ok(
+    screen.getByText(/original copy is retained until verification finishes/),
   );
-  await user.click(
-    await screen.findByRole("option", { name: "User defaults", exact: true }),
-  );
-  assert.deepEqual(changes[0].args, ["7", "2", { kind: "personal" }]);
-  assert.equal(screen.getByRole("button", { name: /Working/ }).disabled, true);
-  await act(async () =>
-    changes[0].resolve(
-      importPreparation({
-        preparationRevision: "3",
-        scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
-        effect: "replace_directory",
-        installId: null,
-      }),
-    ),
-  );
-  await user.click(
-    await screen.findByRole("button", { name: "Replace folder", exact: true }),
-  );
-  assert.deepEqual(commits, [["7", "3", "replace_directory"]]);
-  await screen.findByText(/target has changed/);
   assert.equal(
-    screen.queryByRole("button", { name: "Replace folder", exact: true }),
+    screen.queryByRole("button", { name: "Update Skill", exact: true }),
     null,
   );
-  assert.equal(commits.length, 1);
+  assert.equal(commits.length, 0);
+  await user.click(
+    screen.getByRole("button", { name: "Replace folder", exact: true }),
+  );
+  assert.deepEqual(commits, [["7", "2", "replace_directory"]]);
+  assert.ok(
+    await screen.findByText(/The target has changed\. Choose the source again/),
+  );
+  await waitFor(() =>
+    assert.equal(
+      screen.queryByRole("button", { name: "Replace folder", exact: true }),
+      null,
+    ),
+  );
 });
 
-test("Late picker results are discarded after scope navigation", async (ctx) => {
+test("A project import preview is discarded without offering confirmation", async (ctx) => {
+  const discards = [];
+  ctx.mock.method(BridgeClient.prototype, "chooseSkillImport", async () =>
+    importPreparation({
+      scope: { kind: "project", workspaceId: "1", workspaceEpoch: "1" },
+    }),
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "prepareSkillImport",
+    async (...args) => {
+      discards.push(args);
+      return { status: "cancelled" };
+    },
+  );
+  await fixture(ctx);
+  const user = userEvent.setup({ document });
+  await chooseImportMenu(user);
+  const drawer = await screen.findByRole("dialog");
+  assert.equal(
+    screen.queryByRole("button", { name: "Update Skill", exact: true }),
+    null,
+  );
+  assert.ok(drawer.querySelector('[role="alert"]'));
+  assert.deepEqual(discards, [["7", "2", null]]);
+});
+
+test("Late picker results are discarded after leaving the Skills page", async (ctx) => {
   const choices = [],
     discards = [];
   ctx.mock.method(
@@ -683,9 +473,7 @@ test("Late picker results are discarded after scope navigation", async (ctx) => 
   await fixture(ctx);
   const user = userEvent.setup({ document });
   await chooseImportMenu(user);
-  await user.click(
-    screen.getByRole("button", { name: "Project settings", exact: true }),
-  );
+  await user.click(screen.getByRole("button", { name: "New task" }));
   await act(async () =>
     choices[0].resolve(
       importPreparation({
