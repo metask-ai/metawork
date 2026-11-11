@@ -59,6 +59,7 @@ const mp4 = mode.startsWith("video")
 let active = 0;
 let imageCalls = 0;
 let dialogueCalls = 0;
+let videoPolls = 0;
 const pending = [];
 function image(response) {
   response.writeHead(200, { "content-type": "application/json" });
@@ -110,6 +111,19 @@ const server = createServer(async (request, response) => {
         throw Error("video read method");
       if (request.url === `/v1/videos/${id}`) {
         trace({ kind: "video_poll" });
+        videoPolls++;
+        if (mode === "video-poll-connection" && videoPolls === 1)
+          return request.socket.destroy();
+        if (mode === "video-poll-retry") {
+          if (videoPolls <= 2) {
+            response.writeHead(videoPolls === 1 ? 429 : 502);
+            return response.end();
+          }
+        }
+        if (mode === "video-poll-backoff") {
+          response.writeHead(429);
+          return response.end();
+        }
         response.writeHead(200, { "content-type": "application/json" });
         return response.end(
           JSON.stringify({
@@ -122,6 +136,10 @@ const server = createServer(async (request, response) => {
       if (request.url !== `/v1/videos/${id}/content`)
         throw Error("video read path");
       trace({ kind: "video_download" });
+      if (mode === "video-download-failed") {
+        response.writeHead(502);
+        return response.end();
+      }
       if (mode === "video-download-hold") {
         response.writeHead(200, { "content-type": "video/mp4" });
         response.write(mp4);

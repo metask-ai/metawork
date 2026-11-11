@@ -5,7 +5,7 @@ const http = @import("agent_http_transport");
 const images = @import("image_generation.zig");
 
 pub const name = "GenerateVideo";
-pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. The video appears in the conversation after a successful save. Call DeliverFile for this video only if the user explicitly requests a separate file delivery. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically retry.";
+pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. The video appears in the conversation after a successful save. Call DeliverFile for this video only if the user explicitly requests a separate file delivery. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically submit another generation after a failure.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested video."}},"required":["prompt"],"additionalProperties":false}
 ;
@@ -64,7 +64,7 @@ pub const Receipt = struct {
     }
 };
 
-pub const Failure = enum { invalid_arguments, unavailable, capacity, cancelled, outcome_unknown, provider_rejected, invalid_response, output_failed, cleanup_incomplete };
+pub const Failure = enum { invalid_arguments, unavailable, capacity, cancelled, outcome_unknown, provider_rejected, invalid_response, download_failed, output_failed, cleanup_incomplete };
 pub const Outcome = union(enum) { saved: Receipt, failed: Failure };
 
 const JsonText = struct {
@@ -108,6 +108,8 @@ pub fn result(buffer: []u8, outcome: Outcome) ![]const u8 {
 
 const max_id_bytes = 256;
 const max_json_bytes = 64 * 1024;
+const poll_interval_ns = 5 * std.time.ns_per_s;
+const max_poll_backoff_ns = 30 * std.time.ns_per_s;
 const TaskState = enum { pending, complete, failed };
 const Task = struct {
     id: [max_id_bytes]u8 = undefined,
@@ -161,10 +163,12 @@ fn request(input: Input, call: *images.Call, endpoint: []const u8, body: []const
     }, &call.cancellation, buffer);
 }
 
-fn waitForPoll(call: *images.Call) bool {
-    const end = std.Io.Timestamp.now(call.io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+fn waitForPoll(call: *images.Call, interval_ns: i96) bool {
+    const end = std.Io.Timestamp.now(call.io, .awake).nanoseconds + interval_ns;
     while (!call.cancellation.isRequested()) {
-        const remaining = end - std.Io.Timestamp.now(call.io, .awake).nanoseconds;
+        const now = std.Io.Timestamp.now(call.io, .awake).nanoseconds;
+        if (now >= call.deadline_ns) return false;
+        const remaining = @min(end, call.deadline_ns) - now;
         if (remaining <= 0) return true;
         std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromNanoseconds(@min(remaining, 50 * std.time.ns_per_ms)), .clock = .awake } }, call.io) catch return false;
     }
@@ -193,25 +197,41 @@ pub fn perform(allocator: std.mem.Allocator, input: Input, value: []const u8, ca
     var url_buffer: [2048 + 1 + max_id_bytes + "/content".len]u8 = undefined;
     const query_url = std.fmt.bufPrint(&url_buffer, "{s}/{s}", .{ input.endpoint, initial.idView() }) catch unreachable;
     var state = initial.state;
+    var interval_ns: i96 = poll_interval_ns;
     while (state == .pending) {
-        if (!waitForPoll(call)) return .{ .failed = .outcome_unknown };
-        const queried = request(input, call, query_url, &.{}, buffer, null) catch return .{ .failed = .outcome_unknown };
+        if (!waitForPoll(call, interval_ns)) return .{ .failed = .outcome_unknown };
+        const queried = request(input, call, query_url, &.{}, buffer, null) catch |err| switch (err) {
+            error.DnsFailed, error.ConnectFailed, error.TlsFailed, error.WriteFailed, error.ReadFailed => {
+                interval_ns = @min(interval_ns * 2, max_poll_backoff_ns);
+                continue;
+            },
+            else => return .{ .failed = .outcome_unknown },
+        };
+        if (queried.status == 429 or (queried.status >= 500 and queried.status <= 599)) {
+            interval_ns = @min(interval_ns * 2, max_poll_backoff_ns);
+            continue;
+        }
         if (queried.status != 200) return .{ .failed = .outcome_unknown };
         const task = Task.decode(allocator, queried.body) catch return .{ .failed = .outcome_unknown };
         if (!std.mem.eql(u8, initial.idView(), task.idView())) return .{ .failed = .outcome_unknown };
         state = task.state;
+        interval_ns = poll_interval_ns;
     }
     if (state == .failed) return .{ .failed = .provider_rejected };
     @memcpy(url_buffer[query_url.len..][0.."/content".len], "/content");
     var download: Download = .{ .output = input.output, .cancellation = &call.cancellation };
-    _ = request(input, call, url_buffer[0 .. query_url.len + "/content".len], &.{}, &.{}, .{ .context = &download, .receive_fn = Download.receive }) catch {};
+    // A cancellation can arrive after the output effect has published the file.
+    _ = request(input, call, url_buffer[0 .. query_url.len + "/content".len], &.{}, &.{}, .{ .context = &download, .receive_fn = Download.receive }) catch |err| {
+        if (err == error.Cancelled and download.outcome == .failed and download.outcome.failed == .download_failed)
+            return .{ .failed = .cancelled };
+    };
     return download.outcome;
 }
 
 const Download = struct {
     output: Output,
     cancellation: *const http.Cancellation,
-    outcome: Outcome = .{ .failed = .output_failed },
+    outcome: Outcome = .{ .failed = .download_failed },
 
     fn receive(context: *anyopaque, content_type: ?[]const u8, length: ?u64, reader: *std.Io.Reader) void {
         const self: *Download = @ptrCast(@alignCast(context));

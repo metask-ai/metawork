@@ -34,6 +34,8 @@ pub const Output = struct {
         if (std.Thread.getCurrentId() == self.main_thread_id) return .{ .failed = .unavailable };
         const receipt = self.save(reader, expected_bytes, cancellation) catch |err| return .{ .failed = switch (err) {
             error.CleanupIncomplete => .cleanup_incomplete,
+            error.Cancelled => .cancelled,
+            error.VideoReadFailed => if (cancellation.isRequested()) .cancelled else .download_failed,
             error.InvalidVideoSize => .invalid_response,
             else => .output_failed,
         } };
@@ -79,14 +81,15 @@ pub const Output = struct {
         var buffer: [64 * 1024]u8 = undefined;
         var size: u64 = 0;
         while (!cancellation.isRequested()) {
-            const count = try reader.readSliceShort(&buffer);
+            const count = reader.readSliceShort(&buffer) catch return error.VideoReadFailed;
             if (count == 0) break;
             size += count;
             if (size > agent.max_generated_video_bytes or (expected_bytes != null and size > expected_bytes.?)) return error.InvalidVideoSize;
             try file.writeStreamingAll(self.io, buffer[0..count]);
         }
         if (cancellation.isRequested()) return error.Cancelled;
-        if (size < 16 or (expected_bytes != null and size != expected_bytes.?)) return error.InvalidVideoSize;
+        if (expected_bytes) |expected| if (size < expected) return error.VideoReadFailed;
+        if (size < 16) return error.InvalidVideoSize;
         try file.sync(self.io);
         return size;
     }

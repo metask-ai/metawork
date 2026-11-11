@@ -1680,6 +1680,7 @@ test "InstallMcpServer restores genuine two-Host-tool checkpoints without restor
 const video_prompt = "Generate the fixture video.";
 const VideoGateway = struct {
     harness: *Harness,
+    fail_next_poll_tls: bool = false,
 
     fn transport(self: *VideoGateway) agent.CompletionTransport {
         return .{ .context = self, .perform_fn = send, .signal_cancellation_fn = signal };
@@ -1691,6 +1692,10 @@ const VideoGateway = struct {
         if (!std.mem.startsWith(u8, request.url, base)) return error.InvalidHttp;
         const suffix = request.url[base.len..];
         if (suffix.len != 0 and suffix[0] != '/') return error.InvalidHttp;
+        if (self.fail_next_poll_tls and request.method == .get and suffix.len != 0 and !std.mem.endsWith(u8, suffix, "/content")) {
+            self.fail_next_poll_tls = false;
+            return error.TlsFailed;
+        }
         const fixture = self.harness.fixture.endpoint;
         const origin = fixture[0 .. fixture.len - "/v1/images/generations".len];
         var url: [1024]u8 = undefined;
@@ -1779,9 +1784,10 @@ test "GenerateVideo canonical Core approves a saved MP4 and rejects denied or ab
 }
 
 test "GenerateVideo canonical Core cancels and joins HTTP on stop close and shutdown" {
-    for ([_]enum { stop, close, shutdown }{ .stop, .close, .shutdown }) |action| {
+    for ([_]enum { stop, close, shutdown, stop_backoff }{ .stop, .close, .shutdown, .stop_backoff }) |action| {
         var h: Harness = undefined;
-        try h.init("video-hold", .{});
+        const backoff = action == .stop_backoff;
+        try h.init(if (backoff) "video-poll-backoff" else "video-hold", .{});
         defer h.deinit();
         const session = try h.session(.full_access, false);
         var gateway: VideoGateway = .{ .harness = &h };
@@ -1794,7 +1800,7 @@ test "GenerateVideo canonical Core cancels and joins HTTP on stop close and shut
             thread.join();
             if (work.result) |*result| result.deinit();
         }
-        const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+        const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + (if (backoff) @as(i96, 10) else 5) * std.time.ns_per_s;
         while (std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds < deadline and !work.done.load(.acquire)) {
             const trace = h.trace() catch |err| {
                 if (err != error.FileNotFound) return err;
@@ -1802,11 +1808,11 @@ test "GenerateVideo canonical Core cancels and joins HTTP on stop close and shut
                 continue;
             };
             defer std.testing.allocator.free(trace);
-            if (count(trace, "video_create") == 1) break;
+            if (count(trace, if (backoff) "video_poll" else "video_create") == 1) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.TestUnexpectedResult;
         switch (action) {
-            .stop => _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel }),
+            .stop, .stop_backoff => _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel }),
             .close => try session.close(.session_close),
             .shutdown => try h.runtime.shutdown(),
         }
@@ -1816,8 +1822,66 @@ test "GenerateVideo canonical Core cancels and joins HTTP on stop close and shut
         try std.testing.expect(work.done.load(.acquire));
         try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
         try std.testing.expectError(error.FileNotFound, onlyVideoPath(&h));
+        if (backoff) {
+            const trace = try h.trace();
+            defer std.testing.allocator.free(trace);
+            try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+            try std.testing.expectEqual(@as(usize, 1), count(trace, "video_poll"));
+            try std.testing.expectEqual(@as(usize, 0), count(trace, "video_download"));
+        }
         try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
     }
+}
+
+fn expectVideoPollRecovery(mode: []const u8, polls: usize, fail_first_poll_tls: bool) !void {
+    var h: Harness = undefined;
+    try h.init(mode, .{});
+    defer h.deinit();
+    const session = try h.session(.full_access, false);
+    var gateway: VideoGateway = .{ .harness = &h, .fail_next_poll_tls = fail_first_poll_tls };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+    var run = try session.beginRun(try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port())));
+    defer run.deinit();
+    var terminal = run.execute();
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
+    try std.testing.expect(!gateway.fail_next_poll_tls);
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));
+    try std.testing.expectEqual(polls, count(trace, "video_poll"));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "video_download"));
+    const path = try onlyVideoPath(&h);
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, path));
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.video_results_outstanding.load(.acquire));
+}
+
+test "GenerateVideo retries HTTP 429 and 502 status queries without creating a second job" {
+    try expectVideoPollRecovery("video-poll-retry", 3, false);
+}
+
+test "GenerateVideo retries a disconnected status query without creating a second job" {
+    try expectVideoPollRecovery("video-poll-connection", 2, false);
+}
+
+test "GenerateVideo retries a TLS handshake failure during status polling" {
+    try expectVideoPollRecovery("video", 1, true);
+}
+
+test "GenerateVideo reports a failed content request as a download failure" {
+    var h: Harness = undefined;
+    try h.init("video-download-failed", .{});
+    defer h.deinit();
+    const session = try h.session(.default, false);
+    var gateway: VideoGateway = .{ .harness = &h };
+    var output = try initVideoOutput(&h);
+    defer output.deinit();
+    const id = try session.prepareRunWithTools(.{ .text = video_prompt }, null, null, null, gateway.input(output.port()));
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunPrepared(h.runtime, session, id, .allow_once, true));
+    try h.evidence(0, 0, "download_failed");
+    try std.testing.expectError(error.FileNotFound, onlyVideoPath(&h));
 }
 
 test "GenerateVideo canonical Core cannot submit a second request after an uncertain outcome" {

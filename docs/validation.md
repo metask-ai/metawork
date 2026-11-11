@@ -392,7 +392,7 @@ File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固
 
 ### GenerateVideo 验证
 
-`zig build test-generate-video` 使用当前 canonical AgentCore、普通 Runtime、本地对话 Provider 和 Metask 视频 HTTP fixture 验证 `GenerateVideo`。覆盖工具声明、当次审批、拒绝及无本 Run 输入时零执行、提交/查询/下载、MP4 原始字节与回执、结果未知后同 Run 的重复调用、Stop/关闭/shutdown 的 callback 收口，以及旧 Host Tool 集合 checkpoint 有或无 Write grant 的恢复。
+`zig build test-generate-video` 使用当前 canonical AgentCore、普通 Runtime、本地对话 Provider 和 Metask 视频 HTTP fixture 验证 `GenerateVideo`。覆盖工具声明、当次审批、拒绝及无本 Run 输入时零执行、提交/查询/下载、瞬时查询失败后的退避和单次创建、退避期间停止、下载与本地保存的失败分类、MP4 原始字节与回执、结果未知后同 Run 的重复调用、Stop/关闭/shutdown 的 callback 收口，以及旧 Host Tool 集合 checkpoint 有或无 Write grant 的恢复。
 
 同一入口通过真实 Account、Models、Application coordinator 和 Product Control 接纳交互 Run。确认生成成功后即可发布带锚点的可信视频引用，覆盖其历史持久化、独立的 `DeliverFile` 登记及执行资源释放。该入口纳入标准 Native graph。真实服务验收须使用实际 Metask 模型和账号授权，观察生成终态、`/content` 字节及生成引用。
 
