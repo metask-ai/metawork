@@ -121,7 +121,16 @@ export function AttachmentPreviewDialog({
     <Dialog.Root
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (open) return;
+        const opener = target.opener;
+        onClose();
+        // Base UI does not return focus after a backdrop press; the chip that
+        // opened the preview still owns it once the dialog has unmounted.
+        window.requestAnimationFrame(() => {
+          const active = document.activeElement;
+          if (opener?.isConnected && (!active || active === document.body))
+            opener.focus();
+        });
       }}
     >
       <Dialog.Portal>

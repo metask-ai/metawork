@@ -3,7 +3,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import { createServer } from "vite";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -40,6 +40,7 @@ Object.defineProperty(globalThis, "navigator", {
 
 const { cleanup, fireEvent, render, screen, waitFor } =
   await import("@testing-library/react");
+const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
@@ -177,6 +178,30 @@ test("an attachment that is no longer available offers no retry", async () => {
   assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
 });
 
+test("over-limit and restricted previews explain themselves without a retry", async () => {
+  for (const [preview, message] of [
+    [
+      { state: "unsupported", reason: "image_limit" },
+      "Image exceeds the preview file size or dimension limit.",
+    ],
+    [{ state: "restricted" }, "File preview is restricted"],
+  ]) {
+    const view = renderDialog({
+      target: { invalid: "attachment.preview.invalid_sent" },
+      load: () =>
+        Promise.resolve({
+          content: "",
+          truncated: false,
+          redacted: false,
+          ...preview,
+        }),
+    });
+    await waitFor(() => screen.getByText(message));
+    assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
+    view.unmount();
+  }
+});
+
 test("a draft attachment withdrawn while open is not requested", () => {
   let calls = 0;
   renderDialog({
@@ -194,14 +219,76 @@ test("a draft attachment withdrawn while open is not requested", () => {
   assert.equal(calls, 0);
 });
 
-test("Escape and the close button dismiss the preview without other effects", async () => {
-  let closed = 0;
-  renderDialog({
-    load: () => new Promise(() => {}),
-    onClose() {
-      closed += 1;
-    },
-  });
+function renderClosableDialog() {
+  const opener = document.createElement("button");
+  opener.textContent = "diagram.png";
+  const elsewhere = document.createElement("button");
+  elsewhere.textContent = "elsewhere";
+  document.body.append(opener, elsewhere);
+  // A mouse click need not focus the chip; closing still returns to it.
+  elsewhere.focus();
+  const closes = [];
+  function Owner() {
+    const [open, setOpen] = useState(true);
+    return createElement(AttachmentPreviewDialog, {
+      target: open
+        ? {
+            key: "draft:a",
+            name: "diagram.png",
+            detail: "PNG · 2 KB",
+            available: true,
+            invalid: "attachment.preview.invalid_draft",
+            opener,
+          }
+        : null,
+      load: () => new Promise(() => {}),
+      onClose() {
+        closes.push("closed");
+        setOpen(false);
+      },
+    });
+  }
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(Owner),
+    ),
+  );
+  assert.ok(screen.getByRole("dialog"));
+  return { opener, closes };
+}
+
+async function expectClosedOnChip({ opener, closes }) {
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  assert.deepEqual(closes, ["closed"]);
+  await waitFor(() => assert.equal(document.activeElement, opener));
+}
+
+test("the close button dismisses the preview and returns focus to its chip", async () => {
+  const opened = renderClosableDialog();
   fireEvent.click(screen.getByRole("button", { name: "Close image preview" }));
-  await waitFor(() => assert.equal(closed, 1));
+  await expectClosedOnChip(opened);
+});
+
+test("Escape dismisses the preview and returns focus to its chip", async () => {
+  const opened = renderClosableDialog();
+  fireEvent.keyDown(document.activeElement, { key: "Escape" });
+  await expectClosedOnChip(opened);
+});
+
+test("a backdrop click dismisses the preview and returns focus to its chip", async () => {
+  const opened = renderClosableDialog();
+  const backdrop = document.querySelector(
+    '[data-base-ui-portal] > [role="presentation"][class*="inset-0"]',
+  );
+  assert.ok(backdrop, "Foundation Dialog renders a scrim backdrop");
+  await userEvent.setup({ pointerEventsCheck: 0 }).click(backdrop);
+  await expectClosedOnChip(opened);
 });

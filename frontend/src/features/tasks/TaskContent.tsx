@@ -322,7 +322,8 @@ function TaskInput({
                       {
                         attachmentIndex: index,
                         displayName: attachment.displayName,
-                        detail: inputAttachmentDetail(attachment, t),
+                        // The preview subtitle is format and size, like drafts.
+                        detail: `${attachment.format.toUpperCase()} · ${formatAttachmentSize(attachment.sizeBytes)}`,
                       },
                       event.currentTarget,
                     )

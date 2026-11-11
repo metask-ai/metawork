@@ -5631,7 +5631,9 @@ export default function App() {
                     ? openConversationWorkspaceFile
                     : undefined
                 }
-                onPreviewRunAttachment={(preview, opener) =>
+                onPreviewRunAttachment={(preview, opener) => {
+                  // Keep the Run in the history window while it is previewed.
+                  retainTaskHistory(preview.taskId, preview.runId);
                   setAttachmentPreview({
                     source: "run",
                     taskId: preview.taskId,
@@ -5640,8 +5642,8 @@ export default function App() {
                     name: preview.displayName,
                     detail: preview.detail,
                     opener,
-                  })
-                }
+                  });
+                }}
                 loadFilePreview={loadFilePreview}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}

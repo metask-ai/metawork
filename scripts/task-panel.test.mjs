@@ -994,6 +994,65 @@ function taskContentElement(
   );
 }
 
+test("sent image chips request a preview titled by format and size", () => {
+  const current = run({
+    input: {
+      kind: "multimodal",
+      text: "Compare",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          displayName: "diagram.png",
+          sizeBytes: "2048",
+          redacted: false,
+          previewable: true,
+        },
+        {
+          kind: "image",
+          format: "webp",
+          displayName: "legacy.webp",
+          sizeBytes: "4096",
+          redacted: false,
+          previewable: false,
+        },
+      ],
+      redacted: false,
+    },
+  });
+  const value = task({ runs: [current] });
+  const requested = [];
+  render(
+    taskContentElement(value, "1", {
+      onPreviewRunAttachment(preview, opener) {
+        requested.push({ preview, opener: opener.tagName });
+      },
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Preview diagram.png",
+      description: "Image · PNG · 2 KB",
+    }),
+  );
+  assert.deepEqual(requested, [
+    {
+      preview: {
+        taskId: value.id,
+        runId: current.id,
+        attachmentIndex: 0,
+        displayName: "diagram.png",
+        detail: "PNG · 2 KB",
+      },
+      opener: "BUTTON",
+    },
+  ]);
+  assert.equal(
+    screen.queryByRole("button", { name: "Preview legacy.webp" }),
+    null,
+  );
+});
+
 test("Task supplements retain canonical Task and Run identity when tools were not recorded", () => {
   const current = run({ tools: [], recordingIncomplete: true });
   const value = task({ runs: [current] });
