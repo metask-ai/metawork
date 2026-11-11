@@ -419,7 +419,7 @@ Disabled
 - 频率菜单只提供 `单次 / 每天 / 每周 / 每月`；每周、每月分别展开可多选的星期/日期二级菜单，首次选择默认当前星期/日期，最后一项不能取消。选中后保持二级菜单展开，点击外部或 Escape 收起，最终由表单确认保存。收起后显示「每周 周一、周三」「每月 1日、15日」，按升序展示。移除每年新建选项。已有每小时、每年和固定间隔定义不被静默转换。
 - 新建与编辑所有频率使用同一 Foundation 时分选择器，小时、分钟在同一面板并排选择，不提供日期输入框。未修改时间规则时保留原绝对起点和日历选择；明确更改时间、频率或星期/日期时，按保存时刻寻找下一个有效执行点。每月不存在的日期跳过，不自动挪到月末。Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 表单不重复展示运行摘要或时区说明；protocol、generation、Unix seconds 和 catalog revision 不进入产品文案；
-- 定时任务新建或明确改选从 Models ready候选选择完整目标，提交expected source/catalog generation，由Host解析protocol；已有定义的其他编辑保留固定绑定；`execution_changed` 的编辑确认按[产品恢复语义](requirements.md#511-定时任务)提交当前目标证明，不要求切换到其他模型再切回，也不重复展示保存确认说明。保存、暂停/恢复、立即运行和删除使用Host typed result与item epoch。编辑草稿固定打开时的 epoch，外部更新保留草稿并要求显式重新载入，不能采用实时 snapshot 的新 epoch 覆盖并发修改；timeout后刷新而不重放，起始偏好不参与已保存计划的执行资格。
+- 定时任务新建或明确改选从 Models ready候选选择完整目标，提交expected source/catalog generation，由Host解析protocol；已有定义的其他编辑保留固定绑定；`execution_changed` 的编辑确认按[产品恢复语义](requirements.md#511-定时任务)提交当前目标证明，不要求切换到其他模型再切回，也不重复展示保存确认说明。保存、暂停/恢复、立即运行和删除使用Host typed result与item epoch。 Bridge 可用且定时任务存储就绪时可删除既有定义；后台唤醒能力不参与删除的可用性判断。编辑草稿固定打开时的 epoch，外部更新保留草稿并要求显式重新载入，不能采用实时 snapshot 的新 epoch 覆盖并发修改；timeout后刷新而不重放，起始偏好不参与已保存计划的执行资格。
 - 执行历史弹窗只展示有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理及 Host 提供的原因；重叠跳过时说明上一次任务仍在运行，链接明确标为“查看上次任务”，不把 blocker 当作本次新建的结果。结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
 - 模型 authority、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时归入 `已停用`，行内显示具体原因并要求用户编辑确认；立即运行与恢复启用在确认前禁用。occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
