@@ -570,6 +570,7 @@ export function McpPage({
   const paneTrigger = useRef<HTMLElement | null>(null);
   const connectionSection = useRef<HTMLElement>(null);
   const toolSection = useRef<HTMLElement>(null);
+  const toolPermissionsId = useId();
   const [paneState, setPaneState] = useState<PaneState>(null);
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [pendingServerId, setPendingServerId] = useState<string | null>(null);
@@ -2484,70 +2485,88 @@ export function McpPage({
                   <section className="mcp-tool-catalog" ref={toolSection}>
                     <header>
                       <div>
-                        <h3>{t("mcp.detail.tool_permissions")}</h3>
+                        <h3 id={toolPermissionsId}>
+                          {t("mcp.detail.tool_permissions")}
+                        </h3>
                         <p>{t("mcp.detail.tool_help")}</p>
                       </div>
                       <span>
-                        {
-                          selected.tools.filter((tool) => tool.desiredAllowed)
-                            .length
-                        }
-                        /{selected.tools.length}
+                        {t("mcp.detail.allowed_count", {
+                          allowed: selected.tools.filter(
+                            (tool) => tool.desiredAllowed,
+                          ).length,
+                          total: selected.tools.length,
+                        })}
                       </span>
                     </header>
                     {selected.tools.length === 0 ? (
                       <p className="mcp-no-tools">{t("mcp.detail.no_tools")}</p>
                     ) : (
-                      <ul>
-                        {selected.tools.map((tool) => (
-                          <li key={tool.name}>
-                            <div>
-                              <code>{tool.name}</code>
-                              <p>
-                                {!tool.discovered
-                                  ? t("mcp.tool.not_discovered")
-                                  : tool.availableToNewTasks
-                                    ? t("mcp.tool.available_to_new_tasks")
-                                    : tool.desiredAllowed
-                                      ? t("mcp.tool.allowed_not_available")
-                                      : t("mcp.tool.not_allowed")}
-                              </p>
-                            </div>
-                            <label className="mcp-tool-toggle">
-                              <span className="sr-only">
-                                {t("mcp.tool.toggle", { name: tool.name })}
-                              </span>
-                              <Checkbox.Root
-                                className="size-[18px] rounded-[5px]"
-                                checked={tool.desiredAllowed}
-                                disabled={
-                                  mutationLocked ||
-                                  pendingServerId !== null ||
-                                  selectedOperationBusy ||
-                                  selected.connection === null
-                                }
-                                onCheckedChange={() => {
-                                  const names = selected.tools
-                                    .filter((candidate) =>
-                                      candidate.name === tool.name
-                                        ? !tool.desiredAllowed
-                                        : candidate.desiredAllowed,
-                                    )
-                                    .map((candidate) => candidate.name);
-                                  void mutateServer(selected, (generation) =>
-                                    onSetAllowedTools(
-                                      generation,
-                                      selected.id,
-                                      names,
-                                    ),
-                                  );
-                                }}
-                              >
-                                <Checkbox.Indicator>✓</Checkbox.Indicator>
-                              </Checkbox.Root>
-                            </label>
-                          </li>
-                        ))}
+                      <ul
+                        className="mcp-tool-list"
+                        aria-labelledby={toolPermissionsId}
+                        role="list"
+                        tabIndex={0}
+                      >
+                        {selected.tools.map((tool, index) => {
+                          const status = !tool.discovered
+                            ? "mcp.tool.not_discovered"
+                            : tool.desiredAllowed && !tool.availableToNewTasks
+                              ? "mcp.tool.allowed_not_available"
+                              : null;
+                          const statusId = `${toolPermissionsId}-${index}`;
+                          return (
+                            <li key={tool.name}>
+                              <div className="mcp-tool-info">
+                                <code>{tool.name}</code>
+                                {status && (
+                                  <span
+                                    className="mcp-tool-status"
+                                    id={statusId}
+                                  >
+                                    {t(status)}
+                                  </span>
+                                )}
+                              </div>
+                              <label className="mcp-tool-toggle">
+                                <span className="sr-only">
+                                  {t("mcp.tool.toggle", { name: tool.name })}
+                                </span>
+                                <Checkbox.Root
+                                  className="size-[18px] rounded-[5px]"
+                                  aria-describedby={
+                                    status ? statusId : undefined
+                                  }
+                                  checked={tool.desiredAllowed}
+                                  disabled={
+                                    mutationLocked ||
+                                    pendingServerId !== null ||
+                                    selectedOperationBusy ||
+                                    selected.connection === null
+                                  }
+                                  onCheckedChange={() => {
+                                    const names = selected.tools
+                                      .filter((candidate) =>
+                                        candidate.name === tool.name
+                                          ? !tool.desiredAllowed
+                                          : candidate.desiredAllowed,
+                                      )
+                                      .map((candidate) => candidate.name);
+                                    void mutateServer(selected, (generation) =>
+                                      onSetAllowedTools(
+                                        generation,
+                                        selected.id,
+                                        names,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  <Checkbox.Indicator>✓</Checkbox.Indicator>
+                                </Checkbox.Root>
+                              </label>
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                     {selected.tools.some(
@@ -2599,9 +2618,11 @@ export function McpPage({
                           selected.authorizationStatus,
                         ) && (
                           <Button
-                            variant="secondary"
-                            size="sm"
-                            className="disabled:opacity-50"
+                            variant="ghost"
+                            size="icon"
+                            className="size-8 text-base text-(--ui-content-muted) disabled:opacity-50"
+                            aria-label={t("mcp.test.action")}
+                            title={t("mcp.test.action")}
                             disabled={
                               mutationLocked ||
                               pendingServerId !== null ||
@@ -2609,12 +2630,15 @@ export function McpPage({
                             }
                             onClick={() => void testConnection(selected)}
                           >
-                            {t("mcp.test.action")}
+                            <Icon name="test" />
                           </Button>
                         )}
                       <Button
-                        variant="secondary"
-                        size="sm"
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 text-base text-(--ui-content-muted) disabled:opacity-50"
+                        aria-label={t("mcp.edit.action")}
+                        title={t("mcp.edit.action")}
                         disabled={
                           mutationLocked ||
                           pendingServerId !== null ||
@@ -2623,7 +2647,7 @@ export function McpPage({
                         }
                         onClick={() => openReplacement(selected)}
                       >
-                        {t("mcp.edit.action")}
+                        <Icon name="edit" />
                       </Button>
                     </div>
                   </header>

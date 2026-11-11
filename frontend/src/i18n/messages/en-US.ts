@@ -419,7 +419,8 @@ export const enUS = {
   "mcp.detail.display_name": "Display name",
   "mcp.detail.diagnostic": "Needs attention",
   "mcp.detail.tool_help":
-    "Choose the exact tools copied into new tasks. Newly discovered tools stay off.",
+    "Newly discovered tools are off by default for new tasks.",
+  "mcp.detail.allowed_count": "Allowed {allowed}/{total}",
   "mcp.detail.no_tools": "This server has not published any usable tools.",
   "mcp.redacted": "MetaWork removed sensitive text from this catalog.",
   "mcp.desired.enabled": "Enabled",
@@ -611,11 +612,8 @@ export const enUS = {
     "Server enabled for new tasks. Open tasks keep their current access.",
   "mcp.mutation.disabled":
     "Server disabled for new tasks. Open tasks keep their current access.",
-  "mcp.tool.not_discovered":
-    "Configured, but not present in the current catalog",
-  "mcp.tool.available_to_new_tasks": "Allowed and available to new tasks",
-  "mcp.tool.allowed_not_available": "Allowed, but currently unavailable",
-  "mcp.tool.not_allowed": "Discovered, but not allowed",
+  "mcp.tool.not_discovered": "Not in current catalog",
+  "mcp.tool.allowed_not_available": "Currently unavailable",
   "mcp.tool.toggle": "Allow {name} for new tasks",
   "mcp.detail.allow_all": "Allow all {count}",
   "mcp.confirm.allow_all.title": "Allow every discovered tool?",

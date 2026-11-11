@@ -4777,6 +4777,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .mcp-server-row {
@@ -5180,33 +5181,45 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-top: 1px solid var(--ui-border);
 }
 
-.mcp-tool-catalog ul {
+.mcp-tool-list {
+  max-block-size: min(240px, 35dvh);
   padding: 0;
   margin: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   border: 1px solid var(--ui-border);
   border-radius: 10px;
   background: var(--ui-surface-panel);
   list-style: none;
 }
 
-.mcp-tool-catalog li {
-  display: flex;
-  padding: 11px 13px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+.mcp-tool-list:focus-visible {
+  outline: 2px solid var(--ui-action-primary);
+  outline-offset: 2px;
 }
 
-.mcp-tool-catalog li + li {
+.mcp-tool-list li {
+  display: flex;
+  min-height: 34px;
+  padding: 6px 12px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mcp-tool-list li + li {
   border-top: 1px solid var(--ui-border);
 }
 
-.mcp-tool-catalog li > div {
+.mcp-tool-info {
+  display: flex;
+  flex: 1;
   min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
 }
 
-.mcp-tool-catalog code {
+.mcp-tool-info code {
   overflow-wrap: anywhere;
   color: var(--ui-content-muted);
   font-family: var(--font-mono);
@@ -5214,7 +5227,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 650;
 }
 
-.mcp-tool-catalog li p,
+.mcp-tool-status {
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  line-height: 1.4;
+}
+
 .mcp-no-tools {
   margin: 5px 0 0;
   color: var(--ui-content-muted);
@@ -5234,7 +5252,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-connection-actions {
   flex: none;
-  gap: 8px;
+  gap: 4px;
 }
 
 .mcp-connection-overview {
@@ -6489,10 +6507,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     justify-self: start;
   }
 
-  .mcp-next-action,
-  .mcp-detail-section > header {
+  .mcp-next-action {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .mcp-detail-section > header {
+    flex-wrap: wrap;
   }
 
   .mcp-next-action > button {
@@ -6507,10 +6528,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     justify-self: start;
   }
 
-  .mcp-connection-actions {
-    width: 100%;
-    align-items: stretch;
-    flex-direction: column;
+  .mcp-connection-actions button {
+    min-width: 44px;
   }
 
   .skills-page-inner {
