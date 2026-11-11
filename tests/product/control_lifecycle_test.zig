@@ -215,6 +215,15 @@ test "history capacity executes more than sixteen Runs through worker retirement
         try settleInputScenario(scenario);
         try std.testing.expectEqual(task, scenario.control.testTask(scenario.task_id).?);
     }
+    // The final lease can retire after a drain pass has checked for Run effects.
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        const retired = for (task.durable.runs) |entry| {
+            if (entry) |run| if (run.execution != null) break false;
+        } else true;
+        if (retired) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
     var count: usize = 0;
     for (task.durable.runs) |entry| if (entry) |run| {
         count += 1;
