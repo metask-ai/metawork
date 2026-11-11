@@ -331,8 +331,9 @@ fn providerGuidance(detail: *const task_state.RunModelError) RunGuidance {
         .context_window => .review_context,
         .output_limit => .revise_instruction,
         .rate_limited, .overloaded => .wait,
-        .server_error, .timeout, .connection, .stream_interrupted => .prepare_retry,
-        .unknown => .model_settings,
+        // `unknown` means no provider statement explained the failure, so it
+        // is never evidence of an Account or model configuration problem.
+        .server_error, .timeout, .connection, .stream_interrupted, .unknown => .prepare_retry,
     };
 }
 
@@ -362,7 +363,7 @@ test "model recovery advice respects exact source and primary cause without gran
         .{ .category = .permission, .guidance = .model_settings },
         .{ .category = .not_found, .guidance = .model_settings },
         .{ .category = .invalid_request, .guidance = .model_settings },
-        .{ .category = .unknown, .guidance = .model_settings },
+        .{ .category = .unknown, .guidance = .prepare_retry },
         .{ .category = .output_limit, .guidance = .revise_instruction },
         .{ .category = .rate_limited, .guidance = .wait },
         .{ .category = .overloaded, .guidance = .wait },
@@ -374,6 +375,27 @@ test "model recovery advice respects exact source and primary cause without gran
         detail.detail.category = case.category;
         const feedback = runFeedback(.failed, .provider_failure, &detail);
         try std.testing.expectEqual(case.guidance, feedback.guidance);
+        try std.testing.expect(feedback.offer_input_preparation);
+    }
+}
+
+test "unknown model failures prepare a retry instead of claiming a settings problem" {
+    // The canonical Core reports `unknown` when no provider statement explains
+    // the failure, e.g. a stream that ends before its stop reason or an
+    // upstream error frame with an unrecognized type. Neither proves that the
+    // Account or the model configuration is wrong.
+    var detail: task_state.RunModelError = .{ .detail = try agent.ModelError.init(.{
+        .run_id = 1,
+        .category = .unknown,
+        .message = "The response stream could not be read: StreamIncomplete.",
+        .http_status = 200,
+        .retry = .unknown,
+        .attempts = 1,
+    }) };
+    for ([_]?task_state.RunModelError.Source{ .metask, .custom_provider, null }) |source| {
+        detail.source = source;
+        const feedback = runFeedback(.failed, .provider_failure, &detail);
+        try std.testing.expectEqual(RunGuidance.prepare_retry, feedback.guidance);
         try std.testing.expect(feedback.offer_input_preparation);
     }
 }
