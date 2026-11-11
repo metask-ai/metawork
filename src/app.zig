@@ -760,10 +760,6 @@ pub fn run(init: std.process.Init) !void {
             .restored_bytes = stores_state.skill_enablement_restored_bytes,
             .restore_failed = stores_state.skill_enablement_restore_failed,
         },
-        .skill_sources = .{
-            .file_store = if (stores_state.skill_sources) |*store| store else null,
-            .restored = stores_state.skill_sources_restored,
-        },
         .builtin_skill_root = builtin_skill_root,
         .completion_factory = .{
             .context = &app.completion_transport,

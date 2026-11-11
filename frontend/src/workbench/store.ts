@@ -1,6 +1,6 @@
 import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
 import { emptyViewVersions, initialViewScope } from "../bridge/contracts.ts";
-import { navigableTasks } from "./task-visibility.ts";
+import { selectableTask } from "./task-visibility.ts";
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
   snapshotReceivedAt: number | null;
@@ -191,14 +191,7 @@ export function workbenchReducer(
   action: WorkbenchAction,
 ): WorkbenchState {
   if (action.type === "task.selected") {
-    const task =
-      navigableTasks(state.snapshot).find(
-        (candidate) => candidate.id === action.taskId,
-      ) ??
-      state.snapshot.taskIndex.find(
-        (candidate) => candidate.id === action.taskId && candidate.archived,
-      );
-    if (!task) return state;
+    if (!selectableTask(state.snapshot, action.taskId)) return state;
     return {
       ...state,
       activeTaskId: action.taskId,
@@ -297,17 +290,14 @@ export function workbenchReducer(
       // must survive so reauthorization can restore the same text.
       draftWorkspaceId: state.draftWorkspaceId,
     };
-  const availableTasks = navigableTasks(snapshot);
-  const activeTaskStillExists =
-    availableTasks.some((task) => task.id === state.activeTaskId) ||
-    snapshot.taskIndex.some(
-      (task) => task.id === state.activeTaskId && task.archived,
-    );
   // Snapshot hydration restores the history list, not the current
   // conversation route. A Task becomes active only after an explicit user
   // selection; if that selection disappears, return to New task instead of
   // silently opening another historical conversation.
-  const activeTaskId = activeTaskStillExists ? state.activeTaskId : null;
+  const activeTaskId =
+    state.activeTaskId && selectableTask(snapshot, state.activeTaskId)
+      ? state.activeTaskId
+      : null;
   return {
     snapshot,
     snapshotReceivedAt: action.receivedAt,

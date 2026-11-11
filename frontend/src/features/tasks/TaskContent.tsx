@@ -8,6 +8,7 @@ import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
 import { MessageInfoBar } from "./MessageInfoBar.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
+import { resolveWorkspaceFileLink } from "../../workbench/workspace-file-links.ts";
 import {
   Fragment,
   useCallback,
@@ -33,6 +34,7 @@ import {
   Activity,
   Conversation,
   Markdown,
+  type MarkdownLocalLinks,
   type MarkdownWebLink,
   Message,
 } from "../../components/ai/index.ts";
@@ -307,6 +309,8 @@ export function TaskContent({
   onPrepareRetry,
   onOpenSettings,
   onPreviewFile,
+  workspaceRoot = null,
+  onPreviewWorkspaceFile,
   loadFilePreview,
   onReviewFileChanges,
   onRespond,
@@ -347,6 +351,14 @@ export function TaskContent({
     taskId: string,
     runId: string,
     reference: FileReferenceView,
+    opener: HTMLButtonElement,
+  ) => void;
+  /** Publishable canonical root of the Task Workspace, for absolute links. */
+  workspaceRoot?: string | null;
+  /** Present only while the Task Workspace files can be browsed. */
+  onPreviewWorkspaceFile?: (
+    taskId: string,
+    path: string,
     opener: HTMLButtonElement,
   ) => void;
   onReviewFileChanges: (
@@ -806,16 +818,40 @@ export function TaskContent({
               onCopy={() => copyResponseMarkdown(run.output.response)}
             />
           );
+          const runLinks = runFileReferenceLinks(run);
+          const referenceLink = (reference: FileReferenceView) => ({
+            label: t("file_preview.open", { path: reference.displayPath }),
+            onOpen: (opener: HTMLButtonElement) =>
+              onPreviewFile(task.id, run.id, reference, opener),
+          });
           const references = new Map(
-            [...runFileReferenceLinks(run)].map(([text, reference]) => [
+            [...runLinks].map(([text, reference]) => [
               text,
-              {
-                label: t("file_preview.open", { path: reference.displayPath }),
-                onOpen: (opener: HTMLButtonElement) =>
-                  onPreviewFile(task.id, run.id, reference, opener),
-              },
+              referenceLink(reference),
             ]),
           );
+          const localLinks: MarkdownLocalLinks = (destination) => {
+            const link = resolveWorkspaceFileLink(destination, workspaceRoot);
+            if (link.kind === "unavailable")
+              return {
+                unavailable: t(`file_preview.link_unavailable.${link.reason}`),
+              };
+            // The Run reference remains the identity for its exact path.
+            const reference = runLinks.get(link.path);
+            if (reference?.displayPath === link.path)
+              return referenceLink(reference);
+            if (!onPreviewWorkspaceFile)
+              return {
+                unavailable: t(
+                  "file_preview.link_unavailable.workspace_unavailable",
+                ),
+              };
+            return {
+              label: t("file_preview.open", { path: link.path }),
+              onOpen: (opener) =>
+                onPreviewWorkspaceFile(task.id, link.path, opener),
+            };
+          };
           const disclosureKey = `${task.id}:${run.id}`;
           const disclosure = observeRunProcessDisclosure(
             processDisclosure.get(disclosureKey),
@@ -1178,6 +1214,7 @@ export function TaskContent({
                                 data-output-disposition={part.disposition}
                                 key={part.identity}
                                 references={streaming ? undefined : references}
+                                localLinks={streaming ? undefined : localLinks}
                                 interactive={!streaming}
                                 webLink={streaming ? undefined : webLink}
                                 streaming={streaming}

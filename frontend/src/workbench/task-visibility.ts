@@ -13,3 +13,18 @@ export function navigableTasks(snapshot: WorkbenchSnapshot): TaskSummary[] {
     workspaceIds.has(task.workspaceId),
   );
 }
+
+export function selectableTask(
+  snapshot: WorkbenchSnapshot,
+  taskId: string,
+): TaskSummary | undefined {
+  const task = snapshot.taskIndex.find((candidate) => candidate.id === taskId);
+  if (
+    task &&
+    (task.archived ||
+      snapshot.workspaces.some(
+        (workspace) => workspace.id === task.workspaceId,
+      ))
+  )
+    return task;
+}

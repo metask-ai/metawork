@@ -347,13 +347,14 @@ export const enUS = {
   "task.new": "New task",
   "task.open": "Open a task",
   "skills.title": "Skills",
+  "skills.builtin": "Built-in",
   "skills.navigation_label": "Workbench tools",
-  "mcp.title": "MCP",
+  "mcp.title": "Connectors",
   "mcp.subtitle": "Connect external tools and choose what new tasks can use.",
   "mcp.clear_search": "Clear search",
-  "mcp.search_placeholder": "Search servers and tools",
+  "mcp.search_placeholder": "Search connectors and tools",
   "mcp.section.attention": "Needs attention",
-  "mcp.section.available": "Available servers",
+  "mcp.section.available": "Available connectors",
   "mcp.section.disabled": "Disabled",
   "mcp.status.ready": "Ready",
   "mcp.status.connecting": "Connecting",
@@ -367,7 +368,7 @@ export const enUS = {
   "mcp.access.not_allowed": "Not allowed",
   "mcp.access.restart_required": "Connecting",
   "mcp.access.unavailable": "Unavailable to new tasks",
-  "mcp.banner.applying.title": "Connecting MCP services",
+  "mcp.banner.applying.title": "Connecting to services",
   "mcp.banner.applying.body":
     "Launching connections, checking the MCP handshake, and discovering tools.",
   "mcp.banner.apply_failed.title": "Connection changes were not applied",
@@ -376,29 +377,30 @@ export const enUS = {
   "mcp.apply.action": "Retry connection",
   "mcp.apply.started":
     "Connection requested. Authorization will be recovered first when needed.",
-  "mcp.apply.busy": "Another MCP operation is still running.",
-  "mcp.apply.unavailable": "The MCP runtime is unavailable right now.",
+  "mcp.apply.busy": "Another connector operation is still running.",
+  "mcp.apply.unavailable": "Connectors are currently unavailable.",
   "mcp.apply.rejected": "The saved settings cannot be applied.",
   "mcp.banner.alignment_unknown.title":
     "The active connection state cannot be verified",
   "mcp.banner.alignment_unknown.body":
     "Editing is paused because MetaWork cannot confirm which saved connection settings are active.",
-  "mcp.banner.recovery.title": "MCP management needs recovery",
+  "mcp.banner.recovery.title": "Connector settings need recovery",
   "mcp.banner.recovery.body":
     "The last known configuration is shown, but changes are paused until recovery completes.",
   "mcp.banner.outcome_unknown.title": "The last save result is unknown",
   "mcp.banner.outcome_unknown.body":
-    "MetaWork has hidden the unconfirmed configuration and blocked MCP access for new tasks until it can be recovered safely.",
-  "mcp.banner.runtime_unavailable.title": "MCP tools are currently unavailable",
+    "MetaWork has hidden the unconfirmed configuration and paused connector access for new tasks until recovery is complete.",
+  "mcp.banner.runtime_unavailable.title":
+    "Connector tools are currently unavailable",
   "mcp.banner.runtime_unavailable.body":
-    "You can still review saved settings. Ordinary tasks remain available without MCP.",
-  "mcp.unavailable_title": "MCP management is unavailable",
+    "You can still review saved settings. Ordinary tasks can continue without connector tools.",
+  "mcp.unavailable_title": "Connectors are unavailable",
   "mcp.unavailable_body":
-    "MetaWork cannot load MCP management right now. Reopen the app to recover the server list.",
-  "mcp.empty_title": "No MCP servers yet",
+    "MetaWork could not load your connectors. Reopen the app to try again.",
+  "mcp.empty_title": "No connectors yet",
   "mcp.empty_agent_hint":
     "Have a setup guide? Share its link with the agent in a task to connect the server.",
-  "mcp.no_results_title": "No matching servers or tools",
+  "mcp.no_results_title": "No matching connectors or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
   "mcp.detail.tool_permissions": "Tool permissions",
   "mcp.detail.connection_test": "Connection test",
@@ -416,7 +418,7 @@ export const enUS = {
   "mcp.existing_tasks_note":
     "Existing tasks cannot gain newly added tools. Revoked permissions restrict future access.",
   "mcp.add.action": "Add manually",
-  "mcp.add.title": "Add an MCP server",
+  "mcp.add.title": "Add a connector",
   "mcp.edit.title": "Edit connection settings",
   "mcp.edit.reauthenticate":
     "Changing the address or program requires setting up credentials or signing in again.",
@@ -425,7 +427,7 @@ export const enUS = {
   "mcp.add.name": "Display name",
   "mcp.add.continue": "Continue",
   "mcp.add.back": "Back",
-  "mcp.add.confirm_title": "Confirm MCP server",
+  "mcp.add.confirm_title": "Confirm connector",
   "mcp.add.detected.connected":
     "MCP handshake succeeded. This address needs no additional sign-in.",
   "mcp.add.detected.authentication_required":
@@ -518,32 +520,32 @@ export const enUS = {
   "mcp.install.failure.authorization_failed":
     "Authorization did not complete. Retry explicitly when you are ready.",
   "mcp.install.failure.connection_failed":
-    "The service could not be connected. Check its connection details on the MCP page.",
+    "Could not connect to the service. Open Connectors to check its connection details.",
   "mcp.install.failure.storage_failed":
     "Configuration could not be saved securely.",
   "mcp.install.failure.timeout": "Installation exceeded its time budget.",
   "mcp.install.credential": "Credential: {slot}",
-  "mcp.install.title": "MCP installation",
+  "mcp.install.title": "Connector setup",
   "mcp.install.submit": "Save credential",
   "mcp.install.cancel": "Cancel installation",
   "mcp.install.action_failed":
     "The action could not be confirmed. Check the current status and retry.",
   "mcp.install.rejected":
-    "MCP configuration could not be created. Check the MCP page.",
-  "mcp.add.endpoint": "Server address",
+    "Could not create the connector. Open Connectors to check its status.",
+  "mcp.add.endpoint": "MCP server address",
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
-  "mcp.add.submit": "Add server",
+  "mcp.add.submit": "Add connector",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",
   "mcp.enable.action": "Enable",
   "mcp.disable.action": "Disable",
-  "mcp.delete.action": "Delete server",
+  "mcp.delete.action": "Delete connector",
   "mcp.refresh.action": "Refresh tools",
   "mcp.refresh.refreshing": "Refreshing…",
-  "mcp.refresh.started": "Refreshing tools from available MCP services.",
+  "mcp.refresh.started": "Refreshing tools from available connectors.",
   "mcp.refresh.busy": "A tool refresh is already running.",
-  "mcp.refresh.unavailable": "MCP tools are currently unavailable.",
+  "mcp.refresh.unavailable": "Connector tools are currently unavailable.",
   "mcp.refresh.shutting_down": "MetaWork is shutting down.",
   "mcp.refresh.rejected": "The catalog refresh was rejected.",
   "mcp.refresh.failed":
@@ -576,14 +578,14 @@ export const enUS = {
     "{count} tools were discovered. Choose which ones new tasks may use.",
   "mcp.next.choose_tools.action": "Choose tools",
   "mcp.mutation.unchanged": "No configuration change was needed.",
-  "mcp.mutation.saved": "MCP settings saved.",
+  "mcp.mutation.saved": "Connector settings saved.",
   "mcp.mutation.saved_recovery_required":
     "Settings saved, but management is paused until recovery completes.",
   "mcp.mutation.stale_generation":
     "The configuration changed elsewhere. The latest saved state was reloaded.",
   "mcp.mutation.rejected": "MetaWork could not apply this change.",
   "mcp.mutation.indeterminate":
-    "The save result is unknown. MetaWork blocked MCP access for new tasks.",
+    "The save result is unknown. MetaWork has paused connector access for new tasks.",
   "mcp.mutation.failed":
     "The change could not be completed. The last confirmed state is unchanged.",
   "mcp.mutation.enabled":
@@ -618,7 +620,7 @@ export const enUS = {
   "mcp.apply_status.pending": "Waiting to connect",
   "mcp.apply_status.rejected": "Change rejected",
   "mcp.apply_status.failed": "Change not applied",
-  "mcp.apply_status.capacity": "MCP connection capacity is full",
+  "mcp.apply_status.capacity": "Connection limit reached",
   "mcp.next.capacity.body": "Close unused tasks, then retry the connection.",
   "mcp.apply_status.unknown": "Unconfirmed",
   "mcp.apply_status.current": "Processed",
@@ -626,15 +628,16 @@ export const enUS = {
   "mcp.banner.runtime_unknown.title":
     "Connection change could not be confirmed",
   "mcp.banner.runtime_unknown.body":
-    "MCP connections, tool refresh and authorization are paused. Restart MetaWork to confirm the service state.",
+    "Connector changes, tool refresh, and authorization are paused. Restart MetaWork to check the connection state.",
   "mcp.confirm.delete.oauth_body":
     "Renewal stops after deletion. Existing tasks lose access when the current authorization expires.",
-  "mcp.confirm.delete.title": "Delete this server?",
+  "mcp.confirm.delete.title": "Delete this connector?",
   "mcp.confirm.delete.body":
     "This removes the configuration and prevents new tasks from using this service. Existing tasks keep their current connection, subject to tool permissions.",
-  "mcp.confirm.delete.action": "Delete server",
-  "skills.subtitle": "Manage local Skills available to MetaWork.",
+  "mcp.confirm.delete.action": "Delete connector",
+  "skills.subtitle": "Manage your personal Skills in MetaWork.",
   "skills.import": "Import Skill",
+  "skills.import.action": "Import",
   "skills.import_first": "Import your first Skill",
   "skills.install": "Install",
   "skills.reimport": "Reimport",
@@ -643,31 +646,19 @@ export const enUS = {
   "skills.retry": "Retry",
   "skills.working": "Working…",
   "skills.no_description": "No description provided.",
-  "skills.filter.label": "Choose Skill settings context",
-  "skills.filter.personal": "User defaults",
-  "skills.filter.project": "Project settings",
-  "skills.project_workspace": "Project to configure",
   "skills.section.skills": "Skills",
-  "skills.scope.personal": "User defaults",
-  "skills.scope.project": "Project settings",
-  "skills.scope.project_context": "Project settings · {workspace}",
-  "skills.scope.external": "Other location",
-  "skills.source.package": "Package",
-  "skills.source.directory": "Local folder",
-  "skills.source.external": "External",
-  "skills.status.ready": "Ready",
+  "skills.scope.personal": "Personal",
   "skills.status.pending": "Pending verification",
   "skills.status.recovery_required": "Recovery required",
   "skills.restart_recovery_body":
     "Local Skill management is paused after a storage failure. Restart MetaWork to reload the saved inventory and retry recovery. If recovery still fails, check folder access and file locks.",
   "skills.status.issue": "Needs attention",
+  "skills.more_actions": "More actions",
+  "skills.enablement.enable": "Enable",
+  "skills.enablement.disable": "Disable",
   "skills.enablement.enabled": "Enabled",
   "skills.enablement.disabled": "Disabled",
-  "skills.enablement.inherit": "Following user setting",
-  "skills.enablement.follow_user": "Follow user setting",
   "skills.enablement.label": "Toggle {skill}",
-  "skills.import.eyebrow": "Local import",
-  "skills.detail.eyebrow": "Skill details",
   "skills.choose_package": "Choose .skill or .zip",
   "skills.choose_package_body":
     "Import a portable Skill package from this computer.",
@@ -726,11 +717,13 @@ export const enUS = {
   "skills.effect.create": "Install Skill",
   "skills.effect.update": "Update Skill",
   "skills.effect.replace_directory": "Replace folder",
-  "skills.effect_body.create": "Add a new Skill in this scope.",
+  "skills.effect_body.create": "Install “{skill}” in your personal directory.",
+  "skills.effect_body.shadows_builtin":
+    "A built-in Skill has the same name. After installation, the personal version will take precedence.",
   "skills.effect_body.update":
-    "Update the managed Skill in this scope and keep its enablement settings.",
+    "A Skill named “{skill}” already exists. Confirm to update its contents and keep its enablement settings.",
   "skills.effect_body.replace_directory":
-    "Replace the existing unmanaged folder in this scope. Its original copy is retained until verification finishes.",
+    "A folder named “{skill}” already exists in your personal directory. Confirm to replace it. Its original copy is retained until verification finishes.",
   "skills.operation.prepared": "{skill} is prepared for confirmation.",
   "skills.operation.pending_verification":
     "{skill} has been published and is awaiting verification.",
@@ -745,7 +738,6 @@ export const enUS = {
     "The unsubmitted preparation for {skill} was discarded.",
   "skills.operation.outcome_unknown":
     "The outcome for {skill} is not confirmed. Review recovery guidance.",
-  "skills.install_scope": "Install for",
   "skills.preview_size": "{files} files · {size} bytes",
   "skills.resource_context_notice":
     "MetaWork adds resource-location instructions to the installed Skill and its exports. Other tools reading the same Skill folder will also see them. Your source files stay unchanged.",
@@ -753,108 +745,44 @@ export const enUS = {
   "skills.replace_body":
     "Replace it only if you trust this package and want the existing Skill to be restored if verification fails.",
   "skills.replace": "Replace Skill",
-  "skills.detail.invocation": "Invocation",
-  "skills.detail.scope": "Scope",
-  "skills.detail.source": "Source",
-  "skills.detail.status": "Status",
   "skills.detail.definition": "SKILL.md",
   "skills.detail.loading": "Loading the local definition…",
-  "skills.detail.external_body":
-    "This Skill is managed outside MetaWork. Its catalog metadata is available, but local files are not opened from this page.",
-  "skills.detail.unavailable":
-    "The local definition is unavailable while this Skill is changing.",
-  "skills.issue_title": "Catalog report",
-  "skills.uninstall_confirm_title": "Uninstall this Skill?",
+  "skills.detail.unavailable": "The Skill file is temporarily unavailable.",
+  "skills.uninstall_confirm_title": "Uninstall “{skill}”?",
   "skills.uninstall_confirm":
-    "Its managed files will be removed from this scope. This cannot be undone from MetaWork.",
+    "Its managed files will be removed from your personal Skill directory. This cannot be undone from MetaWork.",
   "skills.exported": "Exported {file}",
   "skills.error.preview": "This source could not be validated as a Skill.",
   "skills.error.mutation": "The Skill change could not be completed.",
-  "skills.error.detail": "The local definition could not be loaded.",
   "skills.error.export_too_large":
     "The exported package would exceed the reimport limit. Reduce its resources and export again.",
   "skills.error.export": "The Skill could not be exported.",
   "skills.error.enablement":
-    "The Skill could not be updated. Refresh and try again.",
+    "Could not change whether “{skill}” is enabled. Refresh and try again.",
   "skills.refresh": "Refresh",
   "skills.refreshing": "Refreshing…",
   "skills.search_label": "Search skills",
-  "skills.search_placeholder": "Search skills",
+  "skills.clear_search": "Clear search",
   "skills.unavailable_title": "Skill management is unavailable",
   "skills.unavailable_body":
     "MetaWork could not open its local Skill inventory. Refresh to try again.",
   "skills.empty_title": "No local Skills yet",
   "skills.empty_body":
     "Import a .skill or .zip package, or choose a folder containing SKILL.md.",
-  "skills.no_project_title": "No configurable projects",
-  "skills.no_project_body":
-    "Add or reauthorize a project before changing its Skill settings.",
   "skills.no_results_title": "No matching Skills",
   "skills.no_results_body": "Nothing matches “{query}”.",
   "skills.catalog_refresh_started": "Refreshing the Skill catalog…",
   "skills.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
-  "skills.sources.title": "Compatible sources",
-  "skills.sources.hint":
-    "Reads personal and authorized project Skills on demand. Future runs automatically use the latest available version.",
-  "skills.sources.partial": "Partially enabled",
-  "skills.sources.scope.user": "Personal directory",
-  "skills.sources.scope.workspace": "Project directory",
-  "skills.sources.unknown": "State unknown",
-  "skills.sources.unknown_origin": "Unknown origin",
-  "skills.sources.saving": "Confirming settings…",
-  "skills.sources.reread": "Reread settings",
-  "skills.sources.reset": "Turn off all compatible sources",
-  "skills.sources.reset_body":
-    "Turns off Claude and Codex sources. No Skills are deleted, and individual Skill enablement and project data are unchanged.",
-  "skills.sources.state.error": "Check failed",
-  "skills.sources.reason.unreadable": "Unreadable",
-  "skills.sources.reason.unsupported_entry": "Unsupported directory entry",
-  "skills.sources.reason.changed": "Directory changed",
-  "skills.sources.health.unavailable": "Settings storage is unavailable.",
-  "skills.sources.health.read_failed":
-    "Settings could not be read; current selections are unknown.",
-  "skills.sources.health.corrupt":
-    "Settings are corrupt; selections are unknown. Reread them or turn off all compatible sources.",
-  "skills.sources.health.missing":
-    "The settings file is missing; current selections are unknown.",
-  "skills.sources.health.unsupported_schema":
-    "The settings format is unsupported. This file will not be reset.",
-  "skills.sources.health.too_large":
-    "Settings exceed the read limit. This file will not be reset.",
-  "skills.sources.health.write_failed":
-    "Saving failed. The last confirmed settings remain in use.",
-  "skills.sources.health.outcome_unknown":
-    "The persisted outcome is unknown. Reread settings to recover.",
-  "skills.sources.failure.stale_revision":
-    "Settings changed elsewhere. A sync was requested; review the values before trying again.",
-  "skills.sources.failure.busy":
-    "A Skill management operation is still pending. Try again after it finishes.",
-  "skills.sources.failure.source_settings_unavailable":
-    "Source settings are unavailable. Check their recovery status.",
-  "skills.sources.failure.write_failed":
-    "Could not save. The previous settings remain valid.",
-  "skills.sources.failure.persistence_outcome_unknown":
-    "The save outcome is unknown. Reread settings.",
-  "skills.sources.failure.stale_recovery_token":
-    "Recovery state changed. A sync was requested; review it before trying again.",
-  "skills.sources.failure.recovery_not_allowed":
-    "This recovery action is not allowed for the current settings.",
-  "skills.sources.failure.read_failed":
-    "Settings could not be reread. The file was not reset.",
-  "skills.sources.failure.revision_exhausted":
-    "The settings revision limit has been reached.",
-  "skills.sources.failure.shutting_down":
-    "The app is shutting down and did not accept this change.",
-  "skills.sources.saved_resync":
-    "Settings were saved, but the display has not synced. Wait for the connection to recover; do not save again.",
-  "skills.sources.uncertain":
-    "The outcome could not be confirmed. A sync was requested; the change will not be retried automatically.",
-  "skills.detail.origin": "Directory origin",
   "skills.catalog_issues": "Catalog issues",
   "skills.catalog_issues_help":
-    "Check compatible sources, or adjust Skills externally and refresh. Individual Skill enablement does not resolve source conflicts.",
+    "Adjust Skill files and refresh. Individual Skill enablement does not resolve source conflicts.",
   "skills.catalog_unavailable":
-    "The catalog is not ready or its query failed. Saved source settings are unchanged; refresh to retry.",
+    "The catalog is not ready or its query failed. Refresh to retry.",
+  "skills.personal_directory_error":
+    "Could not check the personal Skill directory: {reason}.",
+  "skills.directory_error.unreadable": "unreadable",
+  "skills.directory_error.unsupported_entry": "unsupported directory entry",
+  "skills.directory_error.changed": "directory changed",
   "skills.no_available_title": "No Skills are currently available",
   "skills.section.attention": "Needs attention",
   "skills.issue.source_conflict":
@@ -862,14 +790,6 @@ export const enUS = {
   "skills.issue.invalid_definition": "Invalid Skill definition",
   "skills.issue.invalid_resource": "Invalid Skill resource",
   "skills.issue.invalid_invocation_name": "Invalid Skill invocation name",
-  "skills.sources.root.agents.user.default":
-    ".agents · Personal directory (default)",
-  "skills.sources.root.agents.workspace.default":
-    ".agents · Project directory (default)",
-  "skills.sources.root.compat.claude.user": "Claude · Personal directory",
-  "skills.sources.root.compat.claude.workspace": "Claude · Project directory",
-  "skills.sources.root.compat.codex.user": "Codex · Personal directory",
-  "skills.sources.root.compat.codex.workspace": "Codex · Project directory",
   "task.empty_title": "What would you like to accomplish?",
   "task.created_empty_body":
     "This task is ready. Enter its first instruction to begin.",
@@ -1177,6 +1097,12 @@ export const enUS = {
   "file_preview.loading": "Loading preview…",
   "file_preview.close": "Close file preview",
   "file_preview.open": "Preview {path}",
+  "file_preview.link_unavailable.outside_workspace":
+    "Can't open: outside the current workspace",
+  "file_preview.link_unavailable.workspace_unavailable":
+    "Can't open: workspace unavailable",
+  "file_preview.link_unavailable.unsupported_path":
+    "Can't open: unsupported file path",
   "file_preview.refresh": "Refresh",
   "file_preview.mode": "File display mode",
   "file_preview.rendered": "Preview",
@@ -1267,7 +1193,7 @@ export const enUS = {
     "{additions} added lines, {deletions} deleted lines",
   "file_changes.diff.unchanged_lines": "{count} unmodified lines",
   "task.jump_latest": "Jump to latest",
-  "inspector.mcp_authority": "MCP at creation",
+  "inspector.mcp_authority": "Connectors at creation",
   "inspector.mcp_selected": "Tools selected",
   "inspector.mcp_none": "Ready · no tools selected",
   "inspector.mcp_unavailable": "Unavailable",
@@ -1324,7 +1250,7 @@ export const enUS = {
   "task.current_run_protocol": "Current run protocol",
   "task.last_run_protocol": "Last run protocol",
   "task.information_scope":
-    "MCP describes tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
+    "Connector information reflects tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
   "conversation.context_observed":
     "Latest observation for this conversation, not a live usage meter.",
   "task_panel.title": "Side panel",
@@ -1447,6 +1373,7 @@ export const enUS = {
   "operation.workspace_remove": "Removing the workspace",
   "search.open": "Search",
   "search.loading": "Searching…",
+  "search.result_unavailable": "That task is no longer available.",
   "search.no_more": "No more matches.",
   "search.more": "Continue search",
   "search.first": "Back to first page",
@@ -1557,7 +1484,7 @@ export const enUS = {
   "permission.mode.full_access.help":
     "Routine actions skip approval while system protections still apply",
   "permission.auto_review.boundary":
-    "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Built-in, Host and MCP tools are reviewed against your task. Decisions requiring your input or review failures return to manual approval.",
+    "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Built-in, Host and connector tools are reviewed against your task. Decisions requiring your input or review failures return to manual approval.",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. Other operations outside this policy require approval.",
   "permission.profile.full_access": "Full access",
@@ -1645,9 +1572,15 @@ export const enUS = {
   "settings.custom_model_address_error.address":
     "Enter a valid URL without credentials, query parameters, or a fragment.",
   "settings.custom_model_address_error.secure":
-    "Use HTTPS. HTTP is supported only for localhost.",
+    "The API key would be sent unencrypted. HTTP is allowed only for this computer (localhost, 127.0.0.1, [::1]); use HTTPS for services on your network.",
   "settings.custom_model_address_error.path":
     "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
+  "settings.custom_model_address_suggestion": "Use {endpoint}",
+  "settings.model_form_error.choice": "Select a model vendor first.",
+  "settings.model_form_error.address": "Enter the request URL.",
+  "settings.model_form_error.api_key": "Enter an API key.",
+  "settings.model_form_error.model_id": "Enter a model ID.",
+  "settings.model_form_error.model_choice": "Choose a model ID.",
   "settings.custom_model_test_start_failed":
     "Test start for {model} not yet confirmed",
   "settings.custom_model_remove_failed":

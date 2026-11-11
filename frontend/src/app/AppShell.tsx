@@ -6,6 +6,7 @@ import {
   type CSSProperties,
   type ReactNode,
   type Ref,
+  type RefObject,
 } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
@@ -141,10 +142,19 @@ function initialRightShare() {
   return normalizeRightShare(parsed);
 }
 
+function preferredPanelOpen(key: string) {
+  return readLocalPreference(key) !== "closed";
+}
+
 function initialPanel(key: string, minimumWidth: number) {
   if (typeof window === "undefined") return true;
-  const stored = readLocalPreference(key);
-  return window.innerWidth >= minimumWidth && stored !== "closed";
+  return window.innerWidth >= minimumWidth && preferredPanelOpen(key);
+}
+
+// A minimized or hidden window can report an empty viewport. That is not a
+// narrow layout, so it must neither collapse panels nor replace the width.
+function hasViewport() {
+  return window.innerWidth > 0;
 }
 
 export function AppShell({
@@ -156,6 +166,10 @@ export function AppShell({
   attentionBusy = false,
   attentionAnnouncement,
   onSearch,
+  searchButtonRef,
+  taskStageRef,
+  taskTitleRef,
+  taskStageLabel,
   left,
   rightPanel,
   rightPanelOpen,
@@ -173,7 +187,11 @@ export function AppShell({
   attentionContent?: ReactNode;
   attentionBusy?: boolean;
   attentionAnnouncement?: { key: number; text: string } | null;
-  onSearch: () => void;
+  onSearch: (opener: HTMLButtonElement) => void;
+  searchButtonRef?: RefObject<HTMLButtonElement | null>;
+  taskStageRef?: Ref<HTMLElement>;
+  taskTitleRef?: Ref<HTMLSpanElement>;
+  taskStageLabel?: string;
   left: ReactNode | null;
   rightPanel: ReactNode | null;
   rightPanelOpen: boolean;
@@ -227,7 +245,8 @@ export function AppShell({
   const compositionTarget = useRef<EventTarget | null>(null);
   const attentionHadFocus = useRef(false);
   const attentionFocusedElement = useRef<HTMLElement | null>(null);
-  const searchButton = useRef<HTMLButtonElement>(null);
+  const localSearchButton = useRef<HTMLButtonElement>(null);
+  const searchButton = searchButtonRef ?? localSearchButton;
 
   useLayoutEffect(() => {
     const focusedControlWasRemoved =
@@ -253,7 +272,7 @@ export function AppShell({
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
     const closeForViewport = () => {
-      if (narrow.matches) setLeftOpen(false);
+      if (narrow.matches && hasViewport()) setLeftOpen(false);
     };
     narrow.addEventListener("change", closeForViewport);
     return () => {
@@ -265,6 +284,7 @@ export function AppShell({
     const element = workbenchElement.current;
     if (!element) return;
     const measure = (observedWidth?: number) => {
+      if (!hasViewport()) return;
       const measuredWidth =
         observedWidth && observedWidth > 0
           ? observedWidth
@@ -296,6 +316,16 @@ export function AppShell({
   useEffect(() => {
     if (effectiveRightPanelOpen && workbenchWidth < 820) setLeftOpen(false);
   }, [effectiveRightPanelOpen, workbenchWidth]);
+
+  // Narrow layouts collapse the sidebar without rewriting the saved choice, so
+  // regaining the desktop width restores that choice.
+  const wideWorkbench = workbenchWidth >= 820;
+  const wasWideWorkbench = useRef(wideWorkbench);
+  useEffect(() => {
+    const widened = wideWorkbench && !wasWideWorkbench.current;
+    wasWideWorkbench.current = wideWorkbench;
+    if (widened) setLeftOpen(preferredPanelOpen(leftPreference));
+  }, [wideWorkbench]);
 
   useEffect(() => {
     if (!resizingRight || (effectiveRightPanelOpen && rightPanelDocked)) return;
@@ -426,7 +456,7 @@ export function AppShell({
               className="icon-button focus-ring"
               ref={searchButton}
               aria-label={t("search.open")}
-              onClick={onSearch}
+              onClick={(event) => onSearch(event.currentTarget)}
             >
               <Icon name="search" />
             </button>
@@ -442,7 +472,13 @@ export function AppShell({
             inert={overlay ? true : undefined}
           >
             {contextVisible && (
-              <span className="commandbar-task">{taskTitle}</span>
+              <span
+                className="commandbar-task focus-ring"
+                ref={taskTitleRef}
+                tabIndex={-1}
+              >
+                {taskTitle}
+              </span>
             )}
           </div>
         </div>
@@ -564,7 +600,15 @@ export function AppShell({
             onResizeEnd={() => setResizingLeft(false)}
           />
         )}
-        <section className="task-stage">{children}</section>
+        <section
+          className="task-stage"
+          ref={taskStageRef}
+          aria-label={taskStageLabel}
+          role={taskStageLabel ? "group" : undefined}
+          tabIndex={taskStageLabel ? -1 : undefined}
+        >
+          {children}
+        </section>
         {effectiveRightPanelOpen && rightPanelDocked && (
           <ResizableSeparator
             className="task-panel-resize-handle"

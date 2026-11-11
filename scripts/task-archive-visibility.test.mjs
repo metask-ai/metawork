@@ -131,6 +131,7 @@ async function renderApp(
     historyRuns = [],
     projectTask = {},
     projectHidden = false,
+    searchPage,
   } = {},
 ) {
   const snapshot = structuredClone(initialSnapshot);
@@ -202,6 +203,10 @@ async function renderApp(
     ping: async () => {},
     fetchSnapshot: async (scope) => {
       if (scope.beforeRunId !== null) historyReads.push(scope.beforeRunId);
+      if (scope.search && searchPage) {
+        const searchIndex = await searchPage(scope);
+        return productStateFixture({ ...snapshot, searchIndex }, scope);
+      }
       return productStateFixture(snapshot, scope);
     },
     renameTask: async (taskId, title) => {
@@ -308,6 +313,143 @@ async function renderApp(
     },
   };
 }
+
+test("Global search restores the opener on cancellation and focuses an accepted Task", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  snapshot.searchIndex = {
+    stale: false,
+    results: [
+      { taskId: "3", runId: null, part: "0", kind: "task", detail: "" },
+    ],
+    nextCursor: null,
+  };
+  const launcher = screen.getByRole("button", { name: "Search", exact: true });
+  const query = () => screen.getByRole("combobox", { name: "Search MetaWork" });
+
+  await user.click(launcher);
+  await waitFor(() => assertFocused(query()));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assertFocused(launcher));
+
+  await user.click(launcher);
+  await user.type(query(), "archive");
+  await screen.findByRole("option", { name: /Archive target/ });
+  await user.keyboard("{Enter}");
+  const stage = await screen.findByRole("group", { name: "Archive target" });
+  await waitFor(() => assertFocused(stage));
+
+  await user.keyboard("{Control>}k{/Control}");
+  await waitFor(() => assertFocused(query()));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assertFocused(stage));
+
+  await user.keyboard("{Control>}k{/Control}");
+  await user.type(query(), "archive");
+  await screen.findByRole("option", { name: /Archive target/ });
+  await user.keyboard("{Enter}");
+  await waitFor(() => assertFocused(stage));
+
+  snapshot.searchIndex.results[0].taskId = "4";
+  await user.click(launcher);
+  await user.type(query(), "earlier");
+  await screen.findByRole("option", { name: /Earlier archive/ });
+  await user.keyboard("{Enter}");
+  const archived = await screen.findByRole("group", {
+    name: "Earlier archive",
+  });
+  await waitFor(() => assertFocused(archived));
+  assert.equal(
+    within(archived).queryByRole("combobox", { name: /instruction/i }),
+    null,
+  );
+});
+
+test("Global search skips filtered pages and discards a closed search session", async (ctx) => {
+  const cursor = (task) => ({
+    revision: "1",
+    securityEpoch: "1",
+    task,
+    run: "0",
+    part: "0",
+    offset: "0",
+  });
+  const hit = (taskId) => ({
+    taskId,
+    runId: null,
+    part: "0",
+    kind: "task",
+    detail: "",
+  });
+  const requests = [];
+  let resolveLate;
+  const { user } = await renderApp(ctx, {
+    searchPage({ searchQuery, searchCursor }) {
+      requests.push([searchQuery, searchCursor?.task ?? null]);
+      if (searchQuery === "late") {
+        return new Promise((resolve) => {
+          resolveLate = resolve;
+        });
+      }
+      if (searchQuery !== "archive") {
+        return { stale: false, results: [], nextCursor: null };
+      }
+      if (!searchCursor) {
+        return { stale: false, results: [hit("99")], nextCursor: cursor("1") };
+      }
+      if (searchCursor.task === "1") {
+        return { stale: false, results: [hit("3")], nextCursor: cursor("2") };
+      }
+      return { stale: false, results: [hit("4")], nextCursor: null };
+    },
+  });
+  const launcher = screen.getByRole("button", { name: "Search", exact: true });
+  const input = () => screen.getByRole("combobox", { name: "Search MetaWork" });
+  const close = () =>
+    screen.getByRole("button", { name: "Close", exact: true });
+
+  await user.click(launcher);
+  await user.type(input(), "archive");
+  await screen.findByRole("option", { name: /Archive target/ });
+  assert.deepEqual(
+    requests.filter(([query]) => query === "archive"),
+    [
+      ["archive", null],
+      ["archive", "1"],
+    ],
+  );
+  await user.click(screen.getByRole("button", { name: "Continue search" }));
+  await screen.findByRole("option", { name: /Earlier archive/ });
+  assertFocused(input());
+  await user.click(screen.getByRole("button", { name: "Back to first page" }));
+  await screen.findByRole("option", { name: /Archive target/ });
+  assertFocused(input());
+
+  fireEvent.change(input(), { target: { value: "late" } });
+  await waitFor(() => assert.ok(resolveLate));
+  await user.click(close());
+  await waitFor(() => assertFocused(launcher));
+  await user.click(launcher);
+  assert.equal(input().value, "");
+  await act(async () =>
+    resolveLate({ stale: false, results: [hit("4")], nextCursor: cursor("2") }),
+  );
+  assert.equal(screen.queryByRole("option"), null);
+  assert.equal(
+    screen.queryByRole("button", { name: "Back to first page" }),
+    null,
+  );
+
+  fireEvent.change(input(), { target: { value: "cancelled" } });
+  await user.click(close());
+  await waitFor(() => assertFocused(launcher));
+  await user.click(launcher);
+  assert.equal(input().value, "");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(
+    requests.some(([query]) => query === "cancelled"),
+    false,
+  );
+});
 
 test("a stopped tool loop prepares a local draft and preserves existing edits", async (ctx) => {
   const run = {

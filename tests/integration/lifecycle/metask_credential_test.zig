@@ -11,6 +11,9 @@ const fake_core = &fixture.fake_core;
 const access_a = "synthetic-lifecycle-access-a";
 const access_b = "synthetic-lifecycle-access-b";
 const model_id = "glm-5.3-flash";
+const switched_principal = "different-principal";
+/// Initial stored refresh token and the one issued by the login exchange.
+const switch_secrets = [_][]const u8{ access_a, access_b, "synthetic-lifecycle-refresh-a", "synthetic-lifecycle-refresh-0" };
 
 const Network = struct {
     expected_access: []const u8 = access_a,
@@ -168,6 +171,10 @@ test "Metask account replacement cannot lend its credential to an old Task" {
     try characterizeCredentialExpiry(.account_switch);
 }
 
+test "Metask logout then another account login moves inference and Models authority to the new account" {
+    try characterizeCredentialExpiry(.account_switch_after_logout);
+}
+
 test "Metask catalog refresh failure never falls back to an old credential" {
     try characterizeCredentialExpiry(.catalog_failure);
 }
@@ -281,7 +288,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
 }
 
-const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     try characterizeCredentialExpiryWithSchedule(scenario, false);
@@ -433,12 +440,39 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try expectBlocked(&control, old_id, "logged-in-again");
         return;
     }
+    if (scenario == .account_switch_after_logout) {
+        const before = control.modelsView().providers[0];
+        try std.testing.expectEqualStrings("credential-lifecycle", before.principal_ref);
+        try expectPersistedMetaskSource(tmp.dir, "credential-lifecycle", before.source_generation);
+        var signed_out = account.TestSupport.prepareLoggedOutAfterExternalCommit(&account_runtime);
+        defer signed_out.deinit();
+        commitObserved(&account_runtime, &control, &coordinator, &signed_out);
+        try std.testing.expectEqual(.needs_authentication, control.modelsView().providers[0].catalog_state);
+        try expectBlocked(&control, old_id, "signed-out");
+        network.login_principal = switched_principal;
+        network.expected_access = access_b;
+        try reloginObserved(&account_runtime, &control, &coordinator);
+        try drainCatalog(&coordinator);
+        try expectSwitchedAccount(&wake_loop, &control, &account_runtime, tmp.dir, workspace, old_id, old_scope, before.source_generation);
+        return;
+    }
     if (scenario == .relogin or scenario == .account_switch) {
-        network.login_principal = if (scenario == .relogin) "credential-lifecycle" else "different-principal";
+        const previous_source_generation = control.modelsView().providers[0].source_generation;
+        network.login_principal = if (scenario == .relogin) "credential-lifecycle" else switched_principal;
         try relogin(&account_runtime);
         network.expected_access = access_b;
         coordinator.authorizationChanged();
         try drainCatalog(&coordinator);
+        if (scenario == .account_switch) {
+            try expectSwitchedAccount(&wake_loop, &control, &account_runtime, tmp.dir, workspace, old_id, old_scope, previous_source_generation);
+            return;
+        }
+        // Userinfo bound the new login to the same principal: models.json is
+        // rewritten for the new credential, but its principal stays unchanged.
+        const relogged = control.modelsView().providers[0];
+        try std.testing.expectEqualStrings("credential-lifecycle", relogged.principal_ref);
+        try std.testing.expect(relogged.source_generation != previous_source_generation);
+        try expectPersistedMetaskSource(tmp.dir, "credential-lifecycle", relogged.source_generation);
         try std.testing.expect(old_scope != account_runtime.authorizationState().?.scope);
         try expectBlocked(&control, old_id, "replaced-authorization");
         try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
@@ -874,6 +908,89 @@ fn relogin(runtime: *account.Runtime) !void {
         try std.testing.expect(runtime.dispatchCommitted(&prepared) == null);
     }
     try std.testing.expectEqual(.authenticated, runtime.view().state);
+}
+
+/// Mirrors the Application Account coordinator order: Account commits, then
+/// Product Control receives the fact, then the Models observer is notified.
+fn commitObserved(runtime: *account.Runtime, control: *control_api.Runtime, coordinator: *coordinator_api.Coordinator, prepared: *account.Prepared) void {
+    const fact = runtime.preparedFact(prepared);
+    const attempt_id = prepared.attemptId();
+    const attempt_terminal = prepared.finishesAttempt();
+    runtime.commit(prepared);
+    control.accountCommitSink().commitNoFail(.{ .fact = fact, .attempt_id = attempt_id, .attempt_terminal = attempt_terminal });
+    coordinator.authorizationChanged();
+}
+
+/// A new OAuth login where Models observes every intermediate Account commit.
+fn reloginObserved(runtime: *account.Runtime, control: *control_api.Runtime, coordinator: *coordinator_api.Coordinator) !void {
+    _ = account.TestSupport.commitBeginLoginWithoutDispatch(runtime);
+    coordinator.authorizationChanged();
+    var input = try account.TestSupport.exchangeInput(std.testing.allocator, "synthetic-authorization-code");
+    defer input.deinit();
+    var exchange = account.TestSupport.prepareLoginExchange(runtime, &input);
+    defer exchange.deinit();
+    try std.testing.expect(runtime.admitEffect(&exchange));
+    commitObserved(runtime, control, coordinator, &exchange);
+    try std.testing.expect(runtime.dispatchCommitted(&exchange) == null);
+    // Token exchange and durable rotation, then Userinfo identity confirmation.
+    for (0..2) |_| {
+        account.TestSupport.joinNetwork(runtime);
+        var prepared = switch (runtime.prepareNextCompletion().?) {
+            .prepared => |value| value,
+            else => return error.LoginDidNotComplete,
+        };
+        defer prepared.deinit();
+        try std.testing.expect(runtime.admitEffect(&prepared));
+        commitObserved(runtime, control, coordinator, &prepared);
+        try std.testing.expect(runtime.dispatchCommitted(&prepared) == null);
+    }
+    try std.testing.expectEqual(.authenticated, runtime.view().state);
+}
+
+/// Login replacement by another principal must re-bind Models to that
+/// principal, durably, and admit new inference only with its credential.
+fn expectSwitchedAccount(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Runtime, account_runtime: *account.Runtime, dir: std.Io.Dir, workspace: u64, old_id: u64, old_scope: u64, previous_source_generation: u64) !void {
+    var lease = (try account_runtime.authorizationLease()).?;
+    defer lease.deinit();
+    try std.testing.expectEqualStrings(switched_principal, lease.principal_ref);
+    try std.testing.expectEqualStrings(access_b, lease.access_token);
+    try std.testing.expect(old_scope != account_runtime.authorizationState().?.scope);
+    const provider = control.modelsView().providers[0];
+    try std.testing.expectEqual(.ready, provider.catalog_state);
+    try std.testing.expectEqualStrings(switched_principal, provider.principal_ref);
+    try std.testing.expect(provider.source_generation != previous_source_generation);
+    try expectPersistedMetaskSource(dir, switched_principal, provider.source_generation);
+
+    // The old account has no balance left: its credential is rejected.
+    fake_core.lock();
+    fake_core.rejected_credential_digest = fixture.credentialDigest(access_a);
+    fake_core.unlock();
+    try expectBlocked(control, old_id, "old-account-task");
+    try std.testing.expectEqualStrings(access_a, control.testTask(old_id).?.runtime.executionConst().?.secret);
+    const new_id = try createTask(control, workspace);
+    try runAndExpect(wake_loop, control, new_id, "new-account-task", .completed);
+    const new = control.testTask(new_id).?;
+    try std.testing.expectEqualStrings(access_b, new.runtime.executionConst().?.secret);
+    try std.testing.expectEqual(account_runtime.authorizationState().?.scope, new.runtime.metask_authorization_scope);
+    try std.testing.expectEqual(@as(usize, 2), fake_core.session_created);
+    try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[1].credential_digest);
+    var snapshot: [512 * 1024]u8 = undefined;
+    const json = try control.writeAggregateFixture(&snapshot);
+    for (switch_secrets) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, json, secret) == null);
+}
+
+fn expectPersistedMetaskSource(dir: std.Io.Dir, principal_ref: []const u8, source_generation: u64) !void {
+    const bytes = try dir.readFileAlloc(std.testing.io, "models.json", std.testing.allocator, .limited(256 * 1024));
+    defer std.testing.allocator.free(bytes);
+    for (switch_secrets) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, bytes, secret) == null);
+    const Stored = struct { metask: ?struct { principal_ref: []const u8, source_generation: u64 } };
+    const parsed = try std.json.parseFromSlice(Stored, std.testing.allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const metask = parsed.value.metask orelse return error.TestExpectedMetaskSource;
+    try std.testing.expectEqualStrings(principal_ref, metask.principal_ref);
+    try std.testing.expectEqual(source_generation, metask.source_generation);
 }
 
 const ReviewProbe = struct {

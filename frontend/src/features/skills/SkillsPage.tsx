@@ -11,43 +11,50 @@ import type {
   SkillCatalogView,
   SkillManagementView,
   SkillMutationResult,
-  SkillSourceBrand,
-  WorkspaceView,
 } from "../../bridge/contracts.ts";
+import { Markdown } from "../../components/ai/Markdown.tsx";
+import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Drawer } from "../../components/ui/drawer.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { Input } from "../../components/ui/input.tsx";
-import { SearchField } from "../../components/ui/search-field.tsx";
-import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { SkillSourceControls } from "./SkillSourceControls.tsx";
 
 type Asset = SkillManagementView["assets"][number];
-export type SkillContext = "personal" | "project";
-export type SkillRefreshTarget =
-  | { scope: "personal" }
-  | { scope: "project"; workspaceId: string; expectedWorkspaceEpoch: string };
-export function skillRefreshKey(target: SkillRefreshTarget): string {
-  return target.scope === "personal"
-    ? "personal"
-    : `project:${target.workspaceId}:${target.expectedWorkspaceEpoch}`;
-}
-export type SkillRefreshRequests = Record<
-  string,
-  { busy: boolean; error: string | null }
->;
 type ImportKind = "package" | "directory";
+type PersonalImportTarget = Extract<
+  SkillImportTarget,
+  { kind: "personal" | "reimport" }
+>;
 type PreparedImport = Extract<SkillImportPreview, { status: "prepared" }>;
+
+function ImportChoices({ onChoose }: { onChoose: (kind: ImportKind) => void }) {
+  const { t } = useI18n();
+  return (
+    <>
+      <Menu.Item onClick={() => onChoose("package")}>
+        <Icon name="package" />
+        {t("skills.choose_package")}
+      </Menu.Item>
+      <Menu.Item onClick={() => onChoose("directory")}>
+        <Icon name="folder-up" />
+        {t("skills.choose_folder")}
+      </Menu.Item>
+    </>
+  );
+}
 
 function ImportMenu({
   label,
+  icon = "upload",
   disabled,
   onChoose,
 }: {
   label: string;
+  icon?: "plus" | "upload";
   disabled: boolean;
   onChoose: (kind: ImportKind, trigger: HTMLElement | null) => void;
 }) {
@@ -58,23 +65,20 @@ function ImportMenu({
       <Menu.Trigger
         ref={trigger}
         disabled={disabled}
-        render={<Button variant="primary" size="sm" />}
+        render={
+          <Button className="skill-import-button" variant="primary" size="sm" />
+        }
       >
-        <Icon name="upload" />
+        <Icon name={icon} />
         {label}
         <Icon name="chevron" />
       </Menu.Trigger>
       <Menu.Portal>
         <Menu.Positioner align="end">
           <Menu.Popup>
-            <Menu.Item onClick={() => onChoose("package", trigger.current)}>
-              <Icon name="package" />
-              {t("skills.choose_package")}
-            </Menu.Item>
-            <Menu.Item onClick={() => onChoose("directory", trigger.current)}>
-              <Icon name="folder-up" />
-              {t("skills.choose_folder")}
-            </Menu.Item>
+            <ImportChoices
+              onChoose={(kind) => onChoose(kind, trigger.current)}
+            />
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>
@@ -95,153 +99,125 @@ export function filterSkills(assets: Asset[], query: string): Asset[] {
   );
 }
 
-export function skillWorkspaceKey(
-  workspace: Pick<WorkspaceView, "id" | "epoch">,
-): string {
-  return `${workspace.id}:${workspace.epoch}`;
-}
-
-export function availableSkillWorkspaces(
-  workspaces: WorkspaceView[],
-): WorkspaceView[] {
-  return workspaces.filter(
-    (workspace) =>
-      workspace.kind === "manual" && workspace.authorization === "available",
-  );
-}
-
-export function resolveSkillWorkspace(
-  workspaces: WorkspaceView[],
-  selectedKey: string | null,
-): WorkspaceView | null {
-  const available = availableSkillWorkspaces(workspaces);
-  return (
-    available.find(
-      (workspace) => skillWorkspaceKey(workspace) === selectedKey,
-    ) ??
-    available[0] ??
-    null
-  );
-}
-
-export function rowsForSkillContext(
-  assets: Asset[],
-  context: SkillContext,
-  workspace: Pick<WorkspaceView, "id" | "epoch"> | null,
-): Asset[] {
-  if (context === "personal")
-    return assets.filter((asset) => asset.scope.kind === "personal");
-  // Ownership is keyed by Workspace id; the current epoch comes from the
-  // Workspace itself when a command needs it.
-  if (!workspace) return [];
-  return assets.filter(
-    (asset) =>
-      asset.scope.kind === "project" &&
-      asset.scope.workspaceId === workspace.id,
-  );
-}
-
 function skillRowIdentity(asset: Asset): string {
-  const scopeIdentity =
-    asset.scope.kind === "project"
-      ? `${asset.scope.kind}:${asset.scope.workspaceId}`
-      : asset.scope.kind;
-  return `${scopeIdentity}:${asset.installId ?? ""}:${asset.skillId ?? ""}:${asset.invocationName}`;
+  return `${asset.installId ?? ""}:${asset.skillId ?? ""}:${asset.invocationName}`;
 }
 
-function sourceLabel(asset: Asset, t: ReturnType<typeof useI18n>["t"]) {
-  if (asset.sourceKind === "local_package") return t("skills.source.package");
-  if (asset.sourceKind === "local_directory")
-    return t("skills.source.directory");
-  return t("skills.source.external");
+function skillAttention(asset: Asset) {
+  if (asset.managementState === "recovery_required") return "recovery_required";
+  if (asset.managementState === "pending_verification") return "pending";
+  return asset.issueCodes.length > 0 ? "issue" : null;
 }
 
-function scopeLabel(
-  asset: Asset,
-  workspaces: WorkspaceView[],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  if (asset.scope.kind === "personal") return t("skills.scope.personal");
-  if (asset.scope.kind === "external") return t("skills.scope.external");
-  const workspace = workspaces.find(
-    (candidate) => candidate.id === asset.scope.workspaceId,
-  );
-  return workspace
-    ? t("skills.scope.project_context", { workspace: workspace.displayName })
-    : t("skills.scope.project");
+function skillBody(definition: string, title: string) {
+  const leadingBlankLines = /^(?:[ \t]*\r?\n)+/;
+  const body = definition.replace(leadingBlankLines, "");
+  const heading = /^#[ \t]+([^\r\n]+)(?:\r?\n|$)/.exec(body);
+  return heading &&
+    heading[1].trim().toLowerCase() === title.trim().toLowerCase()
+    ? body.slice(heading[0].length).replace(leadingBlankLines, "")
+    : body;
 }
 
-function SkillCard({
+function SkillContent({
   asset,
-  workspaces,
+  onDetail,
+}: {
+  asset: Asset;
+  onDetail: (installId: string) => Promise<SkillDetailResult>;
+}) {
+  const { t } = useI18n();
+  const [detail, setDetail] = useState<SkillDetailResult | "error" | null>(
+    null,
+  );
+  const requested = useRef(false);
+  const installId =
+    asset.managementState === "recovery_required" ? null : asset.installId;
+
+  useEffect(() => {
+    if (!installId || requested.current) return;
+    requested.current = true;
+    void onDetail(installId).then(setDetail, () => setDetail("error"));
+  }, [installId, onDetail]);
+
+  if (!installId) return null;
+
+  if (detail === null || detail === "error" || !detail.available) {
+    return (
+      <p
+        className="skill-detail-content skill-detail-content-status"
+        role="status"
+      >
+        {t(
+          detail === null
+            ? "skills.detail.loading"
+            : "skills.detail.unavailable",
+        )}
+      </p>
+    );
+  }
+
+  const body = skillBody(
+    detail.definition,
+    asset.displayName || asset.invocationName,
+  );
+  return body.trim() ? (
+    <Markdown className="skill-detail-content" interactive={false}>
+      {body}
+    </Markdown>
+  ) : null;
+}
+
+function SkillRow({
+  asset,
   onOpen,
   onSetState,
   enablementBusy,
 }: {
   asset: Asset;
-  workspaces: WorkspaceView[];
   onOpen: (asset: Asset, trigger: HTMLElement) => void;
-  onSetState: (asset: Asset, state: "inherit" | "enabled" | "disabled") => void;
+  onSetState: (asset: Asset, state: "enabled" | "disabled") => void;
   enablementBusy: boolean;
 }) {
   const { t } = useI18n();
-  const attention =
-    asset.managementState === "recovery_required" ||
-    asset.managementState === "pending_verification" ||
-    asset.issueCodes.length > 0;
+  const attention = skillAttention(asset);
   return (
-    <li className="skill-card" data-attention={attention}>
+    <li className="skill-row" data-attention={attention !== null}>
       <button
-        className="skill-card-open focus-ring"
+        className="skill-row-open focus-ring"
         onClick={(event) => onOpen(asset, event.currentTarget)}
       >
-        <span className="skill-card-icon" aria-hidden="true">
+        <span className="skill-row-icon" aria-hidden="true">
           <Icon name="skill-file" />
         </span>
-        <span className="skill-card-copy">
-          <span className="skill-card-heading">
+        <span className="skill-row-copy">
+          <span className="skill-row-title">
             <strong>{asset.displayName || asset.invocationName}</strong>
-            <Icon name="chevron-right" />
-          </span>
-          <span className="skill-card-description">
-            {asset.description || t("skills.no_description")}
-          </span>
-          <span className="skill-card-meta">
-            <span>{scopeLabel(asset, workspaces, t)}</span>
-            <span>{sourceLabel(asset, t)}</span>
-            {attention && (
-              <span className="skill-card-attention">
-                {asset.managementState === "recovery_required"
-                  ? t("skills.status.recovery_required")
-                  : asset.managementState === "pending_verification"
-                    ? t("skills.status.pending")
-                    : t("skills.status.issue")}
-              </span>
+            {asset.sourceKind === "builtin" && (
+              <span className="skill-row-builtin">{t("skills.builtin")}</span>
             )}
           </span>
+          <span className="skill-row-description">
+            {asset.description || t("skills.no_description")}
+          </span>
+          {attention && (
+            <span className="skill-row-attention">
+              {t(`skills.status.${attention}`)}
+            </span>
+          )}
         </span>
       </button>
       {asset.enabled !== null && (
-        <span className="skill-card-enablement">
+        <div className="skill-row-enablement">
           <span>
-            {asset.scope.kind === "project" &&
-            asset.enablementState === "inherit"
-              ? t("skills.enablement.inherit")
-              : asset.enabled
-                ? t("skills.enablement.enabled")
-                : t("skills.enablement.disabled")}
-          </span>
-          {asset.scope.kind === "project" &&
-            asset.enablementState !== "inherit" && (
-              <button
-                className="skill-enablement-inherit focus-ring"
-                disabled={!asset.canSetEnabled || enablementBusy}
-                onClick={() => onSetState(asset, "inherit")}
-              >
-                {t("skills.enablement.follow_user")}
-              </button>
+            {t(
+              asset.enabled
+                ? "skills.enablement.enabled"
+                : "skills.enablement.disabled",
             )}
+          </span>
           <Switch.Root
+            className="h-4 w-7 data-checked:bg-(--metask-state-complete)"
             checked={asset.enabled}
             disabled={!asset.canSetEnabled || enablementBusy}
             aria-label={t("skills.enablement.label", {
@@ -251,9 +227,9 @@ function SkillCard({
               onSetState(asset, checked ? "enabled" : "disabled")
             }
           >
-            <Switch.Thumb />
+            <Switch.Thumb className="size-3 data-checked:translate-x-3" />
           </Switch.Root>
-        </span>
+        </div>
       )}
     </li>
   );
@@ -261,20 +237,15 @@ function SkillCard({
 
 export function SkillsPage({
   management,
-  personalCatalog,
-  workspaces,
+  personalCatalog: catalog,
   query,
-  refreshRequests,
-  sourceBusy,
-  sourceError,
-  onSetSourceEnabled,
-  onRecoverSources,
+  refreshRequest,
   disabled,
   onQuery,
   onRefresh,
   onSetEnabled,
   onChooseImport,
-  onPrepareImport,
+  onDiscardImport,
   onInstall,
   onReimport,
   onUninstall,
@@ -284,41 +255,24 @@ export function SkillsPage({
 }: {
   management: SkillManagementView;
   personalCatalog: SkillCatalogView;
-  workspaces: WorkspaceView[];
   query: string;
-  refreshRequests: SkillRefreshRequests;
-  sourceBusy: boolean;
-  sourceError: string | null;
-  onSetSourceEnabled: (
-    id: SkillSourceBrand,
-    enabled: boolean,
-    revision: string,
-  ) => void;
-  onRecoverSources: (action: "reread" | "reset", token: string) => void;
+  refreshRequest: { busy: boolean; error: string | null };
   disabled: boolean;
   onQuery: (query: string) => void;
-  onRefresh: (target: SkillRefreshTarget) => void;
+  onRefresh: () => void;
   onSetEnabled: (
-    target:
-      | { scope: "personal" }
-      | {
-          scope: "project";
-          workspaceId: string;
-          expectedWorkspaceEpoch: string;
-        },
     skillPolicyKey: string,
-    state: "inherit" | "enabled" | "disabled",
+    state: "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ) => Promise<SkillEnablementResult>;
   onChooseImport: (
     kind: ImportKind,
-    target: SkillImportTarget,
+    target: PersonalImportTarget,
   ) => Promise<SkillImportPreview>;
-  onPrepareImport: (
+  onDiscardImport: (
     previewId: string,
     revision: string,
-    target: SkillImportTarget | null,
   ) => Promise<SkillImportPreview>;
   onInstall: (
     previewId: string,
@@ -337,50 +291,38 @@ export function SkillsPage({
 }) {
   const { t } = useI18n();
   const title = useRef<HTMLHeadingElement>(null);
-  const drawerHeading = useRef<HTMLHeadingElement>(null);
-  const drawer = useRef<HTMLDivElement>(null);
-  const drawerTrigger = useRef<HTMLElement | null>(null);
-  const [context, setContext] = useState<SkillContext>("personal");
-  const [selectedWorkspaceKey, setSelectedWorkspaceKey] = useState<
-    string | null
-  >(null);
+  const dialogHeading = useRef<HTMLHeadingElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const dialogTrigger = useRef<HTMLElement | null>(null);
+  const detailMenuTrigger = useRef<HTMLButtonElement>(null);
+  const uninstallTrigger = useRef<HTMLButtonElement>(null);
+  const cancelUninstall = useRef<HTMLButtonElement>(null);
   const [selected, setSelected] = useState<Asset | null>(null);
-  const [detail, setDetail] = useState<SkillDetailResult | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [preview, setPreview] = useState<PreparedImport | null>(null);
-  const [importScope, setImportScope] = useState("personal");
   const [reimportTarget, setReimportTarget] = useState<Asset | null>(null);
   const importAudience = useRef(0);
   const previewRef = useRef<PreparedImport | null>(null);
   previewRef.current = preview;
-  const discardRef = useRef(onPrepareImport);
-  discardRef.current = onPrepareImport;
+  const discardRef = useRef(onDiscardImport);
+  discardRef.current = onDiscardImport;
   const [busy, setBusy] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [enablementBusy, setEnablementBusy] = useState<string | null>(null);
-  const [enablementError, setEnablementError] = useState<string | null>(null);
+  const [enablementBusy, setEnablementBusy] = useState(false);
+  const [enablementFailure, setEnablementFailure] = useState<{
+    identity: string;
+    name: string;
+  } | null>(null);
 
-  const manualWorkspaces = useMemo(
-    () => availableSkillWorkspaces(workspaces),
-    [workspaces],
-  );
-  const selectedWorkspace = useMemo(
-    () => resolveSkillWorkspace(workspaces, selectedWorkspaceKey),
-    [selectedWorkspaceKey, workspaces],
-  );
-  const effectiveWorkspaceKey = selectedWorkspace
-    ? skillWorkspaceKey(selectedWorkspace)
-    : null;
-  const contextAssets = useMemo(
-    () => rowsForSkillContext(management.assets, context, selectedWorkspace),
-    [context, management.assets, selectedWorkspace],
+  const personalAssets = useMemo(
+    () => management.assets.filter((asset) => asset.scope.kind === "personal"),
+    [management.assets],
   );
   const visibleAssets = useMemo(
-    () => filterSkills(contextAssets, query),
-    [contextAssets, query],
+    () => filterSkills(personalAssets, query),
+    [personalAssets, query],
   );
   const attention = visibleAssets.filter(
     (asset) =>
@@ -388,164 +330,97 @@ export function SkillsPage({
       asset.managementState === "recovery_required",
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
-  const drawerOpen = selected !== null || importOpen;
-  const catalog =
-    context === "personal" ? personalCatalog : selectedWorkspace?.skillCatalog;
-  const discovery =
-    context === "personal"
-      ? management.personalSourceDiscovery
-      : (selectedWorkspace?.skillSourceDiscovery ?? null);
-  const refreshTarget: SkillRefreshTarget | null =
-    context === "personal"
-      ? { scope: "personal" }
-      : selectedWorkspace
-        ? {
-            scope: "project",
-            workspaceId: selectedWorkspace.id,
-            expectedWorkspaceEpoch: selectedWorkspace.epoch,
-          }
-        : null;
-  const refreshRequest = refreshTarget
-    ? refreshRequests[skillRefreshKey(refreshTarget)]
-    : undefined;
-  const refreshing =
-    refreshRequest?.busy === true || catalog?.availability === "loading";
-  const contextIdentity = refreshTarget
-    ? skillRefreshKey(refreshTarget)
-    : "project:none";
-  const currentContextIdentity = useRef(contextIdentity);
-  currentContextIdentity.current = contextIdentity;
+  const dialogOpen = selected !== null || importOpen;
+  const selectedAttention = selected && skillAttention(selected);
+  const detailEnablementFailed =
+    selected && enablementFailure?.identity === skillRowIdentity(selected);
+  const enablementError =
+    enablementFailure &&
+    t("skills.error.enablement", { skill: enablementFailure.name });
+  const shadowsBuiltin =
+    preview?.effect === "create" &&
+    personalAssets.some(
+      (asset) =>
+        asset.sourceKind === "builtin" &&
+        asset.invocationName === preview.invocationName,
+    );
+  const showDetailMenu =
+    selected?.installId && (selected.canExport || selected.canReimport);
+  const showDetailActions =
+    selected &&
+    (selected.canSetEnabled ||
+      (selected.installId && (selected.canRetry || selected.canUninstall)));
+  const refreshing = refreshRequest.busy || catalog.availability === "loading";
 
   async function setEnablementState(
     asset: Asset,
-    state: "inherit" | "enabled" | "disabled",
+    state: "enabled" | "disabled",
   ) {
     if (
+      enablementBusy ||
       !asset.canSetEnabled ||
       !asset.skillPolicyKey ||
-      !asset.selectionRevision
+      !asset.selectionRevision ||
+      !catalog.revision
     )
       return;
-    // Commands carry the Workspace's current epoch from the same snapshot,
-    // never the asset's creation epoch.
-    const currentWorkspace =
-      asset.scope.kind === "project"
-        ? workspaces.find(
-            (candidate) => candidate.id === asset.scope.workspaceId,
-          )
-        : undefined;
-    const target =
-      asset.scope.kind === "project"
-        ? currentWorkspace
-          ? {
-              scope: "project" as const,
-              workspaceId: currentWorkspace.id,
-              expectedWorkspaceEpoch: currentWorkspace.epoch,
-            }
-          : null
-        : asset.scope.kind === "personal"
-          ? { scope: "personal" as const }
-          : null;
-    if (!target || (target.scope === "personal" && state === "inherit")) return;
-    const catalog =
-      target.scope === "personal"
-        ? personalCatalog
-        : currentWorkspace?.skillCatalog;
-    if (!catalog?.revision) return;
-    const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillPolicyKey}`;
-    setEnablementBusy(identity);
-    setEnablementError(null);
-    const requestContext = contextIdentity;
+    const failure = {
+      identity: skillRowIdentity(asset),
+      name: asset.displayName || asset.invocationName,
+    };
+    setEnablementBusy(true);
+    setEnablementFailure((current) =>
+      current?.identity === failure.identity ? null : current,
+    );
     try {
       const result = await onSetEnabled(
-        target,
         asset.skillPolicyKey,
         state,
         catalog.revision,
         asset.selectionRevision,
       );
-      if (!result.applied && currentContextIdentity.current === requestContext)
-        setEnablementError(t("skills.error.enablement"));
+      if (!result.applied) setEnablementFailure(failure);
     } catch {
-      if (currentContextIdentity.current === requestContext)
-        setEnablementError(t("skills.error.enablement"));
+      setEnablementFailure(failure);
     } finally {
-      setEnablementBusy(null);
+      setEnablementBusy(false);
     }
   }
 
   useEffect(() => title.current?.focus(), []);
-  useEffect(() => setEnablementError(null), [contextIdentity]);
   useEffect(() => {
     importAudience.current += 1;
     discardPreview();
     setImportOpen(false);
     setBusy(false);
-  }, [contextIdentity, disabled]);
+    setConfirmUninstall(false);
+  }, [disabled]);
   useEffect(
     () => () => {
       importAudience.current += 1;
       const current = previewRef.current;
       if (current)
         void discardRef
-          .current(current.previewId, current.preparationRevision, null)
+          .current(current.previewId, current.preparationRevision)
           .catch(() => {});
     },
     [],
   );
 
   useEffect(() => {
-    if (selectedWorkspaceKey !== effectiveWorkspaceKey)
-      setSelectedWorkspaceKey(effectiveWorkspaceKey);
-  }, [effectiveWorkspaceKey, selectedWorkspaceKey]);
-
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const frame = window.requestAnimationFrame(() =>
-      drawerHeading.current?.focus(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [drawerOpen, selected?.installId]);
-
-  useEffect(() => {
     if (!selected) return;
     const selectedIdentity = skillRowIdentity(selected);
-    const current = contextAssets.find(
+    const current = personalAssets.find(
       (asset) => skillRowIdentity(asset) === selectedIdentity,
     );
     if (current) setSelected(current);
-    else closeDrawer(false);
-    // closeDrawer deliberately follows the authoritative current context.
+    else closeDialog();
+    // closeDialog deliberately follows the committed personal inventory.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextAssets]);
-
-  useEffect(() => {
-    if (!drawerOpen) return;
-    function keydown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) closeDrawer();
-      if (event.key !== "Tab" || !drawer.current) return;
-      const focusable = Array.from(
-        drawer.current.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]',
-        ),
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  });
+  }, [personalAssets]);
 
   function rememberTrigger(trigger?: HTMLElement) {
-    drawerTrigger.current =
+    dialogTrigger.current =
       trigger ??
       (document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -558,48 +433,29 @@ export function SkillsPage({
     setPreview(null);
     if (current)
       void discardRef
-        .current(current.previewId, current.preparationRevision, null)
+        .current(current.previewId, current.preparationRevision)
         .catch(() => {});
   }
 
-  function closeDrawer(restoreFocus = true) {
+  function closeDialog() {
     importAudience.current += 1;
     discardPreview();
-    const trigger = drawerTrigger.current;
     setSelected(null);
-    setDetail(null);
     setImportOpen(false);
     setPreview(null);
     setBusy(false);
     setReimportTarget(null);
 
-    setDetailLoading(false);
     setConfirmUninstall(false);
     setNotice(null);
     setError(null);
-    if (restoreFocus)
-      window.requestAnimationFrame(() => {
-        if (trigger?.isConnected) trigger.focus();
-      });
   }
 
-  async function openDetail(asset: Asset, trigger: HTMLElement) {
+  function openDetail(asset: Asset, trigger: HTMLElement) {
     rememberTrigger(trigger);
     setImportOpen(false);
     setSelected(asset);
-    setDetail(null);
     setError(null);
-    if (!asset.installId || asset.managementState === "recovery_required")
-      return;
-    setDetailLoading(true);
-    try {
-      setDetail(await onDetail(asset.installId));
-    } catch {
-      setDetail(null);
-      setError(t("skills.error.detail"));
-    } finally {
-      setDetailLoading(false);
-    }
   }
 
   function importError(reason: SkillMutationReason) {
@@ -612,41 +468,26 @@ export function SkillsPage({
     target?: Asset,
   ) {
     if (busy || disabled) return;
-    if (!trigger || !drawer.current?.contains(trigger))
+    if (!trigger || !dialog.current?.contains(trigger))
       rememberTrigger(trigger ?? undefined);
     discardPreview();
     const audience = ++importAudience.current;
-    const requestContext = contextIdentity;
-    const intent: SkillImportTarget | null = target?.installId
+    const intent: PersonalImportTarget = target?.installId
       ? { kind: "reimport", installId: target.installId }
-      : context === "personal"
-        ? { kind: "personal" }
-        : selectedWorkspace
-          ? {
-              kind: "project",
-              workspaceId: selectedWorkspace.id,
-              workspaceEpoch: selectedWorkspace.epoch,
-            }
-          : null;
-    if (!intent) return;
+      : { kind: "personal" };
     setSelected(null);
     setImportOpen(false);
     setReimportTarget(target ?? null);
-    setImportScope(intent.kind === "project" ? intent.workspaceId : "personal");
     setError(null);
     setNotice(null);
     setBusy(true);
     try {
       const chosen = await onChooseImport(kind, intent);
-      if (
-        audience !== importAudience.current ||
-        requestContext !== currentContextIdentity.current
-      ) {
+      if (audience !== importAudience.current) {
         if (chosen.status === "prepared")
-          void onPrepareImport(
+          void onDiscardImport(
             chosen.previewId,
             chosen.preparationRevision,
-            null,
           ).catch(() => {});
         return;
       }
@@ -656,63 +497,18 @@ export function SkillsPage({
         setError(importError(chosen.reason));
         return;
       }
+      if (chosen.scope.kind !== "personal") {
+        void onDiscardImport(
+          chosen.previewId,
+          chosen.preparationRevision,
+        ).catch(() => {});
+        setError(importError("invalid_preview"));
+        return;
+      }
       setPreview(chosen);
-      setImportScope(
-        chosen.scope.kind === "project" ? chosen.scope.workspaceId : "personal",
-      );
     } catch {
       if (audience === importAudience.current) {
         setImportOpen(true);
-        setError(t("skills.error.preview"));
-      }
-    } finally {
-      if (audience === importAudience.current) setBusy(false);
-    }
-  }
-
-  async function changeImportScope(value: string) {
-    if (!preview || busy || disabled) return;
-    const workspace = manualWorkspaces.find((item) => item.id === value);
-    const target: SkillImportTarget | null =
-      value === "personal"
-        ? { kind: "personal" }
-        : workspace
-          ? {
-              kind: "project",
-              workspaceId: workspace.id,
-              workspaceEpoch: workspace.epoch,
-            }
-          : null;
-    if (!target) return;
-    const audience = ++importAudience.current;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await onPrepareImport(
-        preview.previewId,
-        preview.preparationRevision,
-        target,
-      );
-      if (audience !== importAudience.current) return;
-      if (result.status === "prepared") {
-        setPreview(result);
-        setImportScope(
-          result.scope.kind === "project"
-            ? result.scope.workspaceId
-            : "personal",
-        );
-      } else if (result.status === "rejected") {
-        setError(importError(result.reason));
-        if (
-          !["busy", "capacity_reached", "catalog_loading"].includes(
-            result.reason,
-          )
-        )
-          discardPreview();
-      }
-    } catch {
-      if (audience === importAudience.current) {
-        discardPreview();
         setError(t("skills.error.preview"));
       }
     } finally {
@@ -745,7 +541,7 @@ export function SkillsPage({
       // Committed work continues in Host; closing never cancels a transaction.
       previewRef.current = null;
       setPreview(null);
-      closeDrawer();
+      closeDialog();
     } catch {
       if (audience === importAudience.current) {
         previewRef.current = null;
@@ -770,7 +566,7 @@ export function SkillsPage({
         setError(t("skills.error.mutation"));
         return;
       }
-      if (close) closeDrawer();
+      if (close) closeDialog();
     } catch {
       setError(t("skills.error.mutation"));
     } finally {
@@ -804,23 +600,19 @@ export function SkillsPage({
   function renderGroup(label: string, assets: Asset[]) {
     if (assets.length === 0) return null;
     return (
-      <section className="skill-group">
+      <section className="skill-group" aria-label={label}>
         <header>
           <h2>{label}</h2>
           <span>{assets.length}</span>
         </header>
-        <ul className="skill-grid">
+        <ul className="skill-list" aria-label={label}>
           {assets.map((asset) => (
-            <SkillCard
+            <SkillRow
               key={skillRowIdentity(asset)}
               asset={asset}
-              workspaces={workspaces}
-              onOpen={(item, trigger) => void openDetail(item, trigger)}
+              onOpen={openDetail}
               onSetState={(item, state) => void setEnablementState(item, state)}
-              enablementBusy={
-                enablementBusy ===
-                `${asset.scope.kind}:${asset.scope.kind === "project" ? asset.scope.workspaceId : "user"}:${asset.skillPolicyKey ?? ""}`
-              }
+              enablementBusy={enablementBusy}
             />
           ))}
         </ul>
@@ -843,23 +635,21 @@ export function SkillsPage({
     operation &&
     operation.phase !== "prepared" &&
     operation.phase !== "cancelled" &&
-    (context === "personal"
-      ? operation.scope.kind === "personal"
-      : operation.scope.kind === "project" &&
-        operation.scope.workspaceId === selectedWorkspace?.id &&
-        operation.scope.workspaceEpoch === selectedWorkspace?.epoch)
+    operation.scope.kind === "personal"
       ? operation
       : null;
 
+  const personalRootError = management.personalSourceDiscovery?.find(
+    (check) => check.state === "error",
+  )?.reason;
   const unavailable = management.availability !== "ready";
-  const missingProjectWorkspace =
-    context === "project" && selectedWorkspace === null;
-  const empty = contextAssets.length === 0;
+  const empty = personalAssets.length === 0;
   const noResults = !empty && visibleAssets.length === 0;
+  const refreshLabel = t(refreshing ? "skills.refreshing" : "skills.refresh");
 
   return (
     <section className="skills-page" aria-labelledby="skills-title">
-      <div className="skills-page-inner skill-center">
+      <div className="skills-page-inner">
         <header className="skills-header">
           <div>
             <h1 id="skills-title" ref={title} tabIndex={-1}>
@@ -869,36 +659,36 @@ export function SkillsPage({
           </div>
           <div className="skill-header-actions">
             <Button
-              variant="secondary"
-              size="sm"
-              disabled={
-                disabled ||
-                refreshing ||
-                !refreshTarget ||
-                management.sourceSettings.revision === null
-              }
-              onClick={() => {
-                if (refreshTarget) onRefresh(refreshTarget);
-              }}
+              variant="ghost"
+              size="icon"
+              className="skill-refresh-button aria-busy:[&_svg]:animate-spin motion-reduce:[&_svg]:animate-none"
+              aria-label={refreshLabel}
+              aria-busy={refreshing}
+              title={refreshLabel}
+              disabled={disabled || refreshing}
+              onClick={onRefresh}
             >
               <Icon name="refresh" />
-              {t(refreshing ? "skills.refreshing" : "skills.refresh")}
             </Button>
+            {!unavailable && (
+              <HeaderSearch
+                label={t("skills.search_label")}
+                clearLabel={t("skills.clear_search")}
+                value={query}
+                onChange={onQuery}
+              />
+            )}
             <ImportMenu
-              label={t("skills.import")}
-              disabled={
-                disabled ||
-                unavailable ||
-                busy ||
-                (context === "project" && !selectedWorkspace)
-              }
+              label={t("skills.import.action")}
+              icon="plus"
+              disabled={disabled || unavailable || busy}
               onChoose={(kind, trigger) => void beginImport(kind, trigger)}
             />
           </div>
         </header>
 
         {visibleOperation && (
-          <p className="skill-drawer-notice" role="status">
+          <p className="skill-dialog-notice" role="status">
             {t(`skills.operation.${visibleOperation.phase}`, {
               skill: visibleOperation.invocationName,
             })}
@@ -907,74 +697,12 @@ export function SkillsPage({
           </p>
         )}
 
-        <SkillSourceControls
-          settings={management.sourceSettings}
-          discovery={discovery}
-          contextLabel={
-            context === "personal"
-              ? t("skills.scope.personal")
-              : (selectedWorkspace?.displayName ?? t("skills.no_project_title"))
-          }
-          busy={sourceBusy}
-          error={sourceError}
-          disabled={disabled}
-          onSetEnabled={onSetSourceEnabled}
-          onRecover={onRecoverSources}
-        />
-
-        <div className="skill-toolbar">
-          <SearchField
-            className="max-w-[360px] flex-1"
-            label={t("skills.search_label")}
-            value={query}
-            placeholder={t("skills.search_placeholder")}
-            onChange={(event) => onQuery(event.target.value)}
-          />
-          <div className="skill-context-controls">
-            <div
-              className="skill-scope-filter"
-              aria-label={t("skills.filter.label")}
-            >
-              {(["personal", "project"] as const).map((nextContext) => (
-                <button
-                  key={nextContext}
-                  className="focus-ring"
-                  data-active={context === nextContext}
-                  onClick={() => {
-                    if (context === nextContext) return;
-                    closeDrawer(false);
-                    setContext(nextContext);
-                  }}
-                >
-                  {t(`skills.filter.${nextContext}`)}
-                </button>
-              ))}
-            </div>
-            {context === "project" && manualWorkspaces.length > 0 && (
-              <SelectField
-                className="skill-workspace-select"
-                value={effectiveWorkspaceKey ?? ""}
-                options={manualWorkspaces.map((workspace) => ({
-                  value: skillWorkspaceKey(workspace),
-                  label: workspace.displayName,
-                }))}
-                onValueChange={(workspaceKey) => {
-                  if (workspaceKey === effectiveWorkspaceKey) return;
-                  closeDrawer(false);
-                  setSelectedWorkspaceKey(workspaceKey);
-                }}
-                aria-label={t("skills.project_workspace")}
-              />
-            )}
-          </div>
-        </div>
-
-        {refreshRequest?.error && (
+        {refreshRequest.error && (
           <p className="skill-enablement-error" role="alert">
             {refreshRequest.error}
           </p>
         )}
-        {catalog?.issues.length ? (
+        {catalog.issues.length ? (
           <section
             className="skill-group skill-catalog-issues"
             aria-label={t("skills.catalog_issues")}
@@ -998,13 +726,17 @@ export function SkillsPage({
             <p>{t("skills.catalog_issues_help")}</p>
           </section>
         ) : null}
-        {catalog &&
-          !["ready", "degraded", "loading"].includes(catalog.availability) && (
-            <p className="skill-enablement-error" role="status">
-              {t("skills.catalog_unavailable")}
-            </p>
-          )}
-        {enablementError && (
+        {(personalRootError ||
+          !["ready", "degraded", "loading"].includes(catalog.availability)) && (
+          <p className="skill-enablement-error" role="status">
+            {personalRootError
+              ? t("skills.personal_directory_error", {
+                  reason: t(`skills.directory_error.${personalRootError}`),
+                })
+              : t("skills.catalog_unavailable")}
+          </p>
+        )}
+        {enablementError && !detailEnablementFailed && (
           <p className="skill-enablement-error" role="alert">
             {enablementError}
           </p>
@@ -1025,15 +757,7 @@ export function SkillsPage({
               )}
             </p>
           </div>
-        ) : missingProjectWorkspace ? (
-          <div className="skill-empty-state">
-            <span>
-              <Icon name="folder-up" />
-            </span>
-            <h2>{t("skills.no_project_title")}</h2>
-            <p>{t("skills.no_project_body")}</p>
-          </div>
-        ) : empty && catalog?.availability === "loading" ? (
+        ) : empty && catalog.availability === "loading" ? (
           <div
             className="skill-empty-state skill-empty-state-compact"
             role="status"
@@ -1047,14 +771,14 @@ export function SkillsPage({
             </span>
             <h2>
               {t(
-                catalog?.issues.length
+                catalog.issues.length
                   ? "skills.no_available_title"
                   : "skills.empty_title",
               )}
             </h2>
             <p>
               {t(
-                catalog?.issues.length
+                catalog.issues.length
                   ? "skills.catalog_issues_help"
                   : "skills.empty_body",
               )}
@@ -1066,7 +790,7 @@ export function SkillsPage({
             />
           </div>
         ) : noResults ? (
-          <div className="skill-empty-state skill-empty-state-compact">
+          <div className="skill-empty-state">
             <span>
               <Icon name="search" />
             </span>
@@ -1081,45 +805,98 @@ export function SkillsPage({
         )}
       </div>
 
-      <Drawer.Root
-        open={drawerOpen}
+      <Dialog.Root
+        open={dialogOpen}
         onOpenChange={(open) => {
-          if (!open && !busy) closeDrawer();
+          if (!open && !busy) closeDialog();
         }}
       >
-        <Drawer.Portal>
-          <Drawer.Backdrop className="skill-drawer-backdrop" />
-          <Drawer.Popup
-            ref={drawer}
-            className="skill-drawer w-[min(500px,calc(100vw-28px))] max-[620px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
-            aria-labelledby="skill-drawer-title"
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup
+            ref={dialog}
+            className="skill-dialog w-[min(640px,calc(100vw-32px))] gap-0 overflow-hidden p-0"
+            initialFocus={dialogHeading}
+            finalFocus={() =>
+              dialogTrigger.current?.isConnected
+                ? dialogTrigger.current
+                : title.current
+            }
           >
             <header>
               <div>
-                <small>
-                  {importOpen
-                    ? t("skills.import.eyebrow")
-                    : t("skills.detail.eyebrow")}
-                </small>
-                <h2 id="skill-drawer-title" ref={drawerHeading} tabIndex={-1}>
+                <Dialog.Title ref={dialogHeading} tabIndex={-1}>
                   {importOpen
                     ? reimportTarget
                       ? t("skills.reimport")
                       : t("skills.import")
                     : selected?.displayName || selected?.invocationName}
-                </h2>
+                </Dialog.Title>
               </div>
-              <button
-                className="icon-button focus-ring"
-                aria-label={t("common.close")}
-                disabled={busy}
-                onClick={() => closeDrawer()}
-              >
-                <Icon name="close" />
-              </button>
+              <div className="skill-dialog-header-actions">
+                {showDetailMenu && selected && (
+                  <Menu.Root>
+                    <Menu.Trigger
+                      ref={detailMenuTrigger}
+                      className="icon-button"
+                      aria-label={t("skills.more_actions")}
+                      disabled={busy || disabled}
+                    >
+                      <Icon name="more" />
+                    </Menu.Trigger>
+                    <Menu.Portal>
+                      <Menu.Positioner align="end">
+                        <Menu.Popup>
+                          {selected.canExport && (
+                            <Menu.Item onClick={() => void runExport()}>
+                              <Icon name="download" />
+                              {t("skills.export")}
+                            </Menu.Item>
+                          )}
+                          {selected.canReimport && (
+                            <Menu.SubmenuRoot>
+                              <Menu.SubmenuTrigger openOnHover={false}>
+                                <Icon name="upload" />
+                                <span className="flex-1">
+                                  {t("skills.reimport")}
+                                </span>
+                                <Icon name="chevron-right" />
+                              </Menu.SubmenuTrigger>
+                              <Menu.Portal>
+                                <Menu.Positioner side="right" align="start">
+                                  <Menu.Popup aria-label={t("skills.reimport")}>
+                                    <ImportChoices
+                                      onChoose={(kind) =>
+                                        void beginImport(
+                                          kind,
+                                          detailMenuTrigger.current,
+                                          selected,
+                                        )
+                                      }
+                                    />
+                                  </Menu.Popup>
+                                </Menu.Positioner>
+                              </Menu.Portal>
+                            </Menu.SubmenuRoot>
+                          )}
+                        </Menu.Popup>
+                      </Menu.Positioner>
+                    </Menu.Portal>
+                  </Menu.Root>
+                )}
+                <button
+                  type="button"
+                  className="icon-button focus-ring"
+                  aria-label={t("common.close")}
+                  disabled={busy}
+                  onClick={() => closeDialog()}
+                >
+                  <Icon name="close" />
+                </button>
+              </div>
             </header>
 
-            <div className="skill-drawer-scroll">
+            <div className="skill-dialog-scroll" tabIndex={0}>
               {importOpen ? (
                 <>
                   {!preview ? (
@@ -1137,7 +914,7 @@ export function SkillsPage({
                   ) : (
                     <>
                       <div className="skill-import-preview">
-                        <span className="skill-card-icon">
+                        <span className="skill-preview-icon">
                           <Icon name="skill-file" />
                         </span>
                         <div>
@@ -1157,42 +934,17 @@ export function SkillsPage({
                           <p>{t("skills.resource_context_notice")}</p>
                         </div>
                       </div>
-                      {!reimportTarget && (
-                        <label className="skill-import-scope">
-                          <span>{t("skills.install_scope")}</span>
-                          <SelectField
-                            value={importScope}
-                            onValueChange={(value) =>
-                              void changeImportScope(value)
-                            }
-                            disabled={busy || disabled}
-                            options={[
-                              {
-                                value: "personal",
-                                label: t("skills.scope.personal"),
-                              },
-                              ...manualWorkspaces.map((workspace) => ({
-                                value: workspace.id,
-                                label: workspace.displayName,
-                              })),
-                            ]}
-                            aria-label={t("skills.install_scope")}
-                          />
-                        </label>
-                      )}
-                      <div className="skill-drawer-notice" role="status">
+                      <div className="skill-dialog-notice" role="status">
                         <strong>{t(`skills.effect.${preview.effect}`)}</strong>
+                        <p>{t("skills.scope.personal")}</p>
                         <p>
-                          {preview.scope.kind === "personal"
-                            ? t("skills.scope.personal")
-                            : t("skills.scope.project_context", {
-                                workspace:
-                                  workspaces.find(
-                                    (w) => w.id === preview.scope.workspaceId,
-                                  )?.displayName ?? t("skills.scope.project"),
-                              })}
+                          {t(`skills.effect_body.${preview.effect}`, {
+                            skill: preview.invocationName,
+                          })}
                         </p>
-                        <p>{t(`skills.effect_body.${preview.effect}`)}</p>
+                        {shadowsBuiltin && (
+                          <p>{t("skills.effect_body.shadows_builtin")}</p>
+                        )}
                         {importBlocker && <p>{importError(importBlocker)}</p>}
                       </div>
                       <section className="skill-definition">
@@ -1202,212 +954,196 @@ export function SkillsPage({
                     </>
                   )}
                   {error && (
-                    <p className="skill-drawer-error" role="alert">
+                    <p className="skill-dialog-error" role="alert">
                       {error}
                     </p>
                   )}
                 </>
               ) : selected ? (
                 <>
-                  <div className="skill-detail-summary">
-                    <div>
-                      <span>{t("skills.detail.invocation")}</span>
-                      <code>{selected.invocationName}</code>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.scope")}</span>
-                      <strong>{scopeLabel(selected, workspaces, t)}</strong>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.source")}</span>
-                      <strong>{sourceLabel(selected, t)}</strong>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.origin")}</span>
-                      <strong>
-                        {selected.origin
-                          ? `${selected.origin.ecosystem === "agents" ? ".agents" : selected.origin.ecosystem === "claude" ? "Claude" : "Codex"} · ${t(selected.origin.scope === "personal" ? "skills.sources.scope.user" : "skills.sources.scope.workspace")}`
-                          : t("skills.sources.unknown_origin")}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.status")}</span>
-                      <strong>
-                        {selected.managementState === "recovery_required"
-                          ? t("skills.status.recovery_required")
-                          : selected.managementState === "pending_verification"
-                            ? t("skills.status.pending")
-                            : selected.issueCodes.length > 0
-                              ? t("skills.status.issue")
-                              : t("skills.status.ready")}
-                      </strong>
-                    </div>
-                  </div>
                   {selected.description && (
-                    <p className="skill-detail-description">
+                    <Dialog.Description className="skill-detail-description">
                       {selected.description}
+                    </Dialog.Description>
+                  )}
+                  {selected.enabled === false && (
+                    <p className="skill-detail-status">
+                      {t("skills.enablement.disabled")}
                     </p>
                   )}
-                  {selected.issueCodes.length > 0 && (
-                    <div className="skill-drawer-notice" role="status">
-                      <strong>{t("skills.issue_title")}</strong>
-                      <p>{selected.issueCodes.join(" · ")}</p>
+                  {selectedAttention && (
+                    <div className="skill-dialog-notice" role="status">
+                      <strong>{t(`skills.status.${selectedAttention}`)}</strong>
+                      {selected.issueCodes.map((code) => (
+                        <p key={code}>{t(`skills.issue.${code}`)}</p>
+                      ))}
                     </div>
                   )}
-                  <section className="skill-definition">
-                    <h3>{t("skills.detail.definition")}</h3>
-                    {selected.installId === null ? (
-                      <p>{t("skills.detail.external_body")}</p>
-                    ) : detailLoading ? (
-                      <p>{t("skills.detail.loading")}</p>
-                    ) : detail?.available ? (
-                      <pre>{detail.definition}</pre>
-                    ) : (
-                      <p>{t("skills.detail.unavailable")}</p>
-                    )}
-                  </section>
-                  {error && (
-                    <p className="skill-drawer-error" role="alert">
-                      {error}
-                    </p>
-                  )}
-                  {notice && (
-                    <p className="skill-drawer-success" role="status">
-                      {notice}
-                    </p>
-                  )}
-                  {confirmUninstall && (
-                    <div className="skill-drawer-notice" role="alert">
-                      <strong>{t("skills.uninstall_confirm_title")}</strong>
-                      <p>{t("skills.uninstall_confirm")}</p>
-                    </div>
-                  )}
+                  <SkillContent
+                    key={skillRowIdentity(selected)}
+                    asset={selected}
+                    onDetail={onDetail}
+                  />
                 </>
               ) : null}
             </div>
 
-            <footer>
-              {importOpen ? (
-                <>
-                  {preview && (
-                    <ImportMenu
-                      label={t("skills.choose_again")}
-                      disabled={busy || disabled}
-                      onChoose={(kind, trigger) =>
-                        void beginImport(
-                          kind,
-                          trigger,
-                          reimportTarget ?? undefined,
-                        )
-                      }
-                    />
-                  )}
-                  <span />
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => closeDrawer()}
-                  >
-                    {t("common.cancel")}
-                  </Button>
-                  {preview && (
+            {selected && (error || notice || detailEnablementFailed) && (
+              <div className="px-5 pb-3">
+                {(error || detailEnablementFailed) && (
+                  <p className="skill-dialog-error" role="alert">
+                    {error || enablementError}
+                  </p>
+                )}
+                {notice && (
+                  <p className="skill-dialog-success" role="status">
+                    {notice}
+                  </p>
+                )}
+              </div>
+            )}
+            {(importOpen || showDetailActions) && (
+              <footer data-detail={!importOpen || undefined}>
+                {importOpen ? (
+                  <>
+                    {preview && (
+                      <ImportMenu
+                        label={t("skills.choose_again")}
+                        disabled={busy || disabled}
+                        onChoose={(kind, trigger) =>
+                          void beginImport(
+                            kind,
+                            trigger,
+                            reimportTarget ?? undefined,
+                          )
+                        }
+                      />
+                    )}
+                    <span />
                     <Button
-                      variant="primary"
+                      variant="secondary"
                       size="sm"
-                      disabled={busy || disabled || importBlocker !== null}
-                      onClick={() => void commitImport()}
+                      disabled={busy}
+                      onClick={() => closeDialog()}
                     >
-                      {busy
-                        ? t("skills.working")
-                        : t(`skills.effect.${preview.effect}`)}
+                      {t("common.cancel")}
                     </Button>
-                  )}
-                </>
-              ) : selected?.installId ? (
-                <>
-                  {selected.canExport && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={busy}
-                      onClick={() => void runExport()}
-                    >
-                      <Icon name="download" /> {t("skills.export")}
-                    </button>
-                  )}
-                  {selected.canReimport && (
-                    <ImportMenu
-                      label={t("skills.reimport")}
-                      disabled={busy || disabled}
-                      onChoose={(kind, trigger) =>
-                        void beginImport(kind, trigger, selected)
-                      }
-                    />
-                  )}
-                  {selected.canRetry && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={busy}
-                      onClick={() =>
-                        void runMutation(() => onRetry(selected.installId!))
-                      }
-                    >
-                      <Icon name="refresh" /> {t("skills.retry")}
-                    </button>
-                  )}
-                  <span />
-                  {selected.canUninstall &&
-                    (confirmUninstall ? (
-                      <>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => setConfirmUninstall(false)}
-                        >
-                          {t("common.cancel")}
-                        </Button>
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() =>
-                            void runMutation(
-                              () => onUninstall(selected.installId!),
-                              true,
-                            )
-                          }
-                        >
-                          <Icon name="trash" /> {t("skills.uninstall")}
-                        </Button>
-                      </>
-                    ) : (
+                    {preview && (
                       <Button
-                        variant="danger"
+                        variant="primary"
+                        size="sm"
+                        disabled={busy || disabled || importBlocker !== null}
+                        onClick={() => void commitImport()}
+                      >
+                        {busy
+                          ? t("skills.working")
+                          : t(`skills.effect.${preview.effect}`)}
+                      </Button>
+                    )}
+                  </>
+                ) : selected ? (
+                  <>
+                    {selected.canSetEnabled && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          busy ||
+                          disabled ||
+                          enablementBusy ||
+                          !catalog.revision
+                        }
+                        onClick={() =>
+                          void setEnablementState(
+                            selected,
+                            selected.enabled ? "disabled" : "enabled",
+                          )
+                        }
+                      >
+                        {t(
+                          selected.enabled
+                            ? "skills.enablement.disable"
+                            : "skills.enablement.enable",
+                        )}
+                      </Button>
+                    )}
+                    {selected.installId && selected.canRetry && (
+                      <Button
+                        variant="secondary"
                         size="sm"
                         disabled={busy}
+                        onClick={() =>
+                          void runMutation(() => onRetry(selected.installId!))
+                        }
+                      >
+                        <Icon name="refresh" /> {t("skills.retry")}
+                      </Button>
+                    )}
+                    <span />
+                    {selected.installId && selected.canUninstall && (
+                      <Button
+                        ref={uninstallTrigger}
+                        variant="danger"
+                        size="sm"
+                        disabled={busy || disabled}
                         onClick={() => setConfirmUninstall(true)}
                       >
                         <Icon name="trash" /> {t("skills.uninstall")}
                       </Button>
-                    ))}
-                </>
-              ) : (
-                <>
-                  <span />
+                    )}
+                  </>
+                ) : null}
+              </footer>
+            )}
+          </Dialog.Popup>
+        </Dialog.Portal>
+        {selected?.installId && selected.canUninstall && !disabled && (
+          <AlertDialog.Root
+            open={confirmUninstall}
+            onOpenChange={setConfirmUninstall}
+          >
+            <AlertDialog.Portal>
+              <AlertDialog.Backdrop />
+              <AlertDialog.Popup
+                initialFocus={cancelUninstall}
+                finalFocus={uninstallTrigger}
+              >
+                <AlertDialog.Title>
+                  {t("skills.uninstall_confirm_title", {
+                    skill: selected.displayName || selected.invocationName,
+                  })}
+                </AlertDialog.Title>
+                <AlertDialog.Description>
+                  {t("skills.uninstall_confirm")}
+                </AlertDialog.Description>
+                <div className="flex justify-end gap-2">
                   <Button
+                    ref={cancelUninstall}
                     variant="secondary"
                     size="sm"
-                    onClick={() => closeDrawer()}
+                    onClick={() => setConfirmUninstall(false)}
                   >
-                    {t("common.close")}
+                    {t("common.cancel")}
                   </Button>
-                </>
-              )}
-            </footer>
-          </Drawer.Popup>
-        </Drawer.Portal>
-      </Drawer.Root>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmUninstall(false);
+                      void runMutation(
+                        () => onUninstall(selected.installId!),
+                        true,
+                      );
+                    }}
+                  >
+                    <Icon name="trash" /> {t("skills.uninstall")}
+                  </Button>
+                </div>
+              </AlertDialog.Popup>
+            </AlertDialog.Portal>
+          </AlertDialog.Root>
+        )}
+      </Dialog.Root>
     </section>
   );
 }

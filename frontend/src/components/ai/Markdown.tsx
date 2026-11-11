@@ -4,10 +4,12 @@ import {
   useCallback,
   useDeferredValue,
   useContext,
+  useId,
   useLayoutEffect,
   useState,
   type ComponentPropsWithoutRef,
   type MouseEvent,
+  type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -15,15 +17,25 @@ import type { InlineCode, Link, Parent, Root, RootContent, Text } from "mdast";
 
 import { CodeBlock } from "./CodeBlock.tsx";
 import { Button } from "../ui/button.tsx";
+import { Tooltip } from "../ui/tooltip.tsx";
 
 export type MarkdownReference = {
   label: string;
   onOpen: (opener: HTMLButtonElement) => void;
 };
 
+// Product features resolve an explicit local Markdown destination (path or
+// file URL) to an opener, or to an already-localized reason it cannot open.
+export type MarkdownLocalLinks = (
+  destination: string,
+) => MarkdownReference | { unavailable: string };
+
 const ReferenceContext = createContext<
   ReadonlyMap<string, MarkdownReference> | undefined
 >(undefined);
+const LocalLinkContext = createContext<MarkdownLocalLinks | undefined>(
+  undefined,
+);
 
 export type MarkdownCodeCopy = {
   label: string;
@@ -42,17 +54,39 @@ export type MarkdownWebLink = {
 
 const WebLinkContext = createContext<MarkdownWebLink | undefined>(undefined);
 
-function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
+// A destination that names a local file rather than a web resource: a path, a
+// file URL or a drive-letter path. Fragments and queries stay in-document.
+function localDestination(url: string): boolean {
+  return (
+    /^(?:file:|[a-z]:[\\/])/i.test(url) ||
+    !/^(?:[a-z][a-z\d+.-]*:|\/\/|[#?])/i.test(url)
+  );
+}
+
+function decodeDestination(url: string): string {
+  try {
+    return decodeURIComponent(url);
+  } catch {
+    return url;
+  }
+}
+
+function referencePlugin(
+  references: ReadonlyMap<string, MarkdownReference>,
+  localLinks: boolean,
+) {
   const aliases = [...references.keys()]
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
   const escaped = aliases.map((alias) =>
     alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
   );
-  const pattern = new RegExp(
-    `(?<![\\p{L}\\p{N}_./\\\\~:@%+-])(?:${escaped.join("|")})(?![\\p{L}\\p{N}_/\\\\~:@%+-]|\\.[\\p{L}\\p{N}_])`,
-    "gu",
-  );
+  const pattern = aliases.length
+    ? new RegExp(
+        `(?<![\\p{L}\\p{N}_./\\\\~:@%+-])(?:${escaped.join("|")})(?![\\p{L}\\p{N}_/\\\\~:@%+-]|\\.[\\p{L}\\p{N}_])`,
+        "gu",
+      )
+    : null;
   function link(alias: string, child: Text | InlineCode): Link {
     return {
       type: "link",
@@ -91,6 +125,12 @@ function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
               /* Malformed URL encoding is not a reference. */
             }
           }
+          // An explicit link keeps its target; the feature decides at render
+          // time whether the current Workspace can open it.
+          if (url && localLinks && localDestination(url))
+            return [
+              { ...node, data: { hProperties: { "data-local-link": url } } },
+            ];
           return [node];
         }
         if (["code", "html", "image", "imageReference"].includes(node.type))
@@ -98,6 +138,7 @@ function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
         if (node.type === "inlineCode")
           return [references.has(node.value) ? link(node.value, node) : node];
         if (node.type === "text") {
+          if (!pattern) return [node];
           const result: RootContent[] = [];
           let offset = 0;
           for (const match of node.value.matchAll(pattern)) {
@@ -186,6 +227,47 @@ function WebLink({
   );
 }
 
+// Keeps an explicit link target perceivable without presenting an action.
+function UnavailableLocalLink({
+  reason,
+  target,
+  children,
+}: {
+  reason: string;
+  target: string;
+  children: ReactNode;
+}) {
+  const description = useId();
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger
+        render={
+          <span
+            role="link"
+            aria-disabled="true"
+            aria-describedby={description}
+            tabIndex={0}
+            className="ai-markdown-file-link-unavailable"
+          />
+        }
+      >
+        {children}
+      </Tooltip.Trigger>
+      <span id={description} hidden>
+        {`${reason} ${target}`}
+      </span>
+      <Tooltip.Portal>
+        <Tooltip.Positioner side="top">
+          <Tooltip.Popup className="max-w-[min(28rem,calc(100vw-2rem))]">
+            <span className="block">{reason}</span>
+            <span className="block [overflow-wrap:anywhere]">{target}</span>
+          </Tooltip.Popup>
+        </Tooltip.Positioner>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
+
 // Stable component identities keep the actual opener mounted when preview state
 // or a snapshot changes. The reference context updates callbacks without remounts.
 const components: Components = {
@@ -217,10 +299,23 @@ const components: Components = {
   a: function ReferenceLink({ href, children: content, node, ...props }) {
     const interactive = useContext(InteractionContext);
     const references = useContext(ReferenceContext);
+    const localLinks = useContext(LocalLinkContext);
     if (!interactive) return <span>{content}</span>;
     const alias = node?.properties["data-inline-reference"];
+    const destination = node?.properties["data-local-link"];
+    const local =
+      typeof destination === "string" ? localLinks?.(destination) : undefined;
+    if (local && "unavailable" in local)
+      return (
+        <UnavailableLocalLink
+          reason={local.unavailable}
+          target={decodeDestination(String(destination))}
+        >
+          {content}
+        </UnavailableLocalLink>
+      );
     const reference =
-      typeof alias === "string" ? references?.get(alias) : undefined;
+      typeof alias === "string" ? references?.get(alias) : local;
     if (reference)
       return (
         <Button
@@ -302,21 +397,28 @@ type MarkdownBodyProps = {
   children: string;
   references?: ReadonlyMap<string, MarkdownReference>;
   referenceFingerprint: string;
+  localLinks: boolean;
   textResourcesOnly: boolean;
 };
+
+const noReferences: ReadonlyMap<string, MarkdownReference> = new Map();
 
 const MarkdownBody = memo(
   function MarkdownBody({
     children,
     references,
+    localLinks,
     textResourcesOnly,
   }: MarkdownBodyProps) {
     return (
       <ReactMarkdown
         skipHtml
         remarkPlugins={
-          references?.size
-            ? [remarkGfm, referencePlugin(references)]
+          references?.size || localLinks
+            ? [
+                remarkGfm,
+                referencePlugin(references ?? noReferences, localLinks),
+              ]
             : [remarkGfm]
         }
         components={textResourcesOnly ? textResourceComponents : components}
@@ -328,6 +430,7 @@ const MarkdownBody = memo(
   (previous, next) =>
     previous.children === next.children &&
     previous.referenceFingerprint === next.referenceFingerprint &&
+    previous.localLinks === next.localLinks &&
     previous.textResourcesOnly === next.textResourcesOnly,
 );
 
@@ -337,6 +440,7 @@ export type MarkdownProps = Omit<
 > & {
   children: string;
   references?: ReadonlyMap<string, MarkdownReference>;
+  localLinks?: MarkdownLocalLinks;
   textResourcesOnly?: boolean;
   codeCopy?: MarkdownCodeCopy;
   webLink?: MarkdownWebLink;
@@ -349,6 +453,7 @@ export function Markdown({
   className,
   children,
   references,
+  localLinks,
   textResourcesOnly = false,
   codeCopy,
   webLink,
@@ -371,19 +476,22 @@ export function Markdown({
       {...props}
     >
       <ReferenceContext.Provider value={references}>
-        <WebLinkContext.Provider value={webLink}>
-          <CodeCopyContext.Provider value={codeCopy}>
-            <InteractionContext.Provider value={interactive}>
-              <MarkdownBody
-                references={references}
-                referenceFingerprint={referenceFingerprint}
-                textResourcesOnly={textResourcesOnly}
-              >
-                {visibleChildren}
-              </MarkdownBody>
-            </InteractionContext.Provider>
-          </CodeCopyContext.Provider>
-        </WebLinkContext.Provider>
+        <LocalLinkContext.Provider value={localLinks}>
+          <WebLinkContext.Provider value={webLink}>
+            <CodeCopyContext.Provider value={codeCopy}>
+              <InteractionContext.Provider value={interactive}>
+                <MarkdownBody
+                  references={references}
+                  referenceFingerprint={referenceFingerprint}
+                  localLinks={Boolean(localLinks)}
+                  textResourcesOnly={textResourcesOnly}
+                >
+                  {visibleChildren}
+                </MarkdownBody>
+              </InteractionContext.Provider>
+            </CodeCopyContext.Provider>
+          </WebLinkContext.Provider>
+        </LocalLinkContext.Provider>
       </ReferenceContext.Provider>
     </div>
   );

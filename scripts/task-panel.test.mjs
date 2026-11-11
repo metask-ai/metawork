@@ -1948,6 +1948,156 @@ test("closed output keeps its DOM root across status revisions and activates lat
   assert.deepEqual(opened[0].slice(0, 2), ["3", "9"]);
 });
 
+function linkedRun(response, fileRefs = []) {
+  return run({
+    output: {
+      commentary: [],
+      response,
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [
+      technicalTool({ id: "write-1", name: "Write", fileRefs }),
+      technicalTool({ id: "deliver-1", order: "2", name: "DeliverFile" }),
+    ],
+  });
+}
+
+const reportReference = {
+  id: "report-ref",
+  title: "p0-file-report.txt",
+  displayPath: "p0-file-report.txt",
+};
+
+test("explicit Markdown file links open Workspace files without a Run reference", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const opened = [];
+  const workspaceOpened = [];
+  render(
+    taskContentElement(
+      task({
+        currentRunId: "9",
+        runs: [
+          linkedRun(
+            [
+              "[p0-file-report.txt](p0-file-report.txt)",
+              // Delivered again in this Run, so no Tool published a reference.
+              "[p0-file-manifest.csv](p0-file-manifest.csv)",
+              "[QA preview](</Users/me/My Work/notes/qa preview.txt>)",
+              "[report again](/Users/me/My%20Work/p0-file-report.txt)",
+              "[hosts](/etc/hosts)",
+            ].join("\n\n"),
+            [reportReference],
+          ),
+        ],
+      }),
+      "1",
+      {
+        workspaceRoot: "/Users/me/My Work",
+        onPreviewFile: (taskId, runId, reference) =>
+          opened.push([taskId, runId, reference.id]),
+        onPreviewWorkspaceFile: (taskId, path, opener) =>
+          workspaceOpened.push([taskId, path, opener.textContent]),
+      },
+    ),
+  );
+
+  const report = screen.getAllByRole("button", {
+    name: "Preview p0-file-report.txt",
+  });
+  assert.deepEqual(
+    report.map((link) => link.textContent),
+    ["p0-file-report.txt", "report again"],
+  );
+  for (const link of report) fireEvent.click(link);
+  assert.deepEqual(opened, [
+    ["3", "9", "report-ref"],
+    ["3", "9", "report-ref"],
+  ]);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Preview p0-file-manifest.csv" }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Preview notes/qa preview.txt" }),
+  );
+  assert.deepEqual(workspaceOpened, [
+    ["3", "p0-file-manifest.csv", "p0-file-manifest.csv"],
+    ["3", "notes/qa preview.txt", "QA preview"],
+  ]);
+
+  const hosts = screen.getByRole("link", { name: "hosts" });
+  assert.equal(hosts.getAttribute("aria-disabled"), "true");
+  assert.equal(hosts.tabIndex, 0);
+  assert.equal(hosts.hasAttribute("href"), false);
+  assert.equal(
+    document.getElementById(hosts.getAttribute("aria-describedby")).textContent,
+    "Can't open: outside the current workspace /etc/hosts",
+  );
+  fireEvent.click(hosts);
+  assert.equal(opened.length + workspaceOpened.length, 4);
+  await user.hover(hosts);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector("[data-base-ui-portal]")?.textContent,
+      "Can't open: outside the current workspace/etc/hosts",
+    ),
+  );
+});
+
+test("Markdown file links follow Workspace availability without remounting output", () => {
+  const value = task({
+    currentRunId: "9",
+    runs: [
+      linkedRun(
+        "[p0-file-report.txt](p0-file-report.txt) [p0-file-manifest.csv](p0-file-manifest.csv) [绝对](/Users/me/ws/a.txt)",
+        [reportReference],
+      ),
+    ],
+  });
+  const view = render(
+    taskContentElement(value, "1", { workspaceRoot: null }, "zh-CN"),
+  );
+  const part = view.container.querySelector(".agent-response");
+  assert.ok(screen.getByRole("button", { name: "预览 p0-file-report.txt" }));
+  for (const [name, target] of [
+    ["p0-file-manifest.csv", "p0-file-manifest.csv"],
+    ["绝对", "/Users/me/ws/a.txt"],
+  ]) {
+    const link = screen.getByRole("link", { name });
+    assert.equal(
+      document.getElementById(link.getAttribute("aria-describedby"))
+        .textContent,
+      `无法打开：当前工作区不可用 ${target}`,
+    );
+  }
+
+  const workspaceOpened = [];
+  view.rerender(
+    taskContentElement(
+      value,
+      "2",
+      {
+        workspaceRoot: "/Users/me/ws",
+        onPreviewWorkspaceFile: (taskId, path) =>
+          workspaceOpened.push([taskId, path]),
+      },
+      "zh-CN",
+    ),
+  );
+  assert.equal(view.container.querySelector(".agent-response"), part);
+  assert.equal(screen.queryByRole("link"), null);
+  fireEvent.click(
+    screen.getByRole("button", { name: "预览 p0-file-manifest.csv" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "预览 a.txt" }));
+  assert.deepEqual(workspaceOpened, [
+    ["3", "p0-file-manifest.csv"],
+    ["3", "a.txt"],
+  ]);
+});
+
 test("live revisions extend the narrative while replacing one bottom status in place", () => {
   const activeRun = run({
     phase: "running",
@@ -6736,6 +6886,80 @@ test("App opens unreferenced workspace files in preview tabs and revokes them wi
     ),
   );
   assert.equal(screen.queryByRole("treeitem"), null);
+});
+
+test("App opens conversation Markdown file links through Workspace authority", async (ctx) => {
+  const reads = [];
+  const fixture = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      previewWorkspaceFile: (...args) =>
+        new Promise((resolve) => reads.push({ args, resolve })),
+    },
+  );
+  Object.assign(fixture.snapshot.tasks[0], {
+    currentRunPhase: null,
+    activeOperation: null,
+  });
+  Object.assign(fixture.snapshot.tasks[0].runs[0], {
+    phase: "completed",
+    terminal: terminal("completed"),
+    activity: null,
+    output: {
+      commentary: ["Working with `a.txt` and `b.txt`."],
+      response: [
+        "[manifest](p0-file-manifest.csv)",
+        "[notes](</tmp/metawork-test/notes/qa preview.txt>)",
+        "[hosts](/etc/hosts)",
+      ].join("\n\n"),
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
+  await act(async () => fixture.publish());
+  await selectRecentTask(/First task/);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Preview p0-file-manifest.csv" }),
+  );
+  assert.deepEqual(reads[0].args.slice(0, 4), [
+    "3",
+    "1",
+    "1",
+    "p0-file-manifest.csv",
+  ]);
+  assert.ok(screen.getByRole("tab", { name: "p0-file-manifest.csv" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Preview notes/qa preview.txt" }),
+  );
+  assert.deepEqual(reads[1].args.slice(0, 4), [
+    "3",
+    "1",
+    "1",
+    "notes/qa preview.txt",
+  ]);
+  assert.ok(screen.getByRole("tab", { name: "qa preview.txt" }));
+  assert.equal(fixture.previews.length, 0);
+  assert.equal(
+    screen.getByRole("link", { name: "hosts" }).getAttribute("aria-disabled"),
+    "true",
+  );
+
+  fixture.snapshot.workspaces[0].authorization = "reauthorization_required";
+  fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
+  await act(async () => fixture.publish());
+  const manifest = await screen.findByRole("link", { name: "manifest" });
+  assert.equal(
+    document.getElementById(manifest.getAttribute("aria-describedby"))
+      .textContent,
+    "Can't open: workspace unavailable p0-file-manifest.csv",
+  );
+  assert.equal(screen.queryByRole("tab", { name: "qa preview.txt" }), null);
+  assert.equal(reads.length, 2);
 });
 
 test("App marks retained Run state unsynchronized and disables stop until refresh succeeds", async (ctx) => {

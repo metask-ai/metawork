@@ -118,6 +118,9 @@ const { ModelSetupNotice } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
+const { suggestChatCompletionsEndpoint } = await vite.ssrLoadModule(
+  "/src/features/settings/model-connection.ts",
+);
 
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
@@ -240,6 +243,18 @@ test("Global search keeps focus in its combobox and restores the opener", async 
     options.map((option) => option.tabIndex),
     [-1, -1],
   );
+  assert.equal(screen.getByRole("listbox").tabIndex, -1);
+  const close = screen.getByRole("button", { name: "Close" });
+  assert.ok(close.closest('[role="dialog"]'));
+  fireEvent.keyDown(combobox, { key: "ArrowDown", isComposing: true });
+  assert.equal(combobox.getAttribute("aria-activedescendant"), options[0].id);
+  fireEvent.compositionStart(combobox);
+  fireEvent.keyDown(combobox, { key: "Enter" });
+  fireEvent.keyDown(combobox, { key: "Escape" });
+  assert.equal(closed, 0);
+  fireEvent.compositionEnd(combobox);
+  fireEvent.keyDown(combobox, { key: "Enter", keyCode: 229 });
+  assert.deepEqual(selected, []);
   fireEvent.keyDown(combobox, { key: "ArrowDown" });
   assert.equal(
     combobox.getAttribute("aria-activedescendant"),
@@ -247,12 +262,55 @@ test("Global search keeps focus in its combobox and restores the opener", async 
   );
   fireEvent.keyDown(combobox, { key: "Enter" });
   assert.deepEqual(selected, ["task:2"]);
-  fireEvent.keyDown(document, { key: "Escape" });
+  fireEvent.click(close);
   assert.equal(closed, 1);
   view.rerender(searchElement({ ...props, open: false }));
   await waitFor(() => assert.ok(document.activeElement === opener));
   view.unmount();
   opener.remove();
+});
+
+test("Global search scrolls the active result into view and preserves its identity", () => {
+  const results = Array.from({ length: 50 }, (_, index) => ({
+    key: `task:${index}`,
+    kind: "task",
+    title: `Task ${index}`,
+    detail: "",
+    taskId: String(index),
+  }));
+  const selected = [];
+  const props = {
+    open: true,
+    query: "task",
+    results,
+    onQuery() {},
+    onClose() {},
+    onSelect(result) {
+      selected.push(result.key);
+    },
+  };
+  const view = render(searchElement(props));
+  const input = screen.getByRole("combobox");
+  const list = screen.getByRole("listbox");
+  const last = screen.getByRole("option", { name: "Task Task 49" });
+  Object.defineProperty(list, "clientHeight", { value: 100 });
+  Object.defineProperties(last, {
+    offsetTop: { value: 150 },
+    offsetHeight: { value: 30 },
+  });
+  fireEvent.keyDown(input, { key: "ArrowUp" });
+  assert.equal(list.scrollTop, 81);
+  assert.equal(input.getAttribute("aria-activedescendant"), last.id);
+  fireEvent.mouseEnter(screen.getAllByRole("option")[0]);
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  const reordered = [results[49], ...results.slice(0, 49)];
+  view.rerender(searchElement({ ...props, results: reordered }));
+  fireEvent.keyDown(input, { key: "Enter" });
+  view.rerender(searchElement({ ...props, results: results.slice(0, 49) }));
+  fireEvent.keyDown(input, { key: "Enter" });
+  assert.deepEqual(selected, ["task:49", "task:49", "task:0"]);
+  view.unmount();
 });
 
 test("SelectionMenu labels the custom group without adding a selectable item or interrupting keyboard navigation", async () => {
@@ -776,6 +834,14 @@ async function chooseModelSource(user, label) {
     await screen.findByRole("option", { name: label, exact: true }),
   );
   return dialog;
+}
+function accessibleDescription(element) {
+  return (element.getAttribute("aria-describedby") ?? "")
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
 }
 
 test("Models exposes a model list and Add model action instead of a Provider directory", () => {
@@ -1311,15 +1377,24 @@ test("a service root needs explicit Gemini confirmation and an endpoint replaces
     name: "Request URL (Endpoint)",
   });
   await user.type(address, "https://api.openai.com");
-  assert.equal(
-    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
-    true,
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
+  assert.equal(submissions.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /If this is a Gemini Native service root, confirm below/,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+  assert.equal(document.activeElement, address);
   await user.click(
     within(dialog).getByRole("checkbox", {
       name: "This is a Gemini Native service root",
     }),
   );
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
   await user.clear(address);
   await user.type(address, "https://example.com/v1/responses");
   assert.equal(
@@ -1365,10 +1440,11 @@ test("invalid endpoints explain the problem before submission and keep the other
     /endpoint ending/,
   );
   assert.equal(address.getAttribute("aria-invalid"), "true");
-  assert.equal(
-    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
-    true,
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
+  assert.equal(submitted.length, 0);
+  assert.equal(document.activeElement, address);
   assert.equal(within(dialog).getByLabelText("API key").value, "fake-test-key");
   await user.clear(address);
   await user.type(address, "https://example.com/v1/responses");
@@ -1378,6 +1454,363 @@ test("invalid endpoints explain the problem before submission and keep the other
     false,
   );
   assert.equal(submitted.length, 0);
+});
+
+test("Save explains each missing custom model field instead of silently doing nothing", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const save = within(dialog).getByRole("button", {
+    name: "Save",
+    exact: true,
+  });
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  const key = within(dialog).getByLabelText("API key");
+  const modelId = within(dialog).getByRole("textbox", { name: "Model ID" });
+  assert.equal(save.disabled, false);
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
+
+  await user.click(save);
+  assert.equal(submitted.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Enter the request URL\./,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+  assert.equal(key.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(key), "Enter an API key.");
+  assert.equal(modelId.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(modelId), "Enter a model ID.");
+  assert.equal(document.activeElement, address);
+
+  await user.type(address, "https://example.com/v1/chat/completions");
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
+  await user.click(save);
+  assert.equal(submitted.length, 0);
+  assert.equal(document.activeElement, key);
+
+  await user.type(key, "example-key");
+  assert.equal(key.getAttribute("aria-invalid"), null);
+  assert.doesNotMatch(dialog.textContent, /Enter an API key/);
+  await user.type(modelId, "example-model");
+  assert.doesNotMatch(dialog.textContent, /Enter a model ID/);
+  await user.click(save);
+  assert.deepEqual(submitted, [
+    {
+      displayName: "example.com",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: "https://example.com/v1/chat/completions",
+      apiKey: "example-key",
+      model: { id: "example-model" },
+    },
+  ]);
+});
+
+test("a pasted address is checked at once without waiting for blur", async () => {
+  const user = userEvent.setup({ document });
+  renderModelSettings();
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.click(address);
+  await user.paste("https://api.example.com/v1/");
+  assert.equal(document.activeElement, address);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /endpoint ending in \/chat\/completions/,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+});
+
+test("a version-suffixed Base URL can be completed to a chat completions endpoint", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.click(address);
+  await user.paste("https://api.example.com/v1/");
+  await user.click(
+    within(dialog).getByRole("button", {
+      name: "Use https://api.example.com/v1/chat/completions",
+    }),
+  );
+  assert.equal(address.value, "https://api.example.com/v1/chat/completions");
+  assert.equal(document.activeElement, address);
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
+  assert.match(
+    within(dialog).getByRole("status").textContent,
+    /Detected API: OpenAI Chat Completions/,
+  );
+  await user.type(within(dialog).getByLabelText("API key"), "example-key");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "example-model",
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(submitted, [
+    {
+      displayName: "api.example.com",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: "https://api.example.com/v1/chat/completions",
+      apiKey: "example-key",
+      model: { id: "example-model" },
+    },
+  ]);
+});
+
+test("typed endpoint problems wait for blur or submission, and LAN HTTP explains the plaintext risk", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://example.com/api");
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  await user.keyboard("{Enter}");
+  assert.equal(submitted.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /endpoint ending in \/chat\/completions/,
+  );
+  assert.equal(within(dialog).queryByRole("button", { name: /^Use / }), null);
+  assert.equal(document.activeElement, address);
+
+  await user.clear(address);
+  await user.type(address, "http://192.168.1.5:1234/v1");
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /API key would be sent unencrypted.*localhost, 127\.0\.0\.1, \[::1\].*HTTPS/,
+  );
+  assert.equal(within(dialog).queryByRole("button", { name: /^Use / }), null);
+  assert.equal(submitted.length, 0);
+});
+
+test("a scheme-less address reaches the form's own explanation instead of native URL validation", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "api.example.com/v1");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.equal(submitted.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Enter a valid URL/,
+  );
+  assert.equal(
+    accessibleDescription(within(dialog).getByLabelText("API key")),
+    "Enter an API key.",
+  );
+  assert.equal(document.activeElement, address);
+});
+
+test("Save names the missing vendor and the missing preset fields", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateBuiltinProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = screen.getByRole("dialog", { name: "Add model" });
+  const save = within(dialog).getByRole("button", {
+    name: "Save",
+    exact: true,
+  });
+  const vendor = within(dialog).getByRole("combobox", { name: "Model vendor" });
+  assert.equal(save.disabled, false);
+  await user.click(save);
+  assert.equal(vendor.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(vendor), "Select a model vendor first.");
+  assert.equal(document.activeElement, vendor);
+
+  await user.click(vendor);
+  await user.click(
+    await screen.findByRole("option", { name: "DeepSeek", exact: true }),
+  );
+  assert.equal(vendor.getAttribute("aria-invalid"), null);
+  assert.doesNotMatch(dialog.textContent, /Select a model vendor first/);
+  await user.click(save);
+  const key = within(dialog).getByLabelText("API key");
+  const model = within(dialog).getByRole("combobox", { name: "Model ID" });
+  assert.equal(key.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(key), "Enter an API key.");
+  assert.equal(model.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(model), "Choose a model ID.");
+  assert.equal(document.activeElement, key);
+  assert.equal(submitted.length, 0);
+
+  await user.type(key, "official-secret");
+  await user.click(model);
+  await user.click(
+    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
+  );
+  assert.equal(model.getAttribute("aria-invalid"), null);
+  await user.click(save);
+  assert.deepEqual(submitted, [
+    {
+      providerId: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "official-secret",
+      model: { id: "deepseek-flash" },
+    },
+  ]);
+});
+
+test("editing keeps Save disabled without changes and explains an emptied model ID", async () => {
+  const user = userEvent.setup({ document });
+  const changes = [];
+  const source = {
+    id: "source-empty-model",
+    builtinProviderId: null,
+    displayName: "Team",
+    protocol: "openai_chat_completions",
+    normalizedBaseUrl: "https://example.com/v1/chat/completions",
+    state: "ready",
+    credentialStatus: "ready",
+    enabled: true,
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [
+      {
+        id: "model-a",
+        displayName: "Model A",
+        metadata: {},
+        metadataProvenance: "unknown",
+        testStatus: "connected",
+        ready: true,
+      },
+    ],
+  };
+  renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onSaveCustomModel: async (input) => {
+      changes.push(input);
+      return {
+        accepted: true,
+        applied: [],
+        source,
+        modelId: input.nextModelId,
+        reviewRequired: false,
+      };
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  const save = within(dialog).getByRole("button", {
+    name: "Save",
+    exact: true,
+  });
+  assert.equal(save.disabled, true);
+  const modelId = within(dialog).getByRole("textbox", { name: "Model ID" });
+  await user.clear(modelId);
+  assert.equal(save.disabled, false);
+  await user.click(save);
+  assert.equal(changes.length, 0);
+  assert.equal(modelId.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(modelId), "Enter a model ID.");
+  assert.equal(document.activeElement, modelId);
+});
+
+test("model dialog feedback is visible: defined error color, invalid borders and dimmed disabled actions", () => {
+  const read = (file) =>
+    readFileSync(new URL(`../frontend/src/${file}`, import.meta.url), "utf8");
+  const stylesheet = read("index.css");
+  const definitions = `${read("styles/metask-tokens.css")}\n${stylesheet}`;
+  const form = read("features/settings/CustomModelsSettings.tsx");
+  const tokens = new Set(form.match(/--ui-[a-z0-9-]+/gu));
+  assert.ok(tokens.has("--ui-content-error"));
+  for (const token of tokens)
+    assert.match(definitions, new RegExp(`${token}\\s*:`, "u"), token);
+  assert.match(
+    stylesheet,
+    /\.settings-model-form \.settings-custom-provider-input\[aria-invalid="true"\],\s*\.settings-model-form \.selection-trigger\.settings-control\[aria-invalid="true"\]\s*\{[^}]*border-color:/su,
+  );
+  assert.match(
+    stylesheet,
+    /\.settings-model-form-actions button:disabled\s*\{[^}]*opacity: 0\.5;/su,
+  );
+});
+
+test("only version-suffixed Base URLs get a chat completions suggestion", () => {
+  const long = `https://example.com/${"a".repeat(2020)}/v1`;
+  for (const [input, expected] of [
+    [
+      "https://api.example.com/v1",
+      "https://api.example.com/v1/chat/completions",
+    ],
+    [
+      "https://api.example.com/v1//",
+      "https://api.example.com/v1/chat/completions",
+    ],
+    [
+      " https://open.bigmodel.cn/api/paas/v4 ",
+      "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    ],
+    [
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    ],
+    ["http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1/chat/completions"],
+    ["https://api.example.com", null],
+    ["https://api.example.com/anthropic", null],
+    ["https://generativelanguage.googleapis.com/v1beta", null],
+    ["https://api.example.com/v1/chat/completions", null],
+    ["https://api.example.com/v1/responses", null],
+    ["http://192.168.1.5:1234/v1", null],
+    ["https://api.example.com/v1?key=1", null],
+    ["https://user@api.example.com/v1", null],
+    ["not a url", null],
+    [long, null],
+  ])
+    assert.equal(suggestChatCompletionsEndpoint(input), expected, input);
 });
 
 test("model test rejection and exceptions produce an actionable local message", async () => {
@@ -3995,6 +4428,10 @@ test("Global search distinguishes a pending work page and exposes bounded contin
   };
   const view = render(searchElement(props));
   assert.equal(screen.getByRole("status").textContent, "Searching…");
+  assert.equal(
+    screen.getByRole("combobox").getAttribute("aria-expanded"),
+    "false",
+  );
   assert.equal(screen.queryByText("No results found."), null);
   assert.ok(screen.getByRole("button", { name: "Continue search" }).disabled);
   view.rerender(searchElement({ ...props, loading: false }));
