@@ -573,8 +573,15 @@ test "canonical MCP uses bare npx and Windows command shims with an offline loca
     }
     var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();
-    try environment.put(if (builtin.os.tag == .windows) "Path" else "PATH", node_dir);
-    if (options.windows_system_root) |system_root| try environment.put("SystemRoot", system_root);
+    if (builtin.os.tag == .windows) {
+        try environment.put("Path", node_dir);
+        if (options.windows_system_root) |system_root| try environment.put("SystemRoot", system_root);
+    } else {
+        // npm launches the package through sh, even with a local offline package.
+        const executable_path = try std.fmt.allocPrint(std.testing.allocator, "{s}:/usr/bin:/bin", .{node_dir});
+        defer std.testing.allocator.free(executable_path);
+        try environment.put("PATH", executable_path);
+    }
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty.npmrc", .data = "" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-global.npmrc", .data = "" });
     const global_npmrc = try std.fs.path.join(std.testing.allocator, &.{ root, "empty-global.npmrc" });
