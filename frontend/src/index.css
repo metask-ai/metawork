@@ -7664,6 +7664,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   user-select: text;
 }
 
+.ai-markdown .ai-markdown-file-link-unavailable {
+  border-radius: 2px;
+  color: var(--ui-content-muted);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: default;
+  overflow-wrap: anywhere;
+}
+
 .ai-markdown table {
   display: block;
   max-width: 100%;

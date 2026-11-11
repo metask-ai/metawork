@@ -1177,6 +1177,12 @@ export const enUS = {
   "file_preview.loading": "Loading preview…",
   "file_preview.close": "Close file preview",
   "file_preview.open": "Preview {path}",
+  "file_preview.link_unavailable.outside_workspace":
+    "Can't open: outside the current workspace",
+  "file_preview.link_unavailable.workspace_unavailable":
+    "Can't open: workspace unavailable",
+  "file_preview.link_unavailable.unsupported_path":
+    "Can't open: unsupported file path",
   "file_preview.refresh": "Refresh",
   "file_preview.mode": "File display mode",
   "file_preview.rendered": "Preview",
