@@ -645,10 +645,9 @@ pub const Store = struct {
         source: OccurrenceSource,
         task_id: u64,
         outcome: OccurrenceTaskOutcome,
-        reason: ?FailureReason,
-    ) error{InvalidSchedule}!void {
-        if (reason != null and reason != .permission_required)
-            return error.InvalidSchedule;
+        permission_failure_profile: ?PermissionProfile,
+    ) error{InvalidSchedule}!bool {
+        const reason: ?FailureReason = if (permission_failure_profile != null) .permission_required else null;
         var index = item.occurrence_count;
         while (index != 0) {
             index -= 1;
@@ -672,8 +671,11 @@ pub const Store = struct {
                 item.last_occurrence.?.reason = reason;
                 item.last_occurrence.?.notification_sent = true;
             }
-            if (reason) |value| self.markNeedsAttention(item, value);
-            return;
+            if (permission_failure_profile == item.permission_profile) {
+                self.markNeedsAttention(item, .permission_required);
+                return true;
+            }
+            return false;
         }
         return error.InvalidSchedule;
     }

@@ -269,7 +269,7 @@ const PendingCompletion = struct {
 const CompletionResolution = struct {
     pending: PendingCompletion,
     outcome: OccurrenceTaskOutcome,
-    permission_required: bool,
+    permission_failure_profile: ?PermissionProfile = null,
 };
 
 /// Callback-scoped access to the Task aggregate. Schedule owns occurrence
@@ -286,7 +286,7 @@ pub const TaskLaunch = struct {
 
 pub const TaskTerminal = struct {
     outcome: TaskOutcome,
-    permission_required: bool,
+    permission_failure_profile: ?PermissionProfile = null,
 };
 
 pub const TaskObservation = union(enum) {
@@ -306,10 +306,14 @@ pub const TaskLaunchOutcome = union(enum) {
     rejected: TaskLaunchFailure,
 };
 
+/// Causes are returned to the caller unchanged; Schedule branches only on
+/// these admission categories, never on another aggregate's error names.
+pub const TaskPreflight = union(enum) { ready, wait, retry: anyerror, rejected: anyerror };
+
 pub const TaskEffects = struct {
     context: *anyopaque,
     has_active_fn: *const fn (*anyopaque, u64) bool,
-    preflight_fn: *const fn (*anyopaque, TaskLaunch) anyerror!void,
+    preflight_fn: *const fn (*anyopaque, TaskLaunch) TaskPreflight,
     launch_fn: *const fn (*anyopaque, TaskLaunch) TaskLaunchOutcome,
     observe_fn: *const fn (*anyopaque, u64) TaskObservation,
 
@@ -586,16 +590,23 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
-            } else if (err == error.TaskHistoryWriterBusy) {
+            } else if (err == error.ScheduleAdmissionWaiting) {
                 self.store.find(due.id).?.waiting_for_task_history = true;
-            } else if (self.persistence_health != .ready or
-                self.store.find(due.id).?.preflight_retry_at_unix_seconds == null)
-            {
-                // No claim may have been committed. Leave its cursor intact
-                // and wait for an authority/lifecycle wake, never arm the same
-                // overdue point again from this failed callback.
-                self.timer.cancelCurrent();
-                return;
+            } else {
+                const item = self.store.find(due.id).?;
+                const rejected = if (item.last_occurrence) |occurrence|
+                    occurrence.result == .rejected and occurrence.source == .timer and
+                        occurrence.planned_at_unix_seconds == due.planned_at_unix_seconds
+                else
+                    false;
+                // A confirmed rejection consumed this occurrence. Rearm for
+                // other definitions, but never replay an unclaimed due point.
+                if (self.persistence_health != .ready or
+                    (!rejected and item.preflight_retry_at_unix_seconds == null))
+                {
+                    self.timer.cancelCurrent();
+                    return;
+                }
             }
         };
         _ = self.rearmNoFail(binding, redaction);
@@ -824,6 +835,15 @@ pub const Runtime = struct {
         return false;
     }
 
+    pub const ContinuationConfirmation = enum { confirmed, pending, failed };
+
+    /// Observe after reconciliation, for a continuation already gated by an occurrence.
+    pub fn continuationConfirmation(self: *const Runtime, task_id: u64) ContinuationConfirmation {
+        if (self.persistence_health != .ready) return .failed;
+        if (!self.hasPendingSubmittedOccurrence(task_id)) return .confirmed;
+        return if (self.completion_confirmation_failed_task == task_id) .failed else .pending;
+    }
+
     fn nextCompletionResolution(
         self: *Runtime,
         tasks: TaskEffects,
@@ -844,12 +864,11 @@ pub const Runtime = struct {
                     .unavailable => return .{
                         .pending = pending,
                         .outcome = .unavailable,
-                        .permission_required = false,
                     },
                     .terminal => |terminal| return .{
                         .pending = pending,
                         .outcome = terminal.outcome,
-                        .permission_required = terminal.permission_required,
+                        .permission_failure_profile = terminal.permission_failure_profile,
                     },
                 }
             }
@@ -866,13 +885,13 @@ pub const Runtime = struct {
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
-        candidate.finalizeOccurrenceTask(
+        const needs_attention = candidate.finalizeOccurrenceTask(
             candidate.find(pending.scheduled_task_id) orelse return false,
             pending.planned_at_unix_seconds,
             pending.source,
             pending.task_id,
             resolution.outcome,
-            if (resolution.permission_required) .permission_required else null,
+            resolution.permission_failure_profile,
         ) catch return false;
         self.commitCandidate(&candidate, redaction) catch return false;
         self.replace(&candidate);
@@ -883,7 +902,7 @@ pub const Runtime = struct {
             .scheduled_task_id = committed.id,
             .task_id = pending.task_id,
             .title = committed.title,
-            .kind = if (resolution.permission_required)
+            .kind = if (needs_attention)
                 .needs_attention
             else if (resolution.outcome == .completed)
                 .completed
@@ -908,21 +927,25 @@ pub const Runtime = struct {
             const binding = item.bindingView();
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
-            tasks.preflight_fn(tasks.context, .{
+            switch (tasks.preflight_fn(tasks.context, .{
                 .title = item.title,
                 .input = item.input.borrowed(),
                 .model_ref = binding.model_ref,
                 .source_generation = binding.source_generation,
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
-            }) catch |err| {
-                if (err == error.TaskHistoryWriterBusy) return err;
-                item.preflight_retry_at_unix_seconds = null;
-                if (err == error.ExecutionUnavailable or err == error.ExecutionInUse or
-                    err == error.ExecutionGenerationMismatch)
+            })) {
+                .ready => {},
+                .wait => return error.ScheduleAdmissionWaiting,
+                .retry => |cause| {
                     item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
-                return err;
-            };
+                    return cause;
+                },
+                .rejected => |cause| {
+                    item.preflight_retry_at_unix_seconds = null;
+                    return cause;
+                },
+            }
         }
         item.preflight_retry_at_unix_seconds = null;
         const begin = try self.beginOccurrence(
@@ -1380,16 +1403,18 @@ const TestTasks = struct {
     terminal_task_id: u64 = 0,
     active_task_id: u64 = 0,
     preflight_error: ?anyerror = null,
+    preflight_result: TaskPreflight = .ready,
     preflight_blocked_title: ?[]const u8 = null,
     rejection: ?TaskLaunchFailure = null,
     launch_effects: ?*TestEffects = null,
     launch_commit: PersistenceCommit = .committed,
 
-    fn preflight(context: *anyopaque, input: TaskLaunch) anyerror!void {
+    fn preflight(context: *anyopaque, input: TaskLaunch) TaskPreflight {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.preflight_blocked_title) |title|
-            if (std.mem.eql(u8, title, input.title)) return error.ExecutionUnavailable;
-        if (self.preflight_error) |err| return err;
+            if (std.mem.eql(u8, title, input.title)) return .{ .retry = error.ExecutionUnavailable };
+        if (self.preflight_error) |err| return .{ .retry = err };
+        return self.preflight_result;
     }
 
     fn hasActive(context: *anyopaque, id: u64) bool {
@@ -1639,7 +1664,7 @@ test "consecutive skips retain the active Task and pending completion beyond his
     item.last_occurrence.?.task_id = 0;
     try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, redaction, tasks.effects()));
     tasks.active_task_id = 0;
-    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .completed };
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(42));
     try std.testing.expectEqual(@as(u64, 43), try runtime.runNow(id, 1, redaction, tasks.effects()));
@@ -1676,6 +1701,29 @@ test "full protected history stops without eviction or an overdue timer retry" {
             },
             .failed => try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth()),
             .outcome_unknown => try std.testing.expectEqual(PersistenceHealth.outcome_unknown, runtime.persistenceHealth()),
+        }
+    }
+}
+
+test "preflight policy follows admission categories rather than opaque causes" {
+    for ([_]TaskPreflight{ .wait, .{ .retry = error.OpaqueAdmissionFailure }, .{ .rejected = error.OpaqueAdmissionFailure } }) |result| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{ .preflight_result = result };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("preflight", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 200;
+        const commits = effects.commits;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(commits, effects.commits);
+        try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+        switch (result) {
+            .wait => try std.testing.expect(runtime.hasTaskHistoryWaits()),
+            .retry => try std.testing.expectEqual(@as(?u64, 260), effects.armed_at),
+            .rejected => try std.testing.expectEqual(@as(?u64, null), effects.armed_at),
+            .ready => unreachable,
         }
     }
 }
@@ -1974,7 +2022,6 @@ test "unavailable Task does not block later Schedule completion reconciliation" 
     tasks.terminal_task_id = 42;
     tasks.terminal = .{
         .outcome = .completed,
-        .permission_required = false,
     };
 
     try std.testing.expect(runtime.reconcileNoFail(
@@ -2025,7 +2072,7 @@ test "permission-required scheduled occurrence stops without waiting for UI" {
     );
     tasks.terminal = .{
         .outcome = .stopped,
-        .permission_required = true,
+        .permission_failure_profile = .full_access,
     };
     try std.testing.expect(runtime.reconcileNoFail(
         testBinding(),
@@ -2045,6 +2092,68 @@ test "permission-required scheduled occurrence stops without waiting for UI" {
     try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
 }
 
+test "permission failure still needs attention after an unrelated edit, pause and resume, or restore" {
+    for ([_]enum { title_edit, pause_and_resume, restore }{ .title_edit, .pause_and_resume, .restore }) |change| {
+        var bytes: [8192]u8 = undefined;
+        var effects: TestEffects = .{ .durable_storage = &bytes };
+        var tasks: TestTasks = .{};
+        const limits: Limits = .{ .max_items = 1, .max_projection_bytes = 8192 };
+        var runtime = try Runtime.init(std.testing.allocator, limits, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        var definition = testDefinition("scheduled", "inspect");
+        const id = try runtime.create(definition, testBinding(), redaction);
+        const original_task = try runtime.runNow(id, 1, redaction, tasks.effects());
+        switch (change) {
+            .title_edit => {
+                definition.title = "renamed";
+                try runtime.update(id, 1, definition, testBinding(), redaction);
+            },
+            .pause_and_resume => {
+                _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
+                _ = try runtime.setEnabled(id, 2, true, testBinding(), redaction);
+            },
+            .restore => {
+                effects.restored_bytes = bytes[0..effects.durable_len];
+                const restored = try Runtime.init(std.testing.allocator, limits, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+                runtime.deinit();
+                runtime = restored;
+            },
+        }
+        tasks.terminal = .{ .outcome = .stopped, .permission_failure_profile = .approval_required };
+        tasks.terminal_task_id = original_task;
+        try std.testing.expect(runtime.reconcileNoFail(testBinding(), redaction, tasks.effects()));
+        const item = runtime.store.find(id).?;
+        try std.testing.expect(!item.enabled);
+        try std.testing.expectEqual(Health.needs_attention, item.health);
+        try std.testing.expectEqual(FailureReason.permission_required, item.occurrences()[0].reason.?);
+        try std.testing.expectEqual(NotificationKind.needs_attention, effects.notification_kind.?);
+    }
+}
+
+test "permission failure from a different profile stays in history without disabling the update" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("scheduled", "inspect");
+    const id = try runtime.create(definition, testBinding(), redaction);
+    const original_task = try runtime.runNow(id, 1, redaction, tasks.effects());
+    definition.permission_profile = .full_access;
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    tasks.terminal = .{ .outcome = .stopped, .permission_failure_profile = .approval_required };
+    tasks.terminal_task_id = original_task;
+    try std.testing.expect(runtime.reconcileNoFail(testBinding(), redaction, tasks.effects()));
+    const updated = runtime.store.find(id).?;
+    try std.testing.expect(updated.enabled);
+    try std.testing.expectEqual(Health.ready, updated.health);
+    try std.testing.expectEqual(PermissionProfile.full_access, updated.permission_profile);
+    try std.testing.expectEqual(FailureReason.permission_required, updated.occurrences()[0].reason.?);
+    try std.testing.expectEqual(TaskOutcome.stopped, updated.occurrences()[0].task_outcome.?);
+    try std.testing.expectEqual(NotificationKind.failed, effects.notification_kind.?);
+}
+
 test "input continuation gate includes submitted occurrences skipped after earlier write failure" {
     var effects: TestEffects = .{};
     var tasks: TestTasks = .{ .next_task_id = 41 };
@@ -2055,7 +2164,7 @@ test "input continuation gate includes submitted occurrences skipped after earli
     const second = try runtime.create(testDefinition("second", "second"), testBinding(), redaction);
     _ = try runtime.runNow(first, 1, redaction, tasks.effects());
     _ = try runtime.runNow(second, 1, redaction, tasks.effects());
-    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .completed };
     effects.fail_commit_at = effects.commits + 1;
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(@as(?u64, 41), runtime.completion_confirmation_failed_task);
@@ -2080,7 +2189,7 @@ test "input continuation observes completion allocation failure even when persis
         const redaction = testRedaction(&effects);
         const id = try runtime.create(testDefinition("source", "source"), testBinding(), redaction);
         _ = try runtime.runNow(id, 1, redaction, tasks.effects());
-        tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+        tasks.terminal = .{ .outcome = .completed };
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure_index });
         runtime.allocator = failing.allocator();
         defer runtime.allocator = std.testing.allocator;
@@ -2215,6 +2324,32 @@ test "allocation failure before launch never strands a committed claim" {
     try std.testing.expect(failures > 0);
 }
 
+test "only a confirmed launch rejection rearms the timer for another due schedule" {
+    for ([_]PersistenceCommit{ .committed, .failed, .outcome_unknown }) |commit| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{ .rejection = .{ .cause = error.TaskCapacity, .reason = .capacity_reached, .task_id = 0 }, .launch_effects = &effects, .launch_commit = commit };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const first = try runtime.create(testDefinition("first", "inspect"), testBinding(), redaction);
+        const second = try runtime.create(testDefinition("second", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 200;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(usize, 0), runtime.store.find(second).?.occurrence_count);
+        if (commit == .committed) {
+            try std.testing.expectEqual(Health.needs_attention, runtime.store.find(first).?.health);
+            try std.testing.expectEqual(@as(?u64, 200), effects.armed_at);
+            tasks.rejection = null;
+            runtime.onTimer(testBinding(), redaction, tasks.effects());
+            try std.testing.expectEqual(@as(u64, 42), runtime.store.find(second).?.last_occurrence.?.task_id);
+        } else {
+            try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+            try std.testing.expect(runtime.persistenceHealth() != .ready);
+        }
+    }
+}
+
 test "rejected launch notification follows a confirmed Schedule commit" {
     for ([_]PersistenceCommit{ .committed, .failed, .outcome_unknown }) |commit| {
         var effects: TestEffects = .{};
@@ -2239,14 +2374,14 @@ test "same-second manual occurrences reconcile by their actual Task identity" {
     const id = try runtime.create(testDefinition("manual", "inspect"), testBinding(), redaction);
     const first = try runtime.runNow(id, 1, redaction, tasks.effects());
     const second = try runtime.runNow(id, 1, redaction, tasks.effects());
-    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .completed };
     tasks.terminal_task_id = first;
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(first));
     try std.testing.expect(runtime.hasPendingSubmittedOccurrence(second));
     try std.testing.expectEqual(@as(?TaskOutcome, null), runtime.store.find(id).?.occurrences()[1].task_outcome);
     tasks.terminal_task_id = second;
-    tasks.terminal = .{ .outcome = .failed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .failed };
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(second));
     try std.testing.expectEqual(TaskOutcome.completed, runtime.store.find(id).?.occurrences()[0].task_outcome.?);
@@ -2427,7 +2562,7 @@ test "title-only edit must not replay a consumed timer occurrence" {
     _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
     effects.now = 200;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
-    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .completed };
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     definition.title = "after";
     try runtime.update(id, 1, definition, testBinding(), redaction);
@@ -2448,7 +2583,7 @@ test "pause and resume after clock rollback must not replay a consumed point" {
     _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
     effects.now = 200;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
-    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .completed };
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
     effects.now = 150;
@@ -2531,7 +2666,7 @@ test "multiple weekdays admit only the latest due occurrence and keep the consum
     try std.testing.expectEqual(@as(usize, 1), item.occurrence_count);
     try std.testing.expectEqual(@as(?u64, 1793865600), item.last_timer_planned_at_unix_seconds);
     try std.testing.expectEqual(@as(?u64, 1794297600), item.next_run_at_unix_seconds);
-    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    tasks.terminal = .{ .outcome = .completed };
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     _ = try runtime.setEnabled(id, 1, false, testBinding(), redaction);
     effects.now = 1793692800;

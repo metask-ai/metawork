@@ -84,7 +84,7 @@ function scheduledElement(snapshot, overrides = {}, locale = "en-US") {
     createElement(ScheduledTasksPage, {
       snapshot,
       disabled: false,
-      recoveryDisabled: false,
+      bridgeUnavailable: false,
       onCreate: async () => undefined,
       onUpdate: async () => undefined,
       onSetEnabled: async () => undefined,
@@ -444,6 +444,44 @@ test("editing owns the task definition and deletion while the history icon shows
   );
 });
 
+test("healthy Schedule storage allows deletion without background wake", async () => {
+  const snapshot = scheduleSnapshot();
+  snapshot.capabilities.scheduledTasks = false;
+  snapshot.capabilities.backgroundScheduleWake = false;
+  const deleted = [];
+  const overrides = {
+    disabled: true,
+    onDelete: async (...identity) => deleted.push(identity),
+  };
+  const page = renderDom(scheduledElement(snapshot, overrides));
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  const deletion = await screen.findByRole("button", {
+    name: "Delete schedule",
+  });
+  assert.equal(deletion.disabled, false);
+  page.rerender(
+    scheduledElement(snapshot, { ...overrides, bridgeUnavailable: true }),
+  );
+  assert.equal(deletion.disabled, true);
+  page.rerender(
+    scheduledElement(
+      {
+        ...snapshot,
+        capabilities: {
+          ...snapshot.capabilities,
+          scheduledTaskPersistence: false,
+        },
+      },
+      overrides,
+    ),
+  );
+  assert.equal(deletion.disabled, true);
+  page.rerender(scheduledElement(snapshot, overrides));
+  await user.click(deletion);
+  await waitFor(() => assert.deepEqual(deleted, [["8", "1"]]));
+});
+
 test("history stays compact and links each available real Task without management controls", async () => {
   let opened;
   renderDom(
@@ -742,7 +780,7 @@ test("Schedule store recovery stays available when normal scheduling is blocked 
   renderDom(
     scheduledElement(snapshot, {
       disabled: true,
-      recoveryDisabled: false,
+      bridgeUnavailable: false,
       onRecover: async () => {
         recoveries += 1;
         return { outcome: "recovered" };

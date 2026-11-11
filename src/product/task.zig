@@ -100,6 +100,9 @@ pub const file_change_store = @import("product_task_file_change_store");
 /// Test-only lifecycle seam. Production consumers cannot obtain Task's
 /// Session Binding implementation through the Product root.
 pub const testing = if (builtin.is_test) struct {
+    pub const findTask = Runtime.testing.findTask;
+    pub const findTaskConst = Runtime.testing.findTaskConst;
+    pub const slots = Runtime.testing.slots;
     pub const SessionBinding = agent_session.Binding;
     pub const SessionBindingState = agent_session.BindingState;
     pub const agent_session_module = agent_session;

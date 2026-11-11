@@ -19,6 +19,7 @@ pub const ViewError = runtime_impl.ViewError;
 pub const TaskEffects = runtime_impl.TaskEffects;
 pub const TaskLaunch = runtime_impl.TaskLaunch;
 pub const TaskLaunchOutcome = runtime_impl.TaskLaunchOutcome;
+pub const TaskPreflight = runtime_impl.TaskPreflight;
 pub const TaskTerminal = runtime_impl.TaskTerminal;
 pub const TaskObservation = runtime_impl.TaskObservation;
 pub const TaskOutcome = runtime_impl.TaskOutcome;

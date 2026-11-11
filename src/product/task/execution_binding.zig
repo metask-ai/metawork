@@ -90,9 +90,38 @@ pub const OwnedTaskExecution = struct {
         };
     }
 
+    pub fn modelRef(self: *const OwnedTaskExecution) ?models_contract.ModelRef {
+        const source = if (std.mem.eql(u8, self.provider_id, models_contract.metask_source_id))
+            models_contract.metask_source_id
+        else if (std.mem.startsWith(u8, self.provider_id, "custom_provider:"))
+            self.provider_id["custom_provider:".len..]
+        else
+            return null;
+        return .{ .source_id = source, .model_id = self.model };
+    }
+
     pub fn matchesSource(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
         return self.matchesTarget(target) and self.source_generation != 0 and self.source_generation == target.source_generation and
             std.mem.eql(u8, self.secret, target.api_key);
+    }
+
+    pub fn matchesIntentRevision(self: *const OwnedTaskExecution, revision: u64) bool {
+        return self.model_intent_revision == revision;
+    }
+
+    pub fn matchesSourceGeneration(self: *const OwnedTaskExecution, generation: u64) bool {
+        return self.source_generation == generation;
+    }
+
+    pub fn matchesProvider(self: *const OwnedTaskExecution, target: models_contract.ModelRef, protocol: models_contract.Protocol) bool {
+        const installed = self.modelRef() orelse return false;
+        const is_metask = std.mem.eql(u8, self.provider_id, models_contract.metask_source_id);
+        return self.protocol == protocol and is_metask == std.mem.eql(u8, target.source_id, models_contract.metask_source_id) and
+            std.mem.eql(u8, installed.source_id, target.source_id);
+    }
+
+    pub fn matchesEndpoint(self: *const OwnedTaskExecution, target: models_contract.Target) bool {
+        return self.protocol == target.protocol and std.mem.eql(u8, self.base_url, target.base_url);
     }
 
     pub fn matchesTarget(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {

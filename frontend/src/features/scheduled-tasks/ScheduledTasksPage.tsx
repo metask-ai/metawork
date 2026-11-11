@@ -237,7 +237,7 @@ function formatTime(
 export function ScheduledTasksPage({
   snapshot,
   disabled,
-  recoveryDisabled,
+  bridgeUnavailable,
   onCreate,
   onUpdate,
   onSetEnabled,
@@ -248,7 +248,7 @@ export function ScheduledTasksPage({
 }: {
   snapshot: WorkbenchSnapshot & { scheduledTasks: ScheduledTaskView[] };
   disabled: boolean;
-  recoveryDisabled: boolean;
+  bridgeUnavailable: boolean;
   onCreate: (input: ScheduledTaskMutation) => Promise<unknown>;
   onUpdate: (
     id: string,
@@ -577,7 +577,7 @@ export function ScheduledTasksPage({
             actionAvailable={
               snapshot.capabilities.scheduledTaskRecoveryAvailable
             }
-            disabled={recoveryDisabled}
+            disabled={bridgeUnavailable}
             onConfirm={async () => {
               const result = await onRecover();
               return result.outcome === "recovered"
@@ -1233,7 +1233,12 @@ export function ScheduledTasksPage({
                     className="scheduled-editor-delete"
                     aria-label={t("scheduled.delete")}
                     title={t("scheduled.delete")}
-                    disabled={disabled || busy || editorStale}
+                    disabled={
+                      bridgeUnavailable ||
+                      !snapshot.capabilities.scheduledTaskPersistence ||
+                      busy ||
+                      editorStale
+                    }
                     onClick={() =>
                       void action(async () => {
                         await onDelete(selected.id, selected.epoch);

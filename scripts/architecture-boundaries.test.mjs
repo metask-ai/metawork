@@ -6,6 +6,91 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
+test("Attachment owns staging operations through completion and shutdown", () => {
+  const control = read("src/product/control/runtime.zig");
+  const staging = read("src/product/attachment/staging.zig");
+  assert.doesNotMatch(
+    control,
+    /\battachment_io\b|\.attachments\.(?:preparing|receiving|file_store|limits|images)\b/,
+  );
+  assert.doesNotMatch(
+    control,
+    /\.attachment_lane\.(?:take|release|continueCopy|continueValidation)\(/,
+  );
+  assert.doesNotMatch(
+    staging,
+    /@import\("(?:metawork_product_control|product_control_[^"]+)"\)/,
+  );
+});
+
+test("Skill and MCP read time independently of Schedule timers", () => {
+  const control = read("src/product/control/runtime.zig");
+  assert.doesNotMatch(control, /self\.schedule\.now\(/);
+  const ports = control.slice(
+    control.indexOf("fn productMcpPorts("),
+    control.indexOf("fn querySkillCatalog("),
+  );
+  assert.doesNotMatch(ports, /ScheduleTimer|clock\.enabled|now_unix_seconds/);
+});
+
+test("Schedule consumes classified admission without external error policy", () => {
+  const source = read("src/product/schedule/runtime.zig");
+  const production = source.slice(0, source.indexOf("const TestEffects ="));
+  assert.doesNotMatch(
+    production,
+    /error\.(?:TaskHistoryWriterBusy|ExecutionUnavailable|ExecutionInUse|ExecutionGenerationMismatch)/,
+  );
+  assert.doesNotMatch(source, /preflight_fn:[^\n]*anyerror!void/);
+});
+
+test("Task binding comparisons stay behind its runtime boundary", () => {
+  const control = read("src/product/control/runtime.zig");
+  const task = read("src/product/task/runtime.zig");
+  const facts = task.slice(
+    task.indexOf("pub const ModelFacts ="),
+    task.indexOf("pub fn modelFacts("),
+  );
+  assert.doesNotMatch(
+    facts,
+    /intent_revision|base_url|credential_update_failed/,
+  );
+  assert.doesNotMatch(
+    control,
+    /installed\.(?:intent_revision|base_url)|installed\.protocol\s*!=/,
+  );
+});
+
+test("Task owns Skill preparation and Control owns its restore allocation", () => {
+  const task = read("src/product/task/runtime.zig");
+  const control = read("src/product/control/runtime.zig");
+  assert.doesNotMatch(
+    task,
+    /pub fn (?:setSkillPreparation|clearSkillPreparation|skillPreparationGeneration)\(/,
+  );
+  assert.doesNotMatch(
+    control,
+    /task_runtime\.(?:setSkillPreparation|clearSkillPreparation|skillPreparationGeneration)\(|self\.skill\.allocator/,
+  );
+});
+
+test("Task owns deletion start and rejects lifecycle reentry in release builds", () => {
+  const task = read("src/product/task/runtime.zig");
+  const control = read("src/product/control/runtime.zig");
+  assert.doesNotMatch(
+    task,
+    /pub fn (?:requestDeletion|markDeletionStopFailed)\(/,
+  );
+  assert.doesNotMatch(
+    control,
+    /task_runtime\.(?:requestDeletion|markDeletionStopFailed)\(/,
+  );
+  assert.match(task, /if \(self\.advancing_inputs\) @panic\(/);
+  assert.match(
+    control,
+    /fn syncLifecycleFactsWithScheduleTimer\([^\n]*\) bool \{\s*if \(self\.task_runtime\.isAdvancingInputs\(\)\) @panic\(/,
+  );
+});
+
 function filesWithExtensions(directory, extensions) {
   return readdirSync(new URL(directory, root), { withFileTypes: true }).flatMap(
     (entry) => {
@@ -980,6 +1065,10 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(runtime, /@import\("metawork_product_schedule"\)/);
   assert.doesNotMatch(
     runtime,
+    /\b(?:input_continuation_schedule_gate|completion_confirmation_failed_task)\b/,
+  );
+  assert.doesNotMatch(
+    runtime,
     /product_schedule_(?:state|persistence|runtime)/,
   );
   assert.match(scheduleRoot, /pub const Runtime = runtime_impl\.Runtime/);
@@ -1655,6 +1744,49 @@ test("Product Task kernels have one physical home without taking the executor", 
     /pub const (?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime) =/,
   );
   assert.match(projection, /@import\("metawork_product_task"\)/);
+  assert.doesNotMatch(
+    projection,
+    /\.task_runtime\.(?:adoptTerminalReceipts|finishRetainedOutput)\(/,
+  );
+  assert.doesNotMatch(
+    projection,
+    /\.task_runtime\.(?:advanceWaitingInput|submitWaitingInput|inputContinuation|pendingInput)\(/,
+  );
+  assert.match(
+    projection,
+    /fn restoreWaitingInput\([^\n]*\{\s*const self:[^\n]*\n\s*_ = self\.admitUserTaskConversationRestore\(/,
+  );
+  const modelAuthority = projection.match(
+    /fn taskModelIntentAuthority\([^\n]*\{([\s\S]*?)\n    \}/,
+  );
+  assert.ok(modelAuthority);
+  assert.doesNotMatch(modelAuthority[1], /\bmodelsView\(/);
+  assert.doesNotMatch(
+    projection,
+    /\.task_runtime\.find\([^\n]*\.source_generation\s*=/,
+  );
+  const restoreCoordination = projection.match(
+    /fn prepareTaskRestoreFilters\([\s\S]*?\n    fn beginTaskModelRebind\(/,
+  );
+  assert.ok(restoreCoordination);
+  assert.doesNotMatch(
+    restoreCoordination[0],
+    /\b(?:restore_job|pinnedCatalogConst|restore_catalog)\b/,
+  );
+  for (const file of [
+    "src/product/control.zig",
+    ...zigFiles("src/product/control/"),
+  ]) {
+    assert.doesNotMatch(
+      read(file),
+      /\.\s*task_runtime\s*\.\s*(?:find(?:Const)?|tasks|inputContinuation|pendingInput)\b/,
+      `${file} reaches into Task records`,
+    );
+  }
+  assert.doesNotMatch(
+    taskRuntime,
+    /\bpub fn (?:find(?:Const)?|inputContinuation|pendingInput)\(/,
+  );
   assert.doesNotMatch(
     projection,
     /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution|product_task_(?:state|policy|view|attachment|agent_session|execution|execution_binding|deletion|recovery|recovery_job|runtime|persistence|checkpoint_record|checkpoint_store))/,

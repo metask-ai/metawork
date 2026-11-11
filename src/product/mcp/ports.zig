@@ -105,15 +105,12 @@ pub const Ports = struct {
 pub const UnixClock = struct {
     enabled: bool = false,
     context: ?*anyopaque = null,
-    now_seconds_fn: *const fn (?*anyopaque) ?u64 = unavailable,
+    now_ms_fn: ?*const fn (?*anyopaque) ?u64 = null,
 
     pub fn nowMs(self: UnixClock) ?u64 {
         if (!self.enabled) return null;
-        const seconds = self.now_seconds_fn(self.context) orelse return null;
-        if (seconds == 0) return null;
-        return std.math.mul(u64, seconds, 1000) catch null;
-    }
-    fn unavailable(_: ?*anyopaque) ?u64 {
-        return null;
+        const read = self.now_ms_fn orelse return null;
+        const milliseconds = read(self.context) orelse return null;
+        return if (milliseconds != 0) milliseconds else null;
     }
 };
