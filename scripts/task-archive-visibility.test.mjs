@@ -309,6 +309,56 @@ async function renderApp(
   };
 }
 
+test("Global search restores the opener on cancellation and focuses an accepted Task", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  snapshot.searchIndex = {
+    stale: false,
+    results: [
+      { taskId: "3", runId: null, part: "0", kind: "task", detail: "" },
+    ],
+    nextCursor: null,
+  };
+  const launcher = screen.getByRole("button", { name: "Search", exact: true });
+  const query = () => screen.getByRole("combobox", { name: "Search MetaWork" });
+
+  await user.click(launcher);
+  await waitFor(() => assertFocused(query()));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assertFocused(launcher));
+
+  await user.click(launcher);
+  await user.type(query(), "archive");
+  await screen.findByRole("option", { name: /Archive target/ });
+  await user.keyboard("{Enter}");
+  const stage = await screen.findByRole("group", { name: "Archive target" });
+  await waitFor(() => assertFocused(stage));
+
+  await user.keyboard("{Control>}k{/Control}");
+  await waitFor(() => assertFocused(query()));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assertFocused(stage));
+
+  await user.keyboard("{Control>}k{/Control}");
+  await user.type(query(), "archive");
+  await screen.findByRole("option", { name: /Archive target/ });
+  await user.keyboard("{Enter}");
+  await waitFor(() => assertFocused(stage));
+
+  snapshot.searchIndex.results[0].taskId = "4";
+  await user.click(launcher);
+  await user.type(query(), "earlier");
+  await screen.findByRole("option", { name: /Earlier archive/ });
+  await user.keyboard("{Enter}");
+  const archived = await screen.findByRole("group", {
+    name: "Earlier archive",
+  });
+  await waitFor(() => assertFocused(archived));
+  assert.equal(
+    within(archived).queryByRole("combobox", { name: /instruction/i }),
+    null,
+  );
+});
+
 test("a stopped tool loop prepares a local draft and preserves existing edits", async (ctx) => {
   const run = {
     ...structuredClone(initialSnapshot.tasks[0].runs[0]),

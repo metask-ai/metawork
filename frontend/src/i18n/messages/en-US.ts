@@ -1445,6 +1445,7 @@ export const enUS = {
   "operation.workspace_remove": "Removing the workspace",
   "search.open": "Search",
   "search.loading": "Searching…",
+  "search.result_unavailable": "That task is no longer available.",
   "search.no_more": "No more matches.",
   "search.more": "Continue search",
   "search.first": "Back to first page",

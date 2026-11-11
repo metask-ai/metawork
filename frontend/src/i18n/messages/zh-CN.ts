@@ -1239,6 +1239,7 @@ export const zhCN: Record<MessageId, string> = {
   "operation.workspace_remove": "移除工作区",
   "search.open": "搜索",
   "search.loading": "搜索中…",
+  "search.result_unavailable": "该任务已不可打开。",
   "search.no_more": "没有更多匹配项。",
   "search.more": "继续搜索",
   "search.first": "返回第一页",

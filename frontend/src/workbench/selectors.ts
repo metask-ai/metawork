@@ -6,7 +6,7 @@ import type {
   WorkspaceView,
 } from "../bridge/contracts.ts";
 import type { WorkbenchState } from "./store.ts";
-import { navigableTasks } from "./task-visibility.ts";
+import { selectableTask } from "./task-visibility.ts";
 
 type TaskNavigation = TaskView | TaskSummary;
 
@@ -164,7 +164,7 @@ export function searchWorkbench(
   )
     return [];
   return (snapshot.searchIndex?.results ?? []).flatMap((hit) => {
-    const task = snapshot.taskIndex.find((task) => task.id === hit.taskId);
+    const task = selectableTask(snapshot, hit.taskId);
     if (!task) return [];
     return [
       {

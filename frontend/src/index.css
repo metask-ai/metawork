@@ -3988,6 +3988,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   transition: none;
 }
 
+.task-stage:focus-visible {
+  outline: 2px solid var(--ui-control-focus-border);
+  outline-offset: -2px;
+}
+
 .app-window[data-right-panel-open="true"][data-right-panel-docked="true"]
   .task-panel {
   flex: 0 0 var(--right-panel-width);

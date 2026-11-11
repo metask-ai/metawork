@@ -14,6 +14,8 @@ export function GlobalSearch({
   results,
   loading,
   hasMore,
+  selectionUnavailable,
+  onClosed,
   onMore,
   onFirst,
   onQuery,
@@ -25,6 +27,8 @@ export function GlobalSearch({
   results: SearchResult[];
   loading?: boolean;
   hasMore?: boolean;
+  selectionUnavailable?: boolean;
+  onClosed?: () => void;
   onMore?: () => void;
   onFirst?: () => void;
   onQuery: (query: string) => void;
@@ -65,6 +69,7 @@ export function GlobalSearch({
     <Dialog.Root
       open={open}
       onOpenChange={(nextOpen) => !nextOpen && onClose()}
+      onOpenChangeComplete={(nextOpen) => !nextOpen && onClosed?.()}
     >
       <Dialog.Portal>
         <Dialog.Backdrop className="search-scrim" />
@@ -72,6 +77,7 @@ export function GlobalSearch({
           className="search-dialog top-[max(72px,10vh)] bottom-auto left-1/2 -translate-x-1/2 translate-y-0 max-h-[min(76vh,680px)] w-[min(620px,100%)] gap-0 overflow-hidden rounded-[16px] p-0"
           aria-labelledby="search-title"
           initialFocus={() => input.current ?? false}
+          finalFocus={onClosed ? false : undefined}
         >
           <Dialog.Title id="search-title" className="sr-only">
             {t("search.title")}
@@ -127,6 +133,7 @@ export function GlobalSearch({
             </Dialog.Close>
           </div>
           <div className="search-status" role="status">
+            {selectionUnavailable && <p>{t("search.result_unavailable")}</p>}
             {!query.trim() && <p>{t("search.hint")}</p>}
             {query.trim() && !loading && results.length === 0 && !hasMore && (
               <p>{t(onFirst ? "search.no_more" : "search.no_results")}</p>

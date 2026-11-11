@@ -6,6 +6,7 @@ import {
   type CSSProperties,
   type ReactNode,
   type Ref,
+  type RefObject,
 } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
@@ -156,6 +157,10 @@ export function AppShell({
   attentionBusy = false,
   attentionAnnouncement,
   onSearch,
+  searchButtonRef,
+  taskStageRef,
+  taskTitleRef,
+  taskStageLabel,
   left,
   rightPanel,
   rightPanelOpen,
@@ -173,7 +178,11 @@ export function AppShell({
   attentionContent?: ReactNode;
   attentionBusy?: boolean;
   attentionAnnouncement?: { key: number; text: string } | null;
-  onSearch: () => void;
+  onSearch: (opener: HTMLButtonElement) => void;
+  searchButtonRef?: RefObject<HTMLButtonElement | null>;
+  taskStageRef?: Ref<HTMLElement>;
+  taskTitleRef?: Ref<HTMLSpanElement>;
+  taskStageLabel?: string;
   left: ReactNode | null;
   rightPanel: ReactNode | null;
   rightPanelOpen: boolean;
@@ -227,7 +236,8 @@ export function AppShell({
   const compositionTarget = useRef<EventTarget | null>(null);
   const attentionHadFocus = useRef(false);
   const attentionFocusedElement = useRef<HTMLElement | null>(null);
-  const searchButton = useRef<HTMLButtonElement>(null);
+  const localSearchButton = useRef<HTMLButtonElement>(null);
+  const searchButton = searchButtonRef ?? localSearchButton;
 
   useLayoutEffect(() => {
     const focusedControlWasRemoved =
@@ -426,7 +436,7 @@ export function AppShell({
               className="icon-button focus-ring"
               ref={searchButton}
               aria-label={t("search.open")}
-              onClick={onSearch}
+              onClick={(event) => onSearch(event.currentTarget)}
             >
               <Icon name="search" />
             </button>
@@ -442,7 +452,13 @@ export function AppShell({
             inert={overlay ? true : undefined}
           >
             {contextVisible && (
-              <span className="commandbar-task">{taskTitle}</span>
+              <span
+                className="commandbar-task focus-ring"
+                ref={taskTitleRef}
+                tabIndex={-1}
+              >
+                {taskTitle}
+              </span>
             )}
           </div>
         </div>
@@ -564,7 +580,15 @@ export function AppShell({
             onResizeEnd={() => setResizingLeft(false)}
           />
         )}
-        <section className="task-stage">{children}</section>
+        <section
+          className="task-stage"
+          ref={taskStageRef}
+          aria-label={taskStageLabel}
+          role={taskStageLabel ? "group" : undefined}
+          tabIndex={taskStageLabel ? -1 : undefined}
+        >
+          {children}
+        </section>
         {effectiveRightPanelOpen && rightPanelDocked && (
           <ResizableSeparator
             className="task-panel-resize-handle"
