@@ -168,7 +168,6 @@ export function AppShell({
   onSearch,
   searchButtonRef,
   taskStageRef,
-  taskTitleRef,
   taskStageLabel,
   left,
   rightPanel,
@@ -190,7 +189,6 @@ export function AppShell({
   onSearch: (opener: HTMLButtonElement) => void;
   searchButtonRef?: RefObject<HTMLButtonElement | null>;
   taskStageRef?: Ref<HTMLElement>;
-  taskTitleRef?: Ref<HTMLSpanElement>;
   taskStageLabel?: string;
   left: ReactNode | null;
   rightPanel: ReactNode | null;
@@ -472,13 +470,7 @@ export function AppShell({
             inert={overlay ? true : undefined}
           >
             {contextVisible && (
-              <span
-                className="commandbar-task focus-ring"
-                ref={taskTitleRef}
-                tabIndex={-1}
-              >
-                {taskTitle}
-              </span>
+              <span className="commandbar-task">{taskTitle}</span>
             )}
           </div>
         </div>
