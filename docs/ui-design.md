@@ -354,46 +354,22 @@ Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；�
 
 > Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability、credential submission、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
 
-MCP 页面与 Skill、Scheduled tasks 使用同一个全局管理页骨架：居中的有界内容区负责标题、搜索、状态分组和连接列表，详情与 Add/Edit 只在用户明确选择后进入可关闭的右侧 drawer。页面不得自动选择第一个服务，也不得在空 registry、无选择或 drawer 关闭时预留第二列。drawer 使用统一的遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复；窄窗占满可用宽度。整体沿用 Workbench 的标题尺度和克制中性色，只用紫色表示进行中的连接、绿色表示成功、琥珀色表示需要处理。
+MCP 页面沿用定时任务的内容底色、有界阅读宽度、标题和低强调搜索。页面默认展示用户现有服务。服务按状态分组，用细分隔线呈现连续列表。窄窗允许页首动作和服务信息换行，保留需要处理的状态、常用操作和启停开关。详情与 Add/Edit 使用定时任务同款居中模态弹窗，窄窗保留视口边距。弹窗正文独立滚动，标题及添加、编辑的底部动作保持可见。弹窗使用统一遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复。
 
-HTTP 地址提供显式“此地址包含凭据”选项，开启后使用 password 输入。已保存敏感地址只显示域名，不回填完整地址；替换连接时明确要求重新填写完整地址，关闭或提交后清除输入。普通公开地址保持可编辑。
+手动添加与编辑中的 HTTP 服务地址使用普通地址输入，不要求用户选择地址凭据属性。已有敏感地址按其保存属性继续使用 password 输入，只显示域名，不回填完整地址；替换连接时明确要求重新填写完整地址，关闭或提交后清除输入。
 
-用户模型只有两层：连接服务、选择工具。手动添加沿 `Add server → 完成必要认证 → 自动连接并发现工具 → 选择允许的工具 → 新 Task 可用`；Agent 安装沿来源 Task 的安装卡自动完成配置和首次精确工具授权，不要求重复 Add/Choose tools。每次工具调用仍沿既有权限。手动发现工具但 allowlist 为空时，详情提供 Choose tools；已自动授权则呈现当前可用状态。连接测试是详情内的次级诊断，不作为常规成功步骤。
+用户模型只有两层：连接服务、选择工具。手动添加沿 `继续 → 检测连接 → 确认添加 → 保存并加载服务 → 选择允许的工具 → 新 Task 可用`；Agent 安装沿来源 Task 的安装卡自动完成配置和首次精确工具授权，不要求重复 Add/Choose tools。每次工具调用仍沿既有权限。手动发现工具但 allowlist 为空时，详情提供 Choose tools；已自动授权则呈现当前可用状态。连接测试是详情内的次级诊断，不作为常规成功步骤。
 
 仍有效授权上的周期性后台目录刷新保持既有可用状态，不反复切换列表分组或显示全页刷新进度；显式刷新仍呈现其操作进度。真实到期、正式目录收缩及失败按对应事实呈现，不能以后台作业存在推断工具不可用。自动刷新调度失败或持续失败暂停时，提供明确诊断并保留可执行的显式刷新动作，不让页面永久卡在刷新中。
 
 配置应用、整体目录可用性和单服务健康分别呈现。应用失败保留用户配置与仍适用于相同来源的正式健康事实，没有该服务观测时显示未加载，不推断网络不可达；只有正式 Activation 的单服务失败可显示不可达。整体 Activation 失败不能因各行显示未加载而变成全局可用。同 ID 改变连接来源后，旧健康与工具发现不能证明新来源已连接。未接管的配置通过重试连接再次 apply；已接管但缺目录时重试刷新，孤立连接测试不恢复正式准入。
 
-```text
-MCP                                                        [ Add server ]
-Connect external tools and choose what new tasks can use.
-
-[ Search servers and tools                              ] [ Refresh ]
-
-Needs attention
-┃ Search             HTTP · OAuth    Sign in
-
-Available servers
-┃ GitHub             HTTP · OAuth    Connected       Enabled  [●]
-
-Disabled
-┃ Local database     stdio · static  Disabled        Disabled [○]
-
-点击 GitHub 后：
-                                           ┌ GitHub                       × ┐
-                                           │ Connection → MCP → Choose tools│
-                                           │ Connected    Ready       2/8   │
-                                           │ Tool permissions              │
-                                           │ Connection and auth           │
-                                           └───────────────────────────────┘
-```
-
-- Header 使用 `Add server` 主动作、`Refresh tools` 与 `Paste configuration` 次级动作。列表占据完整管理页宽度；每个服务行都为带文字状态的启停 switch 保留固定位置，switch 与打开详情的主点击区是并列交互元素，不能嵌套，切换不自动打开 drawer。连接配置被遮蔽或 legacy approval 尚未完成时仍显示 switch，但以 disabled 状态配合同行的明确问题状态引导用户进入详情，不能直接移除控制而让启停能力不可发现。停用只收缩后续新 Task authority且可恢复，直接提交并显示已打开 Task 不变的结果；启用在没有已允许工具时同样直接提交，只有恢复非空 tool allowlist 时才确认并明确将重新开放的工具数量。点击连接的其余区域才打开 detail drawer；Add/Edit 与详情复用同一个 drawer surface，但保持各自清晰标题和提交动作。drawer 可关闭，关闭时保留列表滚动与筛选并把焦点还给原触发点；目标服务从 authoritative projection 消失时同样关闭并恢复到相邻列表上下文。操作仍在进行时不得因 backdrop 或 Escape 丢失未完成状态。Add 在 drawer 中显式选择 `STDIO` 或 `Streamable HTTP`。STDIO 普通路径提供 display name 与一条 launch command；Renderer 以不执行 shell 的 tokenizer 将引号/转义解析为 command + ordered argv，并拒绝 pipe、重定向、变量或命令替换。导入或 Edit 的 command 与有序 argv 使用独立字段，无修改保存不经过命令字符串；只有用户明确改为编辑完整启动命令时，才按本机桌面平台成对分词与格式化，并保留空参数及字面值。cwd、environment slot、auth、协议策略和 timeout 收入 Advanced settings。HTTP 普通路径提供 display name 与 endpoint，auth/registration/header 等高级设置保持 typed。OAuth 不出现在 STDIO；不提供 legacy SSE 或 generic advanced blob。粘贴配置是独立的次级入口：用户在 password 接收控件显式粘贴严格 mcpServers JSON，原文解析后立即清除；按输入顺序列出可添加与不支持条目，逐个查看并预填现有 Add，不自动选择、跳转或覆盖打开的草稿。environment/header 值仅预填专用 password 字段，其余公开字段保持可编辑。提交、取消、generation 变化或离页后清除未发送值，后续条目需重新粘贴或填写凭据。
+- 管理可用时，页首右侧的「手动添加」按钮沿用定时任务页的按钮样式，点击后打开添加弹窗。空列表提示用户可在 Task 中将接入说明链接交给 Agent。已有服务时，在同一行显示带可访问名称和悬停说明的刷新、搜索图标。搜索就地展开，关闭时保留筛选并可重新打开清除。列表占据完整管理页宽度；每个服务行都为带文字状态的启停 switch 保留固定位置，switch 与打开详情的主点击区是并列交互元素，不能嵌套，切换不自动打开详情。连接配置被遮蔽或 legacy approval 尚未完成时仍显示 switch，但以 disabled 状态配合同行的明确问题状态引导用户进入详情，不能直接移除控制而让启停能力不可发现。停用只收缩后续新 Task authority且可恢复，直接提交并显示已打开 Task 不变的结果；启用在没有已允许工具时同样直接提交，只有恢复非空 tool allowlist 时才确认并明确将重新开放的工具数量。正常服务行省略工具数量和“新任务可用”的重复摘要，右侧提供编辑连接、删除服务图标和启停开关；异常、待授权、正在连接及待选择工具的状态仍在行内显示，已有 Task 引用数继续保留。编辑直接打开该服务的编辑弹窗，删除进入同一确认流程；图标有悬停提示和可访问名称，各操作受该服务和管理层当前状态约束。点击连接主体打开详情弹窗。Add/Edit 与详情复用弹窗样式，分别呈现对应标题和动作。弹窗关闭时保留列表滚动与筛选并把焦点还给原触发点。目标服务从 authoritative projection 消失时关闭弹窗并恢复到列表上下文。弹窗内正在保存或执行服务管理操作时禁用关闭、取消、遮罩和 Escape 退出。手动添加的 Streamable HTTP 表单仅要求填写显示名称和服务地址，名称在上。输入无效地址时在字段下方说明格式要求。地址按普通连接配置保存，使用默认协议策略和请求超时。点击「继续」在弹窗内检测连接，检测期间可取消。若服务返回可保留请求方法的同源重定向，则按服务指定的地址重新检测一次，进入第二步时展示实际检测的地址。失败保留名称和地址并显示提示。握手通过或收到认证要求后，在同一弹窗显示名称、地址和认证方式。检测到的选项预选并标注「已检测」，用户可改选或返回修改地址。选 OAuth 时显示可用的客户端注册选项，点击「添加服务」保存待授权配置并进入详情，详情提供「登录」动作。其他方式提供可展开的请求头，值使用 password 输入，在提交、返回或关闭后清除。点击「添加服务」验证当前配置，握手通过才保存并进入详情。编辑连接沿用添加表单的宽度、字段和底部动作样式，以显示名称、服务地址、身份认证和 OAuth 客户端选项为主，直接预选已保存的认证及注册方式，不显示不可切换的连接类型卡片。更换已有认证连接的地址或启动程序时，提示需要重新配置密钥或登录。添加和编辑表单均不暴露协议策略和请求超时；首次添加使用默认值，编辑时沿用该服务已有值。STDIO 服务由 Agent 接入，已有服务可在详情中管理。Edit 的 command 与有序 argv 使用独立字段，无修改保存不经过命令字符串；只有用户明确改为编辑完整启动命令时，才按本机桌面平台成对分词与格式化，保留空参数及字面值，并拒绝管道、重定向和变量或命令替换。cwd、environment slot、auth、协议策略、timeout 与 OAuth 注册和标头保持 typed。OAuth 只适用于 Streamable HTTP。
 - Agent 安装以 Host 操作状态卡显示在来源 Task 和 MCP 页，普通进度不要求点击，也不自动导航或抢占已打开表单。缺少凭据时只显示专用 password 输入；跨 origin 或来源意图不明确时使用 Host 确认，OAuth 使用现有授权流。进行中可按精确身份取消；凭据在提交、目标/revision/generation 变化或离页时清除，不回填或重放。安装完成保留完成历史；后续启停与目录有效性由正常服务状态呈现，不显示成仍在连接。
-- Add/Edit 的提交按钮分别使用 `Add server` / `Save connection`，其显式提交本身授权完整 typed connection，并在同一个 transaction 中保存 connection fingerprint；按钮不声称默认关闭的工具已经向 Task 开放，也不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
+- Add/Edit 的提交按钮分别使用 `Add server` / `Save connection`，其显式提交授权对应的完整 typed connection。首次手动添加在检测通过并点击「添加服务」后保存 connection fingerprint，编辑直接随替换事务保存；按钮不声称默认关闭的工具已经向 Task 开放，也不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
 - Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 的每个 secret slot 与 OAuth pre-registered client secret 使用普通 password input，显示名称、已设置/缺失状态与保存/取消动作，已保存值不回填。输入清理与提交遵守 [Renderer Bridge 合同](renderer-bridge-contract.md)；超过凭据存储 UTF-8 字节上限时，在本地阻止提交并明确提示上限与修改方式，不截断输入；提交期间禁用重复保存，失败显示既有 mutation 反馈。OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，确认页须事先说明确认会替换现有授权、确认后取消或浏览器失败仍需重新登录；具体 grant 退休边界以 [Product 架构](product-architecture.md#25-mcp-authority) 为准。用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的替换/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。新的服务连接等待授权结束，页面必须明确说明；已打开 Task 的工具不变。列表与详情分别显示等待恢复授权和正在更新授权，恢复完成后自动连接，期间不提供重试连接或取消 refresh。ready 但当前未加载目标连接失败时，按 Host `canAuthorize` 保留重新登录出口，同时保留显式连接重试；裸 401/403 不显示为已确认 token 过期。
 - 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。正常产品状态收敛为 `Connecting / Connected / Needs attention / Disabled`。只有 `applyStatus = applying` 的当前候选行显示 Connecting；全局单步期间冻结冲突动作，健康行仍显示自己的工具可用状态。失败结果按成员保留，即使其他成员随后成功也要继续提示；行内重试只重开该成员，整体重试才重开全部失败。已知失败调用 `metawork.mcp.applyConfiguration`，不要求重启。Core 接管结果未知则单独提示重启确认，并冻结连接、catalog 和授权操作，不能伪装成某一成员网络故障。desired-disabled 服务始终归入 Disabled。被现有 Task 引用的行显示实际版本的引用数；已停用或删除成员的保留总数即使没有 Desired 行也须可见。停用后的编辑只保存配置，详情须说明现有任务保留已应用配置、重新启用后才应用修改。OAuth 删除确认必须说明停止续期、当前授权到期后现有任务不可用。
-- 详情依次为连接轨迹、至多一个主要处理动作、Tool permissions、Connection and authentication、默认折叠的 Advanced settings 和危险操作。Tools 显示 discovered、desired allowed 与 available to new tasks 三个事实并提供真实 Checkbox；新发现工具默认关闭。Connection 显示完整 executable/endpoint 与授权状态；秘密值只显示 `Set / Replace / Missing`。`Test connection` 始终是连接详情内的可选诊断，不是正式 apply gate；其 testing/connected/failed 结果只显示在 Connection 区域。正式 Runtime 不可用时，顶部恢复动作只能调用正式 apply 或 refresh，不能用候选测试冒充恢复。`Refresh tools` 只刷新当前正式 Runtime catalog。
+- 详情按当前状态呈现至多一个主要处理动作，相关诊断并入同一提示。其后依次显示 Tool permissions、Connection and authentication、默认折叠的 Advanced settings 和危险操作。连接尚未就绪且没有已知工具时隐藏 Tool permissions；有已知工具时，工具列表用紧凑行显示名称和真实 Checkbox，区域标题汇总已授权数；仅在工具不在当前目录中或已授权但新任务暂不可用时显示逐行提示。长列表限制高度并在列表内部滚动。新发现工具默认关闭。Connection 显示完整 executable/endpoint 与授权状态；秘密值只显示 `Set / Replace / Missing`。测试连接与编辑连接使用紧凑的图标按钮，提供悬停提示和可访问名称，窄窗保持并排。`Test connection` 始终是连接详情内的可选诊断，不是正式 apply gate；测试进度、启动失败和最终结果只在 Connection 区域的同一状态行显示。测试期间禁用测试按钮并隐藏上次结果，完成后以 Host 投影显示本次结果。正式 Runtime 不可用时，顶部恢复动作只能调用正式 apply 或 refresh，不能用候选测试冒充恢复。`Refresh tools` 只刷新当前正式 Runtime catalog。
 - Add/Edit/Enable/Disable/Delete 成功保存后自动 apply；Rename 与 tool-only mutation直接更新对应产品事实。apply 成功才原子安装新 Manifest/Activation/Admission，失败保留已保存 desired 并允许重试。已打开 Task 保持创建时 authority；UI 不暗示即时撤权。Delete、批量放行和恢复非空 tool allowlist 的 Enable 使用 modal confirmation；Disable 与不恢复工具权限的 Enable 直接提交。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑并隐藏未经确认的 desired 列表，但恢复文案也不得要求重启。
 - Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration，也不隐式发起 OAuth。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。OAuth success/refresh 只有同一 consent epoch 的 token revision 可以原子替换 Runtime HTTP auth snapshot；已开始的请求完成后才释放旧 snapshot，既有 Session 的 tool selection 不变。`reauth_required` 禁止新 Task 获得该 server，但不宣称已撤销既有 Session authority。401/403 scope challenge 进入 `Sign in again`，consent 显示原 scopes 与新 challenge scopes 的 union，不自动循环重试失败 tool call。
 - Host projection 发布完整非敏感 typed connection：STDIO 的 command/ordered argv/cwd/environment name，Streamable HTTP 的完整 endpoint/header name，以及用户选择的 OAuth registration plan、公开 client id 和 token endpoint auth method。environment/header value、credential locator、client secret、token、code、PKCE、动态注册所得内部材料、raw OAuth document、schema、fingerprint 和 AgentCore handle 仍不从 Host 返回 Renderer；手动填写的值仅按上述表单合同短暂存在。`redacted = true` 时明确说明 Host 移除了敏感文本，对应 `connection = null`；该状态优先于 approval/auth/desired presentation，进入只读恢复面，禁用 Connect、Enable、Edit、Test、Rename 与 tool mutation，只保留 Delete 后重新添加，不以摘要或空表单冒充旧配置。

@@ -1835,9 +1835,6 @@ export type McpMutationResult = {
   desiredGeneration: string | null;
 };
 export type McpCreateResult = McpMutationResult & { serverId: string | null };
-export type McpInstallDraft =
-  | ({ transport: "stdio" } & McpStdioConnectionInput)
-  | ({ transport: "streamable_http" } & McpHttpConnectionInput);
 export const mcpInstallationPhases = [
   "preparing",
   "needs_authorization",
@@ -1903,6 +1900,25 @@ export type McpRefreshResult = {
 export type McpConfigurationApplyResult = {
   outcome: "started" | "busy" | "unavailable" | "rejected";
 };
+export type McpHttpDraftProbeResult =
+  | { outcome: "redirected"; endpoint: string }
+  | {
+      outcome:
+        | "connected"
+        | "failed"
+        | "authentication_required"
+        | "access_denied"
+        | "oauth_automatic"
+        | "oauth_existing"
+        | "busy"
+        | "rejected"
+        | "unavailable";
+    };
+
+export type McpHttpDraftHeader = { name: string; value: string };
+export type McpHttpDraftAddResult =
+  McpCreateResult | { outcome: "failed" | "busy" | "unavailable" };
+
 export type McpConnectionTestResult = {
   outcome:
     | "started"

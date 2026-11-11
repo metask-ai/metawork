@@ -1,107 +1,27 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   commandLineToken,
   parseMcpCommandLine,
   validMcpArgv,
-  parseMcpConfiguration,
+  validMcpHttpEndpoint,
 } from "../frontend/src/features/mcp/configuration-input.ts";
 
-test("strict configuration rejects duplicates, comments, trailing commas and excessive depth without echoing input", () => {
-  for (const source of [
-    '{"mcpServers":{"secret-name":{"command":"a","command":"b"}}}',
-    '{"mcpServers":{"a":{"command":"node",}}}',
-    '{/* secret */"mcpServers":{"a":{"command":"node"}}}',
-    '{"mcpServers":{},"mcpServers":{}}',
-    "[".repeat(34) + "0" + "]".repeat(34),
-    " ".repeat(256 * 1024 + 1),
-    '{"mcpServers":{}}',
-  ]) {
-    assert.throws(
-      () => parseMcpConfiguration(source),
-      (error) =>
-        ["invalid", "duplicate_key", "depth_limit"].includes(error.message),
-    );
-  }
-});
-
-test("generic import preserves argv and separates password values from public drafts", () => {
-  const result = parseMcpConfiguration(
-    JSON.stringify({
-      mcpServers: {
-        local: {
-          command: "node",
-          args: ["", "--filter=$HOME", "`literal`", "--port", "3000"],
-          env: { PORT: "3000" },
-          disabled: false,
-          autoApprove: ["all"],
-        },
-        remote: {
-          type: "streamable-http",
-          url: "https://example.test/mcp",
-          headers: { Authorization: "Bearer synthetic-secret" },
-        },
-        unsupported: { command: "node", envFile: ".env" },
-        disabled: { command: "node", disabled: true },
-        wrongType: { command: "node", disabled: "false" },
-        expression: { command: "node", env: { TOKEN: "${env:KEY}" } },
-      },
-    }),
-  );
-  assert.equal(result.entries.length, 2);
-  assert.deepEqual(result.entries[0].draft.arguments, [
-    "",
-    "--filter=$HOME",
-    "`literal`",
-    "--port",
-    "3000",
-  ]);
-  assert.deepEqual(result.entries[0].draft.environmentNames, ["PORT"]);
-  assert.equal(result.entries[0].secrets.PORT, "3000");
-  assert.equal(result.entries[0].ignoredPermissions, true);
-  assert.equal(
-    result.entries[1].secrets.Authorization,
-    "Bearer synthetic-secret",
-  );
-  assert.equal(
-    JSON.stringify(result.entries.map((entry) => entry.draft)).includes(
-      "synthetic-secret",
+test("MCP endpoint validation matches the Host authority contract", async () => {
+  const { accepted, rejected } = JSON.parse(
+    await readFile(
+      new URL(
+        "../src/product/mcp/testdata/mcp-http-endpoints.json",
+        import.meta.url,
+      ),
+      "utf8",
     ),
-    false,
   );
-  assert.deepEqual(
-    result.issues.map((issue) => issue.code),
-    ["unsupported", "unsupported", "invalid", "variables"],
-  );
-});
-
-test("import rejects conflicting fields, reserved slots, invalid endpoints and credential byte overflow", () => {
-  for (const value of [
-    { command: "node", url: "https://example.test" },
-    { command: "node", args: [1] },
-    { command: "node", env: { Path: "bad" } },
-    { command: "node", env: { A: "a", a: "b" } },
-    { url: "https://example.test/mcp#fragment" },
-    { url: "https://example.test", headers: { Host: "bad" } },
-    { command: "node", env: { TOKEN: "界".repeat(4) } },
-  ])
-    assert.equal(
-      parseMcpConfiguration(
-        JSON.stringify({ mcpServers: { test: value } }),
-        10,
-        "windows",
-      ).entries.length,
-      0,
-    );
-});
-
-test("HTTP configuration preserves endpoint query bytes", () => {
-  const url = "https://example.test?key=synthetic%2Bvalue&route=mcp";
-  const result = parseMcpConfiguration(
-    JSON.stringify({ mcpServers: { query: { url } } }),
-  );
-  assert.equal(result.issues.length, 0);
-  assert.equal(result.entries[0].draft.endpoint, url);
+  for (const endpoint of accepted)
+    assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
+  for (const endpoint of rejected)
+    assert.equal(validMcpHttpEndpoint(endpoint), false, endpoint);
 });
 
 test("Windows commands preserve drive, UNC and quoted paths", () => {
@@ -176,6 +96,20 @@ for (const platform of ["windows", "posix"]) {
       "node $HOME",
     ])
       assert.equal(parseMcpCommandLine(value, platform), null, value);
+  });
+  test(`${platform}: package command preserves quoted arguments`, () => {
+    assert.deepEqual(
+      parseMcpCommandLine(
+        'npx -y "@modelcontextprotocol/server-filesystem" "/workspace files"',
+        platform,
+      ),
+      [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/workspace files",
+      ],
+    );
   });
 }
 

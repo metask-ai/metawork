@@ -36,6 +36,8 @@ export const commands = {
   mcpCancelInstallation: "metawork.mcp.cancelInstallation",
   mcpCreateStdioServer: "metawork.mcp.createStdioServer",
   mcpCreateHttpServer: "metawork.mcp.createHttpServer",
+  mcpProbeHttpDraft: "metawork.mcp.probeHttpDraft",
+  mcpVerifyAndAddHttpDraft: "metawork.mcp.verifyAndAddHttpDraft",
   mcpUpdateStdioConnection: "metawork.mcp.updateStdioConnection",
   mcpUpdateHttpConnection: "metawork.mcp.updateHttpConnection",
   mcpRenameServer: "metawork.mcp.renameServer",

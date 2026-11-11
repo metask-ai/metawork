@@ -44,16 +44,11 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { McpPage, filterMcpServers, parseMcpCommandLine, validMcpHttpEndpoint } =
-  await vite.ssrLoadModule("/src/features/mcp/McpPage.tsx");
+const { McpPage, filterMcpServers } = await vite.ssrLoadModule(
+  "/src/features/mcp/McpPage.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
-const endpointContract = JSON.parse(
-  await readFile(
-    join(process.cwd(), "src/product/mcp/testdata/mcp-http-endpoints.json"),
-    "utf8",
-  ),
-);
 
 test.afterEach(() => cleanup());
 test.after(async () => {
@@ -110,7 +105,7 @@ test("MCP installation cancels the exact operation without an Add step", async (
       },
     }),
   );
-  assert.equal(screen.queryByRole("button", { name: "Add server" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Add manually" }), null);
   fireEvent.click(screen.getByRole("button", { name: "Cancel installation" }));
   await waitFor(() => assert.deepEqual(calls, [["server-1", "2"]]));
 });
@@ -295,8 +290,9 @@ function pageElement(management, query = "", overrides = {}) {
       query,
       disabled: false,
       onQuery() {},
-      onCreateStdio: unchangedMutation,
-      onCreateHttp: unchangedMutation,
+      onProbeHttpDraft: async () => ({ outcome: "connected" }),
+      onVerifyAndAddHttpDraft: unchangedMutation,
+      onCreateOAuthHttp: unchangedMutation,
       onUpdateStdio: unchangedMutation,
       onUpdateHttp: unchangedMutation,
       onRename: unchangedMutation,
@@ -402,10 +398,12 @@ test("MCP opens details only on request and restores the list trigger on close",
   row.focus();
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+  const heading = within(dialog).getByRole("heading", { name: "GitHub" });
+  await waitFor(() => assert.ok(document.activeElement === heading));
+  fireEvent.keyDown(heading, { key: "Escape" });
 
-  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  await waitFor(() => assert.equal(document.activeElement, row));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  await waitFor(() => assert.ok(document.activeElement === row));
 });
 
 test("MCP toggles a server from the list without opening details", async () => {
@@ -446,6 +444,62 @@ test("MCP toggles a server from the list without opening details", async () => {
       "Server disabled for new tasks. Open tasks keep their current access.",
     ),
   );
+});
+
+test("MCP list actions edit the chosen connection and confirm deletion without opening details", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        ...emptyManagement,
+        desiredGeneration: "7",
+        servers,
+      },
+      "",
+      {
+        onRemove: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+  const actions = within(screen.getByRole("group", { name: "GitHub" }));
+  const edit = actions.getByRole("button", { name: "Edit connection" });
+  const remove = actions.getByRole("button", { name: "Delete server" });
+  assert.equal(screen.queryByText("Available to new tasks"), null);
+  assert.equal(screen.queryByText(/2\/2 tools available/), null);
+  fireEvent.click(edit);
+  const form = screen.getByRole("dialog", { name: "Edit connection settings" });
+  assert.equal(
+    within(form).getByRole("textbox", { name: "Display name" }).value,
+    "GitHub",
+  );
+  fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(document.activeElement === edit));
+  fireEvent.click(remove);
+  assert.equal(calls.length, 0);
+  let confirmation = screen.getByRole("alertdialog", {
+    name: "Delete this server?",
+  });
+  assert.ok(within(confirmation).getByText(/Renewal stops after deletion/));
+  fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(document.activeElement === remove));
+  fireEvent.click(remove);
+  confirmation = screen.getByRole("alertdialog", {
+    name: "Delete this server?",
+  });
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "Delete server" }),
+  );
+  await waitFor(() => assert.deepEqual(calls, [["7", "github-binding"]]));
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement ===
+        screen.getByRole("heading", { level: 1, name: "MCP" }),
+    ),
+  );
+  assert.equal(screen.queryByRole("dialog"), null);
 });
 
 test("MCP locks every server switch while one mutation is pending", async () => {
@@ -495,6 +549,13 @@ test("MCP locks every server switch while one mutation is pending", async () => 
   await waitFor(() =>
     assert.equal(gitlabToggle.getAttribute("aria-disabled"), "true"),
   );
+  for (const name of ["Edit connection", "Delete server"]) {
+    assert.ok(
+      screen
+        .getAllByRole("button", { name })
+        .every((button) => button.disabled),
+    );
+  }
   fireEvent.click(gitlabToggle);
   assert.deepEqual(calls, [["shared-generation", "github-binding", false]]);
 
@@ -502,25 +563,6 @@ test("MCP locks every server switch while one mutation is pending", async () => 
   await waitFor(() =>
     assert.equal(gitlabToggle.getAttribute("aria-disabled"), null),
   );
-});
-
-test("MCP shares the centered management-page frame and foundation Drawer", async () => {
-  const [page, css] = await Promise.all([
-    readFile(
-      join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
-      "utf8",
-    ),
-    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
-  ]);
-
-  assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
-  assert.match(page, /label: t\("mcp\.negotiation\.automatic"\)/);
-  assert.doesNotMatch(page, /label: "Automatic"/);
-  assert.match(
-    css,
-    /\.mcp-page-inner \{[\s\S]*?width: min\(100%, 944px\);[\s\S]*?margin: 0 auto;/,
-  );
-  assert.doesNotMatch(css, /\.mcp-workspace\s*\{/);
 });
 
 test("MCP keeps isolated test results in connection details", () => {
@@ -542,12 +584,68 @@ test("MCP keeps isolated test results in connection details", () => {
   );
 
   const row = screen.getByRole("button", { name: /GitHub/ });
-  assert.ok(within(row).getByText("Available to new tasks"));
+  assert.equal(within(row).queryByText("Available to new tasks"), null);
   assert.equal(within(row).queryByText("Failed · 2 issues"), null);
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
   assert.ok(within(dialog).getByText("Failed · 2 issues"));
   assert.equal(within(dialog).queryByText("Connection test failed"), null);
+});
+
+test("MCP retest replaces the old result and keeps feedback beside the connection controls", async () => {
+  let finishRequest;
+  const actions = {
+    onTest: () =>
+      new Promise((resolve) => {
+        finishRequest = resolve;
+      }),
+  };
+  const pageWithTest = (status, toolCount = 0, issueCount = 0) =>
+    pageElement(
+      {
+        ...emptyManagement,
+        desiredGeneration: "7",
+        servers: [
+          { ...servers[0], connectionTest: { status, toolCount, issueCount } },
+        ],
+      },
+      "",
+      actions,
+    );
+  const view = render(pageWithTest("connected", 17));
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = within(screen.getByRole("dialog", { name: "GitHub" }));
+  const testButton = dialog.getByRole("button", { name: "Test connection" });
+  assert.match(dialog.getByRole("status").textContent, /Succeeded · 17 found/);
+
+  fireEvent.click(testButton);
+  assert.equal(testButton.disabled, true);
+  assert.match(dialog.getByRole("status").textContent, /Testing…/);
+  assert.equal(dialog.queryByText("Succeeded · 17 found"), null);
+
+  view.rerender(pageWithTest("testing"));
+  finishRequest({ outcome: "started" });
+  await waitFor(() =>
+    assert.match(dialog.getByRole("status").textContent, /Testing…/),
+  );
+  assert.equal(testButton.disabled, true);
+
+  view.rerender(pageWithTest("connected", 17));
+  await waitFor(() => assert.equal(testButton.disabled, false));
+  assert.match(dialog.getByRole("status").textContent, /Succeeded · 17 found/);
+  assert.equal(dialog.queryByText(/Opening an isolated test connection/), null);
+  assert.equal(dialog.queryByText("Testing…"), null);
+
+  fireEvent.click(testButton);
+  finishRequest({ outcome: "busy" });
+  await waitFor(() =>
+    assert.match(
+      dialog.getByRole("status").textContent,
+      /Another connection test is already running/,
+    ),
+  );
+  assert.equal(dialog.queryByText("Succeeded · 17 found"), null);
+  assert.equal(testButton.disabled, false);
 });
 
 test("MCP retries the formal Runtime instead of promoting connection tests", async () => {
@@ -628,7 +726,7 @@ test("MCP keeps intentionally disabled servers out of the attention group", () =
   const row = within(disabledGroup).getByRole("button", {
     name: /Filesystem/,
   });
-  assert.ok(within(row).getByText("Disabled"));
+  assert.ok(within(row.closest("li")).getByText("Disabled"));
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "Filesystem" });
   assert.ok(within(dialog).getByRole("button", { name: "Enable" }));
@@ -659,7 +757,7 @@ test("MCP keeps disabled desired state separate from connection apply recovery",
   assert.ok(screen.getByText("Connection changes were not applied"));
   assert.equal(screen.queryByText("Needs attention"), null);
   const row = screen.getByRole("button", { name: /Filesystem/ });
-  assert.ok(within(row).getByText("Disabled"));
+  assert.ok(within(row.closest("li")).getByText("Disabled"));
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "Filesystem" });
   assert.equal(
@@ -721,11 +819,7 @@ test("MCP keeps choosing tools as the final setup step", () => {
       "2 tools were discovered. Choose which ones new tasks may use.",
     ),
   );
-  assert.equal(
-    dialog.querySelector(".mcp-connection-trace > div:last-child")?.dataset
-      .state,
-    "active",
-  );
+  assert.ok(within(dialog).getByRole("heading", { name: "Tool permissions" }));
 });
 
 test("MCP keeps a missing connection read-only instead of guessing repair data", () => {
@@ -881,146 +975,6 @@ test("MCP unmodified structured Edit submits literal argv and supports independe
   assert.equal(calls[1][2].cwd, server.connection.cwd);
 });
 
-test("MCP pasted configuration requires selection and Add, then captures only into the receipt identity", async () => {
-  const creates = [],
-    captures = [];
-  render(
-    pageElement(
-      {
-        availability: "ready",
-        managementHealth: "ready",
-        operation: "idle",
-        desiredGeneration: "7",
-        runtimeAlignment: "current",
-        redacted: false,
-        servers: [],
-      },
-      "",
-      {
-        onCreateStdio: async (...args) => {
-          creates.push(args);
-          return {
-            outcome: "saved",
-            desiredGeneration: "8",
-            serverId: "receipt-only",
-          };
-        },
-        onCaptureSecret: async (...args) => {
-          captures.push(args);
-          return {
-            outcome: "saved",
-            desiredGeneration: String(8 + captures.length),
-          };
-        },
-      },
-    ),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Paste configuration" }));
-  const paste = screen.getByLabelText("Paste mcpServers JSON here");
-  assert.equal(paste.type, "password");
-  const source = JSON.stringify({
-    mcpServers: {
-      Local: {
-        command: "node",
-        args: ["", "$HOME"],
-        env: { FIRST: "synthetic-one", SECOND: "synthetic-two" },
-        autoApprove: ["all"],
-      },
-      Other: { url: "https://example.test/mcp" },
-    },
-  });
-  fireEvent.paste(paste, { clipboardData: { getData: () => source } });
-  assert.equal(paste.value, "");
-  assert.equal(creates.length, 0);
-  assert.equal(screen.queryByRole("dialog"), null);
-  fireEvent.click(screen.getAllByRole("button", { name: "Review and add" })[0]);
-  const form = screen.getByRole("dialog", { name: "Add an MCP server" });
-  assert.equal(
-    within(form).getByLabelText("Credential for FIRST").type,
-    "password",
-  );
-  assert.equal(form.textContent.includes("synthetic-one"), false);
-  assert.equal(creates.length, 0);
-  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
-  await waitFor(() => assert.equal(captures.length, 2));
-  assert.equal(JSON.stringify(creates).includes("synthetic-"), false);
-  assert.deepEqual(creates[0][1].arguments, ["", "$HOME"]);
-  assert.deepEqual(captures, [
-    [
-      "8",
-      "receipt-only",
-      { kind: "stdio_environment", name: "FIRST" },
-      "synthetic-one",
-    ],
-    [
-      "9",
-      "receipt-only",
-      { kind: "stdio_environment", name: "SECOND" },
-      "synthetic-two",
-    ],
-  ]);
-  assert.equal(within(form).getByLabelText("Credential for FIRST").value, "");
-});
-
-test("MCP import stops remaining credential submission after an external generation change", async () => {
-  let finishCreate;
-  const captures = [];
-  const overrides = {
-    onCreateHttp: () =>
-      new Promise((resolve) => {
-        finishCreate = resolve;
-      }),
-    onCaptureSecret: async (...args) => {
-      captures.push(args);
-      return { outcome: "saved", desiredGeneration: "10" };
-    },
-  };
-  const management = {
-    availability: "ready",
-    managementHealth: "ready",
-    operation: "idle",
-    desiredGeneration: "7",
-    runtimeAlignment: "current",
-    redacted: false,
-    servers: [],
-  };
-  const view = render(pageElement(management, "", overrides));
-  fireEvent.click(screen.getByRole("button", { name: "Paste configuration" }));
-  fireEvent.paste(screen.getByLabelText("Paste mcpServers JSON here"), {
-    clipboardData: {
-      getData: () =>
-        JSON.stringify({
-          mcpServers: {
-            Remote: {
-              url: "https://example.test/mcp",
-              headers: { Authorization: "Bearer synthetic" },
-            },
-          },
-        }),
-    },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Review and add" }));
-  fireEvent.click(
-    within(screen.getByRole("dialog")).getByRole("button", {
-      name: "Add server",
-    }),
-  );
-  await waitFor(() => assert.equal(typeof finishCreate, "function"));
-  view.rerender(
-    pageElement({ ...management, desiredGeneration: "9" }, "", overrides),
-  );
-  finishCreate({
-    outcome: "saved",
-    desiredGeneration: "8",
-    serverId: "committed",
-  });
-  await waitFor(() =>
-    assert.ok(screen.getByText(/remaining credentials could not be saved/)),
-  );
-  assert.equal(captures.length, 0);
-  assert.equal(screen.getByLabelText("Credential for Authorization").value, "");
-});
-
 test("MCP tests a saved connection without refreshing the current Runtime", async () => {
   const calls = [];
   render(
@@ -1047,7 +1001,10 @@ test("MCP tests a saved connection without refreshing the current Runtime", asyn
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
   await waitFor(() => assert.deepEqual(calls, [["7", "github-binding"]]));
-  assert.ok(screen.getByText("Opening an isolated test connection."));
+  assert.equal(
+    screen.queryByText("Opening an isolated test connection."),
+    null,
+  );
 });
 
 test("MCP page distinguishes unavailable, empty, filtered, and redacted states", () => {
@@ -1076,6 +1033,12 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
     }),
   );
   assert.ok(screen.getByText("No MCP servers yet"));
+  assert.ok(screen.getByText(/Share its link with the agent in a task/));
+  assert.ok(screen.getByRole("button", { name: "Add manually" }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Paste configuration" }),
+    null,
+  );
 
   view.rerender(
     pageElement(
@@ -1092,6 +1055,15 @@ test("MCP page distinguishes unavailable, empty, filtered, and redacted states",
     ),
   );
   assert.ok(screen.getByText("No matching servers or tools"));
+  assert.equal(
+    screen.queryByText(/Share its link with the agent in a task/),
+    null,
+  );
+  assert.ok(screen.getByRole("button", { name: "Add manually" }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Paste configuration" }),
+    null,
+  );
 });
 
 test("MCP search covers server identity, transport, and tool name", () => {
@@ -1109,9 +1081,11 @@ test("MCP search covers server identity, transport, and tool name", () => {
   );
 });
 
-test("MCP add selects Streamable HTTP and preserves its typed public input", async () => {
+test("MCP checks a remote draft before asking the user to add it", async () => {
   const calls = [];
   const tests = [];
+  const probes = [];
+  let finishProbe;
   const view = render(
     pageElement(
       {
@@ -1125,7 +1099,13 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
       },
       "",
       {
-        onCreateHttp: async (...args) => {
+        onProbeHttpDraft: (...args) => {
+          probes.push(args);
+          return new Promise((resolve) => {
+            finishProbe = resolve;
+          });
+        },
+        onVerifyAndAddHttpDraft: async (...args) => {
           calls.push(args);
           return {
             outcome: "saved",
@@ -1141,46 +1121,99 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
     ),
   );
 
-  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
+  fireEvent.click(screen.getByRole("button", { name: "Add manually" }));
   const dialog = screen.getByRole("dialog", {
     name: "Add an MCP server",
   });
-  assert.ok(
-    dialog.textContent.includes("Credentials use separate password fields."),
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Executable" }),
+    null,
   );
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: /Streamable HTTP/ }),
+  assert.equal(
+    within(dialog).queryByRole("group", { name: "Connection type" }),
+    null,
   );
-  const name = within(dialog).getByRole("textbox", { name: "Display name" });
-  const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
-  const submit = within(dialog).getByRole("button", { name: "Add server" });
+  assert.equal(
+    within(dialog).queryByRole("group", { name: "Authentication" }),
+    null,
+  );
+  assert.equal(within(dialog).queryByRole("checkbox"), null);
+  assert.equal(within(dialog).queryByText("Protocol policy"), null);
+  assert.equal(within(dialog).queryByText("Timeout (ms)"), null);
+  const endpoint = within(dialog).getByRole("textbox", {
+    name: "Server address",
+  });
+  const displayName = within(dialog).getByRole("textbox", {
+    name: "Display name",
+  });
+  assert.equal(displayName.value, "");
+  const submit = within(dialog).getByRole("button", { name: "Continue" });
+  assert.equal(
+    within(dialog).queryByRole("button", { name: "Add server" }),
+    null,
+  );
+  assert.equal(endpoint.hasAttribute("aria-describedby"), false);
 
-  fireEvent.change(name, { target: { value: "Local Search" } });
   fireEvent.change(endpoint, {
     target: { value: "http://example.com/mcp" },
   });
+  assert.equal(endpoint.getAttribute("aria-invalid"), "true");
+  assert.ok(endpoint.getAttribute("aria-describedby"));
   assert.equal(submit.disabled, true);
   fireEvent.change(endpoint, {
     target: { value: "http://127.0.0.1:4312/mcp" },
   });
-  fireEvent.change(name, { target: { value: "界".repeat(100) } });
+  assert.equal(displayName.value, "");
   assert.equal(submit.disabled, true);
-  fireEvent.change(name, { target: { value: "Local Search" } });
+  fireEvent.change(displayName, { target: { value: "Local search" } });
   assert.equal(submit.disabled, false);
   fireEvent.click(submit);
+  assert.deepEqual(probes, [
+    ["generation-9", "Local search", "http://127.0.0.1:4312/mcp"],
+  ]);
+  assert.equal(calls.length, 0);
+  finishProbe({ outcome: "failed" });
+  await within(dialog).findByText(/Couldn't complete the MCP handshake/);
+  assert.equal(calls.length, 0);
+  assert.equal(displayName.value, "Local search");
+  assert.equal(endpoint.value, "http://127.0.0.1:4312/mcp");
+  fireEvent.click(submit);
+  assert.equal(probes.length, 2);
+  assert.equal(calls.length, 0);
+  finishProbe({ outcome: "connected" });
+
+  let review = await screen.findByRole("dialog", {
+    name: "Confirm MCP server",
+  });
+  assert.equal(calls.length, 0);
+  assert.ok(within(review).getByText("Local search"));
+  assert.ok(within(review).getByText("http://127.0.0.1:4312/mcp"));
+  fireEvent.click(within(review).getByRole("button", { name: "Back" }));
+  const draft = screen.getByRole("dialog", { name: "Add an MCP server" });
+  const draftEndpoint = within(draft).getByRole("textbox", {
+    name: "Server address",
+  });
+  assert.equal(draftEndpoint.value, "http://127.0.0.1:4312/mcp");
+  fireEvent.change(draftEndpoint, {
+    target: { value: "http://127.0.0.1:4312/updated" },
+  });
+  fireEvent.click(within(draft).getByRole("button", { name: "Continue" }));
+  assert.deepEqual(probes.at(-1), [
+    "generation-9",
+    "Local search",
+    "http://127.0.0.1:4312/updated",
+  ]);
+  finishProbe({ outcome: "connected" });
+  review = await screen.findByRole("dialog", { name: "Confirm MCP server" });
+  assert.equal(calls.length, 0);
+  fireEvent.click(within(review).getByRole("button", { name: "Add server" }));
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
     "generation-9",
-    {
-      displayName: "Local Search",
-      negotiation: "automatic",
-      timeoutMs: 30000,
-      endpoint: "http://127.0.0.1:4312/mcp",
-      authMode: "none",
-      headerNames: [],
-      registration: null,
-    },
+    "Local search",
+    "http://127.0.0.1:4312/updated",
+    [],
   ]);
   assert.equal(tests.length, 0);
   // The form stays open until the refreshed canonical projection surfaces the
@@ -1199,7 +1232,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
           {
             ...servers[0],
             id: "local-search-binding",
-            displayName: "Local Search",
+            displayName: "Local search",
             namespace: "mcp_local_search",
             authMode: "none",
             authorizationStatus: "not_required",
@@ -1222,78 +1255,247 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
     ),
   );
   await waitFor(() =>
-    assert.ok(screen.getByRole("dialog", { name: "Local Search" })),
+    assert.ok(screen.getByRole("dialog", { name: "Local search" })),
   );
   assert.equal(tests.length, 0);
 });
 
-test("MCP STDIO add preserves ordered argv and names without secret values", async () => {
+test("MCP continues to authentication after a bare 401 without guessing a sign-in method", async () => {
   const calls = [];
   render(
-    pageElement(
-      {
-        availability: "ready",
-        managementHealth: "ready",
-        operation: "idle",
-        desiredGeneration: "11",
-        runtimeAlignment: "current",
-        redacted: false,
-        servers: [],
+    pageElement(emptyManagement, "", {
+      onProbeHttpDraft: async () => ({ outcome: "authentication_required" }),
+      onVerifyAndAddHttpDraft: async (...args) => {
+        calls.push(args);
+        return { outcome: "failed" };
       },
-      "",
-      {
-        onCreateStdio: async (...args) => {
-          calls.push(args);
-          return { outcome: "saved" };
-        },
-      },
-    ),
-  );
-
-  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
-  const dialog = screen.getByRole("dialog", {
-    name: "Add an MCP server",
-  });
-  fireEvent.change(
-    within(dialog).getByRole("textbox", { name: "Display name" }),
-    {
-      target: { value: "Local files" },
-    },
-  );
-  fireEvent.change(
-    within(dialog).getByRole("textbox", { name: /Launch command/ }),
-    {
-      target: { value: "/usr/local/bin/files-mcp --readonly" },
-    },
-  );
-  fireEvent.click(
-    within(dialog).getByRole("radio", { name: "Static secrets" }),
-  );
-  fireEvent.change(
-    within(dialog).getByRole("textbox", {
-      name: "Environment variable names 1",
     }),
-    { target: { value: "FILES_TOKEN" } },
   );
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
-
-  await waitFor(() => assert.equal(calls.length, 1));
-  assert.deepEqual(calls[0], [
-    "11",
-    {
-      displayName: "Local files",
-      negotiation: "automatic",
-      timeoutMs: 30000,
-      command: "/usr/local/bin/files-mcp",
-      arguments: ["--readonly"],
-      cwd: null,
-      environmentNames: ["FILES_TOKEN"],
-    },
-  ]);
+  fireEvent.click(screen.getByRole("button", { name: "Add manually" }));
+  const first = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.change(within(first).getByLabelText("Display name"), {
+    target: { value: "Protected service" },
+  });
+  fireEvent.change(within(first).getByLabelText("Server address"), {
+    target: { value: "https://mcp.example.test/mcp" },
+  });
+  fireEvent.click(within(first).getByRole("button", { name: "Continue" }));
+  const review = await screen.findByRole("dialog", {
+    name: "Confirm MCP server",
+  });
+  assert.match(review.textContent, /server requires authentication/);
+  assert.equal(
+    within(review).queryAllByRole("radio", { checked: true }).length,
+    0,
+  );
+  assert.equal(
+    within(review).getByRole("button", { name: "Add server" }).disabled,
+    true,
+  );
+  assert.deepEqual(calls, []);
 });
 
-test("MCP OAuth add carries an explicit client auth method and no secret", async () => {
+test("MCP saves a detected OAuth server and offers sign-in in its details", async () => {
+  const pendingServer = {
+    ...servers[1],
+    displayName: "Protected service",
+    authorizationStatus: "client_registration_required",
+    runtimeStatus: "not_loaded",
+    safeDiagnostic: "",
+  };
+  const creates = [];
+  const authorizations = [];
+  const actions = {
+    onProbeHttpDraft: async () => ({ outcome: "oauth_automatic" }),
+    onCreateOAuthHttp: async (...args) => {
+      creates.push(args);
+      return {
+        outcome: "saved",
+        desiredGeneration: "1",
+        serverId: pendingServer.id,
+      };
+    },
+    onAuthorize: async (...args) => {
+      authorizations.push(args);
+      return { outcome: "started", operationId: "op-1" };
+    },
+  };
+  const view = render(pageElement(emptyManagement, "", actions));
+  fireEvent.click(screen.getByRole("button", { name: "Add manually" }));
+  const first = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.change(within(first).getByLabelText("Display name"), {
+    target: { value: pendingServer.displayName },
+  });
+  fireEvent.change(within(first).getByLabelText("Server address"), {
+    target: { value: pendingServer.connection.endpoint },
+  });
+  fireEvent.click(within(first).getByRole("button", { name: "Continue" }));
+  const review = await screen.findByRole("dialog", {
+    name: "Confirm MCP server",
+  });
+  fireEvent.click(within(review).getByRole("button", { name: "Add server" }));
+  await waitFor(() =>
+    assert.deepEqual(creates, [
+      [
+        "0",
+        {
+          displayName: pendingServer.displayName,
+          endpoint: pendingServer.connection.endpoint,
+          authMode: "oauth",
+          negotiation: "automatic",
+          timeoutMs: 30000,
+          registration: { kind: "automatic" },
+          headerNames: [],
+        },
+      ],
+    ]),
+  );
+  view.rerender(
+    pageElement(
+      {
+        ...emptyManagement,
+        desiredGeneration: "1",
+        servers: [pendingServer],
+      },
+      "",
+      actions,
+    ),
+  );
+  const details = await screen.findByRole("dialog", {
+    name: pendingServer.displayName,
+  });
+  assert.deepEqual(authorizations, []);
+  const signIn = within(details).getAllByRole("button", { name: "Sign in" })[0];
+  fireEvent.click(signIn);
+  await waitFor(() =>
+    assert.deepEqual(authorizations, [["1", pendingServer.id]]),
+  );
+});
+
+test("MCP checks the redirected address for OAuth and uses it for final verification", async () => {
+  const probes = [];
   const calls = [];
+  let finishVerification;
+  render(
+    pageElement(emptyManagement, "", {
+      onProbeHttpDraft: async (_generation, _name, endpoint) => {
+        probes.push(endpoint);
+        return probes.length === 1
+          ? {
+              outcome: "redirected",
+              endpoint: "https://mcp.example.test/connect?route=updated",
+            }
+          : { outcome: "oauth_automatic" };
+      },
+      onVerifyAndAddHttpDraft: (...args) => {
+        calls.push(args);
+        return new Promise((resolve) => {
+          finishVerification = resolve;
+        });
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Add manually" }));
+  const first = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.change(within(first).getByLabelText("Display name"), {
+    target: { value: "Protected service" },
+  });
+  fireEvent.change(within(first).getByLabelText("Server address"), {
+    target: { value: "https://mcp.example.test/entry?route=original" },
+  });
+  fireEvent.click(within(first).getByRole("button", { name: "Continue" }));
+  const review = await screen.findByRole("dialog", {
+    name: "Confirm MCP server",
+  });
+  assert.deepEqual(probes, [
+    "https://mcp.example.test/entry?route=original",
+    "https://mcp.example.test/connect?route=updated",
+  ]);
+  assert.ok(
+    within(review).getByText("https://mcp.example.test/connect?route=updated"),
+  );
+  assert.equal(
+    within(review).getByRole("radio", { name: "OAuth Detected" }).checked,
+    true,
+  );
+  assert.equal(
+    within(review).getByRole("radio", {
+      name: "Register automatically Detected",
+    }).checked,
+    true,
+  );
+  const add = within(review).getByRole("button", { name: "Add server" });
+  assert.equal(add.disabled, false);
+  fireEvent.click(within(review).getByRole("radio", { name: "Without OAuth" }));
+  fireEvent.click(within(review).getByText("Request headers"));
+  fireEvent.click(within(review).getByRole("button", { name: "Add header" }));
+  assert.equal(add.disabled, true);
+  fireEvent.change(within(review).getByLabelText("Name"), {
+    target: { value: "Authorization" },
+  });
+  const value = within(review).getByLabelText("Value");
+  assert.equal(value.type, "password");
+  fireEvent.change(value, { target: { value: "Bearer fixture-draft" } });
+  fireEvent.click(add);
+  assert.deepEqual(calls, [
+    [
+      "0",
+      "Protected service",
+      "https://mcp.example.test/connect?route=updated",
+      [{ name: "Authorization", value: "Bearer fixture-draft" }],
+    ],
+  ]);
+  assert.equal(value.value, "");
+  finishVerification({ outcome: "failed" });
+  await within(review).findByText(
+    /final configuration could not complete the MCP handshake/,
+  );
+  assert.equal(within(review).getByLabelText("Name").value, "Authorization");
+});
+
+test("MCP ignores a successful draft check after the user cancels", async () => {
+  let finishProbe;
+  const calls = [];
+  render(
+    pageElement(emptyManagement, "", {
+      onProbeHttpDraft: () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        }),
+      onVerifyAndAddHttpDraft: async (...args) => {
+        calls.push(args);
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Add manually" }));
+  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
+  fireEvent.change(within(dialog).getByLabelText("Display name"), {
+    target: { value: "New service" },
+  });
+  fireEvent.change(within(dialog).getByLabelText("Server address"), {
+    target: { value: "https://mcp.example.test/mcp" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  await Promise.resolve(finishProbe({ outcome: "connected" }));
+  assert.deepEqual(calls, []);
+  fireEvent.click(screen.getByRole("button", { name: "Add manually" }));
+  assert.equal(screen.getByLabelText("Display name").value, "");
+});
+
+test("MCP edit can add OAuth to a saved remote server", async () => {
+  const calls = [];
+  const server = {
+    ...servers[0],
+    authMode: "none",
+    authorizationStatus: "not_required",
+    connection: {
+      ...servers[0].connection,
+      endpoint: "https://mcp.example.test/mcp",
+      registrationKind: null,
+    },
+  };
   render(
     pageElement(
       {
@@ -1303,43 +1505,31 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
         desiredGeneration: "12",
         runtimeAlignment: "current",
         redacted: false,
-        servers: [],
+        servers: [server],
       },
       "",
       {
-        onCreateHttp: async (...args) => {
+        onUpdateHttp: async (...args) => {
           calls.push(args);
-          return { outcome: "saved" };
+          return { outcome: "saved", desiredGeneration: "13" };
         },
       },
     ),
   );
 
-  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
   const dialog = screen.getByRole("dialog", {
-    name: "Add an MCP server",
+    name: "Edit connection settings",
   });
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: /Streamable HTTP/ }),
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Server address" }).value,
+    server.connection.endpoint,
   );
-  fireEvent.change(
-    within(dialog).getByRole("textbox", { name: "Display name" }),
-    {
-      target: { value: "Remote OAuth" },
-    },
-  );
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Endpoint" }), {
-    target: { value: "https://mcp.example.test/mcp" },
-  });
   fireEvent.click(within(dialog).getByRole("radio", { name: "OAuth" }));
   fireEvent.click(
-    within(dialog).getByRole("combobox", { name: "Client registration" }),
+    within(dialog).getByRole("radio", { name: "Use your own OAuth client" }),
   );
-  const existingClientOption = await screen.findByRole("option", {
-    name: "Existing client",
-  });
-  fireEvent.pointerDown(existingClientOption);
-  fireEvent.click(existingClientOption);
   await waitFor(() =>
     within(dialog).getByRole("textbox", { name: "Client ID" }),
   );
@@ -1356,13 +1546,16 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   });
   fireEvent.pointerDown(clientSecretBasicOption);
   fireEvent.click(clientSecretBasicOption);
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Save connection" }),
+  );
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
     "12",
+    server.id,
     {
-      displayName: "Remote OAuth",
+      displayName: server.displayName,
       negotiation: "automatic",
       timeoutMs: 30000,
       endpoint: "https://mcp.example.test/mcp",
@@ -1454,30 +1647,6 @@ test("MCP gates OAuth client secret recovery and configuration on credential sub
   );
 });
 
-test("MCP endpoint validation matches the Host authority contract", () => {
-  for (const endpoint of endpointContract.accepted)
-    assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
-  for (const endpoint of endpointContract.rejected)
-    assert.equal(validMcpHttpEndpoint(endpoint), false, endpoint);
-});
-
-test("MCP launch command is tokenized without invoking shell syntax", () => {
-  assert.deepEqual(
-    parseMcpCommandLine(
-      'npx -y "@modelcontextprotocol/server-filesystem" "/workspace files"',
-    ),
-    [
-      "npx",
-      "-y",
-      "@modelcontextprotocol/server-filesystem",
-      "/workspace files",
-    ],
-  );
-  assert.equal(parseMcpCommandLine("npx server | tee output"), null);
-  assert.equal(parseMcpCommandLine("npx $(whoami)"), null);
-  assert.equal(parseMcpCommandLine('npx "unterminated'), null);
-});
-
 test("MCP tool allowlist mutation sends exact desired tools and generation", async () => {
   const calls = [];
   render(
@@ -1511,6 +1680,11 @@ test("MCP tool allowlist mutation sends exact desired tools and generation", asy
 
 test("MCP edit preloads and preserves the complete public destination", async () => {
   const calls = [];
+  const server = {
+    ...servers[0],
+    negotiation: "modern_only",
+    timeoutMs: 45000,
+  };
   render(
     pageElement(
       {
@@ -1520,7 +1694,7 @@ test("MCP edit preloads and preserves the complete public destination", async ()
         desiredGeneration: "replacement-generation",
         runtimeAlignment: "current",
         redacted: false,
-        servers: [servers[0]],
+        servers: [server],
       },
       "",
       {
@@ -1537,14 +1711,58 @@ test("MCP edit preloads and preserves the complete public destination", async ()
   const dialog = screen.getByRole("dialog", {
     name: "Edit connection settings",
   });
-  assert.ok(
-    dialog.textContent.includes("Change the saved non-secret settings"),
+  assert.equal(within(dialog).queryByText("Advanced settings"), null);
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol policy" }),
+    null,
   );
-  const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Timeout (ms)" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("group", { name: "Connection type" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("checkbox", {
+      name: "This address contains credentials",
+    }),
+    null,
+  );
+  assert.equal(
+    within(dialog).getByRole("radio", { name: "OAuth" }).checked,
+    true,
+  );
+  assert.equal(
+    within(dialog).getByRole("radio", { name: "Register automatically" })
+      .checked,
+    true,
+  );
+  const endpoint = within(dialog).getByRole("textbox", {
+    name: "Server address",
+  });
   const submit = within(dialog).getByRole("button", {
     name: "Save connection",
   });
   assert.equal(endpoint.value, "https://github.example/mcp");
+  fireEvent.change(endpoint, {
+    target: { value: "https://updated.example/mcp" },
+  });
+  assert.ok(
+    within(dialog).getByText(
+      "Changing the address or program requires setting up credentials or signing in again.",
+    ),
+  );
+  fireEvent.change(endpoint, {
+    target: { value: "https://github.example/mcp" },
+  });
+  assert.equal(
+    within(dialog).queryByText(
+      "Changing the address or program requires setting up credentials or signing in again.",
+    ),
+    null,
+  );
   assert.equal(submit.disabled, false);
   fireEvent.click(submit);
 
@@ -1554,8 +1772,8 @@ test("MCP edit preloads and preserves the complete public destination", async ()
     "github-binding",
     {
       displayName: "GitHub",
-      negotiation: "automatic",
-      timeoutMs: 30000,
+      negotiation: "modern_only",
+      timeoutMs: 45000,
       endpoint: "https://github.example/mcp",
       authMode: "oauth",
       headerNames: [],
@@ -1806,7 +2024,7 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   );
   assert.ok(screen.getByText("The last save result is unknown"));
   // Frozen unknown-outcome state hides mutating entry points entirely.
-  assert.equal(screen.queryByRole("button", { name: "Add server" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Add manually" }), null);
 
   view.rerender(
     pageElement({
@@ -1864,11 +2082,15 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
   };
   const view = render(pageElement(management, "", handlers));
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
-  let drawer = screen.getByRole("dialog");
-  assert.equal(within(drawer).queryByText("Cannot connect"), null);
-  assert.ok(within(drawer).getByText(pending.safeDiagnostic));
+  let dialog = screen.getByRole("dialog");
+  assert.equal(within(dialog).queryByText("Cannot connect"), null);
+  assert.ok(within(dialog).getByText(pending.safeDiagnostic));
+  assert.equal(
+    within(dialog).queryByRole("heading", { name: "Tool permissions" }),
+    null,
+  );
   fireEvent.click(
-    within(drawer).getByRole("button", { name: "Retry connection" }),
+    within(dialog).getByRole("button", { name: "Retry connection" }),
   );
   await waitFor(() => assert.deepEqual(calls, ["refresh"]));
   view.rerender(
@@ -1878,17 +2100,31 @@ test("MCP distinguishes unapplied connections from a loaded runtime missing its 
         configurationApply: "failed",
         runtimeAlignment: "restart_required",
         applyFailureCount: 1,
-        servers: [{ ...pending, applyStatus: "rejected" }],
+        servers: [
+          {
+            ...pending,
+            applyStatus: "rejected",
+            safeDiagnostic:
+              "Configuration changes were not applied. Retry the connection.",
+          },
+        ],
       },
       "",
       handlers,
     ),
   );
-  drawer = screen.getByRole("dialog");
+  dialog = screen.getByRole("dialog");
   fireEvent.click(
-    within(drawer).getByRole("button", { name: "Retry connection" }),
+    within(dialog).getByRole("button", { name: "Retry connection" }),
   );
   await waitFor(() => assert.deepEqual(calls, ["refresh", "apply"]));
+  assert.ok(
+    within(dialog).getByText(
+      "The settings are saved. The server has not loaded.",
+    ),
+  );
+  assert.equal(within(dialog).queryByText(/^Connection requested\./), null);
+  assert.equal(within(dialog).queryByText("Needs attention"), null);
   assert.ok(screen.getByText("Connection changes were not applied"));
   assert.equal(screen.queryByText("Cannot connect"), null);
 
@@ -2375,9 +2611,6 @@ test("MCP distinguishes authorization waiting and refreshing without offering ca
       within(dialog).queryByRole("button", { name: "Cancel authorization" }),
       null,
     );
-    const stages = dialog.querySelectorAll(".mcp-connection-trace > div");
-    assert.equal(stages[0].dataset.state, "active");
-    assert.equal(stages[1].dataset.state, "pending");
     assert.equal(dialog.querySelector(".mcp-diagnostic"), null);
 
     cleanup();
@@ -2410,42 +2643,7 @@ test("MCP explains the global connection wait during browser authorization", () 
 
 test("MCP sensitive address uses a one-shot password field and never refills a saved private address", async () => {
   const calls = [];
-  render(
-    pageElement({ ...emptyManagement, desiredGeneration: "9" }, "", {
-      onCreateHttp: async (...args) => {
-        calls.push(args);
-        return { outcome: "rejected", desiredGeneration: "9", serverId: null };
-      },
-    }),
-  );
-  fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
-  let form = screen.getByRole("dialog", { name: "Add an MCP server" });
-  fireEvent.click(
-    within(form).getByRole("button", { name: /Streamable HTTP/ }),
-  );
-  fireEvent.change(
-    within(form).getByRole("textbox", { name: "Display name" }),
-    { target: { value: "Private" } },
-  );
-  fireEvent.click(
-    within(form).getByRole("checkbox", {
-      name: /This address contains credentials/,
-    }),
-  );
-  const endpoint = within(form).getByLabelText("Endpoint");
-  assert.equal(endpoint.type, "password");
-  fireEvent.change(endpoint, {
-    target: { value: "https://mcp.example/k/synthetic-key?scope=one" },
-  });
-  fireEvent.click(within(form).getByRole("button", { name: "Add server" }));
-  await waitFor(() => assert.equal(calls.length, 1));
-  await waitFor(() => assert.equal(endpoint.value, ""));
-  assert.equal(calls[0][1].sensitiveEndpoint, true);
-  assert.equal(
-    calls[0][1].endpoint,
-    "https://mcp.example/k/synthetic-key?scope=one",
-  );
-  cleanup();
+  let finish;
   const server = {
     ...servers[0],
     connection: {
@@ -2455,22 +2653,44 @@ test("MCP sensitive address uses a one-shot password field and never refills a s
     },
   };
   render(
-    pageElement({
-      ...emptyManagement,
-      desiredGeneration: "9",
-      servers: [server],
-    }),
+    pageElement(
+      { ...emptyManagement, desiredGeneration: "9", servers: [server] },
+      "",
+      {
+        onUpdateHttp: (...args) => {
+          calls.push(args);
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        },
+      },
+    ),
   );
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
-  form = screen.getByRole("dialog", { name: "Edit connection settings" });
-  const replacement = within(form).getByLabelText("Endpoint");
+  const form = screen.getByRole("dialog", { name: "Edit connection settings" });
+  const replacement = within(form).getByLabelText("Server address");
   assert.equal(replacement.type, "password");
   assert.equal(replacement.value, "");
   assert.equal(
-    within(form).getByRole("checkbox", {
+    within(form).queryByRole("checkbox", {
       name: /This address contains credentials/,
-    }).checked,
-    true,
+    }),
+    null,
   );
+  fireEvent.change(replacement, {
+    target: { value: "https://mcp.example/k/synthetic-key?scope=one" },
+  });
+  fireEvent.click(
+    within(form).getByRole("button", { name: "Save connection" }),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(replacement.value, "");
+  assert.equal(calls[0][2].sensitiveEndpoint, true);
+  assert.equal(
+    calls[0][2].endpoint,
+    "https://mcp.example/k/synthetic-key?scope=one",
+  );
+  finish({ outcome: "rejected", desiredGeneration: "9" });
+  await waitFor(() => assert.equal(replacement.disabled, false));
 });

@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- MCP 页面移除「粘贴配置」和 JSON 导入表单。
+
 ## [0.2.11] - 2026-11-07
 
 ### Added

@@ -350,7 +350,7 @@ export const enUS = {
   "skills.navigation_label": "Workbench tools",
   "mcp.title": "MCP",
   "mcp.subtitle": "Connect external tools and choose what new tasks can use.",
-  "mcp.search_label": "Search MCP servers and tools",
+  "mcp.clear_search": "Clear search",
   "mcp.search_placeholder": "Search servers and tools",
   "mcp.section.attention": "Needs attention",
   "mcp.section.available": "Available servers",
@@ -364,18 +364,9 @@ export const enUS = {
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.tool_access_summary": "{available}/{total} tools available",
-  "mcp.trace.label": "Connection progress",
-  "mcp.trace.connection": "Connection",
-  "mcp.trace.handshake": "MCP handshake",
-  "mcp.trace.tools": "Choose tools",
-  "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
   "mcp.access.restart_required": "Connecting",
   "mcp.access.unavailable": "Unavailable to new tasks",
-  "mcp.banner.restart.title": "Applying connection changes",
-  "mcp.banner.restart.body":
-    "MetaWork is connecting and discovering tools. Open tasks keep their current access.",
   "mcp.banner.applying.title": "Connecting MCP services",
   "mcp.banner.applying.body":
     "Launching connections, checking the MCP handshake, and discovering tools.",
@@ -405,44 +396,73 @@ export const enUS = {
   "mcp.unavailable_body":
     "MetaWork cannot load MCP management right now. Reopen the app to recover the server list.",
   "mcp.empty_title": "No MCP servers yet",
-  "mcp.empty_body":
-    "Add a trusted STDIO or Streamable HTTP server. The connection starts enabled, while tools stay unavailable to tasks by default.",
+  "mcp.empty_agent_hint":
+    "Have a setup guide? Share its link with the agent in a task to connect the server.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
-  "mcp.detail.eyebrow": "MCP server",
-  "mcp.detail.new_tasks": "New tasks",
   "mcp.detail.tool_permissions": "Tool permissions",
   "mcp.detail.connection_test": "Connection test",
-  "mcp.detail.tools_available": "{count} tools available",
-  "mcp.detail.allowed_count": "Allowed {allowed}/{total}",
   "mcp.detail.connection_and_auth": "Connection and authentication",
   "mcp.detail.advanced": "Advanced settings",
   "mcp.detail.display_name": "Display name",
   "mcp.detail.diagnostic": "Needs attention",
   "mcp.detail.tool_help":
-    "Choose the exact tools copied into new tasks. Newly discovered tools stay off.",
+    "Newly discovered tools are off by default for new tasks.",
+  "mcp.detail.allowed_count": "Allowed {allowed}/{total}",
   "mcp.detail.no_tools": "This server has not published any usable tools.",
   "mcp.redacted": "MetaWork removed sensitive text from this catalog.",
   "mcp.desired.enabled": "Enabled",
   "mcp.desired.disabled": "Disabled",
   "mcp.existing_tasks_note":
     "Existing tasks cannot gain newly added tools. Revoked permissions restrict future access.",
-  "mcp.add.action": "Add server",
-  "mcp.add.eyebrow": "New MCP server",
+  "mcp.add.action": "Add manually",
   "mcp.add.title": "Add an MCP server",
-  "mcp.add.intro":
-    "Choose a transport and save the public connection settings. Adding the server authorizes and enables the connection; tools stay off by default.",
-  "mcp.edit.eyebrow": "Edit MCP connection",
   "mcp.edit.title": "Edit connection settings",
-  "mcp.edit.intro":
-    "Change the saved non-secret settings. Secret values stay hidden and are preserved only while the executable or endpoint remains unchanged.",
+  "mcp.edit.reauthenticate":
+    "Changing the address or program requires setting up credentials or signing in again.",
   "mcp.edit.action": "Edit connection",
   "mcp.edit.submit": "Save connection",
   "mcp.add.name": "Display name",
-  "mcp.add.transport": "Connection type",
-  "mcp.add.stdio_help": "Run a local process with structured arguments.",
-  "mcp.add.http_help": "Connect to a remote Streamable HTTP endpoint.",
-  "mcp.add.protocol": "Protocol policy",
+  "mcp.add.continue": "Continue",
+  "mcp.add.back": "Back",
+  "mcp.add.confirm_title": "Confirm MCP server",
+  "mcp.add.detected.connected":
+    "MCP handshake succeeded. This address needs no additional sign-in.",
+  "mcp.add.detected.authentication_required":
+    "The server requires authentication. Check its setup instructions for the required request headers.",
+  "mcp.add.detected.access_denied":
+    "The server denied access. Check its authorization instructions.",
+  "mcp.add.detected.oauth_automatic":
+    "The server requires OAuth sign-in and supports automatic client registration.",
+  "mcp.add.detected.oauth_existing":
+    "The server requires OAuth sign-in and did not provide a registration endpoint.",
+  "mcp.add.detected_label": "Detected",
+  "mcp.add.auth_mode.oauth": "OAuth",
+  "mcp.add.auth_mode.none": "Without OAuth",
+  "mcp.add.oauth_client": "OAuth client registration",
+  "mcp.add.oauth_client.automatic": "Register automatically",
+  "mcp.add.oauth_client.existing": "Use your own OAuth client",
+  "mcp.add.oauth_after_save":
+    "After adding the server, sign in from its details to connect.",
+  "mcp.add.oauth_unavailable": "OAuth is currently unavailable.",
+  "mcp.add.request_headers": "Request headers",
+  "mcp.add.request_header_name": "Name",
+  "mcp.add.request_header_value": "Value",
+  "mcp.add.request_header_add": "Add header",
+  "mcp.add.final.failed":
+    "The final configuration could not complete the MCP handshake. Check the address and headers and try again.",
+  "mcp.add.final.busy": "Another server is being added. Try again shortly.",
+  "mcp.add.final.unavailable":
+    "The final configuration could not be verified right now. Try again shortly.",
+  "mcp.add.probing": "Checking connection…",
+  "mcp.add.probe.failed":
+    "Couldn't complete the MCP handshake. Check the full server address and try again.",
+  "mcp.add.probe.busy":
+    "Another connection check is in progress. Try again shortly.",
+  "mcp.add.probe.rejected":
+    "Couldn't check this configuration. Review the name and address and try again.",
+  "mcp.add.probe.unavailable":
+    "Connection checks are unavailable right now. Try again shortly.",
   "mcp.add.timeout": "Timeout (ms)",
   "mcp.add.timeoutHelp":
     "Per-request timeout. Connection and catalog management are limited to {limit} ms; tool calls keep the configured timeout.",
@@ -450,34 +470,8 @@ export const enUS = {
   "mcp.add.executable": "Executable",
   "mcp.add.argument": "Argument",
   "mcp.add.add_argument": "Add argument",
-  "mcp.add.remove_argument": "Remove argument",
+  "mcp.add.remove_argument": "Remove argument {index}",
   "mcp.add.edit_command_line": "Edit as launch command",
-  "mcp.import.review_values":
-    "Some environment/header values also appear in the public connection. Review them before adding.",
-  "mcp.proposal.title": "MCP server suggestion",
-  "mcp.proposal.body":
-    "Review this public configuration, then add the server, authenticate and choose tools. New tasks can use the selected tools.",
-  "mcp.proposal.review": "Review MCP configuration",
-  "mcp.proposal.detached":
-    "The source task was stopped or deleted. Public settings are retained as a normal Add form; review and submit them explicitly.",
-  "mcp.proposal.expired":
-    "This suggestion has expired. No automatic retry was made. Close this form and check the saved connection before adding again.",
-  "mcp.proposal.rejected":
-    "An MCP suggestion could not be accepted. Review the public configuration and enter credentials only in password fields or OAuth.",
-  "mcp.import.title": "Paste configuration",
-  "mcp.import.paste": "Paste mcpServers JSON here",
-  "mcp.import.help":
-    "Paste strict JSON. Credentials stay in this form. Review and add one server at a time.",
-  "mcp.import.review": "Review and add",
-  "mcp.import.invalid": "Invalid configuration. Paste strict JSON again.",
-  "mcp.import.unsupported": "Unsupported configuration fields or transport.",
-  "mcp.import.variables":
-    "Provide concrete values instead of configuration expressions.",
-  "mcp.import.permissions_ignored":
-    "Imported permission settings were ignored. Choose allowed tools after connecting.",
-  "mcp.import.credential": "Credential for",
-  "mcp.import.capture_failed":
-    "The server was saved, but remaining credentials could not be saved. Enter them in its connection details.",
   "mcp.add.command": "Launch command",
   "mcp.add.command_help":
     "Paste the command you would normally run. Shell operators and substitutions are not executed.",
@@ -486,18 +480,17 @@ export const enUS = {
   "mcp.add.environment_name": "Add environment name",
   "mcp.add.authentication": "Authentication",
   "mcp.add.headers": "Header names",
+  "mcp.edit.secret_help":
+    "Set or replace secret values in the connection details after saving.",
   "mcp.add.header_name": "Add header name",
-  "mcp.add.registration": "Client registration",
-  "mcp.add.registration.automatic": "Automatic (DCR)",
-  "mcp.add.registration.existing": "Existing client",
   "mcp.add.client_id": "Client ID",
   "mcp.add.client_auth_method": "Token endpoint client authentication",
   "mcp.client_auth.none": "Public client (no client secret)",
   "mcp.client_auth.client_secret_basic": "Client secret (HTTP Basic)",
   "mcp.client_auth.client_secret_post": "Client secret (request body)",
   "mcp.add.remove_row": "Remove row",
-  "mcp.add.sensitive_endpoint":
-    "This address contains credentials (stored securely; enter the full address to replace it)",
+  "mcp.add.sensitive_endpoint_replace":
+    "Enter the full address to replace the saved address.",
   "mcp.install.phase.preparing": "Preparing configuration…",
   "mcp.install.phase.needs_authorization":
     "Confirm this installation in the system confirmation window.",
@@ -537,11 +530,9 @@ export const enUS = {
     "The action could not be confirmed. Check the current status and retry.",
   "mcp.install.rejected":
     "MCP configuration could not be created. Check the MCP page.",
-  "mcp.add.endpoint": "Endpoint",
+  "mcp.add.endpoint": "Server address",
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
-  "mcp.add.defaults":
-    "Credentials use separate password fields. After saving, MetaWork shows the next action this connection needs.",
   "mcp.add.submit": "Add server",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",
@@ -558,8 +549,6 @@ export const enUS = {
   "mcp.refresh.failed":
     "The tools could not be refreshed. The last confirmed state is unchanged.",
   "mcp.test.action": "Test connection",
-  "mcp.test.testing": "Testing…",
-  "mcp.test.started": "Opening an isolated test connection.",
   "mcp.test.busy": "Another connection test is already running.",
   "mcp.test.stale_generation":
     "The configuration changed. Retry with the latest settings.",
@@ -567,11 +556,6 @@ export const enUS = {
     "Finish secret setup or OAuth authorization first.",
   "mcp.test.rejected": "The current configuration cannot be tested.",
   "mcp.test.unavailable": "Connection testing is temporarily unavailable.",
-  "mcp.test.failed":
-    "Connection failed. Check the endpoint, authentication, and server status.",
-  "mcp.test.connected":
-    "Connected. Found {tools} tools and {issues} catalog issues.",
-  "mcp.test.summary.untested": "Not tested",
   "mcp.test.summary.testing": "Testing…",
   "mcp.test.summary.connected": "Succeeded · {tools} found",
   "mcp.test.summary.failed": "Failed · {issues} issues",
@@ -580,6 +564,8 @@ export const enUS = {
   "mcp.next.credentials.body":
     "Add the required credential to connect and load available tools.",
   "mcp.next.configure_credentials": "Set credentials",
+  "mcp.next.apply_failed.body":
+    "The settings are saved. The server has not loaded.",
   "mcp.next.retry_connection.body":
     "Retry the saved connection to update tools and new-task access.",
   "mcp.next.retry_connection.action": "Retry connection",
@@ -604,11 +590,8 @@ export const enUS = {
     "Server enabled for new tasks. Open tasks keep their current access.",
   "mcp.mutation.disabled":
     "Server disabled for new tasks. Open tasks keep their current access.",
-  "mcp.tool.not_discovered":
-    "Configured, but not present in the current catalog",
-  "mcp.tool.available_to_new_tasks": "Allowed and available to new tasks",
-  "mcp.tool.allowed_not_available": "Allowed, but currently unavailable",
-  "mcp.tool.not_allowed": "Discovered, but not allowed",
+  "mcp.tool.not_discovered": "Not in current catalog",
+  "mcp.tool.allowed_not_available": "Currently unavailable",
   "mcp.tool.toggle": "Allow {name} for new tasks",
   "mcp.detail.allow_all": "Allow all {count}",
   "mcp.confirm.allow_all.title": "Allow every discovered tool?",
@@ -1951,13 +1934,11 @@ export const enUS = {
   "mcp.detail.arguments": "Arguments",
   "mcp.detail.cwd": "Working directory",
   "mcp.detail.environment_names": "Environment names",
-  "mcp.detail.endpoint_origin": "Endpoint origin",
   "mcp.detail.header_names": "Header names",
   "mcp.detail.connection_unavailable": "Connection settings unavailable",
   "mcp.detail.connection_unavailable_help":
     "The configuration is invalid or contains recognized sensitive text. Remove the server and add it again.",
   "mcp.detail.registration": "Client registration",
-  "mcp.summary.configured": "Configured",
   "mcp.summary.not_configured": "Not configured",
   "mcp.registration.none": "None",
   "mcp.registration.automatic": "Automatic (DCR)",
@@ -1967,18 +1948,14 @@ export const enUS = {
   "mcp.approval.help":
     "This setting was saved by an older version. Connect it once to continue.",
   "mcp.approval.action": "Connect and enable",
-  "mcp.capability.approval_unavailable":
-    "Connection review is unavailable on this device.",
   "mcp.capability.capture_unavailable":
     "Credential submission is currently unavailable.",
-  "mcp.capability.oauth_unavailable": "OAuth is unavailable on this device.",
   "mcp.authorization_status.not_required": "No authorization required",
   "mcp.authorization_status.missing_static_secret":
     "One or more secrets are missing",
   "mcp.authorization_status.missing_oauth_client_secret":
     "OAuth client secret is missing",
-  "mcp.authorization_status.client_registration_required":
-    "Client registration required",
+  "mcp.authorization_status.client_registration_required": "Sign-in required",
   "mcp.authorization_status.consent_required": "Consent required",
   "mcp.authorization_status.authorizing": "Authorization in progress",
   "mcp.authorization_status.ready": "Authorization ready",

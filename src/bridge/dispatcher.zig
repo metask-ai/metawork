@@ -20,7 +20,7 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 17;
+const async_product_handler_count = 19;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -178,6 +178,8 @@ pub const ModelsHost = struct {
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
     context: *anyopaque,
+    probe_http_draft_fn: *const fn (*anyopaque, *const mcp_configuration.Preparation, *anyopaque, *const fn (*anyopaque, mcp_configuration.HttpDraftDetection) void) anyerror!bool,
+    verify_http_draft_fn: *const fn (*anyopaque, *mcp_configuration.MutationPreparation, u64, *anyopaque, *const fn (*anyopaque) bool, *const fn (*anyopaque, ?mcp_configuration.CreateResult) void) anyerror!bool,
     test_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpConnectionTestStartOutcome,
     begin_approval_fn: *const fn (*anyopaque, u64, u64, []const u8, *const McpApproval.Completion) anyerror!McpApproval.Start,
     cancel_approval_fn: *const fn (*anyopaque, u64) void,
@@ -208,6 +210,22 @@ const PendingDialog = struct {
     request_len: usize = 0,
     continuation: DialogContinuation = undefined,
 };
+const McpDraftReply = struct {
+    responder: native_sdk.bridge.AsyncResponder,
+    request_id: [native_sdk.bridge.max_id_bytes]u8 = undefined,
+    request_len: usize,
+
+    fn init(responder: native_sdk.bridge.AsyncResponder, id: []const u8) McpDraftReply {
+        var reply: McpDraftReply = .{ .responder = responder, .request_len = id.len };
+        @memcpy(reply.request_id[0..id.len], id);
+        return reply;
+    }
+
+    fn success(self: *const McpDraftReply, response: []const u8) void {
+        self.responder.success(self.request_id[0..self.request_len], response) catch {};
+    }
+};
+
 pub const Dispatcher = struct {
     const PreviewRelease = struct {
         responder: native_sdk.bridge.AsyncResponder,
@@ -293,6 +311,8 @@ pub const Dispatcher = struct {
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
+    mcp_draft_probe: ?McpDraftReply = null,
+    mcp_draft_add: ?McpDraftReply = null,
     models_host: ?ModelsHost = null,
     updates_host: ?UpdatesHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
@@ -350,8 +370,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn deinit(self: *Dispatcher) void {
-        self.callbacks.stopIngress();
-        self.settleDialogs();
+        self.stopIngress();
         self.callbacks.assertQuiescent();
         self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
@@ -515,6 +534,8 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[14] = .{ .name = commands.choose_skill_import, .context = self, .invoke_fn = chooseSkillImport };
         self.registered_async_handlers[15] = .{ .name = commands.export_skill, .context = self, .invoke_fn = exportSkill };
         self.registered_async_handlers[16] = .{ .name = commands.mcp_approve_connection, .context = self, .invoke_fn = approveMcpConnection };
+        self.registered_async_handlers[17] = .{ .name = commands.mcp_probe_http_draft, .context = self, .invoke_fn = probeMcpHttpDraft };
+        self.registered_async_handlers[18] = .{ .name = commands.mcp_verify_add_http_draft, .context = self, .invoke_fn = verifyAndAddMcpHttpDraft };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -524,6 +545,8 @@ pub const Dispatcher = struct {
 
     pub fn stopIngress(self: *Dispatcher) void {
         self.callbacks.stopIngress();
+        self.finishMcpHttpDraft("unavailable");
+        self.cancelMcpDraftAdd();
         self.settleDialogs();
     }
 
@@ -536,6 +559,7 @@ pub const Dispatcher = struct {
 
     pub fn assertQuiescent(self: *Dispatcher) void {
         self.callbacks.assertQuiescent();
+        std.debug.assert(self.mcp_draft_probe == null and self.mcp_draft_add == null);
         for (self.dialogs) |entry| std.debug.assert(!entry.active);
     }
 
@@ -555,6 +579,8 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        self.finishMcpHttpDraft("unavailable");
+        self.cancelMcpDraftAdd();
         self.settleDialogs();
         if (self.updates_host) |host| host.cancel_fn(host.context);
         self.cancelOutputConnection();
@@ -4328,6 +4354,108 @@ pub const Dispatcher = struct {
             .header_names = parsed.value.headerNames,
         });
         return self.finishMcpCreate(workbench, output, outcome);
+    }
+
+    fn probeMcpHttpDraft(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginMcpHttpDraft(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+
+    fn beginMcpHttpDraft(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const id = invocation.request.id;
+        if (self.mcp_draft_probe != null) return responder.success(id, "{\"outcome\":\"busy\"}");
+        const host = self.mcp_management_host orelse return responder.success(id, "{\"outcome\":\"unavailable\"}");
+        var parsed = try handlers.parsePayloadWithLimit(handlers.McpHttpDraft, invocation.request.payload, 32 * 1024);
+        defer parsed.deinit();
+        const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const control = try self.requireProductControl();
+        var preparation = (try control.prepareMcpHttpDraft(expected, parsed.value.displayName, parsed.value.endpoint)) orelse
+            return responder.success(id, "{\"outcome\":\"rejected\"}");
+        defer preparation.deinit();
+        self.mcp_draft_probe = McpDraftReply.init(responder, id);
+        errdefer self.mcp_draft_probe = null;
+        if (!try host.probe_http_draft_fn(host.context, &preparation, self, mcpHttpDraftFinished))
+            self.finishMcpHttpDraft("unavailable");
+    }
+
+    fn mcpHttpDraftFinished(context: *anyopaque, result: mcp_configuration.HttpDraftDetection) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        if (result != .redirected) return self.finishMcpHttpDraft(@tagName(result));
+        const control = self.control orelse return self.finishMcpHttpDraft("unavailable");
+        if (!control.canPublishMcpDraftRedirect(result.redirected)) return self.finishMcpHttpDraft("failed");
+        const pending = self.mcp_draft_probe orelse return;
+        var buffer: [32 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        std.json.Stringify.value(.{ .outcome = "redirected", .endpoint = result.redirected }, .{}, &writer) catch return self.finishMcpHttpDraft("failed");
+        self.mcp_draft_probe = null;
+        pending.success(writer.buffered());
+    }
+
+    fn finishMcpHttpDraft(self: *Dispatcher, outcome: []const u8) void {
+        const pending = self.mcp_draft_probe orelse return;
+        self.mcp_draft_probe = null;
+        var buffer: [64]u8 = undefined;
+        const response = std.fmt.bufPrint(&buffer, "{{\"outcome\":\"{s}\"}}", .{outcome}) catch unreachable;
+        pending.success(response);
+    }
+
+    fn verifyAndAddMcpHttpDraft(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginMcpDraftAdd(invocation, responder) catch |err| {
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+
+    fn beginMcpDraftAdd(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const id = invocation.request.id;
+        if (self.mcp_draft_add != null) return responder.success(id, "{\"outcome\":\"busy\"}");
+        const host = self.mcp_management_host orelse return responder.success(id, "{\"outcome\":\"unavailable\"}");
+        if (invocation.request.payload.len > 128 * 1024) return error.InvalidBridgePayload;
+        var parsed = std.json.parseFromSlice(handlers.McpHttpDraftCreate, std.heap.c_allocator, invocation.request.payload, .{ .allocate = .alloc_always, .ignore_unknown_fields = false }) catch return error.InvalidBridgePayload;
+        defer parsed.deinit();
+        defer for (parsed.value.headers) |header| std.crypto.secureZero(u8, @constCast(header.value));
+        const generation = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
+        const control = try self.requireProductControl();
+        var mutation = try control.prepareMcpHttpDraftCreate(generation, parsed.value.displayName, parsed.value.endpoint, parsed.value.headers);
+        defer mutation.deinit();
+        if (mutation != .prepared) {
+            var buffer: [256]u8 = undefined;
+            return responder.success(id, try self.finishMcpCreate(control, &buffer, .{ .outcome = .rejected }));
+        }
+        self.mcp_draft_add = McpDraftReply.init(responder, id);
+        errdefer self.mcp_draft_add = null;
+        if (!try host.verify_http_draft_fn(host.context, &mutation, generation, self, mcpDraftAddActive, mcpDraftAddFinished))
+            self.cancelMcpDraftAdd();
+    }
+
+    fn mcpDraftAddActive(context: *anyopaque) bool {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        return self.mcp_draft_add != null and self.control != null;
+    }
+
+    fn mcpDraftAddFinished(context: *anyopaque, result: ?mcp_configuration.CreateResult) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        const reply = self.mcp_draft_add orelse return;
+        self.mcp_draft_add = null;
+        const saved = result orelse return reply.success("{\"outcome\":\"failed\"}");
+        const control = self.control orelse return reply.success("{\"outcome\":\"unavailable\"}");
+        var buffer: [256]u8 = undefined;
+        const response = self.finishMcpCreate(control, &buffer, saved) catch return reply.success("{\"outcome\":\"unavailable\"}");
+        reply.success(response);
+    }
+
+    fn cancelMcpDraftAdd(self: *Dispatcher) void {
+        const reply = self.mcp_draft_add orelse return;
+        self.mcp_draft_add = null;
+        reply.success("{\"outcome\":\"unavailable\"}");
     }
 
     fn updateMcpStdioConnection(

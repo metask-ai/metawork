@@ -894,30 +894,44 @@ pub fn discoverResourceEffect(
     transport: Transport,
     endpoint: []const u8,
 ) (Error || std.mem.Allocator.Error)!ResourceDiscovery {
+    return discoverResourceWithChallengeEffect(allocator, transport, endpoint, null);
+}
+
+pub fn discoverResourceWithChallengeEffect(
+    allocator: std.mem.Allocator,
+    transport: Transport,
+    endpoint: []const u8,
+    observed_header: ?[]const u8,
+) (Error || std.mem.Allocator.Error)!ResourceDiscovery {
     if (!validHttpsUrl(endpoint)) return error.InvalidEndpoint;
     var body_buffer: [Limits.metadata_body_bytes]u8 = undefined;
     var header_buffer: [Limits.header_bytes]u8 = undefined;
     var challenge_storage: [Limits.header_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &challenge_storage);
     var challenge: ?Challenge = null;
-    const probe = transport.fetch(
-        .{ .method = .get, .url = endpoint, .headers = &.{.{
-            .name = "Accept",
-            .value = "application/json",
-        }} },
-        &body_buffer,
-        &header_buffer,
-    ) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.Cancelled,
-        error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
-        error.Network, error.NetworkBeforeSend, error.ResponseTooLarge, error.InvalidResponse, error.InvalidResponseBeforeSend => null,
-    };
-    if (probe) |response| if (response.status == 401) {
-        if (response.www_authenticate) |header|
-            challenge = parseBearerChallenge(header, &challenge_storage) catch
-                return error.InvalidChallenge;
-    };
+    if (observed_header) |header| {
+        if (selectBearerChallenge(header) != null)
+            challenge = try parseBearerChallenge(header, &challenge_storage);
+    } else {
+        const probe = transport.fetch(
+            .{ .method = .get, .url = endpoint, .headers = &.{.{
+                .name = "Accept",
+                .value = "application/json",
+            }} },
+            &body_buffer,
+            &header_buffer,
+        ) catch |err| switch (err) {
+            error.CancelledBeforeSend => return error.Cancelled,
+            error.Cancelled => return error.Cancelled,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
+            error.Network, error.NetworkBeforeSend, error.ResponseTooLarge, error.InvalidResponse, error.InvalidResponseBeforeSend => null,
+        };
+        if (probe) |response| if (response.status == 401) {
+            if (response.www_authenticate) |header|
+                challenge = parseBearerChallenge(header, &challenge_storage) catch
+                    return error.InvalidChallenge;
+        };
+    }
 
     if (challenge) |value| if (value.resource_metadata) |metadata_url| {
         if (!validHttpsUrl(metadata_url)) return error.InvalidChallenge;
@@ -2300,6 +2314,16 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
     );
     defer resource.deinit();
     try std.testing.expectEqualStrings("files.read", resource.requested_scopes[0]);
+    const discovery_calls = fake.calls;
+    var observed = try discoverResourceWithChallengeEffect(
+        std.testing.allocator,
+        transport,
+        "https://mcp.example.test/mcp",
+        "Bearer resource_metadata=\"https://mcp.example.test/oauth-resource\", scope=\"files.write files.read\"",
+    );
+    defer observed.deinit();
+    try std.testing.expectEqual(discovery_calls + 1, fake.calls);
+    try std.testing.expectEqualStrings(resource.resource, observed.resource);
     try std.testing.expectEqualStrings("files.write", resource.requested_scopes[1]);
     try std.testing.expectEqualStrings("ignored", resource.scopes_supported[0]);
     var server = try discoverAuthorizationServer(
@@ -2353,7 +2377,7 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
         queried_url,
         "https://auth.example.test/authorize?audience=mcp&response_type=code",
     ));
-    try std.testing.expectEqual(@as(usize, 3), fake.calls);
+    try std.testing.expectEqual(@as(usize, 4), fake.calls);
 }
 
 test "MCP OAuth does not request every advertised supported scope" {

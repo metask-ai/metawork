@@ -905,10 +905,76 @@ pub const RuntimeBuild = struct {
     }
 };
 
+pub const DraftHttpObservation = struct {
+    const max_redirect_bytes = 4096;
+
+    mutex: std.Io.Mutex = .init,
+    status: u16 = 0,
+    challenge: [mcp_oauth.Limits.header_bytes]u8 = @splat(0),
+    challenge_len: usize = 0,
+    redirect: [max_redirect_bytes]u8 = @splat(0),
+    redirect_len: usize = 0,
+
+    fn recordRedirect(self: *DraftHttpObservation, io: std.Io, endpoint: []const u8, response: *std.http.Client.Response) void {
+        var location: ?[]const u8 = null;
+        var headers = response.head.iterateHeaders();
+        while (headers.next()) |header_value| {
+            if (!std.ascii.eqlIgnoreCase(header_value.name, "Location")) continue;
+            if (location != null) return;
+            location = header_value.value;
+        }
+        const reference = location orelse return;
+        if (reference.len == 0 or reference.len > max_redirect_bytes) return;
+        const base = std.Uri.parse(endpoint) catch return;
+        var scratch: [3 * max_redirect_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &scratch);
+        @memcpy(scratch[0..reference.len], reference);
+        var aux: []u8 = &scratch;
+        const resolved = std.Uri.resolveInPlace(base, reference.len, &aux) catch return;
+        if (!std.ascii.eqlIgnoreCase(base.scheme, resolved.scheme)) return;
+        const default_port: u16 = if (std.ascii.eqlIgnoreCase(base.scheme, "https")) 443 else 80;
+        if ((base.port orelse default_port) != (resolved.port orelse default_port)) return;
+        var target_buffer: [max_redirect_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &target_buffer);
+        var writer = std.Io.Writer.fixed(&target_buffer);
+        resolved.format(&writer) catch return;
+        const target = writer.buffered();
+        if (mcp_configuration.endpointOrigin(target, max_redirect_bytes) == null or std.mem.eql(u8, endpoint, target)) return;
+        var base_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        var target_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        const base_host = base.getHost(&base_host_buffer) catch return;
+        const target_host = resolved.getHost(&target_host_buffer) catch return;
+        if (!std.ascii.eqlIgnoreCase(base_host.bytes, target_host.bytes)) return;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.redirect_len != 0) return;
+        @memcpy(self.redirect[0..target.len], target);
+        self.redirect_len = target.len;
+    }
+
+    fn record(self: *DraftHttpObservation, io: std.Io, status: u16, challenge_value: []const u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.status == 401 and status != 401) return;
+        if (self.status == status and challenge_value.len == 0) return;
+        self.status = status;
+        std.crypto.secureZero(u8, &self.challenge);
+        @memcpy(self.challenge[0..challenge_value.len], challenge_value);
+        self.challenge_len = challenge_value.len;
+    }
+
+    // Read after the isolated Runtime and its transports have shut down.
+    pub fn header(self: *const DraftHttpObservation) ?[]const u8 {
+        if (self.challenge_len == 0) return null;
+        return self.challenge[0..self.challenge_len];
+    }
+};
+
 pub const HostEnvironment = struct {
     process_attempt: u64 = 0,
     process_notifier: ?process_observation.Notifier = null,
     catalog_budget: ?*catalog_budget.Budget = null,
+    draft_http_observation: ?*DraftHttpObservation = null,
     executable_search_path: ?[]const u8 = null,
     windows_system_root: ?[]const u8 = null,
 
@@ -1003,7 +1069,7 @@ pub fn buildRuntime(
         owner.* = (if (std.mem.eql(u8, server.transport.kind, "stdio"))
             createStdioOwner(io, allocator, server, preparation, host_environment, observation)
         else if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
-            createHttpOwner(io, allocator, server, preparation, &authorization)
+            createHttpOwner(io, allocator, server, preparation, &authorization, host_environment.draft_http_observation)
         else
             error.InvalidConfig) catch |err| {
             allocator.destroy(owner);
@@ -1639,6 +1705,7 @@ const HttpContext = struct {
     custom_headers: []std.http.Header,
     secret_values: [][]u8,
     authorization: ?*HttpAuthSlot = null,
+    draft_http_observation: ?*DraftHttpObservation = null,
     backend: agent.McpHttpBackend,
 
     const Inspection = struct {
@@ -1762,9 +1829,9 @@ const HttpContext = struct {
         var request = try self.beginRequest(&client, request_value, bearer, &headers, &inspection);
         defer request.deinit();
         var response = request.receiveHead(&.{}) catch return error.Network;
-        if (response.head.content_encoding != .identity) return error.InvalidResponse;
         const status: u16 = @intFromEnum(response.head.status);
-        self.observeAuthorizationFailure(&response, status, &inspection);
+        self.observeHttpStatus(&response, status, &inspection, request_value.method == .post);
+        if (response.head.content_encoding != .identity) return error.InvalidResponse;
         const exchange: Exchange = .{ .client = &client, .request = request_value, .bearer = bearer, .inspection = &inspection };
         try self.deliverResponse(&response, status, sink, &inspection, &exchange);
         if (!sink.inspect_fn(sink.context, .{ .context = &inspection, .check_fn = Inspection.check }))
@@ -1818,51 +1885,53 @@ const HttpContext = struct {
         return request;
     }
 
-    fn observeAuthorizationFailure(self: *HttpContext, response: *std.http.Client.Response, status: u16, inspection: *Inspection) void {
+    fn observeHttpStatus(self: *HttpContext, response: *std.http.Client.Response, status: u16, inspection: *Inspection, observe_draft: bool) void {
+        if (status == 307 or status == 308) {
+            if (observe_draft) if (self.draft_http_observation) |observation| {
+                observation.recordRedirect(self.io, self.url, response);
+            };
+            return;
+        }
+        if (status != 401 and status != 403) return;
         var authenticate_storage: [mcp_oauth.Limits.header_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &authenticate_storage);
         var authenticate_writer = std.Io.Writer.fixed(&authenticate_storage);
         var authenticate_invalid = false;
         var iterator = response.head.iterateHeaders();
         while (iterator.next()) |header| {
-            if (status < 200 or status >= 300) {
-                if ((status == 401 or status == 403) and
-                    std.ascii.eqlIgnoreCase(header.name, "WWW-Authenticate") and
-                    !authenticate_invalid)
-                {
-                    if (authenticate_writer.buffered().len != 0)
-                        authenticate_writer.writeAll(", ") catch {
-                            authenticate_invalid = true;
-                            continue;
-                        };
-                    authenticate_writer.writeAll(header.value) catch {
-                        authenticate_invalid = true;
-                        continue;
-                    };
-                }
-            }
-        }
-        if (status == 401 or status == 403) {
-            if (self.authorization) |authorization| if (inspection.lease) |lease| {
-                var challenge = if (!authenticate_invalid and
-                    authenticate_writer.buffered().len != 0)
-                    mcp_oauth.parseRuntimeBearerChallenge(
-                        self.allocator,
-                        authenticate_writer.buffered(),
-                    ) catch null
-                else
-                    null;
-                defer if (challenge) |*value| value.deinit();
-                if (challenge) |*value| {
-                    var scopes_safe = true;
-                    for (value.scopes) |scope| if (!Inspection.check(inspection, scope)) {
-                        scopes_safe = false;
-                        break;
-                    };
-                    authorization.recordRuntimeAuthFailure(lease, if (scopes_safe) value.scopes else null);
-                } else authorization.recordHttpAuthRejection(lease);
+            if (!std.ascii.eqlIgnoreCase(header.name, "WWW-Authenticate")) continue;
+            if (authenticate_writer.buffered().len != 0)
+                authenticate_writer.writeAll(", ") catch {
+                    authenticate_invalid = true;
+                    break;
+                };
+            authenticate_writer.writeAll(header.value) catch {
+                authenticate_invalid = true;
+                break;
             };
         }
+        if (observe_draft) if (self.draft_http_observation) |observation| {
+            observation.record(self.io, status, if (authenticate_invalid) "" else authenticate_writer.buffered());
+        };
+        if (self.authorization) |authorization| if (inspection.lease) |lease| {
+            var challenge = if (!authenticate_invalid and
+                authenticate_writer.buffered().len != 0)
+                mcp_oauth.parseRuntimeBearerChallenge(
+                    self.allocator,
+                    authenticate_writer.buffered(),
+                ) catch null
+            else
+                null;
+            defer if (challenge) |*value| value.deinit();
+            if (challenge) |*value| {
+                var scopes_safe = true;
+                for (value.scopes) |scope| if (!Inspection.check(inspection, scope)) {
+                    scopes_safe = false;
+                    break;
+                };
+                authorization.recordRuntimeAuthFailure(lease, if (scopes_safe) value.scopes else null);
+            } else authorization.recordHttpAuthRejection(lease);
+        };
     }
 
     fn sendContinuation(self: *HttpContext, exchange: *const Exchange, post: agent.McpHttpContinuationPost) FetchFailure!void {
@@ -1877,7 +1946,7 @@ const HttpContext = struct {
         var response = request.receiveHead(&.{}) catch return error.Network;
         if (response.head.content_encoding != .identity) return error.InvalidResponse;
         const status: u16 = @intFromEnum(response.head.status);
-        self.observeAuthorizationFailure(&response, status, exchange.inspection);
+        self.observeHttpStatus(&response, status, exchange.inspection, true);
         try self.deliverResponse(&response, status, &post.response_sink, exchange.inspection, null);
         if (!post.response_sink.inspect_fn(post.response_sink.context, .{ .context = exchange.inspection, .check_fn = Inspection.check })) return error.InvalidResponse;
     }
@@ -1957,6 +2026,7 @@ fn createHttpOwner(
     server: mcp_configuration.ServerWire,
     preparation: *const mcp_configuration.Preparation,
     authorization_output: *?*HttpAuthSlot,
+    draft_http_observation: ?*DraftHttpObservation,
 ) BuildError!agent.McpTransportOwner {
     authorization_output.* = null;
     const context = try allocator.create(HttpContext);
@@ -1969,6 +2039,7 @@ fn createHttpOwner(
         .custom_headers = &.{},
         .secret_values = &.{},
         .authorization = null,
+        .draft_http_observation = draft_http_observation,
         .backend = undefined,
     };
     errdefer context.arena.deinit();
@@ -3493,7 +3564,7 @@ test "MCP private endpoint is resolved only in its HTTP owner and rejects cross-
         .tools = &.{},
     };
     var authorization: ?*HttpAuthSlot = null;
-    var owner = try createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization);
+    var owner = try createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization, null);
     defer owner.deinit();
     const backend: *agent.McpHttpBackend = @ptrCast(@alignCast(owner.transport.context));
     const context: *HttpContext = @fieldParentPtr("backend", backend);
@@ -3502,7 +3573,7 @@ test "MCP private endpoint is resolved only in its HTTP owner and rejects cross-
     try std.testing.expectEqualStrings("https://mcp.example.test/k/synthetic?route=private", context.url);
     var inspection: HttpContext.Inspection = .{ .context = context, .lease = null };
     try std.testing.expect(!HttpContext.Inspection.check(&inspection, context.url));
-    try std.testing.expectError(error.InvalidConfig, createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization));
+    try std.testing.expectError(error.InvalidConfig, createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization, null));
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {

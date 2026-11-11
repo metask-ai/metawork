@@ -16,7 +16,7 @@ import { BrandIcon } from "../../components/ui/BrandIcon.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
-import { Popover } from "../../components/ui/popover.tsx";
+import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
@@ -270,7 +270,6 @@ export function ScheduledTasksPage({
   const { locale, t } = useI18n();
   const [now, setNow] = useState(Date.now);
   const [query, setQuery] = useState("");
-  const searchInput = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingEpoch, setEditingEpoch] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -534,59 +533,12 @@ export function ScheduledTasksPage({
           </div>
           <div className="scheduled-header-actions">
             {hasScheduledTasks && (
-              <Popover.Root>
-                <Popover.Trigger
-                  className="icon-button scheduled-search-trigger"
-                  aria-label={t("scheduled.search_placeholder")}
-                  title={t("scheduled.search_placeholder")}
-                  data-active={query.trim() ? "true" : undefined}
-                >
-                  <Icon name="search" />
-                </Popover.Trigger>
-                <Popover.Portal>
-                  <Popover.Positioner
-                    side="left"
-                    align="center"
-                    sideOffset={-32}
-                  >
-                    <Popover.Popup
-                      aria-label={t("scheduled.search_placeholder")}
-                      initialFocus={() => searchInput.current}
-                      className={cn(
-                        "w-[min(180px,calc(100vw-32px))] p-0 shadow-none",
-                        controlFocus,
-                      )}
-                    >
-                      <label className="scheduled-search">
-                        <Icon name="search" />
-                        <span className="sr-only">
-                          {t("scheduled.search_placeholder")}
-                        </span>
-                        <Input
-                          ref={searchInput}
-                          type="search"
-                          value={query}
-                          placeholder={t("scheduled.search_placeholder")}
-                          onChange={(event) => setQuery(event.target.value)}
-                        />
-                        {query && (
-                          <button
-                            type="button"
-                            className="focus-ring"
-                            aria-label={t("scheduled.clear_search")}
-                            onClick={() => {
-                              setQuery("");
-                              searchInput.current?.focus();
-                            }}
-                          >
-                            <Icon name="close" />
-                          </button>
-                        )}
-                      </label>
-                    </Popover.Popup>
-                  </Popover.Positioner>
-                </Popover.Portal>
-              </Popover.Root>
+              <HeaderSearch
+                label={t("scheduled.search_placeholder")}
+                clearLabel={t("scheduled.clear_search")}
+                value={query}
+                onChange={setQuery}
+              />
             )}
             <Button
               className="scheduled-create-button"

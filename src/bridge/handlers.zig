@@ -302,6 +302,17 @@ pub const McpCreateHttpServer = struct {
     headerNames: []const []const u8,
     registration: ?McpOauthRegistration = null,
 };
+pub const McpHttpDraft = struct {
+    expectedDesiredGeneration: []const u8,
+    displayName: []const u8,
+    endpoint: []const u8,
+};
+pub const McpHttpDraftCreate = struct {
+    expectedDesiredGeneration: []const u8,
+    displayName: []const u8,
+    endpoint: []const u8,
+    headers: []const @import("metawork_product_mcp").contract.HttpDraftHeader,
+};
 pub const McpUpdateStdioConnection = struct {
     expectedDesiredGeneration: []const u8,
     serverId: []const u8,

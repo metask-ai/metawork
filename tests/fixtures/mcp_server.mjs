@@ -63,6 +63,27 @@ function startHttp() {
     request.on("end", () => {
       try {
         if (bytes > 1024 * 1024) throw new Error("request too large");
+        if (request.url === "/mcp/draft-entry") {
+          response.writeHead(308, { location: "draft-test" }).end();
+          return;
+        }
+        if (request.url === "/mcp/cross-origin/") {
+          response
+            .writeHead(307, {
+              location: "https://example.invalid/mcp/cross-origin",
+            })
+            .end();
+          return;
+        }
+        if (
+          request.url === "/mcp/draft-test" &&
+          request.headers.authorization !== "Bearer fixture-draft-token"
+        ) {
+          response
+            .writeHead(401, { "Content-Type": "application/json" })
+            .end('{"error":"unauthorized"}');
+          return;
+        }
         if (options.expectedBearer && request.url.startsWith("/mcp")) {
           const matched =
             request.headers.authorization ===
@@ -367,7 +388,8 @@ function startHttp() {
           return;
         }
         const target = new URL(request.url, "http://localhost");
-        if (target.pathname !== "/mcp") throw new Error("unexpected endpoint");
+        if (target.pathname !== "/mcp" && target.pathname !== "/mcp/draft-test")
+          throw new Error("unexpected endpoint");
         if (
           options.expectedQuery &&
           target.searchParams.get("api_key") !== options.expectedQuery

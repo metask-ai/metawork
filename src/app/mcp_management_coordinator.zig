@@ -412,12 +412,33 @@ const ConnectionTestResult = struct {
 const ConnectionTestJob = struct {
     allocator: std.mem.Allocator,
     host: Host,
-    server_id: []u8,
+    io: std.Io,
+    draft_http_observation: mcp_platform.DraftHttpObservation = .{},
+    detection: mcp_configuration.HttpDraftDetection = .failed,
+    target: Target,
     runtime: ?*agent.Runtime,
     authorizations: mcp_platform.HttpAuthorizations,
     result: ConnectionTestResult = .{},
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+
+    const Target = union(enum) {
+        saved: []const u8,
+        draft: struct {
+            endpoint: []u8,
+            context: *anyopaque,
+            complete: *const fn (*anyopaque, mcp_configuration.HttpDraftDetection) void,
+        },
+        verified: VerifiedDraft,
+    };
+
+    pub const VerifiedDraft = struct {
+        mutation: mcp_configuration.MutationPreparation,
+        generation: u64,
+        context: *anyopaque,
+        active: *const fn (*anyopaque) bool,
+        complete: *const fn (*anyopaque, ?mcp_configuration.CreateResult) void,
+    };
 
     fn start(self: *ConnectionTestJob) std.Thread.SpawnError!void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
@@ -448,8 +469,32 @@ const ConnectionTestJob = struct {
         runtime.deinit();
         self.runtime = null;
         self.authorizations.deinit();
+        if (self.target == .draft) self.detection = self.detectDraft();
         self.finished.store(true, .release);
         self.host.notify();
+    }
+
+    fn detectDraft(self: *ConnectionTestJob) mcp_configuration.HttpDraftDetection {
+        if (self.result.outcome == .connected) return .connected;
+        const status = self.draft_http_observation.status;
+        if (status != 401 and status != 403) {
+            const observation = &self.draft_http_observation;
+            return if (observation.redirect_len == 0) .failed else .{ .redirected = observation.redirect[0..observation.redirect_len] };
+        }
+        const fallback: mcp_configuration.HttpDraftDetection = if (status == 401) .authentication_required else .access_denied;
+        var cancellation: mcp_oauth.Cancellation = .{ .io = self.io };
+        var http: mcp_oauth.StdHttpTransport = .{
+            .allocator = self.allocator,
+            .io = self.io,
+            .cancellation = &cancellation,
+            .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromSeconds(5), .clock = .awake }),
+        };
+        const transport = http.transport();
+        var resource = mcp_oauth.discoverResourceWithChallengeEffect(self.allocator, transport, self.target.draft.endpoint, self.draft_http_observation.header()) catch return fallback;
+        defer resource.deinit();
+        var authorization = mcp_oauth.discoverAuthorizationServer(self.allocator, transport, &resource, resource.authorization_servers[0]) catch return fallback;
+        defer authorization.deinit();
+        return if (authorization.registration_endpoint != null) .oauth_automatic else .oauth_existing;
     }
 
     fn join(self: *ConnectionTestJob) void {
@@ -460,7 +505,15 @@ const ConnectionTestJob = struct {
 
     fn deinit(self: *ConnectionTestJob) void {
         std.debug.assert(self.thread == null and self.runtime == null);
-        self.allocator.free(self.server_id);
+        switch (self.target) {
+            .saved => |id| self.allocator.free(id),
+            .draft => |draft| {
+                secureFree(self.allocator, draft.endpoint);
+                std.crypto.secureZero(u8, &self.draft_http_observation.challenge);
+                std.crypto.secureZero(u8, &self.draft_http_observation.redirect);
+            },
+            .verified => |*verified| verified.mutation.deinit(),
+        }
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
@@ -845,53 +898,70 @@ pub const Coordinator = struct {
             if (state_index != index) state.* = .disabled;
         }
 
-        // A diagnostic Runtime is a separate fault domain and does not
-        // borrow the formal Runtime's serialized catalog budget.
-        var test_environment = self.host_environment;
-        test_environment.catalog_budget = null;
-        var runtime_build = mcp_platform.buildRuntime(
-            self.io,
-            self.allocator,
-            &preparation,
-            test_environment,
-        ) catch return .unavailable;
-        defer runtime_build.deinit();
-        const input = if (runtime_build.input) |*value| value else return .unavailable;
-        const runtime = agent.Runtime.init(self.io, self.allocator, .{
-            .max_sessions = 1,
-            // Catalog-only Runtime; it never owns an executable Session.
-            .mcp_input = input,
-        }) catch return .unavailable;
-        var authorizations = runtime_build.takeAuthorizations();
-        var runtime_owned = true;
-        defer if (runtime_owned) {
-            runtime.shutdown() catch {};
-            runtime.deinit();
-            authorizations.deinit();
-        };
+        return self.startConnectionTest(&preparation, .{ .saved = server_id });
+    }
+
+    pub fn probeHttpDraft(self: *Coordinator, preparation: *const mcp_configuration.Preparation, context: *anyopaque, complete: *const fn (*anyopaque, mcp_configuration.HttpDraftDetection) void) !bool {
+        if (self.draftCheckBusy()) return false;
+        const endpoint = try self.allocator.dupe(u8, preparation.registry.?.value.servers[preparation.registry.?.value.servers.len - 1].transport.url.?);
+        var started = false;
+        defer if (!started) secureFree(self.allocator, endpoint);
+        started = try self.startConnectionTest(preparation, .{ .draft = .{ .endpoint = endpoint, .context = context, .complete = complete } }) == .started;
+        return started;
+    }
+
+    pub const VerifiedDraft = ConnectionTestJob.VerifiedDraft;
+
+    pub fn verifyAndAddHttpDraft(self: *Coordinator, draft: *VerifiedDraft) !bool {
+        if (self.draftCheckBusy() or draft.mutation != .prepared) return false;
+        var preparation = (try draft.mutation.prepared.httpDraftPreparation(mcp_startup.configuration_limits)) orelse return false;
+        defer preparation.deinit();
+        if (try self.startConnectionTest(&preparation, .{ .verified = draft.* }) != .started) return false;
+        draft.mutation = .rejected;
+        return true;
+    }
+
+    fn draftCheckBusy(self: *const Coordinator) bool {
+        return self.stopping or self.confirmation != null or self.connection_test_job != null or self.configuration_apply_job != null or self.flow != null;
+    }
+
+    fn startConnectionTest(self: *Coordinator, preparation: *const mcp_configuration.Preparation, target: ConnectionTestJob.Target) !ConnectionTestStartOutcome {
         const job = try self.allocator.create(ConnectionTestJob);
-        errdefer self.allocator.destroy(job);
+        var started = false;
+        defer if (!started) self.allocator.destroy(job);
         job.* = .{
             .allocator = self.allocator,
             .host = self.host,
-            .server_id = try self.allocator.dupe(u8, server_id),
-            .runtime = runtime,
-            .authorizations = authorizations,
+            .io = self.io,
+            .target = switch (target) {
+                .saved => |id| .{ .saved = try self.allocator.dupe(u8, id) },
+                else => target,
+            },
+            .runtime = null,
+            .authorizations = .{ .allocator = self.allocator },
         };
-        errdefer self.allocator.free(job.server_id);
-        try self.control.beginMcpConnectionTest(server_id);
+        defer if (!started and job.target == .saved) self.allocator.free(job.target.saved);
+        // Diagnostic Runtimes do not borrow the formal Runtime's catalog budget.
+        var test_environment = self.host_environment;
+        test_environment.catalog_budget = null;
+        if (target == .draft) test_environment.draft_http_observation = &job.draft_http_observation;
+        var runtime_build = mcp_platform.buildRuntime(self.io, self.allocator, preparation, test_environment) catch return .unavailable;
+        defer runtime_build.deinit();
+        const input = if (runtime_build.input) |*value| value else return .unavailable;
+        const runtime = agent.Runtime.init(self.io, self.allocator, .{ .max_sessions = 1, .mcp_input = input }) catch return .unavailable;
+        job.runtime = runtime;
+        job.authorizations = runtime_build.takeAuthorizations();
+        defer if (!started) {
+            runtime.shutdown() catch {};
+            runtime.deinit();
+            job.authorizations.deinit();
+        };
+        if (job.target == .saved) try self.control.beginMcpConnectionTest(job.target.saved);
         job.start() catch {
-            self.control.completeMcpConnectionTest(
-                server_id,
-                .failed,
-                0,
-                0,
-            );
-            self.allocator.free(job.server_id);
-            self.allocator.destroy(job);
+            if (job.target == .saved) self.control.completeMcpConnectionTest(job.target.saved, .failed, 0, 0);
             return .unavailable;
         };
-        runtime_owned = false;
+        started = true;
         self.connection_test_job = job;
         return .started;
     }
@@ -1393,13 +1463,20 @@ pub const Coordinator = struct {
         if (self.connection_test_job) |test_job| {
             if (test_job.finished.load(.acquire)) {
                 test_job.join();
-                self.control.completeMcpConnectionTest(
-                    test_job.server_id,
-                    test_job.result.outcome,
-                    test_job.result.tool_count,
-                    test_job.result.issue_count,
-                );
                 self.connection_test_job = null;
+                switch (test_job.target) {
+                    .saved => |id| self.control.completeMcpConnectionTest(id, test_job.result.outcome, test_job.result.tool_count, test_job.result.issue_count),
+                    .draft => |draft| draft.complete(draft.context, if (self.stopping) .failed else test_job.detection),
+                    .verified => |*draft| {
+                        if (!self.stopping and draft.active(draft.context)) {
+                            const result: ?mcp_configuration.CreateResult = if (test_job.result.outcome == .connected)
+                                self.control.commit_http_draft_fn(self.control.context, draft.generation, &draft.mutation) catch mcp_configuration.CreateResult{ .outcome = .rejected }
+                            else
+                                null;
+                            draft.complete(draft.context, result);
+                        }
+                    },
+                }
                 test_job.deinit();
                 changed = true;
             }

@@ -110,6 +110,8 @@ import {
   type McpRefreshResult,
   type McpConfigurationApplyResult,
   type McpConnectionTestResult,
+  type McpHttpDraftProbeResult,
+  type McpHttpDraftAddResult,
   mcpAvailabilities,
   mcpManagementHealthValues,
   mcpConfigurationApplyValues,
@@ -6831,6 +6833,54 @@ export function decodeMcpConfigurationApplyResult(
     ] as const),
   };
 }
+export function decodeMcpHttpDraftProbeResult(
+  value: unknown,
+): McpHttpDraftProbeResult {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "outcome" in value &&
+    value.outcome === "redirected"
+  ) {
+    const item = object(value, "$", ["outcome", "endpoint"]);
+    return {
+      outcome: "redirected",
+      endpoint: nonEmptyString(item.endpoint, "$.endpoint"),
+    };
+  }
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "connected",
+      "authentication_required",
+      "access_denied",
+      "oauth_automatic",
+      "oauth_existing",
+      "failed",
+      "busy",
+      "rejected",
+      "unavailable",
+    ] as const),
+  };
+}
+
+export function decodeMcpHttpDraftAddResult(
+  value: unknown,
+): McpHttpDraftAddResult {
+  if (typeof value === "object" && value !== null && "outcome" in value) {
+    const { outcome } = value;
+    if (
+      outcome === "failed" ||
+      (outcome === "busy" && !("desiredGeneration" in value)) ||
+      outcome === "unavailable"
+    ) {
+      object(value, "$", ["outcome"]);
+      return { outcome };
+    }
+  }
+  return decodeMcpCreateResult(value);
+}
+
 export function decodeMcpConnectionTestResult(
   value: unknown,
 ): McpConnectionTestResult {
