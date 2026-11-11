@@ -83,8 +83,14 @@ pub const Preview = struct {
     file_count: usize,
     total_bytes: u64,
     content_hash: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    body_offset: usize,
     /// Host-only identity of the selected root; never projected to Renderer.
     source_root: ?[]u8 = null,
+
+    pub fn authorBody(self: *const Preview) []const u8 {
+        const body = self.definition[self.body_offset..];
+        return if (std.mem.startsWith(u8, body, resource_context)) body[resource_context.len..] else body;
+    }
 
     pub fn deinit(self: *Preview) void {
         self.allocator.free(self.definition);
@@ -294,6 +300,7 @@ pub fn previewDirectory(
         .file_count = manifest.files.len,
         .total_bytes = manifest.total_bytes,
         .content_hash = manifest.content_hash,
+        .body_offset = metadata.body_offset,
     };
 }
 
@@ -848,26 +855,21 @@ test "store-only export rejects importer size overflow before writing bytes" {
     try std.testing.expectEqual(@as(u64, 0), try archive.length(std.testing.io));
 }
 
-test "directory preview derives bounded metadata without owning runtime health" {
+test "directory preview preserves the definition and exposes the author body" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "SKILL.md",
-        .data = "---\nname: release-check\ndescription: Check a release before publishing.\n---\n# Release\n",
-    });
-    var preview = try previewDirectory(
-        std.testing.io,
-        std.testing.allocator,
-        tmp.dir,
-        .{},
-    );
-    defer preview.deinit();
-    try std.testing.expectEqualStrings("release-check", preview.invocation_name);
-    try std.testing.expectEqualStrings(
-        "Check a release before publishing.",
-        preview.description,
-    );
-    try std.testing.expectEqual(@as(usize, 1), preview.file_count);
+    const front = "---\r\nname: release-check\r\ndescription: Check a release before publishing.\r\n---\r\n";
+    const body = "# Release\r\n\r\nSkill resource directory: use the release folder.\r\n";
+    for ([_][]const u8{ front ++ body, front ++ resource_context ++ body }) |definition| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = definition });
+        var preview = try previewDirectory(std.testing.io, std.testing.allocator, tmp.dir, .{});
+        defer preview.deinit();
+        try std.testing.expectEqualStrings("release-check", preview.invocation_name);
+        try std.testing.expectEqualStrings("Check a release before publishing.", preview.description);
+        try std.testing.expectEqual(@as(usize, 1), preview.file_count);
+        try std.testing.expectEqualStrings(definition, preview.definition);
+        try std.testing.expectEqualStrings(body, preview.authorBody());
+    }
 }
 
 test "managed definitions preserve author bytes and are idempotent across line endings" {

@@ -13,6 +13,7 @@ import type {
   SkillMutationResult,
 } from "../../bridge/contracts.ts";
 import { Markdown } from "../../components/ai/Markdown.tsx";
+import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
@@ -110,9 +111,7 @@ function skillAttention(asset: Asset) {
 
 function skillBody(definition: string, title: string) {
   const leadingBlankLines = /^(?:[ \t]*\r?\n)+/;
-  const body = definition
-    .replace(/^---\r?\n(?:[^\n]*\n)*?---(?:\r?\n|\r?$)/, "")
-    .replace(leadingBlankLines, "");
+  const body = definition.replace(leadingBlankLines, "");
   const heading = /^#[ \t]+([^\r\n]+)(?:\r?\n|$)/.exec(body);
   return heading &&
     heading[1].trim().toLowerCase() === title.trim().toLowerCase()
@@ -296,6 +295,8 @@ export function SkillsPage({
   const dialog = useRef<HTMLDivElement>(null);
   const dialogTrigger = useRef<HTMLElement | null>(null);
   const detailMenuTrigger = useRef<HTMLButtonElement>(null);
+  const uninstallTrigger = useRef<HTMLButtonElement>(null);
+  const cancelUninstall = useRef<HTMLButtonElement>(null);
   const [selected, setSelected] = useState<Asset | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [preview, setPreview] = useState<PreparedImport | null>(null);
@@ -309,8 +310,11 @@ export function SkillsPage({
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [enablementBusy, setEnablementBusy] = useState<string | null>(null);
-  const [enablementError, setEnablementError] = useState<string | null>(null);
+  const [enablementBusy, setEnablementBusy] = useState(false);
+  const [enablementFailure, setEnablementFailure] = useState<{
+    identity: string;
+    name: string;
+  } | null>(null);
 
   const personalAssets = useMemo(
     () => management.assets.filter((asset) => asset.scope.kind === "personal"),
@@ -328,6 +332,18 @@ export function SkillsPage({
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
   const dialogOpen = selected !== null || importOpen;
   const selectedAttention = selected && skillAttention(selected);
+  const detailEnablementFailed =
+    selected && enablementFailure?.identity === skillRowIdentity(selected);
+  const enablementError =
+    enablementFailure &&
+    t("skills.error.enablement", { skill: enablementFailure.name });
+  const shadowsBuiltin =
+    preview?.effect === "create" &&
+    personalAssets.some(
+      (asset) =>
+        asset.sourceKind === "builtin" &&
+        asset.invocationName === preview.invocationName,
+    );
   const showDetailMenu =
     selected?.installId && (selected.canExport || selected.canReimport);
   const showDetailActions =
@@ -339,17 +355,23 @@ export function SkillsPage({
   async function setEnablementState(
     asset: Asset,
     state: "enabled" | "disabled",
-    reportError: (message: string | null) => void = setEnablementError,
   ) {
     if (
+      enablementBusy ||
       !asset.canSetEnabled ||
       !asset.skillPolicyKey ||
-      !asset.selectionRevision
+      !asset.selectionRevision ||
+      !catalog.revision
     )
       return;
-    if (!catalog.revision) return;
-    setEnablementBusy(asset.skillPolicyKey);
-    reportError(null);
+    const failure = {
+      identity: skillRowIdentity(asset),
+      name: asset.displayName || asset.invocationName,
+    };
+    setEnablementBusy(true);
+    setEnablementFailure((current) =>
+      current?.identity === failure.identity ? null : current,
+    );
     try {
       const result = await onSetEnabled(
         asset.skillPolicyKey,
@@ -357,11 +379,11 @@ export function SkillsPage({
         catalog.revision,
         asset.selectionRevision,
       );
-      if (!result.applied) reportError(t("skills.error.enablement"));
+      if (!result.applied) setEnablementFailure(failure);
     } catch {
-      reportError(t("skills.error.enablement"));
+      setEnablementFailure(failure);
     } finally {
-      setEnablementBusy(null);
+      setEnablementBusy(false);
     }
   }
 
@@ -371,6 +393,7 @@ export function SkillsPage({
     discardPreview();
     setImportOpen(false);
     setBusy(false);
+    setConfirmUninstall(false);
   }, [disabled]);
   useEffect(
     () => () => {
@@ -589,10 +612,7 @@ export function SkillsPage({
               asset={asset}
               onOpen={openDetail}
               onSetState={(item, state) => void setEnablementState(item, state)}
-              enablementBusy={
-                enablementBusy === asset.skillPolicyKey &&
-                enablementBusy !== null
-              }
+              enablementBusy={enablementBusy}
             />
           ))}
         </ul>
@@ -716,7 +736,7 @@ export function SkillsPage({
               : t("skills.catalog_unavailable")}
           </p>
         )}
-        {enablementError && (
+        {enablementError && !detailEnablementFailed && (
           <p className="skill-enablement-error" role="alert">
             {enablementError}
           </p>
@@ -922,6 +942,9 @@ export function SkillsPage({
                             skill: preview.invocationName,
                           })}
                         </p>
+                        {shadowsBuiltin && (
+                          <p>{t("skills.effect_body.shadows_builtin")}</p>
+                        )}
                         {importBlocker && <p>{importError(importBlocker)}</p>}
                       </div>
                       <section className="skill-definition">
@@ -961,26 +984,24 @@ export function SkillsPage({
                     asset={selected}
                     onDetail={onDetail}
                   />
-                  {error && (
-                    <p className="skill-dialog-error" role="alert">
-                      {error}
-                    </p>
-                  )}
-                  {notice && (
-                    <p className="skill-dialog-success" role="status">
-                      {notice}
-                    </p>
-                  )}
-                  {confirmUninstall && (
-                    <div className="skill-dialog-notice" role="alert">
-                      <strong>{t("skills.uninstall_confirm_title")}</strong>
-                      <p>{t("skills.uninstall_confirm")}</p>
-                    </div>
-                  )}
                 </>
               ) : null}
             </div>
 
+            {selected && (error || notice || detailEnablementFailed) && (
+              <div className="px-5 pb-3">
+                {(error || detailEnablementFailed) && (
+                  <p className="skill-dialog-error" role="alert">
+                    {error || enablementError}
+                  </p>
+                )}
+                {notice && (
+                  <p className="skill-dialog-success" role="status">
+                    {notice}
+                  </p>
+                )}
+              </div>
+            )}
             {(importOpen || showDetailActions) && (
               <footer data-detail={!importOpen || undefined}>
                 {importOpen ? (
@@ -1029,14 +1050,13 @@ export function SkillsPage({
                         disabled={
                           busy ||
                           disabled ||
-                          enablementBusy !== null ||
+                          enablementBusy ||
                           !catalog.revision
                         }
                         onClick={() =>
                           void setEnablementState(
                             selected,
                             selected.enabled ? "disabled" : "enabled",
-                            setError,
                           )
                         }
                       >
@@ -1060,48 +1080,69 @@ export function SkillsPage({
                       </Button>
                     )}
                     <span />
-                    {selected.installId &&
-                      selected.canUninstall &&
-                      (confirmUninstall ? (
-                        <>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={busy}
-                            onClick={() => setConfirmUninstall(false)}
-                          >
-                            {t("common.cancel")}
-                          </Button>
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            disabled={busy}
-                            onClick={() =>
-                              void runMutation(
-                                () => onUninstall(selected.installId!),
-                                true,
-                              )
-                            }
-                          >
-                            <Icon name="trash" /> {t("skills.uninstall")}
-                          </Button>
-                        </>
-                      ) : (
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => setConfirmUninstall(true)}
-                        >
-                          <Icon name="trash" /> {t("skills.uninstall")}
-                        </Button>
-                      ))}
+                    {selected.installId && selected.canUninstall && (
+                      <Button
+                        ref={uninstallTrigger}
+                        variant="danger"
+                        size="sm"
+                        disabled={busy || disabled}
+                        onClick={() => setConfirmUninstall(true)}
+                      >
+                        <Icon name="trash" /> {t("skills.uninstall")}
+                      </Button>
+                    )}
                   </>
                 ) : null}
               </footer>
             )}
           </Dialog.Popup>
         </Dialog.Portal>
+        {selected?.installId && selected.canUninstall && !disabled && (
+          <AlertDialog.Root
+            open={confirmUninstall}
+            onOpenChange={setConfirmUninstall}
+          >
+            <AlertDialog.Portal>
+              <AlertDialog.Backdrop />
+              <AlertDialog.Popup
+                initialFocus={cancelUninstall}
+                finalFocus={uninstallTrigger}
+              >
+                <AlertDialog.Title>
+                  {t("skills.uninstall_confirm_title", {
+                    skill: selected.displayName || selected.invocationName,
+                  })}
+                </AlertDialog.Title>
+                <AlertDialog.Description>
+                  {t("skills.uninstall_confirm")}
+                </AlertDialog.Description>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    ref={cancelUninstall}
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setConfirmUninstall(false)}
+                  >
+                    {t("common.cancel")}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmUninstall(false);
+                      void runMutation(
+                        () => onUninstall(selected.installId!),
+                        true,
+                      );
+                    }}
+                  >
+                    <Icon name="trash" /> {t("skills.uninstall")}
+                  </Button>
+                </div>
+              </AlertDialog.Popup>
+            </AlertDialog.Portal>
+          </AlertDialog.Root>
+        )}
       </Dialog.Root>
     </section>
   );

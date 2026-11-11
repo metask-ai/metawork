@@ -367,6 +367,8 @@ Task detail 的 `permissionReviewExplanation` 精确为 `null | { cause, reason 
 
 Skill management 使用同一 revision 1 数据面发布 bounded preview/detail/projection 与 typed import/export/reimport/uninstall mutation；command catalog、Zig DTO、TypeScript runtime decoder、snapshot fixture 和 automation 必须完全一致，不建立第二 transport 或局部 revision。
 
+`skills.detail` 成功响应的 `definition` 是只读展示用的作者正文。Host 去掉文件头部元数据和由 MetaWork 写入的精确资源定位说明。导入预览继续呈现源定义，已安装文件与导出包继续遵循 Product artifact 合同。
+
 `skills.chooseImport` 精确接收 `{ kind: package | directory, target }`。target 精确为 `{ kind, workspaceId, expectedWorkspaceEpoch, installId }`，四字段必填；personal 三个 identity 为 null，project 只携带非空 Workspace id/epoch，reimport 只携带原 installId。Host 原生 picker 不使用普通短 command timeout。取消返回 `{ status: cancelled }`，准备失败返回 `{ status: rejected, reason }`；成功返回 `{ status: prepared, previewId, operationId, preparationRevision, sourceKind, scope, effect, installId, invocationName, displayName, description, definition, fileCount, totalBytes, blocker }`。scope 精确为 `{ kind: personal | project, workspaceId, workspaceEpoch }`，personal 两 identity 为 null；effect 为 create、update 或 replace_directory，只有 update 含非空 installId。正文和 metadata 由 Product 安全投影；不得携带源路径或摘要。
 
 `skills.prepareImport` 精确接收 `{ previewId, preparationRevision, target }`，对有效 grant 改选 typed 目标后返回同一 prepared/rejected shape；target 为 null 只放弃尚未提交的准备，返回 cancelled，不取消任何 transaction。改选只推进 preparationRevision，不延长原 grant 的五分钟有效期。`skills.install` 与 `skills.reimport` 精确接收 `{ previewId, preparationRevision, confirmation: create | update | replace_directory }`，后者只接受 update。目标由 Host 准备记录拥有，不接收 scope、installId、allowReplace 或 raw path 的替代 payload。所有 identity/revision 采用 canonical decimal u64 string，installId 沿用 opaque hex identity；格式错误 fail closed。

@@ -169,10 +169,6 @@ test("Skill details show the description and safely format the readable body", a
     ),
   );
   const definition = [
-    "---",
-    "name: review",
-    "description: Hidden file metadata",
-    "---",
     "# Review",
     "",
     "## Before editing",
@@ -234,7 +230,6 @@ test("Skill details show the description and safely format the readable body", a
     content.getAllByRole("heading", { name: /^review$/i }).length,
     1,
   );
-  assert.equal(content.queryByText(/Hidden file metadata/), null);
   assert.equal(content.getByText("selected changes").tagName, "STRONG");
   assert.ok(content.getByText("Reference"));
   assert.equal(managed.querySelector("a[href], img, iframe, details"), null);
@@ -324,6 +319,91 @@ test("Skill details keep enablement and uninstall in the footer and move file ac
     "directory",
     { kind: "reimport", installId: asset.installId },
   ]);
+});
+
+test("Skill uninstall confirms outside the scrolling body and focuses Cancel", async (ctx) => {
+  const asset = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/skill-recovery-required.fixture",
+      "utf8",
+    ),
+  );
+  Object.assign(asset, { managementState: "ready", canUninstall: true });
+  const uninstall = ctx.mock.method(
+    BridgeClient.prototype,
+    "uninstallSkill",
+    async () => ({
+      accepted: true,
+      installId: asset.installId,
+      verificationPending: true,
+      reason: null,
+    }),
+  );
+  await fixture(ctx, (snapshot) => {
+    snapshot.skillManagement.assets = [asset];
+  });
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: /review.*description/i }),
+  );
+  const detail = await screen.findByRole("dialog", { name: "review" });
+  const trigger = within(detail).getByRole("button", { name: "Uninstall" });
+  await user.click(trigger);
+  const confirmation = await screen.findByRole("alertdialog", {
+    name: "Uninstall “review”?",
+  });
+  const cancel = within(confirmation).getByRole("button", { name: "Cancel" });
+  assert.equal(detail.contains(confirmation), false);
+  assert.ok(within(confirmation).getByText(/removed from your personal/));
+  await waitFor(() => assert.equal(document.activeElement, cancel));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  assert.equal(uninstall.mock.callCount(), 0);
+
+  await user.click(trigger);
+  await user.click(
+    within(await screen.findByRole("alertdialog")).getByRole("button", {
+      name: "Uninstall",
+    }),
+  );
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  assert.deepEqual(uninstall.mock.calls[0].arguments, [asset.installId]);
+});
+
+test("A late enablement failure stays with the Skill that initiated it", async (ctx) => {
+  const builtin = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/skill-builtin.fixture",
+      "utf8",
+    ),
+  );
+  const other = {
+    ...builtin,
+    skillId: "builtin-pptx",
+    invocationName: "pptx",
+    displayName: "pptx",
+    skillPolicyKey: "pptx",
+  };
+  const { promise, reject } = Promise.withResolvers();
+  ctx.mock.method(BridgeClient.prototype, "setSkillEnabled", () => promise);
+  await fixture(ctx, (snapshot) => {
+    snapshot.skillManagement.assets = [builtin, other];
+  });
+  const user = userEvent.setup({ document });
+  const open = async (name) => {
+    await user.click(screen.getByRole("button", { name: new RegExp(name) }));
+    return within(await screen.findByRole("dialog", { name }));
+  };
+  const first = await open("docx");
+  await user.click(first.getByRole("button", { name: "Disable" }));
+  await user.keyboard("{Escape}");
+  const second = await open("pptx");
+  await act(async () => reject(new Error("Host request failed")));
+  assert.equal(second.queryByRole("alert"), null);
+  await user.keyboard("{Escape}");
+  assert.match(screen.getByRole("alert").textContent, /“docx”/);
+  const reopened = await open("docx");
+  assert.match(reopened.getByRole("alert").textContent, /“docx”/);
 });
 
 async function fixture(ctx, configure = () => {}) {
@@ -558,6 +638,42 @@ test("Import uses the personal scope, retains busy confirmation and shows Host v
   );
   await waitFor(() => assert.ok(document.activeElement === trigger));
   assert.equal(commits.length, 2);
+});
+
+test("Personal import warns before taking precedence over a same-name built-in Skill", async (ctx) => {
+  const builtin = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/skill-builtin.fixture",
+      "utf8",
+    ),
+  );
+  ctx.mock.method(BridgeClient.prototype, "chooseSkillImport", async () =>
+    importPreparation({
+      effect: "create",
+      installId: null,
+      invocationName: "docx",
+    }),
+  );
+  const install = ctx.mock.method(
+    BridgeClient.prototype,
+    "installSkill",
+    async () => ({
+      accepted: false,
+      installId: null,
+      verificationPending: false,
+      reason: "target_changed",
+    }),
+  );
+  await fixture(ctx, (snapshot) => {
+    snapshot.skillManagement.assets = [builtin];
+  });
+  const user = userEvent.setup({ document });
+  await chooseImportMenu(user);
+  const confirmation = within(await screen.findByRole("dialog"));
+  assert.ok(confirmation.getByText(/personal version will take precedence/));
+  assert.equal(install.mock.callCount(), 0);
+  await user.click(confirmation.getByRole("button", { name: "Install Skill" }));
+  assert.deepEqual(install.mock.calls[0].arguments, ["7", "2", "create"]);
 });
 
 test("A same-name unmanaged folder requires explicit replacement confirmation", async (ctx) => {

@@ -718,6 +718,8 @@ export const enUS = {
   "skills.effect.update": "Update Skill",
   "skills.effect.replace_directory": "Replace folder",
   "skills.effect_body.create": "Install “{skill}” in your personal directory.",
+  "skills.effect_body.shadows_builtin":
+    "A built-in Skill has the same name. After installation, the personal version will take precedence.",
   "skills.effect_body.update":
     "A Skill named “{skill}” already exists. Confirm to update its contents and keep its enablement settings.",
   "skills.effect_body.replace_directory":
@@ -746,7 +748,7 @@ export const enUS = {
   "skills.detail.definition": "SKILL.md",
   "skills.detail.loading": "Loading the local definition…",
   "skills.detail.unavailable": "The Skill file is temporarily unavailable.",
-  "skills.uninstall_confirm_title": "Uninstall this Skill?",
+  "skills.uninstall_confirm_title": "Uninstall “{skill}”?",
   "skills.uninstall_confirm":
     "Its managed files will be removed from your personal Skill directory. This cannot be undone from MetaWork.",
   "skills.exported": "Exported {file}",
@@ -756,7 +758,7 @@ export const enUS = {
     "The exported package would exceed the reimport limit. Reduce its resources and export again.",
   "skills.error.export": "The Skill could not be exported.",
   "skills.error.enablement":
-    "The Skill could not be updated. Refresh and try again.",
+    "Could not change whether “{skill}” is enabled. Refresh and try again.",
   "skills.refresh": "Refresh",
   "skills.refreshing": "Refreshing…",
   "skills.search_label": "Search skills",

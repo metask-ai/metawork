@@ -3456,22 +3456,16 @@ test("Skill management responses keep mutations and file access explicit", () =>
     /expected keys/,
   );
 
-  assert.deepEqual(
-    decodeSkillDetailResult({
-      available: true,
-      definition: "---\nname: release-check\n---\n",
-      fileCount: 2,
-      totalBytes: 42,
-      reason: null,
-    }),
-    {
-      available: true,
-      definition: "---\nname: release-check\n---\n",
-      fileCount: 2,
-      totalBytes: 42,
-      reason: null,
-    },
+  const detail = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/skill-detail.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
   );
+  assert.deepEqual(decodeSkillDetailResult(detail), detail);
   assert.throws(
     () =>
       decodeSkillDetailResult({

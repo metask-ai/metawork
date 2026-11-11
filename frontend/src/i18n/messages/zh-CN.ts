@@ -615,6 +615,8 @@ export const zhCN: Record<MessageId, string> = {
   "skills.effect.update": "更新技能",
   "skills.effect.replace_directory": "替换目录",
   "skills.effect_body.create": "将在个人目录安装「{skill}」。",
+  "skills.effect_body.shadows_builtin":
+    "已有同名内置技能。安装成功后，个人版本将优先生效。",
   "skills.effect_body.update":
     "已存在同名技能「{skill}」。确认后更新其内容，并保留启用设置。",
   "skills.effect_body.replace_directory":
@@ -639,7 +641,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.detail.definition": "SKILL.md",
   "skills.detail.loading": "正在读取本地定义…",
   "skills.detail.unavailable": "暂时无法读取技能文件。",
-  "skills.uninstall_confirm_title": "确认卸载此技能？",
+  "skills.uninstall_confirm_title": "卸载「{skill}」？",
   "skills.uninstall_confirm":
     "将从个人技能目录删除由 MetaWork 管理的文件。此操作无法在 MetaWork 中撤销。",
   "skills.exported": "已导出 {file}",
@@ -648,7 +650,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.error.export_too_large":
     "导出包将超过可重新导入的大小上限，请减少资源后再导出。",
   "skills.error.export": "未能导出技能。",
-  "skills.error.enablement": "未能更新技能的启用状态，请刷新后重试。",
+  "skills.error.enablement": "未能更新「{skill}」的启用状态，请刷新后重试。",
   "skills.refresh": "刷新",
   "skills.refreshing": "正在刷新…",
   "skills.search_label": "搜索技能",

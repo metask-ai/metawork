@@ -4207,16 +4207,7 @@ pub const Dispatcher = struct {
             skillMutationRejection(err) orelse "detail_unavailable",
         );
         defer detail.deinit();
-        var writer = std.Io.Writer.fixed(output);
-        writer.writeAll("{\"available\":true,\"definition\":") catch
-            return error.NoSpaceLeft;
-        std.json.Stringify.value(detail.definition, .{}, &writer) catch
-            return error.NoSpaceLeft;
-        writer.print(",\"fileCount\":{d},\"totalBytes\":{d},\"reason\":null}}", .{
-            detail.file_count,
-            detail.total_bytes,
-        }) catch return error.NoSpaceLeft;
-        return writer.buffered();
+        return encodeSkillDetail(output, &detail);
     }
 
     fn cancelMcpInstallation(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -6135,6 +6126,17 @@ fn encodeSkillExportResult(
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeSkillDetail(output: []u8, detail: *const skill_runtime.Preview) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    writer.writeAll("{\"available\":true,\"definition\":") catch return error.NoSpaceLeft;
+    std.json.Stringify.value(detail.authorBody(), .{}, &writer) catch return error.NoSpaceLeft;
+    writer.print(",\"fileCount\":{d},\"totalBytes\":{d},\"reason\":null}}", .{
+        detail.file_count,
+        detail.total_bytes,
+    }) catch return error.NoSpaceLeft;
     return writer.buffered();
 }
 
@@ -9013,6 +9015,25 @@ test "Skill import preparation matches Renderer fixture and refuses mixed target
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @import("contract_fixture").skill_import_preview, "\r\n"), encoded);
     try std.testing.expectError(error.InvalidBridgePayload, parseSkillImportTarget(.{ .kind = "personal", .workspaceId = null, .expectedWorkspaceEpoch = null, .installId = "00112233445566778899aabbccddeeff" }));
     try std.testing.expectError(error.InvalidBridgePayload, parseSkillImportTarget(.{ .kind = "project", .workspaceId = "1", .expectedWorkspaceEpoch = null, .installId = null }));
+}
+
+test "Skill detail dialog projects the author body and matches the Renderer fixture" {
+    const front = "---\nname: review\n---\n";
+    var definition = (front ++ "# Review\n\nRead the changes.\n").*;
+    const detail: skill_runtime.Preview = .{
+        .allocator = std.testing.allocator,
+        .definition = &definition,
+        .invocation_name = "review",
+        .display_name = "review",
+        .description = "",
+        .file_count = 2,
+        .total_bytes = definition.len + 4,
+        .content_hash = @splat(0),
+        .body_offset = front.len,
+    };
+    var output: [256]u8 = undefined;
+    const expected = std.mem.trimEnd(u8, @import("contract_fixture").skill_detail, "\r\n");
+    try std.testing.expectEqualStrings(expected, try encodeSkillDetail(&output, &detail));
 }
 
 test "Skill import admission retains busy confirmation, consumes once, and revokes preparation on disconnect" {
