@@ -225,9 +225,11 @@ function flowLabels(flow) {
       ? entry.parts.map((part) => part.ordinal)
       : entry.kind === "image"
         ? `image:${entry.reference.id}`
-        : entry.kind === "input"
-          ? `user:${entry.input.id}`
-          : entry.kind,
+        : entry.kind === "video"
+          ? `video:${entry.reference.id}`
+          : entry.kind === "input"
+            ? `user:${entry.input.id}`
+            : entry.kind,
   );
 }
 function projectedRun(id, overrides = {}) {
@@ -277,6 +279,49 @@ test("an accepted image stays before the interjection when later output arrives,
     ),
     [[0], "image:old", "user:1", [1], "image:new"],
   );
+});
+
+test("generated media follows its assistant text in streaming and terminal Runs", () => {
+  const picture = image("picture", 0, "1");
+  const video = {
+    id: "clip",
+    title: "",
+    displayPath: "clip.mp4",
+    generatedVideo: true,
+    presentationAnchor: { afterOutputCount: 0, presentationOrder: "2" },
+  };
+  const previews = [video, picture];
+  const commentary = ["Generating"];
+  assert.deepEqual(
+    flowLabels(deriveRunReadingFlow("7", output(), [], [], previews)),
+    ["image:picture", "video:clip"],
+  );
+  assert.deepEqual(
+    flowLabels(
+      deriveRunReadingFlow(
+        "7",
+        output({ commentary, provisional: "Done" }),
+        [],
+        [],
+        previews,
+      ),
+    ),
+    [[0, 1], "image:picture", "video:clip"],
+  );
+  for (const responseKind of ["final", "partial"]) {
+    const run = projectedRun("7", {
+      output: output({ commentary, response: "Done", responseKind }),
+      tools: [{ fileRefs: previews }],
+      additionalInputs: [positionedInput("1", 2, "3")],
+    });
+    assert.deepEqual(
+      flowLabels(
+        deriveTaskReadingPlan({ runs: [run], inputSubmissions: [] }).runs[0]
+          .entries,
+      ),
+      [[0, 1], "image:picture", "video:clip", "supplement", "user:1"],
+    );
+  }
 });
 
 test("image and message prefix anchors survive discard followed by slot reuse", () => {

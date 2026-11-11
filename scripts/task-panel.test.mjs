@@ -88,6 +88,9 @@ const { TaskContent, createTaskReadingMemory } = await vite.ssrLoadModule(
 const { GeneratedImagePreview } = await vite.ssrLoadModule(
   "/src/features/tasks/GeneratedImagePreview.tsx",
 );
+const { GeneratedVideoPreview } = await vite.ssrLoadModule(
+  "/src/features/tasks/GeneratedVideoPreview.tsx",
+);
 const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
 );
@@ -705,7 +708,7 @@ function task(overrides = {}) {
   };
 }
 
-function renderTaskContent(value, locale = "en-US") {
+function renderTaskContent(value, locale = "en-US", props = {}) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -730,6 +733,7 @@ function renderTaskContent(value, locale = "en-US") {
         renderPendingUi() {
           return null;
         },
+        ...props,
       }),
     ),
   );
@@ -9516,6 +9520,207 @@ function previewImageFixture(data) {
 }
 const generatedPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8k8AAAAASUVORK5CYII=";
+
+test("generated MP4 renders a bare player on approach and releases it offscreen", async () => {
+  const originalObserver = globalThis.IntersectionObserver;
+  const originalPause = window.HTMLMediaElement.prototype.pause;
+  let visible;
+  let released = 0;
+  let paused = 0;
+  const loads = [];
+  globalThis.IntersectionObserver = class {
+    constructor(callback) {
+      visible = (isIntersecting) => callback([{ isIntersecting }]);
+    }
+    observe() {}
+    disconnect() {}
+  };
+  window.HTMLMediaElement.prototype.pause = () => {
+    paused++;
+  };
+  try {
+    const referenceId = "file-17-1-1-1";
+    const view = render(
+      localizedView(
+        createElement(GeneratedVideoPreview, {
+          taskId: "17",
+          runId: "23",
+          referenceId,
+          load: async (...args) => {
+            loads.push(args);
+            return {
+              state: "ready",
+              content: "",
+              truncated: false,
+              redacted: false,
+              video: {
+                src: "blob:preview",
+                valid: () => true,
+                subscribe: () => () => {},
+              },
+              release: () => {
+                released++;
+              },
+            };
+          },
+        }),
+      ),
+    );
+    assert.equal(loads.length, 0);
+    assert.equal(view.container.querySelector("button"), null);
+    await act(async () => visible(true));
+    assert.deepEqual(loads[0].slice(0, 3), ["17", "23", referenceId]);
+    const video = view.container.querySelector("video");
+    assert.ok(video.controls && !video.autoplay && video.hidden);
+    fireEvent.loadedData(video);
+    assert.equal(video.hidden, false);
+    await act(async () => visible(false));
+    assert.equal(view.container.querySelector("video"), null);
+    assert.equal(released, 1);
+    assert.equal(paused, 1);
+    assert.equal(loads[0][3].signal.aborted, true);
+    await act(async () => visible(true));
+    assert.equal(loads.length, 2);
+  } finally {
+    cleanup();
+    window.HTMLMediaElement.prototype.pause = originalPause;
+    if (originalObserver === undefined) delete globalThis.IntersectionObserver;
+    else globalThis.IntersectionObserver = originalObserver;
+  }
+});
+
+test("the assistant previews a generated video and exposes explicit file actions in Execution details", async () => {
+  const reference = {
+    id: "video-ref",
+    title: "",
+    displayPath: "generated-videos/clip.mp4",
+    generatedVideo: true,
+    presentationAnchor: { afterOutputCount: 0, presentationOrder: "1" },
+  };
+  const duplicate = {
+    id: "a".repeat(32),
+    displayPath: reference.displayPath,
+    sizeBytes: "1546",
+    redacted: false,
+  };
+  const other = {
+    id: "b".repeat(32),
+    displayPath: "report.md",
+    sizeBytes: "7",
+    redacted: false,
+  };
+  const props = {
+    synchronized: true,
+    outputsEnabled: true,
+    loadFilePreview: async () => assert.fail("Static render must not load"),
+  };
+  const completed = run({
+    tools: [
+      technicalTool({ name: "GenerateVideo", fileRefs: [reference] }),
+      technicalTool({
+        id: "image-tool",
+        order: "2",
+        name: "GenerateImage",
+        fileRefs: [
+          {
+            id: "image-ref",
+            title: "",
+            displayPath: "generated-images/frame.png",
+            generatedImage: true,
+            presentationAnchor: { afterOutputCount: 0, presentationOrder: "2" },
+          },
+        ],
+      }),
+    ],
+    outputs: [duplicate, other],
+  });
+  const html = renderTaskContent(task({ runs: [completed] }), "en-US", props);
+  const content = document.createElement("div");
+  content.innerHTML = html;
+  const player = content.querySelector(".generated-video-preview");
+  assert.ok(player?.closest('[data-reading-id="9:video:video-ref"]'));
+  assert.equal(player.closest(".run-outputs"), null);
+  const response = content.querySelector('[data-output-disposition="final"]');
+  const picture = content.querySelector(".generated-image-preview");
+  const footers = content.querySelectorAll(
+    '.message-info-bar[data-role="assistant"]',
+  );
+  assert.equal(footers.length, 1);
+  const details = content.querySelector(".run-process");
+  assert.ok(
+    response.compareDocumentPosition(player) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    player.compareDocumentPosition(picture) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    picture.compareDocumentPosition(footers[0]) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    footers[0].compareDocumentPosition(details) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.equal(
+    content.querySelector(`[data-output-id="${duplicate.id}"]`),
+    null,
+  );
+  assert.ok(content.querySelector(`[data-output-id="${other.id}"]`));
+  const beforeDelivery = renderTaskContent(
+    task({
+      runs: [
+        {
+          ...completed,
+          outputs: [],
+          output: { ...completed.output, response: "", responseKind: null },
+        },
+      ],
+    }),
+    "en-US",
+    props,
+  );
+  assert.match(beforeDelivery, /generated-video-preview/);
+  assert.doesNotMatch(beforeDelivery, /class="run-outputs"/);
+  assert.doesNotMatch(beforeDelivery, /returned no final response/);
+
+  const actions = [];
+  const view = render(
+    taskContentElement(task({ runs: [completed] }), "1", {
+      ...props,
+      loadFilePreview: async () => ({ state: "missing" }),
+      onOutputAction: async (taskId, runId, outputId, action, signal) => {
+        assert.equal(signal.aborted, false);
+        actions.push([taskId, runId, outputId, action]);
+        return action === "save" ? "saved" : "revealed";
+      },
+    }),
+  );
+  assert.equal(
+    view.container.querySelector(`[data-output-id="${duplicate.id}"]`),
+    null,
+  );
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("button", { name: /^Execution details/ }));
+  const delivery = view.container.querySelector(
+    `[data-output-id="${duplicate.id}"]`,
+  );
+  assert.ok(delivery?.closest(".run-process-body"));
+  assert.equal(delivery.closest(".run-outputs"), null);
+  assert.deepEqual(
+    [...delivery.querySelectorAll("button")].map(
+      (button) => button.textContent,
+    ),
+    ["Show in folder", "Save as…"],
+  );
+  await user.click(
+    within(delivery).getByRole("button", { name: "Show in folder" }),
+  );
+  await user.click(within(delivery).getByRole("button", { name: "Save as…" }));
+  assert.deepEqual(actions, [
+    [task().id, completed.id, duplicate.id, "reveal"],
+    [task().id, completed.id, duplicate.id, "save"],
+  ]);
+});
 
 test("generated image loads only its reference and opens the existing preview", async () => {
   const calls = [];

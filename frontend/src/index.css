@@ -2224,53 +2224,6 @@ summary::-webkit-details-marker {
   font-size: var(--text-label);
 }
 
-.settings-danger-zone {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  margin-top: 12px;
-  padding: 18px;
-  align-items: center;
-  gap: 24px;
-  border: 1px solid var(--settings-line);
-  border-radius: 14px;
-  background: var(--settings-paper);
-}
-
-.settings-danger-zone h3,
-.settings-danger-zone p {
-  margin: 0;
-}
-
-.settings-danger-zone h3 {
-  color: var(--settings-ink);
-  font-size: var(--text-body);
-  font-weight: 700;
-}
-
-.settings-danger-zone p {
-  margin-top: 4px;
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  line-height: 1.5;
-}
-
-.settings-signout-confirmation {
-  max-width: 320px;
-  padding: 12px 14px;
-  border: 1px solid var(--ui-action-danger-border);
-  border-radius: 10px;
-  background: var(--ui-surface-canvas);
-  font-size: var(--text-control);
-  line-height: 1.5;
-}
-
-.settings-signout-confirmation span {
-  display: flex;
-  margin-top: 10px;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .selection-trigger {
   display: inline-flex;
   min-width: 0;
@@ -2713,7 +2666,8 @@ summary::-webkit-details-marker {
 ),
 .ai-message[data-role="user"]:is(:hover, :focus-within) + .message-info-bar,
 .message-info-bar:is(:hover, :focus-within),
-.run-assistant-output:is(:hover, :focus-within) > .message-info-bar {
+.ai-message[data-role="assistant"]:is(:hover, :focus-within)
+  > .message-info-bar {
   opacity: 1;
 }
 
@@ -3353,10 +3307,6 @@ button.run-process-tool:hover {
 
   .settings-control-compact {
     width: 100%;
-  }
-
-  .settings-danger-zone {
-    grid-template-columns: 1fr;
   }
 
   .settings-identity-row {
@@ -9762,10 +9712,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
 }
 
+.generated-image-preview,
+.generated-video-preview {
+  max-width: min(100%, 576px);
+}
 .generated-image-preview {
   margin: 16px 0;
   width: fit-content;
-  max-width: min(100%, 576px);
 }
 .generated-image-open {
   display: block;
@@ -9912,6 +9865,36 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.generated-video-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  max-height: min(60vh, 480px);
+  border-radius: 8px;
+}
+
+.generated-video-preview video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+  background: #000;
+}
+
+.generated-video-preview > p {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 8px;
+  text-align: center;
+  color: var(--ui-content-muted);
 }
 
 @media (max-width: 640px) {

@@ -250,8 +250,15 @@ pub const Access = struct {
         return self.get().prepareRun(input);
     }
 
-    pub fn prepareRunWithTools(self: *Access, input: agent.RunInput, image: ?agent.ImageGenerationRunInput, delivery: ?agent.FileDeliveryInput, mcp: ?agent.McpInstallationInput) !u64 {
-        return self.get().prepareRunWithTools(input, image, delivery, mcp);
+    pub fn prepareRunWithTools(
+        self: *Access,
+        input: agent.RunInput,
+        image: ?agent.ImageGenerationRunInput,
+        delivery: ?agent.FileDeliveryInput,
+        mcp: ?agent.McpInstallationInput,
+        video: ?agent.VideoGenerationRunInput,
+    ) !u64 {
+        return self.get().prepareRunWithTools(input, image, delivery, mcp, video);
     }
 
     pub fn beginRunOutcome(self: *Access, run_id: u64) agent.BeginRunOutcome {

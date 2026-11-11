@@ -354,6 +354,8 @@ macOS 附件容量与 Host 内存观察使用 `METAWORK_ATTACHMENT_CAPACITY_ONLY
 
 File Preview 的定向入口为 `zig build test-file-preview` 与 `node --test scripts/file-preview-transfer.test.mjs scripts/workbench-contract.test.mjs scripts/task-panel.test.mjs`。必须覆盖容器事实与调用方策略、图片容量不阻塞文本、原件尾部凭据、连续分块身份与字节一致、实际解码前 loading、取消/过期/连接及安全代次回收。真实目标平台验证必须另测历史页、大小图、多个标签、反复开闭后的耗时和进程内存；逻辑额度不等于物理内存保证，合成尾部 fixture 不等于真实相机/手机样本兼容验收，独立 SDK probe 不等于最终 Product 验收。
 
+生成视频预览沿用该入口，覆盖可信生成引用及 owning Run、容器识别与缺失、严格视频描述符、分块回读、授权变化与 URL 释放。桌面验收核对所属 Run 的助手回复直接显示 MP4 首帧，支持播放与跳转，离开保留区域后暂停并释放，同时验证窄窗布局。
+
 流式 Markdown 的 Renderer 回归必须固定：commentary、provisional 与 final/partial 位于同一 Assistant message，并由 `Run identity + output ordinal` 保持 part DOM 根；provisional 从首批字节支持 GFM 的强调、列表、表格与未闭合代码围栏，但 raw HTML、图片请求、链接、文件预览和复制保持惰性；classification 保留根节点，discard 立即清除且正文不建立 `aria-live`。closed part 必须跨 activity/Tool revision 保持根节点，并在结构化引用 alias 集晚到或失效时更新交互。目标平台真实 WebView 还必须以 256 KiB 混合 GFM 连续增长验证内容正确、跟随底部、上滚、文本选择和 Composer 焦点；若该门槛失败，必须登记独立增量 parser 评估，不能启用运行时 fallback。
 
 AgentCore runtime assets 的验证必须覆盖 manifest declaration、执行文件和许可证缺失/篡改、构建和 runtime package 部署，以及不依赖开发机外部 rg 的真实 Glob/Grep。source-free probe 显式绑定候选 bundle 自带的 rg；桌面 vertical 验证 Host 同目录部署，不能让环境中的 rg 掩盖漏包。
@@ -387,6 +389,12 @@ PermissionProfile 的最小充分证据必须跨越实际 owner：candidate prob
 Task completion receipt 的最小充分证据必须跨越实际 owner：Product lifecycle 固定 latest terminal `completed` identity、迟到/重复 acknowledgement、失败或中断不产生新提醒、归档确认、`recent_order` 不变、旧记录迁移、正常关闭恢复与异常强杀只可能重现最后未提交提醒；Bridge/Renderer 固定 strict nullable snapshot、Task/Run identity command、断连与 stale result，以及只有中央 Task 工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖且 document 可见、窗口有焦点时才确认。Renderer reload、选择状态和 `localStorage` 不能充当 receipt 证据。
 
 File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
+
+### GenerateVideo 验证
+
+`zig build test-generate-video` 使用当前 canonical AgentCore、普通 Runtime、本地对话 Provider 和 Metask 视频 HTTP fixture 验证 `GenerateVideo`。覆盖工具声明、当次审批、拒绝及无本 Run 输入时零执行、提交/查询/下载、瞬时查询失败后的退避和单次创建、退避期间停止、下载与本地保存的失败分类、MP4 原始字节与回执、结果未知后同 Run 的重复调用、Stop/关闭/shutdown 的 callback 收口，以及旧 Host Tool 集合 checkpoint 有或无 Write grant 的恢复。
+
+同一入口通过真实 Account、Models、Application coordinator 和 Product Control 接纳交互 Run。确认生成成功后即可发布带锚点的可信视频引用，覆盖其历史持久化、独立的 `DeliverFile` 登记及执行资源释放。该入口纳入标准 Native graph。真实服务验收须使用实际 Metask 模型和账号授权，观察生成终态、`/content` 字节及生成引用。
 
 ### GenerateImage 输出格式验证
 

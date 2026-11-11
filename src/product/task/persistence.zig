@@ -1022,6 +1022,8 @@ pub const FileReferenceWire = struct {
     presentation_state: ?[]const u8 = null,
     presentation_anchor: ?task_state.PresentationAnchor = null,
     generated_image: bool = false,
+    generated_video: ?bool = null,
+
     id: []const u8,
     title: []const u8,
     display_path: []const u8,
@@ -1029,6 +1031,19 @@ pub const FileReferenceWire = struct {
     locator_kind: []const u8,
     locator: []const u8,
     range: ?FileReferenceRangeWire = null,
+
+    const legacy_video_state = "generated_video";
+
+    pub fn isGeneratedVideo(self: FileReferenceWire) bool {
+        return self.generated_video orelse false;
+    }
+
+    pub fn normalizeLegacyVideo(self: *FileReferenceWire) void {
+        if (self.generated_video == null and std.mem.eql(u8, self.presentation_state orelse "", legacy_video_state)) {
+            self.generated_video = true;
+            self.presentation_state = "anchored";
+        }
+    }
 };
 
 pub const FileChangeArtifactWire = struct {
@@ -1488,6 +1503,7 @@ fn projectRun(
                 const reference = reference_entry orelse continue;
                 references[file_ref_index] = .{
                     .generated_image = reference.generated_image,
+                    .generated_video = if (reference.generated_video) true else null,
                     .presentation_state = if (reference.presentation_anchor != null) "anchored" else "legacy",
                     .presentation_anchor = reference.presentation_anchor,
                     .id = reference.id,
@@ -2361,7 +2377,7 @@ fn restoreRunInput(
 
 fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_state.ToolView {
     const receipt_metadata = if (wire.file_refs) |refs| generated: {
-        for (refs) |reference| if (reference.generated_image) break :generated true;
+        for (refs) |reference| if (reference.generated_image or reference.isGeneratedVideo()) break :generated true;
         break :generated false;
     } else false;
     const id = try projection.copyReference(receipt_metadata, wire.id, projection.limits.max_tool_field_bytes);
@@ -2423,8 +2439,11 @@ fn restoreFileReference(
 ) RestoreError!task_state.FileReferenceView {
     const locator_kind = parseEnum(task_state.FileReferenceLocatorKind, wire.locator_kind) orelse
         return error.TaskStoreCorrupt;
+    const video = wire.isGeneratedVideo();
+    const generated = wire.generated_image or video;
     var reference = task_state.FileReferenceView{
         .generated_image = wire.generated_image,
+        .generated_video = video,
         .presentation_anchor = wire.presentation_anchor,
         .id = undefined,
         .title = undefined,
@@ -2437,20 +2456,20 @@ fn restoreFileReference(
             .end = .{ .line = range.end.line, .column = range.end.column },
         } else null,
     };
-    reference.id = try projection.copyReference(wire.generated_image, wire.id, projection.limits.max_file_ref_field_bytes);
-    errdefer projection.freeReference(wire.generated_image, reference.id);
-    reference.title = try projection.copyReference(wire.generated_image, wire.title, projection.limits.max_file_ref_field_bytes);
-    errdefer projection.freeReference(wire.generated_image, reference.title);
+    reference.id = try projection.copyReference(generated, wire.id, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.freeReference(generated, reference.id);
+    reference.title = try projection.copyReference(generated, wire.title, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.freeReference(generated, reference.title);
     reference.display_path = try projection.copyReference(
-        wire.generated_image,
+        generated,
         wire.display_path,
         projection.limits.max_file_ref_field_bytes,
     );
-    errdefer projection.freeReference(wire.generated_image, reference.display_path);
-    reference.kind = try projection.copyReference(wire.generated_image, wire.kind, projection.limits.max_file_ref_field_bytes);
-    errdefer projection.freeReference(wire.generated_image, reference.kind);
+    errdefer projection.freeReference(generated, reference.display_path);
+    reference.kind = try projection.copyReference(generated, wire.kind, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.freeReference(generated, reference.kind);
     reference.locator = try projection.copyReference(
-        wire.generated_image,
+        generated,
         wire.locator,
         projection.limits.max_file_ref_field_bytes,
     );
@@ -2643,11 +2662,11 @@ fn deinitRestoredFileReference(
     projection: RestoreProjection,
     reference: *task_state.FileReferenceView,
 ) void {
-    projection.freeReference(reference.generated_image, reference.id);
-    projection.freeReference(reference.generated_image, reference.title);
-    projection.freeReference(reference.generated_image, reference.display_path);
-    projection.freeReference(reference.generated_image, reference.kind);
-    projection.freeReference(reference.generated_image, reference.locator);
+    projection.freeReference(reference.generated(), reference.id);
+    projection.freeReference(reference.generated(), reference.title);
+    projection.freeReference(reference.generated(), reference.display_path);
+    projection.freeReference(reference.generated(), reference.kind);
+    projection.freeReference(reference.generated(), reference.locator);
     reference.* = undefined;
 }
 
@@ -3188,6 +3207,9 @@ pub fn decodeRecovering(
                         continue;
                     };
                 };
+                for (task.runs) |run| for (run.tools) |tool| {
+                    if (tool.file_refs) |refs| for (refs) |*ref| ref.normalizeLegacyVideo();
+                };
                 if (task.id != id or task.recent_order != order) {
                     dropped_tasks += 1;
                     degraded = true;
@@ -3610,14 +3632,24 @@ fn validatePresentation(task: TaskWire, limits: Limits) !void {
             if (input.submission) |record| try validatePresentationItem(task, record.presentation_state, record.presentation_order, record.after_output_count, limits, &seen);
         }
         var generated_images: usize = 0;
+        var generated_video = false;
         for (run.tools) |tool| if (tool.file_refs) |refs| {
             for (refs) |ref| {
-                if (!ref.generated_image) {
+                const video = ref.isGeneratedVideo();
+                if (std.mem.eql(u8, ref.presentation_state orelse "", FileReferenceWire.legacy_video_state)) return error.Invalid;
+                if (!ref.generated_image and !video) {
                     if (ref.presentation_anchor != null) return error.Invalid;
                     continue;
                 }
-                generated_images += 1;
-                if (generated_images > agent.image_generation_limits.sends_per_run) return error.Invalid;
+                if (video) {
+                    if (generated_video or ref.generated_image or ref.presentation_anchor == null or
+                        !std.mem.eql(u8, ref.locator_kind, "workspace_path") or
+                        !std.mem.endsWith(u8, ref.locator, ".mp4")) return error.Invalid;
+                    generated_video = true;
+                } else {
+                    generated_images += 1;
+                    if (generated_images > agent.image_generation_limits.sends_per_run) return error.Invalid;
+                }
                 try validatePresentationItem(task, ref.presentation_state, if (ref.presentation_anchor) |a| a.presentation_order else null, if (ref.presentation_anchor) |a| a.after_output_count else 0, limits, &seen);
             }
         };

@@ -28,6 +28,7 @@ export type RunReadingEntry =
   | { kind: "input"; identity: string; input: AdditionalInputView }
   | { kind: "submission"; identity: string; input: WaitingInputView }
   | { kind: "image"; identity: string; reference: FileReferenceView }
+  | { kind: "video"; identity: string; reference: FileReferenceView }
   | { kind: "local"; identity: string; operationId: string }
   | { kind: "supplement"; identity: string };
 
@@ -164,7 +165,7 @@ export function deriveTaskReadingPlan(
       submissions.filter((input) => input.submission.anchorRunId === run.id),
       run.tools
         .flatMap((tool) => tool.fileRefs)
-        .filter((ref) => ref.generatedImage),
+        .filter((ref) => ref.generatedImage || ref.generatedVideo),
       pending.filter(
         (input) =>
           input.anchor.anchorRunId === run.id ||
@@ -175,7 +176,9 @@ export function deriveTaskReadingPlan(
       ? entries.length
       : entries.reduce(
           (last, entry, index) =>
-            entry.kind === "assistant" || entry.kind === "image"
+            entry.kind === "assistant" ||
+            entry.kind === "image" ||
+            entry.kind === "video"
               ? index + 1
               : last,
           0,
@@ -203,7 +206,7 @@ export function deriveRunReadingFlow(
   output: RunOutput,
   inputs: readonly AdditionalInputView[],
   submissions: readonly WaitingInputView[] = [],
-  images: readonly FileReferenceView[] = [],
+  media: readonly FileReferenceView[] = [],
   local: readonly LocalReadingInput[] = [],
 ): RunReadingEntry[] {
   const parts = deriveAssistantOutputParts(runId, output);
@@ -255,7 +258,7 @@ export function deriveRunReadingFlow(
         input,
       },
     })),
-    ...images
+    ...media
       .filter((reference) => reference.presentationAnchor != null)
       .map((reference, index) => ({
         anchor: reference.presentationAnchor?.afterOutputCount ?? parts.length,
@@ -263,8 +266,10 @@ export function deriveRunReadingFlow(
         localSequence: 0,
         index: inputs.length + submissions.length + index,
         entry: {
-          kind: "image" as const,
-          identity: `${runId}:image:${reference.id}`,
+          kind: reference.generatedVideo
+            ? ("video" as const)
+            : ("image" as const),
+          identity: `${runId}:${reference.generatedVideo ? "video" : "image"}:${reference.id}`,
           reference,
         },
       })),
@@ -287,10 +292,16 @@ export function deriveRunReadingFlow(
         ? 1
         : a.localSequence - b.localSequence || a.index - b.index,
   );
+  const pendingMedia: RunReadingEntry[] = [];
   for (const message of messages) {
     prefixMax = Math.max(prefixMax, message.anchor);
+    if (message.entry.kind === "image" || message.entry.kind === "video") {
+      pendingMedia.push(message.entry);
+      continue;
+    }
     appendOutput(Math.min(parts.length, prefixMax));
-    entries.push(message.entry);
+    entries.push(...pendingMedia, message.entry);
+    pendingMedia.length = 0;
   }
   appendOutput(parts.length);
   if (output.redacted || output.provisionalRedacted) {
@@ -303,14 +314,20 @@ export function deriveRunReadingFlow(
         redacted: true,
       });
   }
+  entries.push(...pendingMedia);
   // Legacy images have no precise anchor: keep their historical Assistant block
   // after this Run's output, before its trailing user messages.
-  const legacyImages = images.filter(
-    (reference) => reference.presentationAnchor == null,
+  const legacyImages = media.filter(
+    (reference) =>
+      !reference.generatedVideo && reference.presentationAnchor == null,
   );
   const legacyBoundary = entries.reduce(
     (last, entry, index) =>
-      entry.kind === "assistant" || entry.kind === "image" ? index + 1 : last,
+      entry.kind === "assistant" ||
+      entry.kind === "image" ||
+      entry.kind === "video"
+        ? index + 1
+        : last,
     0,
   );
   entries.splice(

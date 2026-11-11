@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { decodeWorkspaceDirectory } from "../frontend/src/bridge/decode-contracts.ts";
+import {
+  decodeFilePreview,
+  decodeWorkspaceDirectory,
+} from "../frontend/src/bridge/decode-contracts.ts";
 import { FilePreviewLoader } from "../frontend/src/bridge/file-preview.ts";
 import { commands } from "../frontend/src/bridge/commands.ts";
 
@@ -10,6 +13,78 @@ const png = Buffer.from(
   "base64",
 );
 const empty = { content: "", truncated: false, redacted: false };
+
+test("generated MP4 shares file preview admission and revokes its source on security change", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("../src/bridge/file_preview_video.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const bytes = await readFile(
+    new URL("../tests/fixtures/generated-video.mp4", import.meta.url),
+  );
+  assert.equal(decodeFilePreview(fixture).video.sizeBytes, bytes.length);
+  assert.throws(() => decodeFilePreview({ ...fixture, image: {} }));
+  assert.throws(() => decodeFilePreview({ ...fixture, state: "restricted" }));
+  assert.throws(() =>
+    decodeFilePreview({
+      ...fixture,
+      video: { ...fixture.video, sizeBytes: "67108865" },
+    }),
+  );
+  const calls = [];
+  const fileReferenceId = "file-3-1-1-1";
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      switch (command) {
+        case commands.previewFile:
+          return fixture;
+        case commands.readPreviewVideo:
+          return {
+            state: "ready",
+            token: fixture.video.token,
+            offset: "0",
+            bytes: String(bytes.length),
+            dataBase64: bytes.toString("base64"),
+          };
+        case commands.releasePreview:
+          return { ...payload, released: true };
+        default:
+          assert.fail(command);
+      }
+    },
+    () => "1",
+  );
+  const result = await loader.load("3", "7", fileReferenceId);
+  assert.equal(result.state, "ready");
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    [commands.previewFile, commands.readPreviewVideo, commands.releasePreview],
+  );
+  assert.deepEqual(calls[0].payload, {
+    generation: "1",
+    previewId: "1",
+    taskId: "3",
+    runId: "7",
+    fileReferenceId,
+  });
+  const src = result.video.src;
+  const media = await fetch(src);
+  assert.equal(media.headers.get("content-type"), "video/mp4");
+  assert.deepEqual(Buffer.from(await media.arrayBuffer()), bytes);
+  const second = await loader.load("3", "8", "file-3-2-1-1");
+  assert.equal(second.state, "ready");
+  assert.equal(result.video.valid(), true);
+  const secondSrc = second.video.src;
+  loader.observeSecurityEpoch("2");
+  assert.equal(result.video.valid(), false);
+  assert.equal(second.video.valid(), false);
+  await assert.rejects(fetch(src));
+  await assert.rejects(fetch(secondSrc));
+});
+
 function deferred() {
   let resolve;
   const promise = new Promise((r) => {

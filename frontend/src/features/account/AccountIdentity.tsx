@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { AccountView, UpdateView } from "../../bridge/contracts.ts";
+import { SignOutConfirmation } from "../../components/SignOutConfirmation.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
-import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
@@ -194,38 +194,7 @@ export function AccountIdentity({
         open={authenticated && confirmSignOut}
         onOpenChange={setConfirmSignOut}
       >
-        <AlertDialog.Portal>
-          <AlertDialog.Backdrop />
-          <AlertDialog.Popup>
-            <AlertDialog.Title>{t("settings.signout_title")}</AlertDialog.Title>
-            <AlertDialog.Description>
-              {t("account.logout_confirm")}
-            </AlertDialog.Description>
-            <div className="flex justify-end gap-2">
-              <Button
-                autoFocus
-                type="button"
-                variant="secondary"
-                size="md"
-                onClick={() => setConfirmSignOut(false)}
-              >
-                {t("common.cancel")}
-              </Button>
-              <Button
-                type="button"
-                variant="danger"
-                size="md"
-                disabled={disabled}
-                onClick={() => {
-                  setConfirmSignOut(false);
-                  onLogout();
-                }}
-              >
-                {t("account.logout")}
-              </Button>
-            </div>
-          </AlertDialog.Popup>
-        </AlertDialog.Portal>
+        <SignOutConfirmation disabled={disabled} onLogout={onLogout} />
       </AlertDialog.Root>
     </>
   );

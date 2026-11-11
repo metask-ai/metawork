@@ -277,6 +277,7 @@ pub const PresentationAnchor = struct {
 pub const FileReferenceView = struct {
     presentation_anchor: ?PresentationAnchor = null,
     generated_image: bool = false,
+    generated_video: bool = false,
     id: []u8,
     title: []u8,
     display_path: []u8,
@@ -284,7 +285,13 @@ pub const FileReferenceView = struct {
     locator_kind: FileReferenceLocatorKind,
     locator: []u8,
     range: ?FileReferenceRangeView = null,
+
+    pub fn generated(self: FileReferenceView) bool {
+        return self.generated_image or self.generated_video;
+    }
 };
+
+pub const GeneratedMedia = enum { image, video };
 
 pub const FileChangeObservation = enum {
     collecting,
@@ -787,21 +794,15 @@ pub const ConversationCoverage = enum {
 /// released only after the worker and canonical event stream are quiescent.
 /// Candidate credential is also the Product projection scrub copy.
 pub const OwnedImageExecution = struct {
-    candidate: models_contract.OwnedImageCandidate,
+    candidate: models_contract.OwnedMediaCandidate,
     transport: agent.CompletionTransport,
     output: agent.ImageGenerationOutput,
     output_owner: *anyopaque,
     release_output_fn: *const fn (*anyopaque) void,
-    metask_authorization_scope: u64 = 0,
-    credential_generation: u64 = 0,
-    credential_source: ?*execution_credentials.Source = null,
-    credential_versions: std.ArrayList([]u8) = .empty,
+    authorization: MediaCredentials = .{},
 
     pub fn enableCredentialRenewal(self: *OwnedImageExecution, allocator: std.mem.Allocator, io: std.Io, scope: u64, generation: u64) std.mem.Allocator.Error!void {
-        std.debug.assert(self.credential_source == null and scope != 0 and generation != 0);
-        self.credential_source = try execution_credentials.Source.create(allocator, io, self.candidate.input().bearer);
-        self.metask_authorization_scope = scope;
-        self.credential_generation = generation;
+        try self.authorization.enable(allocator, io, self.candidate.input().bearer, scope, generation);
     }
 
     pub fn input(self: *const OwnedImageExecution) agent.ImageGenerationRunInput {
@@ -810,23 +811,45 @@ pub const OwnedImageExecution = struct {
             .endpoint = candidate.endpoint,
             .model = candidate.selection.model_id,
             .credential = candidate.bearer,
-            .credential_reader = if (self.credential_source) |source| .{ .context = source, .read_fn = readCredential } else null,
+            .credential_reader = self.authorization.reader(),
             .output = self.output,
         }, .transport = self.transport };
     }
 
     pub fn deinit(self: *OwnedImageExecution) void {
         self.release_output_fn(self.output_owner);
-        if (self.credential_source) |source| {
-            for (self.credential_versions.items) |value| {
+        self.authorization.deinit();
+        self.candidate.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const MediaCredentials = struct {
+    scope: u64 = 0,
+    generation: u64 = 0,
+    source: ?*execution_credentials.Source = null,
+    versions: std.ArrayList([]u8) = .empty,
+
+    pub fn enable(self: *MediaCredentials, allocator: std.mem.Allocator, io: std.Io, bearer: []const u8, scope: u64, generation: u64) std.mem.Allocator.Error!void {
+        std.debug.assert(self.source == null and scope != 0 and generation != 0);
+        self.source = try execution_credentials.Source.create(allocator, io, bearer);
+        self.scope = scope;
+        self.generation = generation;
+    }
+
+    fn reader(self: *const MediaCredentials) ?agent.ImageGenerationCredentialReader {
+        return if (self.source) |source| .{ .context = source, .read_fn = readCredential } else null;
+    }
+
+    fn deinit(self: *MediaCredentials) void {
+        if (self.source) |source| {
+            for (self.versions.items) |value| {
                 std.crypto.secureZero(u8, value);
                 source.allocator.free(value);
             }
-            self.credential_versions.deinit(source.allocator);
+            self.versions.deinit(source.allocator);
             source.release();
         }
-        self.candidate.deinit();
-        self.* = undefined;
     }
 
     fn readCredential(context: *anyopaque, buffer: []u8) ?usize {
@@ -854,6 +877,32 @@ pub const OwnedFileDelivery = struct {
     }
 };
 
+pub const OwnedVideoExecution = struct {
+    candidate: models_contract.OwnedMediaCandidate,
+    transport: agent.CompletionTransport,
+    output: agent.VideoGenerationOutput,
+    release_output_fn: *const fn (*anyopaque) void,
+    authorization: MediaCredentials = .{},
+
+    pub fn input(self: *const OwnedVideoExecution) ?agent.VideoGenerationRunInput {
+        const candidate = self.candidate.input();
+        return .{
+            .endpoint = candidate.endpoint,
+            .model = candidate.selection.model_id,
+            .credential = self.authorization.reader() orelse return null,
+            .transport = self.transport,
+            .output = self.output,
+        };
+    }
+
+    pub fn deinit(self: *OwnedVideoExecution) void {
+        self.release_output_fn(self.output.context);
+        self.authorization.deinit();
+        self.candidate.deinit();
+        self.* = undefined;
+    }
+};
+
 /// Worker control and title production exist only while a Run owns execution.
 /// History restoration deliberately never allocates this structure.
 pub const RunExecution = struct {
@@ -871,6 +920,7 @@ pub const RunRecord = struct {
     projection_content_version: u64 = 1,
     /// Never encoded in history or reconstructed from a checkpoint.
     image_execution: ?OwnedImageExecution = null,
+    video_execution: ?OwnedVideoExecution = null,
     file_delivery: ?OwnedFileDelivery = null,
 
     /// Runtime-only monotonic admission time. Never restored from history.
@@ -973,7 +1023,7 @@ pub const RunRecord = struct {
     /// Restored history allocates it only when a model error is present.
     model_error_storage: ?*RunModelError = null,
     model_error_source: ?models_contract.Source = null,
-    initial_credentials: [2][]const u8 = .{ &.{}, &.{} },
+    initial_credentials: [3][]const u8 = @splat(&.{}),
     /// Main-thread view of every version that may still reach this operation.
     /// Workers use initialRedactionSecrets and their owned request copies;
     /// mutable publication always crosses the main-thread sanitizer again.
@@ -990,12 +1040,16 @@ pub const RunRecord = struct {
             self.projection_content_version = std.math.add(u64, self.projection_content_version, 1) catch 0;
     }
 
-    pub fn initialRedactionSecrets(self: *const RunRecord) [2][]const u8 {
+    pub fn initialRedactionSecrets(self: *const RunRecord) [3][]const u8 {
         return self.initial_credentials;
     }
 
+    pub fn initialCredentialViews(self: *const RunRecord) []const []const u8 {
+        return self.initial_credentials[0..if (self.initial_credentials[2].len == 0) 2 else 3];
+    }
+
     pub fn redactionSecrets(self: *const RunRecord) []const []const u8 {
-        return if (self.credential_views.items.len != 0) self.credential_views.items else &self.initial_credentials;
+        return if (self.credential_views.items.len != 0) self.credential_views.items else self.initialCredentialViews();
     }
 
     pub fn provisionalRedacted(self: *const RunRecord) bool {
@@ -1638,7 +1692,7 @@ pub const TextProjectionResult = struct {
 /// performs memory mechanics and never retains Task, Run, or Agent values.
 pub const EventProjection = struct {
     context: *anyopaque,
-    retain_generated_image_fn: *const fn (*anyopaque, *RunRecord, []const u8, []const u8, u64) EventProjectionError!*ToolView,
+    retain_generated_media_fn: *const fn (*anyopaque, *RunRecord, []const u8, []const u8, u64, GeneratedMedia) EventProjectionError!*ToolView,
     record_output_fn: ?*const fn (*anyopaque, *RunRecord, *const agent.FileDeliveryReceipt) EventProjectionError!void = null,
     max_assistant_message_bytes: usize,
     max_commentary_segments_per_run: usize,
@@ -2281,7 +2335,9 @@ pub fn applyEvent(
 fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agent.OwnedCoreEvent, projection: EventProjection) EventProjectionError!void {
     const result = envelope.event.value.known.tool_result;
     const tool = if (envelope.generated_image_path) |path|
-        try projection.retain_generated_image_fn(projection.context, run, result.id, path, task_id)
+        try projection.retain_generated_media_fn(projection.context, run, result.id, path, task_id, .image)
+    else if (envelope.generated_video_path) |path|
+        try projection.retain_generated_media_fn(projection.context, run, result.id, path, task_id, .video)
     else
         try projection.findOrCreateTool(run, result.id, result.name, result.input);
     tool.is_error = result.is_error;
@@ -2301,7 +2357,7 @@ fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agen
     );
     tool.content_truncated = content.truncated;
     tool.redacted = tool.redacted or content.redacted;
-    if (envelope.generated_image_path == null and !tool.receipt_metadata)
+    if (!tool.receipt_metadata)
         try projection.replaceFileReferences(tool, envelope, run.initial_credentials[0], task_id, run.generation);
 }
 

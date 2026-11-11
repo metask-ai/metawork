@@ -8,7 +8,8 @@ pub const max_image_slots: usize = 2;
 pub const max_image_held_bytes: usize = max_image_slots * max_image_source_bytes;
 pub const max_image_pixels: u64 = 4096 * 4096;
 pub const max_image_side: u32 = 8192;
-pub const image_chunk_bytes: usize = 262143;
+pub const media_chunk_bytes: usize = 262143;
+pub const max_media_slots: usize = max_image_slots + 1;
 pub const ImageInfo = image_container.Info;
 /// `attachment_draft` carries Host-prepared bytes for an unsent draft image;
 /// it never opens a path. `attachment_original` reads one exact retained Task
@@ -70,6 +71,7 @@ pub const State = enum {
 
 pub const Input = struct {
     source: Source = .reference,
+    generated_video: bool = false,
     completion_id: u64,
     task_id: u64,
     run_id: u64,
@@ -91,6 +93,7 @@ pub const Input = struct {
 
 pub const Completion = struct {
     source: Source = .reference,
+    generated_video: bool = false,
     entries: []const DirectoryEntry = &.{},
     completion_id: u64,
     task_id: u64,
@@ -148,6 +151,7 @@ fn isImage(bytes: []const u8) bool {
 
 const Job = struct {
     source: Source,
+    generated_video: bool,
     entries: [max_directory_entries]DirectoryEntry = undefined,
     entry_count: usize = 0,
     lane: *Lane,
@@ -168,6 +172,7 @@ const Job = struct {
     image_info: ?ImageInfo = null,
     reserved_image_bytes: usize = 0,
     reserved_original: bool = false,
+    reserved_video: bool = false,
     cancelled: std.atomic.Value(bool) = .init(false),
     created_at: std.Io.Timestamp,
     state: State = .failed,
@@ -228,17 +233,18 @@ const Job = struct {
         defer root.close(self.lane.io);
         if (self.source == .directory) return self.readDirectory(root);
         if (self.source == .attachment_original) return self.readRetainedOriginal(root);
-        if (self.source == .workspace and !validWorkspacePath(self.relative_path, false)) {
+        const relative = self.source == .workspace or self.generated_video;
+        if (relative and !validWorkspacePath(self.relative_path, false)) {
             self.state = .restricted;
             return .completed;
         }
         var parent: ?std.Io.Dir = null;
         defer if (parent) |*dir| dir.close(self.lane.io);
         var file_path: []const u8 = self.relative_path;
-        if (self.source == .workspace) {
+        if (relative) {
             const split = std.mem.lastIndexOfScalar(u8, file_path, '/');
-            parent = openWorkspaceDirectory(self.lane.io, root, if (split) |index| file_path[0..index] else "") catch {
-                self.state = .restricted;
+            parent = openWorkspaceDirectory(self.lane.io, root, if (split) |index| file_path[0..index] else "") catch |err| {
+                self.state = if (self.generated_video and (err == error.FileNotFound or err == error.NotDir)) .missing else .restricted;
                 return .completed;
             };
             if (split) |index| file_path = file_path[index + 1 ..];
@@ -271,6 +277,17 @@ const Job = struct {
             self.state = .failed;
             return .completed;
         };
+        if (self.generated_video) {
+            if (header_read < 16 or before.size > self.max_bytes or !std.mem.eql(u8, header[4..8], "ftyp")) {
+                self.state = .unsupported;
+                return .completed;
+            }
+            if (!self.lane.reserveVideo()) {
+                self.state = .busy;
+                return .completed;
+            }
+            self.reserved_video = true;
+        }
         if (header_read >= 21 and std.mem.eql(u8, header[0..4], "RIFF") and std.mem.eql(u8, header[8..16], "WEBPVP8X") and header[20] & 2 != 0) {
             self.state = .animated_image;
             return .completed;
@@ -280,7 +297,7 @@ const Job = struct {
             self.state = .image_limit;
             return .completed;
         }
-        const wanted: usize = @intCast(if (image) before.size else @min(before.size, self.max_bytes));
+        const wanted: usize = @intCast(if (image or self.generated_video) before.size else @min(before.size, self.max_bytes));
         if (image) {
             if (!self.lane.reserveImage(wanted)) {
                 self.state = .busy;
@@ -328,6 +345,11 @@ const Job = struct {
         };
         if (read != wanted or metadataChanged(before, after)) return .changed;
 
+        if (self.generated_video) {
+            if (!std.mem.eql(u8, bytes[4..8], "ftyp")) return .changed;
+            self.state = .ready;
+            return .completed;
+        }
         if (image) {
             const info = image_container.inspect(bytes) catch {
                 self.clearContent();
@@ -549,6 +571,8 @@ const Job = struct {
         self.reserved_image_bytes = 0;
         if (self.reserved_original) self.lane.releaseOriginal();
         self.reserved_original = false;
+        if (self.reserved_video) self.lane.releaseVideo();
+        self.reserved_video = false;
     }
 
     fn deinit(self: *Job) void {
@@ -579,6 +603,7 @@ pub const Lane = struct {
     image_count: usize = 0,
     image_bytes: usize = 0,
     original_held: bool = false,
+    video_reserved: bool = false,
 
     pub fn create(
         io: std.Io,
@@ -632,6 +657,7 @@ pub const Lane = struct {
         }
         job.* = .{
             .source = input.source,
+            .generated_video = input.generated_video,
             .lane = self,
             .completion_id = input.completion_id,
             .created_at = .now(self.io, .awake),
@@ -686,6 +712,7 @@ pub const Lane = struct {
         std.debug.assert(self.active_count == 0);
         std.debug.assert(self.completion_count == 0);
         std.debug.assert(self.image_count == 0 and self.image_bytes == 0 and !self.original_held);
+        std.debug.assert(!self.video_reserved);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -705,6 +732,7 @@ pub const Lane = struct {
             .job = job,
             .completion = .{
                 .source = job.source,
+                .generated_video = job.generated_video,
                 .entries = job.entries[0..job.entry_count],
                 .completion_id = job.completion_id,
                 .task_id = job.task_id,
@@ -821,6 +849,21 @@ pub const Lane = struct {
         std.debug.assert(self.image_count > 0 and self.image_bytes >= bytes);
         self.image_count -= 1;
         self.image_bytes -= bytes;
+    }
+
+    fn reserveVideo(self: *Lane) bool {
+        self.lock();
+        defer self.unlock();
+        if (!self.accepting or self.video_reserved) return false;
+        self.video_reserved = true;
+        return true;
+    }
+
+    fn releaseVideo(self: *Lane) void {
+        self.lock();
+        defer self.unlock();
+        std.debug.assert(self.video_reserved);
+        self.video_reserved = false;
     }
 
     fn publish(self: *Lane, job: *Job) void {

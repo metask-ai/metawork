@@ -117,6 +117,7 @@ const ModelEntry = struct {
     metadata: contract.ModelMetadata = .{},
     protocol: ?contract.Protocol = null,
     image_generation: bool = false,
+    video_generation: bool = false,
 };
 
 pub const CatalogSession = struct {
@@ -257,7 +258,7 @@ pub const CatalogSession = struct {
         std.debug.assert(output.len >= self.models.items.len);
         var count: usize = 0;
         for (self.models.items) |*entry| {
-            if (entry.image_generation != image_generation) continue;
+            if (image_generation and !entry.image_generation or !image_generation and entry.protocol == null) continue;
             output[count] = .{
                 .id = entry.id.view(),
                 .display_name = entry.display_name.view(),
@@ -303,6 +304,17 @@ pub const CatalogSession = struct {
     pub fn hasImageModel(self: *const CatalogSession, id: []const u8) bool {
         const index = self.findModel(id) orelse return false;
         return self.models.items[index].image_generation;
+    }
+
+    pub fn selectVideoModel(self: *const CatalogSession, preferred: []const u8) ?[]const u8 {
+        var first: ?[]const u8 = null;
+        for (self.models.items) |*entry| {
+            if (!entry.video_generation) continue;
+            const id = entry.id.view();
+            if (std.mem.eql(u8, id, preferred)) return id;
+            if (first == null) first = id;
+        }
+        return first;
     }
 
     pub fn ownerAccountId(self: *const CatalogSession) []const u8 {
@@ -376,6 +388,7 @@ const PublicModel = struct {
     display_name: PublicText(contract.Limits.model_display_name_bytes) = .{},
     metadata: contract.ModelMetadata = .{},
     image_generation: bool = false,
+    dialogue: bool = false,
 };
 
 /// Secret-free, fixed-capacity Models projection. Network workers mutate the
@@ -390,6 +403,7 @@ pub const PublicCatalog = struct {
         undefined,
     model_count: usize = 0,
     image_model_count: usize = 0,
+    entry_count: usize = 0,
 
     pub fn replaceFromSession(
         self: *PublicCatalog,
@@ -398,6 +412,7 @@ pub const PublicCatalog = struct {
         const source_models = session.models.items;
         std.debug.assert(source_models.len <= self.models.len);
         self.clear();
+        self.entry_count = source_models.len;
         for (
             source_models,
             self.models[0..source_models.len],
@@ -406,18 +421,21 @@ pub const PublicCatalog = struct {
             storage.display_name.set(source.display_name.view());
             storage.metadata = source.metadata;
             storage.image_generation = source.image_generation;
-            if (source.image_generation) self.image_model_count += 1 else self.model_count += 1;
+            storage.dialogue = source.protocol != null;
+            if (source.image_generation) self.image_model_count += 1;
+            if (storage.dialogue) self.model_count += 1;
         }
     }
 
     pub fn clear(self: *PublicCatalog) void {
         self.model_count = 0;
         self.image_model_count = 0;
+        self.entry_count = 0;
     }
 
     pub fn hasModel(self: *const PublicCatalog, id: []const u8) bool {
         for (self.models[0..self.entryCount()]) |*entry|
-            if (!entry.image_generation and std.mem.eql(u8, entry.id.view(), id)) return true;
+            if (entry.dialogue and std.mem.eql(u8, entry.id.view(), id)) return true;
         return false;
     }
 
@@ -432,17 +450,17 @@ pub const PublicCatalog = struct {
     }
 
     pub fn imageModelViews(self: *PublicCatalog) []const contract.ModelView {
-        return self.writeViews(self.model_views[self.model_count..self.entryCount()], true);
+        return self.writeViews(self.model_views[self.model_count..][0..self.image_model_count], true);
     }
 
     fn entryCount(self: *const PublicCatalog) usize {
-        return self.model_count + self.image_model_count;
+        return self.entry_count;
     }
 
     fn writeViews(self: *const PublicCatalog, output: []contract.ModelView, image_generation: bool) []const contract.ModelView {
         var count: usize = 0;
         for (self.models[0..self.entryCount()]) |*storage| {
-            if (storage.image_generation != image_generation) continue;
+            if (image_generation and !storage.image_generation or !image_generation and !storage.dialogue) continue;
             output[count] = .{
                 .id = storage.id.view(),
                 .display_name = storage.display_name.view(),
@@ -723,8 +741,8 @@ fn parseModels(
         // A dialogue endpoint does not admit a mixed media-generation model.
         const endpoints: ModelEndpointsWire = capabilities.endpoints orelse .{};
         entry.image_generation = supported(endpoints.images_generations);
-        if (!entry.image_generation) {
-            if (supported(endpoints.videos)) continue;
+        entry.video_generation = supported(endpoints.videos);
+        if (!entry.image_generation and !entry.video_generation) {
             entry.protocol = endpoints.selectedProtocol() orelse continue;
         }
         result.entries.append(allocator, entry) catch return error.OutOfMemory;
@@ -1064,7 +1082,9 @@ test "one OAuth catalog request owns both purpose projections across reset and i
     defer session.deinit();
     try session.loadModels(transport, "catalog-only-secret", "principal", null);
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expectEqual(@as(usize, 3), session.models.items.len);
+    try std.testing.expectEqual(@as(usize, 4), session.models.items.len);
+    try std.testing.expectEqualStrings("video", session.selectVideoModel("video").?);
+    try std.testing.expectEqualStrings("mixed", session.selectVideoModel("missing").?);
     try std.testing.expectEqualStrings("chat", session.firstModelId().?);
     try std.testing.expectEqual(contract.Protocol.anthropic_messages, session.modelProtocol("chat").?);
     try std.testing.expect(!session.hasModel("image"));
@@ -1090,6 +1110,7 @@ test "one OAuth catalog request owns both purpose projections across reset and i
     try std.testing.expect(public.hasImageModel("mixed"));
     try std.testing.expect(!public.hasImageModel("no-endpoint"));
     try std.testing.expect(!public.hasImageModel("video"));
+    try std.testing.expect(!public.hasModel("video"));
     fake.body = image_only;
     try session.loadModels(transport, "catalog-only-secret", "principal", null);
     public.replaceFromSession(&session);
@@ -1139,18 +1160,18 @@ test "empty catalog is a valid authoritative result" {
 }
 
 test "one catalog classifies image generation independently and preserves dialogue exclusions" {
-    const cases = [_]struct { endpoints: []const u8, count: usize, images: usize = 0 }{
+    const cases = [_]struct { endpoints: []const u8, count: usize, images: usize = 0, video: bool = false }{
         .{ .endpoints = "{\"messages\":{\"supported\":true}}", .count = 1 },
         .{ .endpoints = "{\"messages\":{\"supported\":true},\"images_generations\":null,\"videos\":{}}", .count = 1 },
         .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"images_generations\":{\"supported\":null}}", .count = 1 },
         .{ .endpoints = "{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":false},\"videos\":{\"supported\":false}}", .count = 1 },
         .{ .endpoints = "{\"messages\":{\"supported\":true},\"images_generations\":{\"supported\":true}}", .count = 0, .images = 1 },
-        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0, .video = true },
         .{ .endpoints = "{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0, .images = 1 },
         .{ .endpoints = "{\"images_generations\":{\"supported\":true}}", .count = 0, .images = 1 },
         .{ .endpoints = "{\"images_generations\":{\"supported\":false}}", .count = 0 },
         .{ .endpoints = "{\"images_generations\":{\"status\":\"supported\"}}", .count = 0 },
-        .{ .endpoints = "{\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"videos\":{\"supported\":true}}", .count = 0, .video = true },
         .{ .endpoints = "{\"embeddings\":{\"supported\":true}}", .count = 0 },
     };
     for (cases) |case| {
@@ -1158,13 +1179,13 @@ test "one catalog classifies image generation independently and preserves dialog
         defer std.testing.allocator.free(body);
         var parsed = try parseModels(std.testing.allocator, body);
         defer parsed.deinit();
-        try std.testing.expectEqual(case.count + case.images, parsed.entries.items.len);
+        try std.testing.expectEqual(case.count + case.images + @intFromBool(case.video), parsed.entries.items.len);
         var image_count: usize = 0;
         for (parsed.entries.items) |entry| {
             if (entry.image_generation) {
                 try std.testing.expect(entry.protocol == null);
                 image_count += 1;
-            } else try std.testing.expect(entry.protocol != null);
+            } else try std.testing.expect(entry.protocol != null or entry.video_generation);
         }
         try std.testing.expectEqual(case.images, image_count);
     }

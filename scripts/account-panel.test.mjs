@@ -618,7 +618,7 @@ test("signed-out settings keep local history reachable and expose sign-in", () =
   });
   assert.match(markup, /Sign in to MetaWork/);
   assert.match(markup, />Sign in with Metask</);
-  assert.doesNotMatch(markup, /id="settings-signout-title"/);
+  assert.doesNotMatch(markup, />Sign out</);
 });
 
 test("authenticated settings keep the official catalog out of model management", () => {
@@ -629,7 +629,7 @@ test("authenticated settings keep the official catalog out of model management",
     initialSection: "models",
   });
   assert.match(accountMarkup, /Metask User/);
-  assert.match(accountMarkup, /id="settings-signout-title">Sign out<\/h3>/);
+  assert.match(accountMarkup, /<button[^>]*>Sign out<\/button>/);
   assert.doesNotMatch(modelsMarkup, /Model One|Default model|Sync again/);
   assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-custom-providers/);
 });

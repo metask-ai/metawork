@@ -10,7 +10,7 @@
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
-7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage`、`DeliverFile`、`InstallMcpServer` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
+7. Agent 统一拥有固定 built-in 和 Host Tool 集合，工具声明不随登录、模型选择或 Run readiness 变化；
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
@@ -166,7 +166,9 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 `InstallMcpServer` 接收有界的结构化单服务请求：sourceUrl、typed connection、公开凭据获取/输入计划和可选 serverId；不接收秘密值、credential locator、allowlist 或模型声称的来源身份。Agent 工具合同拥有严格 schema 与编码上限。callback 验证当前 RunContext、Session generation 和终止状态，通过冻结 capability 非阻塞交接 owned 请求并立即返回 `in_progress` 与 requestId；竞争、关闭或拒绝分别返回有界分类，不等待主线程、安装 worker 或 UI，不提供查询轮询工具。请求 id 不是成功证明或 server identity，最终结果直接消费 Product 状态卡；同一 Task 的显式修复由 Host 绑定唯一失败目标。Run 正常结束不取消已接纳安装；主动 Stop 在可信终止路径取消未完成操作，shutdown 先关闭入口再释放 owner。工具说明要求使用 Host 凭据计划，不让模型用 shell/WebFetch 取 Key 或猜写客户端私有配置；工具调用仍使用现有权限，网页不授予安装权限。Product 和 Application 的安装、凭据、来源及恢复语义分别由对应领域合同拥有。
 
-普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`、`InstallMcpServer`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
+普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`、`InstallMcpServer`、`GenerateVideo`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
+
+`GenerateVideo` 只接收 `prompt`，每 Run 至多提交一次。Agent 通过冻结的 Metask target 提交 `model`、`input.prompt` 和 `parameters`，校验有界任务 ID，用同一 target 查询终态并从 `/content` 下载。查询遇到瞬时传输错误、HTTP 429 或 5xx 时在同一调用期限内退避重试，收到有效状态后恢复常规轮询间隔。永久错误、无效响应或任务 ID 不一致结束本地等待。每次请求读取当时有效的 Run 凭据副本。只接纳有界的 MP4 响应，使用 Application 的 Workspace 输出 effect 流式写入，提交后返回相对路径、MIME 与大小。Agent 按生图规则精确匹配当次保存回执与成功工具结果，以独立 sideband 将可信路径交给 Product。提交后 Stop 或超时只结束本地等待和下载，远端结果未知时报告 `outcome_unknown`，禁止重发创建请求。已知生成后的下载失败报告 `download_failed`，本地写入或发布失败报告 `output_failed`，无法确认的清理单独报告。响应附带的媒体 URL 不参与请求目标选择。
 
 图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
 

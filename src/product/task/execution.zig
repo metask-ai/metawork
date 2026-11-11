@@ -837,7 +837,7 @@ test "callback diagnostic enrichment preserves terminal decisions and bounded cr
                 .commentary_ends = &.{},
                 .tools = &.{},
                 .terminal_diagnostic = storage[0..capacity],
-                .initial_credentials = .{ "SECRET-KEY", &.{} },
+                .initial_credentials = .{ "SECRET-KEY", &.{}, &.{} },
             };
             const run = &record;
             var result: agent.TerminalResult = .{
@@ -930,7 +930,7 @@ test "model error publication owns sanitized fields and preserves primary and su
             .tools = &.{},
             .terminal_diagnostic = &storage,
             .model_error_storage = &model_error_storage,
-            .initial_credentials = .{ "SECRET", "SECRET-LONG" },
+            .initial_credentials = .{ "SECRET", "SECRET-LONG", &.{} },
         };
         var result: agent.TerminalResult = .{
             .allocator = std.testing.allocator,

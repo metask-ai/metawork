@@ -4057,6 +4057,17 @@ test("presentation anchors are strict and lossless for both messages and generat
   ];
   run.tools = [tool];
   assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+  const video = clone(value);
+  const videoReference = video.tasks[0].runs[0].tools[0].fileRefs[0];
+  delete videoReference.generatedImage;
+  videoReference.generatedVideo = true;
+  videoReference.displayPath = "generated-videos/clip.mp4";
+  assert.deepEqual(decodeWorkbenchSnapshot(video), video);
+  const conflicting = clone(video);
+  conflicting.tasks[0].runs[0].tools[0].fileRefs[0].generatedImage = true;
+  assert.throws(() => decodeWorkbenchSnapshot(conflicting), /generated media/);
+  videoReference.presentationAnchor = null;
+  assert.throws(() => decodeWorkbenchSnapshot(video), /generated media/);
   for (const order of ["0", "18446744073709551616", 1, "01"]) {
     const candidate = clone(value);
     candidate.tasks[0].runs[0].tools[0].fileRefs[0].presentationAnchor.presentationOrder =

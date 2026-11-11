@@ -9,6 +9,7 @@ pub const Error = error{
 
 pub const OwnedCoreEvent = struct {
     generated_image_path: ?[]u8 = null,
+    generated_video_path: ?[]u8 = null,
     /// Agent-verified receipt, never decoded from Core JSON or tool text.
     delivered_file: ?file_delivery.Receipt = null,
     session_id: u64,
@@ -21,6 +22,7 @@ pub const OwnedCoreEvent = struct {
     pub fn ownedBytes(self: *const OwnedCoreEvent) usize {
         return self.encoded_bytes +|
             (if (self.generated_image_path) |path| path.len else @as(usize, 0)) +|
+            (if (self.generated_video_path) |path| path.len else @as(usize, 0)) +|
             (if (self.delivered_file != null) @as(usize, @sizeOf(file_delivery.Receipt)) else 0);
     }
 
@@ -28,6 +30,7 @@ pub const OwnedCoreEvent = struct {
     /// value; call `deinit` exactly once after consuming the SDK parse owner.
     pub fn deinit(self: *OwnedCoreEvent) void {
         if (self.generated_image_path) |path| self.allocator.free(path);
+        if (self.generated_video_path) |path| self.allocator.free(path);
         self.allocator.free(self.json);
         self.event.deinit();
         self.* = undefined;
@@ -37,6 +40,7 @@ pub const OwnedCoreEvent = struct {
     /// event bytes to the transport layer without copying them again.
     pub fn takeJson(self: *OwnedCoreEvent) OwnedEventJson {
         if (self.generated_image_path) |path| self.allocator.free(path);
+        if (self.generated_video_path) |path| self.allocator.free(path);
         self.event.deinit();
         const result = OwnedEventJson{
             .session_id = self.session_id,

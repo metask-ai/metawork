@@ -59,6 +59,7 @@ pub const FileReference = struct {
     locator_kind: FileLocatorKind,
     locator: []const u8,
     range: ?FileRange,
+    generated_video: bool = false,
 };
 
 /// Callback-scoped Host metadata; callers must copy before asynchronous work.
@@ -400,6 +401,7 @@ pub const OperationEffects = struct {
     /// Caller owns until a Run record is installed; preparation consumes it.
     /// The pointer is callback-scoped and cleared from retained effects.
     image_execution: ?*?task_state.OwnedImageExecution = null,
+    video_execution: ?*?task_state.OwnedVideoExecution = null,
     file_delivery: ?*?task_state.OwnedFileDelivery = null,
     mcp_installation: ?agent.McpInstallationInput = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
@@ -1222,7 +1224,7 @@ const EventContext = struct {
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
             .record_output_fn = recordEventOutput,
-            .retain_generated_image_fn = retainEventGeneratedImage,
+            .retain_generated_media_fn = retainEventGeneratedMedia,
             .record_file_changes_fn = recordEventFileChanges,
         };
     }
@@ -3158,10 +3160,11 @@ pub const Runtime = struct {
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts, null);
         const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
+        const video = if (effects.video_execution) |owned| if (owned.*) |*value| value.input() else null else null;
         const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
         var mcp_installation = effects.mcp_installation;
         if (mcp_installation) |*value| value.task_id = task.durable.id;
-        const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation);
+        const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation, video);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -3175,6 +3178,10 @@ pub const Runtime = struct {
         if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
         if (effects.image_execution) |owned| {
             run_record.image_execution = owned.*;
+            owned.* = null;
+        }
+        if (effects.video_execution) |owned| {
+            run_record.video_execution = owned.*;
             owned.* = null;
         }
         if (effects.file_delivery) |owned| {
@@ -4179,7 +4186,7 @@ pub const Runtime = struct {
             task_state.findRun(task.durable.runs, task.runtime.active_run_id)
         else
             null;
-        if (run) |record| try record.credential_views.ensureUnusedCapacity(self.allocator, if (record.credential_views.items.len == 0) 3 else 1);
+        if (run) |record| try record.credential_views.ensureUnusedCapacity(self.allocator, if (record.credential_views.items.len == 0) record.initialCredentialViews().len + 1 else 1);
         access.updateCredential(replacement) catch |err| switch (err) {
             // The worker may enter checkpoint export after sessionState.
             error.SessionNotIdle => {
@@ -4192,7 +4199,7 @@ pub const Runtime = struct {
         execution.installCredential(replacement, generation);
         installed = true;
         if (run) |record| {
-            if (record.credential_views.items.len == 0) record.credential_views.appendSliceAssumeCapacity(&record.initial_credentials);
+            if (record.credential_views.items.len == 0) record.credential_views.appendSliceAssumeCapacity(record.initialCredentialViews());
             record.credential_views.appendAssumeCapacity(replacement);
         }
         task.runtime.credential_update_failed = false;
@@ -4219,7 +4226,7 @@ pub const Runtime = struct {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
-            changed = self.renewMetaskImages(id, scope, generation, credential) or changed;
+            changed = self.renewMetaskMedia(id, scope, generation, credential) or changed;
             if (self.metaskCredentialScope(id) != scope) continue;
             const value = credential orelse {
                 self.failCredentialRenewal(id, generation, true, false);
@@ -4255,31 +4262,36 @@ pub const Runtime = struct {
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
     }
 
-    pub fn renewMetaskImages(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: ?[]const u8) bool {
+    fn renewMetaskMedia(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: ?[]const u8) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;
-        for (task.durable.runs) |*entry| if (entry.*) |*run| if (run.image_execution) |*image| {
-            if (image.metask_authorization_scope != scope or image.credential_generation == generation) continue;
-            const source = image.credential_source orelse continue;
-            image.credential_generation = generation;
-            changed = true;
-            const key = value orelse {
-                source.invalidate();
-                continue;
-            };
-            installImageCredential(self.allocator, run, image, key) catch source.invalidate();
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            if (run.image_execution) |*image|
+                changed = renewMediaCredential(self.allocator, run, &image.authorization, scope, generation, value) or changed;
+            if (run.video_execution) |*video|
+                changed = renewMediaCredential(self.allocator, run, &video.authorization, scope, generation, value) or changed;
         };
         return changed;
     }
 
-    fn installImageCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, image: *task_state.OwnedImageExecution, value: []const u8) !void {
-        const source = image.credential_source.?;
+    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, scope: u64, generation: u64, value: ?[]const u8) bool {
+        if (authorization.scope != scope or authorization.generation == generation) return false;
+        const source = authorization.source orelse return false;
+        authorization.generation = generation;
+        if (value) |key| {
+            installMediaCredential(allocator, run, authorization, key) catch source.invalidate();
+        } else source.invalidate();
+        return true;
+    }
+
+    fn installMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, value: []const u8) !void {
+        const source = authorization.source.?;
         if (!source.matches(value)) {
-            try image.credential_versions.ensureUnusedCapacity(source.allocator, 1);
-            try run.credential_views.ensureUnusedCapacity(allocator, if (run.credential_views.items.len == 0) 3 else 1);
+            try authorization.versions.ensureUnusedCapacity(source.allocator, 1);
+            try run.credential_views.ensureUnusedCapacity(allocator, if (run.credential_views.items.len == 0) run.initialCredentialViews().len + 1 else 1);
             const owned = try source.allocator.dupe(u8, value);
-            image.credential_versions.appendAssumeCapacity(owned);
-            if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(&run.initial_credentials);
+            authorization.versions.appendAssumeCapacity(owned);
+            if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(run.initialCredentialViews());
             run.credential_views.appendAssumeCapacity(owned);
         }
         source.replace(value);
@@ -4420,6 +4432,7 @@ pub const Runtime = struct {
                         .uri => .uri,
                     },
                     .locator = reference.locator,
+                    .generated_video = reference.generated_video,
                     .range = if (reference.range) |range| .{
                         .start = .{ .line = range.start.line, .column = range.start.column },
                         .end = .{ .line = range.end.line, .column = range.end.column },
@@ -5137,12 +5150,19 @@ pub const Runtime = struct {
             changed = true;
         };
         for (&execution.terminal_receipts.generated_images) |*entry| if (entry.*) |*image| {
-            const tool = try retainGeneratedImage(&context, run, image.tool_route_digest, image.receipt.pathView(), task.durable.id);
+            const tool = try retainGeneratedMedia(&context, run, image.tool_route_digest, image.receipt.pathView(), task.durable.id, .image);
             tool.state = .completed;
             tool.is_error = false;
             entry.* = null;
             changed = true;
         };
+        if (execution.terminal_receipts.generated_video) |video| {
+            const tool = try retainGeneratedMedia(&context, run, video.tool_route_digest, video.receipt.pathView(), task.durable.id, .video);
+            tool.state = .completed;
+            tool.is_error = false;
+            execution.terminal_receipts.generated_video = null;
+            changed = true;
+        }
         return changed;
     }
 
@@ -5485,13 +5505,8 @@ pub const Runtime = struct {
                     .none, .settled => {},
                     .exporting, .failure_ready, .candidate_ready => continue,
                 }
-                if (run.image_execution) |image| {
-                    if (!effects.prepareCredentialRelease(image.candidate.input().bearer)) continue;
-                    const ready = for (image.credential_versions.items) |credential| {
-                        if (!effects.prepareCredentialRelease(credential)) break false;
-                    } else true;
-                    if (!ready) continue;
-                }
+                if (run.image_execution) |image| if (!prepareMediaCredentialRelease(effects, &image.candidate, &image.authorization)) continue;
+                if (run.video_execution) |video| if (!prepareMediaCredentialRelease(effects, &video.candidate, &video.authorization)) continue;
                 releaseRunEffects(self, run, effects);
                 releaseAutomaticTitle(&execution.automatic_title);
                 self.allocator.destroy(execution);
@@ -8421,15 +8436,15 @@ fn discardEventTool(context: *EventContext, tool: *task_state.ToolView) void {
     if (tool.file_refs) |refs| context.runtime.allocator.free(refs);
 }
 
-fn retainEventGeneratedImage(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64) task_state.EventProjectionError!*task_state.ToolView {
+fn retainEventGeneratedMedia(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
     const context: *EventContext = @ptrCast(@alignCast(raw_context));
-    return retainGeneratedImage(context, run, toolRouteDigest(id), path, task_id);
+    return retainGeneratedMedia(context, run, toolRouteDigest(id), path, task_id, media);
 }
 
-fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64) task_state.EventProjectionError!*task_state.ToolView {
-    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = "image" }};
+fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
+    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = @tagName(media) }};
     if (findToolByRouteDigest(run.tools, digest)) |tool| {
-        try replaceToolFileReferences(context, tool, &generated, true, run.initial_credentials[0], task_id, run.generation);
+        try replaceToolFileReferences(context, tool, &generated, media, run.initial_credentials[0], task_id, run.generation);
         if (!tool.receipt_metadata) {
             // Existing owned identity moves from display accounting to the
             // already bounded trusted metadata owner, without copying it.
@@ -8452,7 +8467,7 @@ fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, dige
     const id = std.fmt.bufPrint(&storage, "tool-{d}", .{run.next_activity_order}) catch unreachable;
     const owned_id = try context.effects.text.projectReceipt(id, storage.len, &.{});
     errdefer context.runtime.allocator.free(owned_id.value);
-    const name = try context.effects.text.projectReceipt("GenerateImage", context.effects.max_tool_field_bytes, run.redactionSecrets());
+    const name = try context.effects.text.projectReceipt(if (media == .image) "GenerateImage" else "GenerateVideo", context.effects.max_tool_field_bytes, run.redactionSecrets());
     errdefer context.runtime.allocator.free(name.value);
     var candidate = task_state.ToolView{
         .route_digest = digest,
@@ -8470,7 +8485,7 @@ fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, dige
         clearEventFileReferences(context, &candidate);
         if (candidate.file_refs) |refs| context.runtime.allocator.free(refs);
     }
-    try replaceToolFileReferences(context, &candidate, &generated, true, run.initial_credentials[0], task_id, run.generation);
+    try replaceToolFileReferences(context, &candidate, &generated, media, run.initial_credentials[0], task_id, run.generation);
     run.tools[slot] = candidate;
     return &run.tools[slot].?;
 }
@@ -8498,7 +8513,7 @@ fn replaceEventFileReferences(
         null;
     const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = envelope.generated_image_path orelse "" }, .title = "", .kind = "image" }};
     const values = if (envelope.generated_image_path != null) &generated else refs orelse &.{};
-    return replaceToolFileReferences(context, tool, values, envelope.generated_image_path != null, credential, task_id, run_generation);
+    return replaceToolFileReferences(context, tool, values, if (envelope.generated_image_path != null) .image else null, credential, task_id, run_generation);
 }
 
 const CoreKnownEvent = @FieldType(@FieldType(@FieldType(agent.OwnedCoreEvent, "event"), "value"), "known");
@@ -8514,7 +8529,8 @@ fn discardReferenceText(context: *EventContext, receipt: bool, value: []u8) void
     if (receipt) context.runtime.allocator.free(value) else context.effects.text.discardCandidate(value);
 }
 
-fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView, values: []const CoreFileReference, generated_image: bool, credential: []const u8, task_id: u64, run_generation: u64) task_state.EventProjectionError!void {
+fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView, values: []const CoreFileReference, media: ?task_state.GeneratedMedia, credential: []const u8, task_id: u64, run_generation: u64) task_state.EventProjectionError!void {
+    const receipt = media != null;
     var candidate = tool.*;
     candidate.file_refs = null;
     errdefer {
@@ -8554,7 +8570,8 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
             index + 1,
         );
         var owned = task_state.FileReferenceView{
-            .generated_image = generated_image,
+            .generated_image = media == .image,
+            .generated_video = media == .video,
             .id = undefined,
             .title = undefined,
             .display_path = undefined,
@@ -8572,17 +8589,17 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         var kind_live = false;
         var locator_live = false;
         errdefer {
-            if (id_live) discardReferenceText(context, generated_image, owned.id);
-            if (title_live) discardReferenceText(context, generated_image, owned.title);
-            if (display_live) discardReferenceText(context, generated_image, owned.display_path);
-            if (kind_live) discardReferenceText(context, generated_image, owned.kind);
-            if (locator_live) discardReferenceText(context, generated_image, owned.locator);
+            if (id_live) discardReferenceText(context, receipt, owned.id);
+            if (title_live) discardReferenceText(context, receipt, owned.title);
+            if (display_live) discardReferenceText(context, receipt, owned.display_path);
+            if (kind_live) discardReferenceText(context, receipt, owned.kind);
+            if (locator_live) discardReferenceText(context, receipt, owned.locator);
         }
-        owned.id = (try projectReferenceText(context, generated_image, id, id.len, &.{}, 0)).value;
+        owned.id = (try projectReferenceText(context, receipt, id, id.len, &.{}, 0)).value;
         id_live = true;
         const title = try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             reference.title,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -8598,7 +8615,7 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
             "file";
         const display = try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             display_source,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -8608,7 +8625,7 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         display_live = true;
         const kind = try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             reference.kind,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -8618,17 +8635,17 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         kind_live = true;
         owned.locator = (try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             locator,
             context.effects.max_file_ref_field_bytes,
             &.{},
             0,
         )).value;
         locator_live = true;
-        if (owned.generated_image) {
+        if (receipt) {
             if (tool.file_refs) |previous| for (previous) |entry| {
                 const old = entry orelse continue;
-                if (old.generated_image and std.mem.eql(u8, old.id, owned.id) and std.mem.eql(u8, old.locator, owned.locator)) {
+                if (old.generated_image == owned.generated_image and old.generated_video == owned.generated_video and std.mem.eql(u8, old.id, owned.id) and std.mem.eql(u8, old.locator, owned.locator)) {
                     owned.presentation_anchor = old.presentation_anchor;
                     break;
                 }
@@ -8660,11 +8677,11 @@ fn clearEventFileReferences(context: *EventContext, tool: *task_state.ToolView) 
     const refs = tool.file_refs orelse return;
     for (refs) |*entry| {
         if (entry.*) |*reference| {
-            discardReferenceText(context, reference.generated_image, reference.id);
-            discardReferenceText(context, reference.generated_image, reference.title);
-            discardReferenceText(context, reference.generated_image, reference.display_path);
-            discardReferenceText(context, reference.generated_image, reference.kind);
-            discardReferenceText(context, reference.generated_image, reference.locator);
+            discardReferenceText(context, reference.generated(), reference.id);
+            discardReferenceText(context, reference.generated(), reference.title);
+            discardReferenceText(context, reference.generated(), reference.display_path);
+            discardReferenceText(context, reference.generated(), reference.kind);
+            discardReferenceText(context, reference.generated(), reference.locator);
         }
         entry.* = null;
     }
@@ -9026,12 +9043,24 @@ fn releaseExecutionValueNoFail(
     execution.deinit();
 }
 
+fn prepareMediaCredentialRelease(effects: ReleaseEffects, candidate: *const models_contract.OwnedMediaCandidate, authorization: *const task_state.MediaCredentials) bool {
+    if (!effects.prepareCredentialRelease(candidate.input().bearer)) return false;
+    for (authorization.versions.items) |credential| if (!effects.prepareCredentialRelease(credential)) return false;
+    return true;
+}
+
 fn releaseRunEffects(self: *Runtime, run: *task_state.RunRecord, effects: ReleaseEffects) void {
     if (run.image_execution) |*image| {
         effects.redactAll(image.candidate.input().bearer);
-        for (image.credential_versions.items) |value| effects.redactAll(value);
+        for (image.authorization.versions.items) |value| effects.redactAll(value);
         image.deinit();
         run.image_execution = null;
+    }
+    if (run.video_execution) |*video| {
+        effects.redactAll(video.candidate.input().bearer);
+        for (video.authorization.versions.items) |value| effects.redactAll(value);
+        video.deinit();
+        run.video_execution = null;
     }
     if (run.file_delivery) |*delivery| {
         delivery.deinit();
@@ -9039,7 +9068,7 @@ fn releaseRunEffects(self: *Runtime, run: *task_state.RunRecord, effects: Releas
     }
     run.credential_views.deinit(self.allocator);
     run.credential_views = .empty;
-    run.initial_credentials = .{ &.{}, &.{} };
+    run.initial_credentials = @splat(&.{});
 }
 
 fn releaseProjectedSlice(
@@ -9107,11 +9136,11 @@ fn deinitFileReference(
     effects: ReleaseEffects,
     reference: *task_state.FileReferenceView,
 ) void {
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.id);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.title);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.display_path);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.kind);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.locator);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.id);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.title);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.display_path);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.kind);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.locator);
     reference.* = undefined;
 }
 
@@ -9523,7 +9552,12 @@ fn reserveRun(
         return error.RunGenerationExhausted;
     // Keep one no-allocation cancellation receipt beyond the next decision.
     try ensureUiHistory(self.allocator, task);
-    var input_record = try copyRunInput(self, task, input, &.{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} }, effects);
+    const initial_credentials = [3][]const u8{
+        execution.api_key,
+        if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{},
+        if (effects.video_execution) |owned| if (owned.*) |*video| video.candidate.input().bearer else &.{} else &.{},
+    };
+    var input_record = try copyRunInput(self, task, input, &initial_credentials, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
     const tools = try self.allocator.alloc(
         ?task_state.ToolView,
@@ -9583,7 +9617,7 @@ fn reserveRun(
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = diagnostic,
-        .initial_credentials = .{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} },
+        .initial_credentials = initial_credentials,
         .execution = run_execution,
         .model_error_storage = model_error_storage,
         .model_error_source = if (std.mem.eql(u8, execution.target.provider_id, models_contract.metask_source_id)) .metask else .custom_provider,
@@ -9663,6 +9697,7 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     clean.input_catalog = null;
     clean.prepared_input = null;
     clean.image_execution = null;
+    clean.video_execution = null;
     clean.file_delivery = null;
     clean.mcp_installation = null;
     return clean;
@@ -9775,21 +9810,19 @@ const RetainedCredentials = struct {
     task: *const task_state.Task,
     index: usize = 0,
     retired_index: usize = 0,
-    image_run_index: usize = 0,
-    image_version_index: usize = 0,
+    media_index: usize = 0,
+    media_version_index: usize = 0,
 
     fn next(self: *RetainedCredentials) ?[]const u8 {
-        while (self.index < 3 + self.task.durable.runs.len) {
+        while (self.index < 3) {
             const index = self.index;
             self.index += 1;
             if (index == 0) {
                 if (self.task.runtime.executionConst()) |execution| return execution.secret;
             } else if (index == 1) {
                 if (self.task.runtime.restore_job) |job| return job.credential;
-            } else if (index == 2) {
-                if (self.task.runtime.restore_job) |job| if (job.rebind) |rebind| return rebind.original_credential;
             } else {
-                if (self.task.durable.runs[index - 3]) |*run| if (run.image_execution) |*image| return image.candidate.input().bearer;
+                if (self.task.runtime.restore_job) |job| if (job.rebind) |rebind| return rebind.original_credential;
             }
         }
         if (self.task.runtime.executionConst()) |execution| {
@@ -9799,16 +9832,24 @@ const RetainedCredentials = struct {
                 return value;
             }
         }
-        while (self.image_run_index < self.task.durable.runs.len) {
-            if (self.task.durable.runs[self.image_run_index]) |*run| if (run.image_execution) |*image| {
-                if (self.image_version_index < image.credential_versions.items.len) {
-                    const value = image.credential_versions.items[self.image_version_index];
-                    self.image_version_index += 1;
-                    return value;
+        while (self.media_index / 2 < self.task.durable.runs.len) {
+            if (self.task.durable.runs[self.media_index / 2]) |*run| {
+                const Secrets = struct { candidate: *const models_contract.OwnedMediaCandidate, authorization: *const task_state.MediaCredentials };
+                const media: ?Secrets = if (self.media_index % 2 == 0)
+                    if (run.image_execution) |*image| .{ .candidate = &image.candidate, .authorization = &image.authorization } else null
+                else if (run.video_execution) |*video|
+                    .{ .candidate = &video.candidate, .authorization = &video.authorization }
+                else
+                    null;
+                if (media) |value| {
+                    const index = self.media_version_index;
+                    self.media_version_index += 1;
+                    if (index == 0) return value.candidate.input().bearer;
+                    if (index <= value.authorization.versions.items.len) return value.authorization.versions.items[index - 1];
                 }
-            };
-            self.image_run_index += 1;
-            self.image_version_index = 0;
+            }
+            self.media_index += 1;
+            self.media_version_index = 0;
         }
         return null;
     }

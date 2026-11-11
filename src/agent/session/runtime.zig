@@ -18,6 +18,7 @@ const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
 const image = @import("../image_generation.zig");
 const image_tool = @import("../generate_image.zig");
+const video_tool = @import("../generate_video.zig");
 const delivery_tool = @import("agent_file_delivery");
 const mcp_install = @import("../mcp_install.zig");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
@@ -73,6 +74,7 @@ pub const Runtime = struct {
     image_results_released: std.atomic.Value(usize) = .init(0),
     delivery_results_outstanding: std.atomic.Value(usize) = .init(0),
     mcp_results_outstanding: std.atomic.Value(usize) = .init(0),
+    video_results_outstanding: std.atomic.Value(usize) = .init(0),
     io: std.Io,
     allocator: std.mem.Allocator,
     api: sdk.Api,
@@ -207,7 +209,15 @@ pub const Runtime = struct {
         mcp_descriptor.input_schema_json = sdk.bytesView(mcp_install.schema);
         mcp_descriptor.execute = Session.executeMcpInstallation;
         mcp_descriptor.release_result = Session.releaseMcpInstallationResult;
-        const host_tools = [_]wire.HostToolV1{ image_descriptor, delivery_descriptor, mcp_descriptor };
+        var video_descriptor = std.mem.zeroes(wire.HostToolV1);
+        video_descriptor.struct_size = @sizeOf(wire.HostToolV1);
+        video_descriptor.ctx = self;
+        video_descriptor.name = sdk.bytesView(video_tool.name);
+        video_descriptor.description = sdk.bytesView(video_tool.description);
+        video_descriptor.input_schema_json = sdk.bytesView(video_tool.schema);
+        video_descriptor.execute = Session.executeVideo;
+        video_descriptor.release_result = Session.releaseVideoResult;
+        const host_tools = [_]wire.HostToolV1{ image_descriptor, delivery_descriptor, mcp_descriptor, video_descriptor };
         runtime_config.host_tools = &host_tools;
         runtime_config.host_tool_count = host_tools.len;
         const mcp_registry_generation = if (limits.mcp_input) |input|
@@ -257,6 +267,16 @@ pub const Runtime = struct {
             .mcp_servers = mcp_servers,
         };
         return self;
+    }
+
+    fn allocAllowedTools(self: *Runtime) ![]wire.BytesViewV1 {
+        const names = [_][]const u8{ image_tool.name, delivery_tool.name, mcp_install.name, video_tool.name };
+        const views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + names.len);
+        for (capabilities.builtins, views[0..capabilities.builtins.len]) |tool, *view|
+            view.* = sdk.bytesView(capabilities.wireName(tool));
+        for (names, views[capabilities.builtins.len..]) |name, *view|
+            view.* = sdk.bytesView(name);
+        return views;
     }
 
     /// Performs one synchronous AgentCore discovery call. The caller decides
@@ -992,13 +1012,8 @@ pub const Runtime = struct {
         // active-Run journal remains disabled until a crash-recovery policy is
         // defined for its intent/result evidence.
         host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
-        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + 3);
+        const allowed_views = try self.allocAllowedTools();
         defer self.allocator.free(allowed_views);
-        for (capabilities.builtins, 0..) |builtin, index|
-            allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
-        allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
-        allowed_views[capabilities.builtins.len + 1] = sdk.bytesView(delivery_tool.name);
-        allowed_views[capabilities.builtins.len + 2] = sdk.bytesView(mcp_install.name);
         host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
         host_config.allowed_tool_count = allowed_views.len;
         var config = std.mem.zeroes(wire.SessionCreateConfigV1);
@@ -1127,16 +1142,8 @@ pub const Runtime = struct {
             secureZero(secret);
             self.allocator.free(secret);
         }
-        const allowed_views = try self.allocator.alloc(
-            wire.BytesViewV1,
-            capabilities.builtins.len + 3,
-        );
+        const allowed_views = try self.allocAllowedTools();
         defer self.allocator.free(allowed_views);
-        for (capabilities.builtins, 0..) |builtin, index|
-            allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
-        allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
-        allowed_views[capabilities.builtins.len + 1] = sdk.bytesView(delivery_tool.name);
-        allowed_views[capabilities.builtins.len + 2] = sdk.bytesView(mcp_install.name);
 
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
@@ -1531,6 +1538,7 @@ pub const Runtime = struct {
         std.debug.assert(self.image_results_created.load(.acquire) == self.image_results_released.load(.acquire));
         std.debug.assert(self.delivery_results_outstanding.load(.acquire) == 0);
         std.debug.assert(self.mcp_results_outstanding.load(.acquire) == 0);
+        std.debug.assert(self.video_results_outstanding.load(.acquire) == 0);
         self.events.deinit();
         self.mcp_servers.deinit();
         for (self.retired_mcp_servers.items) |*servers| servers.deinit();

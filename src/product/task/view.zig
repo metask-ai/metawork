@@ -955,8 +955,8 @@ fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool:
                 try text_projection.writeJson(writer, reference.title);
                 writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
                 try text_projection.writeJson(writer, reference.display_path);
-                if (reference.generated_image) {
-                    writer.writeAll(",\"generatedImage\":true,\"presentationAnchor\":") catch return error.SnapshotTooLarge;
+                if (reference.generated()) {
+                    writer.writeAll(if (reference.generated_video) ",\"generatedVideo\":true,\"presentationAnchor\":" else ",\"generatedImage\":true,\"presentationAnchor\":") catch return error.SnapshotTooLarge;
                     if (reference.presentation_anchor) |anchor| {
                         writer.print("{{\"afterOutputCount\":{d},\"presentationOrder\":\"{d}\"}}", .{ anchor.after_output_count, anchor.presentation_order }) catch return error.SnapshotTooLarge;
                     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -1004,6 +1004,8 @@ pub const OwnedToolProjection = struct {
                 .locator_kind = .workspace_path,
                 .locator = &.{},
                 .generated_image = ref.generated_image,
+                .generated_video = ref.generated_video,
+                .presentation_anchor = ref.presentation_anchor,
             } else null;
         };
         value.file_refs = references;

@@ -11,6 +11,7 @@ const agent_protocol = @import("product_agent_protocol_adapter");
 const product_task = @import("metawork_product_task");
 const product_workspace = @import("metawork_product_workspace");
 const image_output = @import("image_output");
+const video_output = @import("video_output");
 
 pub const ProbeNotifier = struct {
     context: *anyopaque,
@@ -286,15 +287,24 @@ pub const Coordinator = struct {
         return .{ .context = self, .prepare_fn = prepareImageRun };
     }
 
-    fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
-        const self: *Coordinator = @ptrCast(@alignCast(context));
+    pub fn videoRunPreparation(self: *Coordinator) control_ports.VideoRunPreparation {
+        return .{ .context = self, .prepare_fn = prepareVideoRun };
+    }
+
+    const PreparedMedia = struct {
+        candidate: models_contract.OwnedMediaCandidate,
+        scope: u64,
+        generation: u64,
+    };
+
+    fn prepareMedia(self: *Coordinator, kind: models_contract.MediaKind) ?PreparedMedia {
         self.assertMainThread();
         const authorization = self.account.authorizationState() orelse return null;
-        const transport = self.completion_transport orelse return null;
         var lease = (self.account.authorizationLease() catch return null) orelse return null;
         defer lease.deinit();
         if (authorization.generation != lease.authorization_generation) return null;
-        var candidate = switch (self.management.prepareImageCandidate(.{
+        const candidate = switch (self.management.prepareMediaCandidate(.{
+            .kind = kind,
             .principal_ref = lease.principal_ref,
             .authorization_generation = lease.authorization_generation,
             .bearer = lease.access_token,
@@ -302,7 +312,14 @@ pub const Coordinator = struct {
             .ready => |value| value,
             .rejected => return null,
         };
-        defer candidate.deinit();
+        return .{ .candidate = candidate, .scope = authorization.scope, .generation = authorization.generation };
+    }
+
+    fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        const transport = self.completion_transport orelse return null;
+        var prepared = self.prepareMedia(.image) orelse return null;
+        defer prepared.candidate.deinit();
         const allocator = std.heap.c_allocator;
         const output = allocator.create(image_output.Output) catch return null;
         output.* = image_output.Output.init(allocator, self.io, self.main_thread_id, workspace) catch {
@@ -310,17 +327,48 @@ pub const Coordinator = struct {
             return null;
         };
         var result: product_task.OwnedImageExecution = .{
-            .candidate = candidate.take(),
+            .candidate = prepared.candidate.take(),
             .transport = transport,
             .output = output.port(),
             .output_owner = output,
             .release_output_fn = releaseImageOutput,
         };
-        result.enableCredentialRenewal(std.heap.c_allocator, self.io, authorization.scope, authorization.generation) catch {
+        result.enableCredentialRenewal(allocator, self.io, prepared.scope, prepared.generation) catch {
             result.deinit();
             return null;
         };
         return result;
+    }
+
+    fn prepareVideoRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedVideoExecution {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        const transport = self.completion_transport orelse return null;
+        var prepared = self.prepareMedia(.video) orelse return null;
+        defer prepared.candidate.deinit();
+        const allocator = std.heap.c_allocator;
+        const output = allocator.create(video_output.Output) catch return null;
+        output.* = video_output.Output.init(allocator, self.io, self.main_thread_id, workspace) catch {
+            allocator.destroy(output);
+            return null;
+        };
+        var result: product_task.OwnedVideoExecution = .{
+            .candidate = prepared.candidate.take(),
+            .transport = transport,
+            .output = output.port(),
+            .release_output_fn = releaseVideoOutput,
+        };
+        result.authorization.enable(allocator, self.io, result.candidate.input().bearer, prepared.scope, prepared.generation) catch {
+            result.deinit();
+            return null;
+        };
+        return result;
+    }
+
+    fn releaseVideoOutput(context: *anyopaque) void {
+        const output: *video_output.Output = @ptrCast(@alignCast(context));
+        const allocator = output.allocator;
+        output.deinit();
+        allocator.destroy(output);
     }
 
     fn releaseImageOutput(context: *anyopaque) void {
@@ -617,7 +665,7 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
         expected_token: []const u8 = "image-access-a",
         model: []const u8 = "image-model-a",
 
-        fn prepare(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
+        fn prepare(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (!self.available) return .{ .rejected = .model_not_found };
             self.calls += 1;
@@ -625,7 +673,7 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
             std.testing.expectEqual(self.expected_generation, input.authorization_generation) catch unreachable;
             std.testing.expectEqualStrings(self.expected_token, input.bearer) catch unreachable;
             if (self.reject) return .{ .rejected = .generation_mismatch };
-            return .{ .ready = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, input.bearer, 7) catch unreachable };
+            return .{ .ready = models_contract.OwnedMediaCandidate.copy(std.testing.allocator, .image, self.model, input.bearer, 7) catch unreachable };
         }
         fn accountHttp(_: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
             if (request.kind != .refresh_token) return error.ProtocolFailed;
@@ -659,7 +707,7 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
     // selection behavior are independently tested against the real Models owner.
     var management: control_ports.ModelsManagement = undefined;
     management.context = &fixture;
-    management.prepare_image_candidate_fn = Fixture.prepare;
+    management.prepare_media_candidate_fn = Fixture.prepare;
     var coordinator = Coordinator.init(&account, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
     coordinator.setCompletionTransport(.{ .perform_fn = Fixture.imageHttp });
     var tmp = std.testing.tmpDir(.{});

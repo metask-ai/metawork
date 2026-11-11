@@ -271,6 +271,7 @@ export type PresentationAnchor = {
 export type FileReferenceView = {
   presentationAnchor?: PresentationAnchor | null;
   generatedImage?: true;
+  generatedVideo?: true;
   id: string;
   title: string;
   displayPath: string;
@@ -294,8 +295,15 @@ export type FilePreviewImage = {
   subscribe: (changed: () => void) => () => void;
   beginDecode: (signal: AbortSignal) => Promise<() => void>;
 };
+export type FilePreviewVideo = {
+  readonly src: string;
+  valid: () => boolean;
+  subscribe: (changed: () => void) => () => void;
+};
+export const maxPreviewVideoBytes = 64 * 1024 * 1024;
 export type FilePreview = {
   image?: FilePreviewImage;
+  video?: FilePreviewVideo;
   state:
     "ready" | "missing" | "restricted" | "unsupported" | "changing" | "error";
   content: string;
@@ -306,7 +314,7 @@ export type FilePreview = {
 };
 export type FilePreviewResponse = Omit<
   FilePreview,
-  "image" | "state" | "reason" | "release"
+  "image" | "video" | "state" | "reason" | "release"
 > & {
   state: FilePreview["state"] | "busy" | "stale_security";
   reason?: "image_limit" | "animated_image";
@@ -316,6 +324,13 @@ export type FilePreviewResponse = Omit<
     sizeBytes: number;
     width: number;
     height: number;
+    chunkBytes: number;
+    securityEpoch: string;
+  };
+  video?: {
+    token: string;
+    mediaType: "video/mp4";
+    sizeBytes: number;
     chunkBytes: number;
     securityEpoch: string;
   };
