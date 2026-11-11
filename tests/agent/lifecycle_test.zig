@@ -2882,7 +2882,7 @@ test "canonical AgentCore management and Workspace resolve all personal and proj
     }
 }
 
-test "canonical AgentCore applies Product fixed source priorities across management Workspace and shared roots" {
+test "canonical AgentCore applies standard Skill root priorities and ignores retired sources across management Workspace and shared roots" {
     const sources = fixture.product_skill.sources;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2893,13 +2893,10 @@ test "canonical AgentCore applies Product fixed source priorities across managem
     for (dirs) |dir| try tmp.dir.createDirPath(std.testing.io, dir);
     const cases = .{
         .{ "agents", 0b1111111, "agents.workspace.default", "agents.workspace.default", "agents.workspace.default" },
-        .{ "codex", 0b1101110, "compat.codex.user", "compat.codex.workspace", "compat.codex.workspace" },
-        .{ "claude", 0b1001100, "compat.claude.user", "compat.claude.workspace", "compat.claude.workspace" },
         .{ "builtin", 0b0001000, "metawork.builtin", "metawork.builtin", "metawork.builtin" },
-        .{ "scope", 0b1000001, "agents.workspace.default", "compat.claude.workspace", "agents.workspace.default" },
         .{ "personal", 0b0001111, "agents.workspace.default", "agents.user.default", "agents.workspace.default" },
-        .{ "personal-codex", 0b0001110, "compat.codex.user", "compat.codex.user", "compat.codex.workspace" },
-        .{ "personal-claude", 0b0001100, "compat.claude.user", "compat.claude.user", "compat.claude.workspace" },
+        .{ "retired-claude", 0b1000100, "", "", "" },
+        .{ "retired-codex", 0b0100010, "", "", "" },
     };
     inline for (cases) |case| {
         for (dirs, 0..) |dir, index| {
@@ -2924,40 +2921,37 @@ test "canonical AgentCore applies Product fixed source priorities across managem
         runtime.deinit();
     }
     for ([_]?[]const u8{ null, workspace, home }, 0..) |root, purpose| {
-        var discovery = try sources.discover(std.testing.io, std.testing.allocator, home, root, .{ .values = @splat(true) });
+        var discovery = try sources.discover(std.testing.io, std.testing.allocator, home, root);
         defer discovery.deinit();
         try discovery.appendBuiltin(std.testing.io, builtin_root);
-        for (0..2) |_| {
-            var acquisition = try runtime.querySkillCatalog(.{
-                .canonical_user_home = home,
-                .target = if (root) |path| .{ .workspace = .{ .canonical_root = path, .epoch = "priority" } } else .management,
-                .additional_sources = try discovery.additionalSources(),
-                .default_source_priority = sources.default_source_priority,
-            });
-            defer acquisition.projection.deinit();
-            defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
-            try std.testing.expectEqual(lifecycle.CatalogHealth.healthy, acquisition.projection.health);
-            try std.testing.expectEqual(cases.len, acquisition.projection.skills.len);
-            inline for (cases) |case| {
-                var found = false;
-                for (acquisition.projection.skills) |skill| {
-                    if (!std.mem.eql(u8, case[0], skill.invocation_name)) continue;
-                    const expected = switch (purpose) {
-                        0 => case[2],
-                        1 => case[3],
-                        else => case[4],
-                    };
-                    try std.testing.expectEqualStrings(expected, skill.source_instance_id);
-                    found = true;
-                }
-                try std.testing.expect(found);
+        var acquisition = try runtime.querySkillCatalog(.{
+            .canonical_user_home = home,
+            .target = if (root) |path| .{ .workspace = .{ .canonical_root = path, .epoch = "priority" } } else .management,
+            .additional_sources = try discovery.additionalSources(),
+            .default_source_priority = sources.default_source_priority,
+        });
+        defer acquisition.projection.deinit();
+        defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
+        try std.testing.expectEqual(lifecycle.CatalogHealth.healthy, acquisition.projection.health);
+        try std.testing.expectEqual(cases.len - 2, acquisition.projection.skills.len);
+        inline for (cases) |case| {
+            var found = false;
+            for (acquisition.projection.skills) |skill| {
+                if (!std.mem.eql(u8, case[0], skill.invocation_name)) continue;
+                const expected = switch (purpose) {
+                    0 => case[2],
+                    1 => case[3],
+                    else => case[4],
+                };
+                try std.testing.expectEqualStrings(expected, skill.source_instance_id);
+                found = true;
             }
-            std.mem.reverse(lifecycle.CatalogSource, discovery.owned_sources[0..discovery.count]);
+            try std.testing.expectEqual(case[2].len != 0, found);
         }
     }
     // An invalid higher-ranked definition must not expose a lower source.
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "home/.agents/skills/personal/SKILL.md", .data = "\xff" });
-    var discovery = try sources.discover(std.testing.io, std.testing.allocator, home, null, .{ .values = @splat(true) });
+    var discovery = try sources.discover(std.testing.io, std.testing.allocator, home, null);
     defer discovery.deinit();
     try discovery.appendBuiltin(std.testing.io, builtin_root);
     var broken = try runtime.querySkillCatalog(.{
@@ -2969,7 +2963,7 @@ test "canonical AgentCore applies Product fixed source priorities across managem
     defer broken.projection.deinit();
     defer runtime.releaseSkillCatalog(broken.lease) catch unreachable;
     try std.testing.expectEqual(lifecycle.CatalogHealth.degraded, broken.projection.health);
-    try std.testing.expectEqual(cases.len - 1, broken.projection.skills.len);
+    try std.testing.expectEqual(cases.len - 3, broken.projection.skills.len);
     for (broken.projection.skills) |skill| try std.testing.expect(!std.mem.eql(u8, "personal", skill.invocation_name));
     try std.testing.expectEqual(@as(usize, 1), broken.projection.issues.len);
     try std.testing.expectEqual(lifecycle.CatalogIssueCode.invalid_definition, broken.projection.issues[0].code);

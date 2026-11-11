@@ -444,8 +444,6 @@ pub fn retryVerification(
     if (current.recovery == null)
         return .{ .install_id = install_id, .verification_pending = false };
     if (current.state != .pending_verification) return error.RecoveryUnavailable;
-    if (context.state.source_settings == null)
-        return .{ .install_id = install_id, .verification_pending = true };
     setReconciliation(
         context,
         install_id,

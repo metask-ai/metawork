@@ -25,8 +25,6 @@ pub const retry_automatic_workspace_root = "metawork.workspaces.retryAutomaticRo
 pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
 pub const refresh_skill_catalog = "metawork.skills.refreshCatalog";
 pub const set_skill_enabled = "metawork.skills.setEnabled";
-pub const set_skill_source_enabled = "metawork.skills.setSourceEnabled";
-pub const recover_skill_source_settings = "metawork.skills.recoverSourceSettings";
 pub const choose_skill_import = "metawork.skills.chooseImport";
 pub const prepare_skill_import = "metawork.skills.prepareImport";
 pub const install_skill = "metawork.skills.install";
@@ -139,8 +137,6 @@ pub const product = [_][]const u8{
     refresh_workspace_skill_catalog,
     refresh_skill_catalog,
     set_skill_enabled,
-    set_skill_source_enabled,
-    recover_skill_source_settings,
     choose_skill_import,
     prepare_skill_import,
     install_skill,

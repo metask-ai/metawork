@@ -75,11 +75,6 @@ pub const TextProjection = view.TextProjection;
 pub const ScopedCatalog = view.ScopedCatalog;
 pub const WorkspaceCatalogs = view.WorkspaceCatalogs;
 pub const ViewError = view.Error;
-pub const SourceConfiguration = state.SourceConfiguration;
-pub const SourceRestore = state.SourceRestore;
-pub const SourceSettingsResult = state.SourceSettingsResult;
-pub const SourceSettingsView = state.SourceSettingsView;
-pub const SourceRecoveryAction = enum { reread, reset };
 
 /// Borrowed verified Application source. The caller keeps its current-version
 /// reference until a later replacement; each dispatched job retains its own.
@@ -190,7 +185,6 @@ const CatalogJob = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     source_roots: ports.SourceRoots,
-    selection: sources.Selection,
     personal_only: bool = false,
     root_checks: ?sources.RootChecks = null,
     verification: ?state.Reconciliation = null,
@@ -225,7 +219,6 @@ const CatalogJob = struct {
             self.allocator,
             self.canonical_user_home,
             if (self.scope == .personal or self.personal_only) null else self.canonical_root,
-            self.selection,
         ) catch return;
         defer discovery.deinit();
         if (self.source_roots.builtin_root) |root| discovery.appendBuiltin(self.io, root) catch return;
@@ -336,7 +329,7 @@ pub const Runtime = struct {
         errdefer if (home) |value| allocator.free(value);
         const workspaces = try allocator.alloc(?WorkspaceCatalog, configuration.max_workspaces);
         @memset(workspaces, null);
-        var result: Runtime = .{
+        return .{
             .allocator = allocator,
             .io = io,
             .ports = effect_ports,
@@ -344,127 +337,19 @@ pub const Runtime = struct {
             .canonical_user_home = home,
             .workspaces = workspaces,
         };
-        result.initializeSources(configuration.state.sources.restored);
-        return result;
-    }
-
-    fn initializeSources(self: *Runtime, restored: SourceRestore) void {
-        const loaded = switch (restored) {
-            .unavailable => return,
-            .read_failed => {
-                self.state.source_health = .read_failed;
-                return;
-            },
-            .loaded => |value| value,
-        };
-        switch (loaded) {
-            .ready => |settings| {
-                self.state.source_settings = settings;
-                self.state.source_revision_high_water = settings.revision;
-                self.state.source_health = .ready;
-            },
-            .absent => {
-                const file_store = self.state.source_file_store orelse return;
-                file_store.commit(.{}) catch |err| {
-                    self.state.source_health = if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .write_failed;
-                    if (err == error.PersistenceOutcomeUnknown) self.state.source_revision_high_water = 1;
-                    return;
-                };
-                self.state.source_settings = .{};
-                self.state.source_revision_high_water = 1;
-                self.state.source_health = .ready;
-            },
-            .invalid => self.state.source_health = .corrupt,
-            .unsupported_schema => self.state.source_health = .unsupported_schema,
-            .too_large => self.state.source_health = .too_large,
-        }
-    }
-
-    pub fn sourceSettings(self: *const Runtime) SourceSettingsView {
-        const available = self.state.source_file_store != null and !self.shutting_down and
-            self.state.reconciliation == null and self.state.source_recovery_generation != std.math.maxInt(u64) and
-            self.state.source_revision_high_water != std.math.maxInt(u64);
-        const can_reread = available and self.state.source_settings == null;
-        return .{
-            .settings = self.state.source_settings,
-            .health = self.state.source_health,
-            .can_set_enabled = available and self.state.source_settings != null,
-            .can_reread = can_reread,
-            .can_reset = can_reread and (self.state.source_health == .corrupt or self.state.source_health == .missing),
-            .recovery_token = if (can_reread) self.state.source_recovery_generation else null,
-        };
     }
 
     pub const SourceDiscoveryView = state.SourceDiscoveryView;
 
     pub fn personalSourceDiscovery(self: *const Runtime) ?SourceDiscoveryView {
-        const settings = self.state.source_settings orelse return null;
         if (self.canonical_user_home == null) return null;
-        return .{ .selection = settings.selection.relevant(.user), .checks = self.state.catalog.source_checks, .checking = self.personal_job != null or self.personal_reschedule_pending };
+        return .{ .checks = self.state.catalog.source_checks, .checking = self.personal_job != null or self.personal_reschedule_pending };
     }
 
     pub fn workspaceSourceDiscovery(self: *const Runtime, id: u64, epoch: u64) ?SourceDiscoveryView {
-        const settings = self.state.source_settings orelse return null;
         const workspace = self.findWorkspaceConst(id) orelse return null;
         if (workspace.epoch != epoch or !workspace.authorized or workspace.personal_only or self.canonical_user_home == null) return null;
-        return .{ .selection = settings.selection, .checks = workspace.control.source_checks, .checking = workspace.job != null or workspace.reschedule_pending };
-    }
-
-    pub fn setSourceEnabled(
-        self: *Runtime,
-        brand: sources.Brand,
-        enabled: bool,
-        expected_revision: u64,
-        budget: ProjectionBudget,
-    ) SourceSettingsResult {
-        if (self.shutting_down) return .{ .reason = .shutting_down };
-        if (self.state.reconciliation != null) return .{ .reason = .busy };
-        if (self.state.source_file_store == null) return .{ .reason = .source_settings_unavailable };
-        const current = self.state.source_settings orelse return .{ .reason = .source_settings_unavailable };
-        const candidate = current.replacing(brand, enabled, expected_revision) catch |err|
-            return .{ .reason = if (err == error.StaleRevision) .stale_revision else .revision_exhausted };
-        if (candidate.revision == current.revision)
-            return .{ .applied = true, .revision = current.revision };
-        const personal_changed = !current.selection.relevant(.user).eql(candidate.selection.relevant(.user));
-        if (!self.sourceGenerationsAvailable(personal_changed)) return .{ .reason = .revision_exhausted };
-        return self.commitSourceSettings(candidate, budget);
-    }
-
-    pub fn recoverSourceSettings(
-        self: *Runtime,
-        action: SourceRecoveryAction,
-        expected_recovery_token: u64,
-        budget: ProjectionBudget,
-    ) SourceSettingsResult {
-        if (self.shutting_down) return .{ .reason = .shutting_down };
-        if (expected_recovery_token != self.state.source_recovery_generation)
-            return .{ .reason = .stale_recovery_token };
-        if (self.state.reconciliation != null) return .{ .reason = .busy };
-        const recovery = self.sourceSettings();
-        if (!recovery.can_reread or (action == .reset and !recovery.can_reset))
-            return .{ .reason = .recovery_not_allowed };
-        if (!self.sourceGenerationsAvailable(true)) return .{ .reason = .revision_exhausted };
-        const loaded = self.state.source_file_store.?.load(self.allocator) catch {
-            self.markSourcesUnavailable(.read_failed, budget);
-            return .{ .reason = .read_failed, .changed = true };
-        };
-        var candidate: sources.Settings = switch (loaded) {
-            .ready => |settings| settings,
-            .absent, .invalid => if (action == .reset) .{} else {
-                self.markSourcesUnavailable(if (loaded == .absent) .missing else .corrupt, budget);
-                return .{ .reason = .source_settings_unavailable, .changed = true };
-            },
-            .unsupported_schema, .too_large => {
-                self.markSourcesUnavailable(if (loaded == .too_large) .too_large else .unsupported_schema, budget);
-                return .{ .reason = .source_settings_unavailable, .changed = true };
-            },
-        };
-        self.state.source_revision_high_water = @max(self.state.source_revision_high_water, candidate.revision);
-        candidate.revision = nextGeneration(self.state.source_revision_high_water) orelse
-            return .{ .reason = .revision_exhausted, .changed = true };
-        // Even a valid reread is durably reconfirmed. Old revisions cannot be
-        // reused after recovery, including a file restored from an older copy.
-        return self.commitSourceSettings(candidate, budget);
+        return .{ .checks = workspace.control.source_checks, .checking = workspace.job != null or workspace.reschedule_pending };
     }
 
     /// Owner-thread handoff only. It never touches the filesystem or changes a
@@ -482,7 +367,7 @@ pub const Runtime = struct {
         // A source switch must not silently complete an asset transaction that
         // was prepared against another query authority.
         if (self.state.reconciliation != null) return error.CatalogLoading;
-        if (!self.sourceGenerationsAvailable(true)) return error.CatalogRequestGenerationExhausted;
+        if (!self.sourceGenerationsAvailable()) return error.CatalogRequestGenerationExhausted;
         self.ports.source_roots.builtin_root = source.root;
         self.ports.source_roots.builtin_lifetime = source.lifetime;
         self.invalidateSourceControl(&self.state.catalog, budget);
@@ -495,63 +380,18 @@ pub const Runtime = struct {
         return true;
     }
 
-    fn sourceGenerationsAvailable(self: *const Runtime, personal_changed: bool) bool {
-        if (self.state.source_recovery_generation == std.math.maxInt(u64) or
-            (personal_changed and self.state.catalog.request_generation == std.math.maxInt(u64))) return false;
-        for (self.workspaces) |entry| if (entry) |workspace| {
-            if (workspace.authorized and (!workspace.personal_only or personal_changed) and workspace.control.request_generation == std.math.maxInt(u64)) return false;
-        };
-        return true;
-    }
-
-    fn commitSourceSettings(self: *Runtime, candidate: sources.Settings, budget: ProjectionBudget) SourceSettingsResult {
-        const previous = self.state.source_settings;
-        self.state.source_file_store.?.commit(candidate) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) {
-                self.state.source_revision_high_water = @max(self.state.source_revision_high_water, candidate.revision);
-                self.markSourcesUnavailable(.outcome_unknown, budget);
-                return .{ .reason = .persistence_outcome_unknown, .changed = true };
-            }
-            const changed = self.state.source_health != .write_failed;
-            self.state.source_health = .write_failed;
-            return .{ .reason = .write_failed, .changed = changed };
-        };
-        self.state.source_settings = candidate;
-        self.state.source_health = .ready;
-        self.state.source_revision_high_water = @max(self.state.source_revision_high_water, candidate.revision);
-        self.state.source_recovery_generation += 1;
-        const personal_changed = if (previous) |old|
-            !old.selection.relevant(.user).eql(candidate.selection.relevant(.user))
-        else
-            true;
-        if (personal_changed) {
-            self.invalidateSourceControl(&self.state.catalog, budget);
-            self.personal_reschedule_pending = true;
-        }
-        for (self.workspaces) |*entry| if (entry.*) |*workspace| {
-            if (!workspace.authorized or (workspace.personal_only and !personal_changed)) continue;
-            self.invalidateSourceControl(&workspace.control, budget);
-            workspace.reschedule_pending = true;
-        };
-        return .{ .applied = true, .revision = candidate.revision, .changed = true };
-    }
-
     fn invalidateSourceControl(self: *Runtime, control: *state.CatalogControl, budget: ProjectionBudget) void {
         control.request_generation = nextGeneration(control.request_generation) orelse std.math.maxInt(u64);
         control.source_checks = null;
         self.invalidateControlWithBudget(control, budget);
     }
 
-    fn markSourcesUnavailable(self: *Runtime, health: state.SourceHealth, budget: ProjectionBudget) void {
-        self.state.source_settings = null;
-        self.state.source_health = health;
-        self.state.source_recovery_generation = nextGeneration(self.state.source_recovery_generation) orelse std.math.maxInt(u64);
-        self.personal_reschedule_pending = false;
-        self.invalidateSourceControl(&self.state.catalog, budget);
-        for (self.workspaces) |*entry| if (entry.*) |*workspace| {
-            workspace.reschedule_pending = false;
-            self.invalidateSourceControl(&workspace.control, budget);
+    fn sourceGenerationsAvailable(self: *const Runtime) bool {
+        if (self.state.catalog.request_generation == std.math.maxInt(u64)) return false;
+        for (self.workspaces) |entry| if (entry) |workspace| {
+            if (workspace.authorized and workspace.control.request_generation == std.math.maxInt(u64)) return false;
         };
+        return true;
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -595,7 +435,7 @@ pub const Runtime = struct {
             workspace.personal_only = binding.personal_only;
             self.invalidateSourceControl(&workspace.control, budget);
             workspace.control.slot = .uninitialized;
-            workspace.reschedule_pending = binding.catalog_authorized and self.state.source_settings != null;
+            workspace.reschedule_pending = binding.catalog_authorized;
             return;
         }
         const index = for (self.workspaces, 0..) |entry, index| {
@@ -639,7 +479,7 @@ pub const Runtime = struct {
     ) Error!CatalogAuthority {
         const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        if (self.state.source_settings == null or !workspace.authorized) return .unavailable;
+        if (!workspace.authorized) return .unavailable;
         return catalogAuthority(&workspace.control, workspace.job != null or workspace.reschedule_pending);
     }
 
@@ -651,7 +491,7 @@ pub const Runtime = struct {
     ) Error!void {
         const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        if (self.state.source_settings == null or !workspace.authorized) return;
+        if (!workspace.authorized) return;
         if (workspace.control.slot != .uninitialized) return;
         self.requestWorkspaceReschedule(id, epoch) catch |err| {
             if (err == error.QueueFull) {
@@ -665,7 +505,6 @@ pub const Runtime = struct {
 
     pub fn refreshPersonal(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.state.source_settings == null) return error.CatalogUnavailable;
         if (self.personal_job != null) return error.CatalogLoading;
         const generation = nextGeneration(self.state.catalog.request_generation) orelse
             return error.CatalogRequestGenerationExhausted;
@@ -699,7 +538,6 @@ pub const Runtime = struct {
 
     pub fn refreshWorkspace(self: *Runtime, id: u64, epoch: u64) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.state.source_settings == null) return error.CatalogUnavailable;
         const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
         if (!workspace.authorized) return error.CatalogUnavailable;
@@ -715,7 +553,7 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        if (!workspace.authorized or self.state.source_settings == null)
+        if (!workspace.authorized)
             return error.CatalogUnavailable;
         if (workspace.job != null or workspace.reschedule_pending)
             return workspace.control.request_generation;
@@ -737,7 +575,7 @@ pub const Runtime = struct {
     pub fn workspacePreparation(self: *const Runtime, id: u64, epoch: u64, generation: u64) Error!CatalogPreparation {
         const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        if (!workspace.authorized or self.state.source_settings == null or self.shutting_down)
+        if (!workspace.authorized or self.shutting_down)
             return .unavailable;
         if (workspace.job != null or workspace.reschedule_pending or
             workspace.control.completed_generation < generation)
@@ -842,7 +680,7 @@ pub const Runtime = struct {
     /// the only automatically retried failure; one latest intent per scope is
     /// retained and each sync visits scopes once in round-robin order.
     fn dispatchPending(self: *Runtime, budget: ProjectionBudget) bool {
-        if (self.shutting_down or self.state.source_settings == null) return false;
+        if (self.shutting_down) return false;
         var changed = false;
         const count = self.workspaces.len + 1;
         for (0..count) |_| {
@@ -902,7 +740,7 @@ pub const Runtime = struct {
         workspace.authorized = authorized;
         self.invalidateSourceControl(&workspace.control, budget);
         if (authorized) workspace.control.slot = .uninitialized;
-        workspace.reschedule_pending = authorized and self.state.source_settings != null;
+        workspace.reschedule_pending = authorized;
     }
 
     pub fn redactCatalogsNoFail(
@@ -947,7 +785,7 @@ pub const Runtime = struct {
 
     pub fn personalCatalogProjection(self: *const Runtime) catalog.CatalogProjection {
         return view.catalogProjection(
-            if (self.state.source_settings == null) .unavailable else self.state.catalog.slot.availability(self.personal_job != null or self.personal_reschedule_pending),
+            self.state.catalog.slot.availability(self.personal_job != null or self.personal_reschedule_pending),
             self.state.catalog.slot.snapshotConst(),
         );
     }
@@ -960,7 +798,7 @@ pub const Runtime = struct {
         const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
         return view.catalogProjection(
-            if (self.state.source_settings == null or !workspace.authorized) .unavailable else workspace.control.slot.availability(workspace.job != null or workspace.reschedule_pending),
+            if (!workspace.authorized) .unavailable else workspace.control.slot.availability(workspace.job != null or workspace.reschedule_pending),
             workspace.control.slot.snapshotConst(),
         );
     }
@@ -971,7 +809,7 @@ pub const Runtime = struct {
         epoch: u64,
     ) ?view.ScopedCatalog {
         const workspace = self.findWorkspaceConst(id) orelse return null;
-        if (workspace.epoch != epoch or !workspace.authorized or self.state.source_settings == null) return null;
+        if (workspace.epoch != epoch or !workspace.authorized) return null;
         return .{
             .scope = .{ .project = .{
                 .workspace_id = id,
@@ -983,7 +821,7 @@ pub const Runtime = struct {
 
     pub fn workspaceAuthorityStable(self: *const Runtime, id: u64, epoch: u64) bool {
         const workspace = self.findWorkspaceConst(id) orelse return false;
-        return self.state.source_settings != null and workspace.authorized and workspace.epoch == epoch and workspace.job == null and !workspace.reschedule_pending and
+        return workspace.authorized and workspace.epoch == epoch and workspace.job == null and !workspace.reschedule_pending and
             workspace.control.slot.snapshotConst() != null;
     }
 
@@ -1019,7 +857,6 @@ pub const Runtime = struct {
             .retry = retry,
             .owner = .{ .context = self, .resolve_fn = viewOwnerResolve },
             .text = text,
-            .source_settings = self.sourceSettings(),
             .personal_source_discovery = self.personalSourceDiscovery(),
         });
     }
@@ -1472,8 +1309,6 @@ pub const Runtime = struct {
         try self.requireRecoveryAvailable(scope);
         const current = self.state.inventoryConst().findConst(install_id).?;
         if (current.recovery == null) return error.InvalidAsset;
-        if (!current.requiresRecovery() and self.state.source_settings == null)
-            return error.CatalogUnavailable;
         const result = try management_runtime.retryVerification(
             self.managementContext(),
             scope,
@@ -1494,7 +1329,7 @@ pub const Runtime = struct {
         const scope = self.assetScope(install_id) catch return false;
         self.requireRecoveryAvailable(scope) catch return false;
         _ = self.canonicalBase(scope) catch return false;
-        return current.requiresRecovery() or self.state.source_settings != null;
+        return true;
     }
 
     pub fn takeManagementChanged(self: *Runtime) bool {
@@ -1522,7 +1357,6 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        const settings = self.state.source_settings orelse return error.CatalogUnavailable;
         if (!workspace.authorized or !self.enablementTrusted() or pinned.redacted or
             (pinned.availability != .ready and pinned.availability != .degraded)) return error.CatalogUnavailable;
         const scope: management.Scope = if (workspace.personal_only) .personal else .{ .project = .{ .workspace_id = id, .workspace_epoch = epoch } };
@@ -1530,7 +1364,7 @@ pub const Runtime = struct {
         errdefer ids.deinit(allocator);
         for (pinned.skills) |skill| {
             if (skill.enabled and self.isSkillEnabled(scope, skill.skill_policy_key) and
-                policy.restoreSourceAllowed(skill, settings.selection, workspace.personal_only))
+                policy.restoreSourceAllowed(skill, workspace.personal_only))
                 try ids.append(allocator, skill.skill_id);
         }
         return ids.toOwnedSlice(allocator);
@@ -1754,8 +1588,7 @@ pub const Runtime = struct {
         defer job.deinit();
         defer self.clearJobVerification(job);
         const current = job.request_generation == control.request_generation and
-            !self.shutting_down and self.state.source_settings != null and
-            job.selection.eql(self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace));
+            !self.shutting_down;
         if (current) {
             control.source_checks = job.root_checks;
             control.completed_generation = job.request_generation;
@@ -1899,7 +1732,6 @@ pub const Runtime = struct {
         scope: management.Scope,
     ) MutationError!void {
         try self.requireRecoveryAvailable(scope);
-        if (self.state.source_settings == null) return error.CatalogUnavailable;
     }
 
     fn requireRecoveryAvailable(self: *const Runtime, scope: management.Scope) MutationError!void {
@@ -2071,7 +1903,6 @@ pub const Runtime = struct {
             .allocator = self.allocator,
             .io = self.io,
             .source_roots = owned_source_roots,
-            .selection = self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace),
             .personal_only = self.personalOnly(scope),
             .verification = verification,
             .catalog_port = self.ports.catalog,
@@ -2217,8 +2048,7 @@ const TestHarness = struct {
     last_epoch_len: usize = 0,
     last_source_count: usize = 0,
     last_default_source_priority: i32 = 0,
-    last_source_ids: [sources.definitions.len + 1]sources.Id = undefined,
-    last_source_scopes: [sources.definitions.len + 1]agent.CatalogSourceScope = undefined,
+    last_source_scopes: [1]agent.CatalogSourceScope = undefined,
 
     last_builtin_root: [4096]u8 = undefined,
     last_builtin_root_len: usize = 0,
@@ -2244,16 +2074,8 @@ const TestHarness = struct {
         };
     }
 
-    fn discoverRoots(_: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, _: []const u8, workspace: ?[]const u8, selection: sources.Selection) anyerror!sources.Discovery {
-        var result: sources.Discovery = .{
-            .allocator = allocator,
-            .default_user = .missing,
-            .default_workspace = if (workspace != null) .missing else .disabled,
-        };
-        for (sources.definitions) |item| {
-            if (selection.enabled(item.id)) result.checks[@intFromEnum(item.id)] = .missing;
-        }
-        return result;
+    fn discoverRoots(_: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, _: []const u8, workspace: ?[]const u8) anyerror!sources.Discovery {
+        return .{ .allocator = allocator, .default_user = .missing, .default_workspace = if (workspace != null) .missing else .disabled };
     }
 
     fn budget(self: *TestHarness) ProjectionBudget {
@@ -2300,7 +2122,7 @@ const TestHarness = struct {
                 @memcpy(self.last_builtin_root[0..source.canonical_root.len], source.canonical_root);
                 self.last_builtin_root_len = source.canonical_root.len;
             } else {
-                self.last_source_ids[index] = sources.findId(source.source_instance_id).?;
+                return error.UnexpectedSource;
             }
             self.last_source_scopes[index] = source.scope;
         }
@@ -2349,7 +2171,7 @@ fn testRuntime(harness: *TestHarness) !Runtime {
         std.testing.allocator,
         harness.effectPorts(),
         .{
-            .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } } },
+            .state = .{},
             .max_workspaces = 3,
             .canonical_user_home = "/home/tester",
         },
@@ -2429,7 +2251,6 @@ test "Skill restore ceiling retains pinned IDs under current source and Workspac
     var runtime = try testRuntime(&harness);
     defer runtime.deinit();
     runtime.state.enablement_health = .ready;
-    runtime.state.source_settings.?.selection.values[@intFromEnum(sources.Id.codex_user)] = true;
     runtime.registerWorkspaceOwned(.{
         .id = 9,
         .epoch = 1,
@@ -2464,25 +2285,22 @@ test "Skill restore ceiling retains pinned IDs under current source and Workspac
     skills[1].source_scope = .workspace;
     skills[2].skill_id = "pinned-codex";
     skills[2].skill_policy_key = "codex";
-    skills[2].source_instance_id = sources.definition(.codex_user).source_instance_id;
+    skills[2].source_instance_id = "compat.codex.user";
     skills[3].enabled = false;
     skills[4].source_instance_id = "unknown-source";
     skills[5].provider_id = "unknown-provider";
-    skills[6].source_instance_id = sources.definition(.codex_user).source_instance_id;
+    skills[6].source_instance_id = "compat.codex.user";
     skills[6].source_scope = .workspace;
     var pinned: catalog.CatalogProjection = .{ .availability = .ready, .revision = "original-catalog", .skills = &skills };
     // No latest catalog is needed: the original query lease owns the content.
-    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project", "pinned-codex" });
-    try Check.ids(&runtime, 10, pinned, &.{ "pinned-review", "pinned-codex" });
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project" });
+    try Check.ids(&runtime, 10, pinned, &.{"pinned-review"});
     try std.testing.expectEqual(@as(usize, 0), harness.query_count);
     _ = try runtime.state.enablement_store.applyUser(.{ .skill_policy_key = "review", .enabled = false, .expected_revision = runtime.state.enablement_store.userRevision() });
-    try Check.ids(&runtime, 9, pinned, &.{ "pinned-project", "pinned-codex" });
+    try Check.ids(&runtime, 9, pinned, &.{"pinned-project"});
     _ = try runtime.state.enablement_store.applyWorkspace(.{ .identity = .{ .workspace_id = 9, .workspace_epoch = 1 }, .skill_policy_key = "review", .state = .enabled, .expected_revision = runtime.state.enablement_store.revision(.{ .workspace_id = 9, .workspace_epoch = 1 }) });
-    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project", "pinned-codex" });
-    // Automatic Tasks ignore another Workspace's overrides and local sources.
-    try Check.ids(&runtime, 10, pinned, &.{"pinned-codex"});
-    runtime.state.source_settings.?.selection.values[@intFromEnum(sources.Id.codex_user)] = false;
     try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project" });
+    // Automatic Tasks ignore another Workspace's overrides and local sources.
     try Check.ids(&runtime, 10, pinned, &.{});
     try std.testing.expectEqualStrings("pinned-review", skills[0].skill_id);
     try std.testing.expect(skills[0].enabled);
@@ -2501,8 +2319,7 @@ test "Skill restore ceiling retains pinned IDs under current source and Workspac
     runtime.findWorkspace(9).?.authorized = false;
     try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
     runtime.findWorkspace(9).?.authorized = true;
-    runtime.state.source_settings = null;
-    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project" });
     runtime.shutting_down = true;
     try std.testing.expectError(error.ExecutorShuttingDown, runtime.restoreCeiling(std.testing.allocator, 9, 1, pinned));
 }
@@ -2547,7 +2364,7 @@ fn exerciseManagementCommitFailure(
         std.testing.allocator,
         harness.effectPorts(),
         .{
-            .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{
+            .state = .{ .management = .{
                 .file_store = &persistence,
                 .staging_root = staging_path_storage[0..staging_path_len],
             } },
@@ -2663,7 +2480,6 @@ test "retiring a Workspace id drops policy and provenance in both stores and kee
     var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
         .state = .{
-            .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
             .management = .{ .file_store = &persistence, .staging_root = staging_path_storage[0..staging_path_len] },
         },
         .max_workspaces = 2,
@@ -2745,7 +2561,6 @@ test "rename failures recover only their asset and explicit retry preserves admi
             var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
             var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
                 .state = .{
-                    .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
                     .management = .{ .file_store = &persistence, .staging_root = source_path },
                 },
                 .max_workspaces = 1,
@@ -2824,8 +2639,7 @@ test "rename failures recover only their asset and explicit retry preserves admi
                     try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
                     try std.testing.expect(!runtime.takeManagementChanged());
                 }
-                // Physical recovery is independent of source/catalog trust.
-                runtime.state.source_settings = null;
+                // Physical recovery is independent of catalog readiness.
                 try std.testing.expect(runtime.retryAvailable(recovery_id));
                 const recovered = try runtime.retryVerification(recovery_id, null);
                 try std.testing.expect(!recovered.verification_pending);
@@ -2870,7 +2684,6 @@ test "rename failures recover only their asset and explicit retry preserves admi
                 defer restart_inventory.deinit();
                 try std.testing.expect(restart_inventory.findConst(id).?.requiresRecovery());
                 management.TestSupport.setRecoveryFault(transactions, .none);
-                runtime.state.source_settings = null;
                 try std.testing.expect(runtime.retryAvailable(id));
                 try std.testing.expectError(error.RecoveryUnavailable, runtime.retryVerification(id, null));
                 try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
@@ -2879,11 +2692,6 @@ test "rename failures recover only their asset and explicit retry preserves admi
                 if (operation == .uninstall and fail_recovery) {
                     try transactions.uninstall(&root, id);
                     try std.testing.expect(runtime.retryAvailable(id));
-                    try std.testing.expect((try runtime.retryVerification(id, 104)).verification_pending);
-                    try std.testing.expect(runtime.personal_job == null and runtime.state.reconciliation == null);
-                    try std.testing.expect(!runtime.retryAvailable(id));
-                    try std.testing.expectError(error.CatalogUnavailable, runtime.retryVerification(id, 105));
-                    runtime.state.source_settings = .{};
                     try std.testing.expect((try runtime.retryVerification(id, 106)).verification_pending);
                     try std.testing.expect(runtime.state.reconciliation.?.request_generation != 0);
                     try std.testing.expect(runtime.personal_job != null and !runtime.retryAvailable(id));
@@ -2912,7 +2720,7 @@ test "rename failures recover only their asset and explicit retry preserves admi
                         0,
                     ));
                     defer _ = windows.ntdll.NtClose(locked);
-                    runtime.state.source_settings = .{};
+                    runtime.state.enablement_health = .ready;
                     try std.testing.expectError(error.FileTransactionFailed, runtime.uninstall(id, 104));
                     try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
                     try std.testing.expect(transactions.inventory.findConst(id).?.recovery == null);
@@ -2947,7 +2755,6 @@ test "recovery persistence failure freezes ahead memory and restarts from strict
         var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
         var configuration: Configuration = .{
             .state = .{
-                .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
                 .management = .{ .file_store = &persistence, .staging_root = source_path },
             },
             .max_workspaces = 1,
@@ -3036,7 +2843,7 @@ test "management mutation and failed catalog reconciliation stay inside Runtime"
         std.testing.allocator,
         harness.effectPorts(),
         .{
-            .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{
+            .state = .{ .management = .{
                 .file_store = &persistence,
                 .staging_root = staging_path,
             } },
@@ -3225,7 +3032,7 @@ test "installed definition read and export resolve managed root inside Runtime" 
         std.testing.allocator,
         harness.effectPorts(),
         .{
-            .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{
+            .state = .{ .management = .{
                 .file_store = &persistence,
                 .staging_root = staging_storage[0..staging_len],
                 .restored_bytes = restored,
@@ -3443,133 +3250,6 @@ test "shutdown cancels queued catalog ownership before Runtime teardown" {
     try std.testing.expectError(error.ExecutorShuttingDown, runtime.refreshPersonal());
 }
 
-test "source commit CAS no-op and A B A invalidate old work before queue admission" {
-    var harness: TestHarness = .{};
-    var runtime = try testRuntime(&harness);
-    defer runtime.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    try store.commit(.{});
-    runtime.state.source_file_store = &store;
-    runtime.registerWorkspaceOwned(.{
-        .id = 1,
-        .epoch = 1,
-        .catalog_authorized = true,
-        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/a"),
-    }, harness.budget());
-    try runtime.refreshPersonal();
-    const old_job = runtime.personal_job.?;
-    const old_generation = old_job.request_generation;
-    const before = runtime.state.catalog.request_generation;
-    const noop = runtime.setSourceEnabled(.claude, false, 1, harness.budget());
-    try std.testing.expect(noop.applied and !noop.changed);
-    try std.testing.expectEqual(before, runtime.state.catalog.request_generation);
-    try std.testing.expectEqual(state.SourceSettingsReason.stale_revision, runtime.setSourceEnabled(.claude, true, 9, harness.budget()).reason.?);
-    try std.testing.expect(runtime.setSourceEnabled(.claude, true, 1, harness.budget()).applied);
-    try std.testing.expect(runtime.setSourceEnabled(.claude, false, 2, harness.budget()).applied);
-    try std.testing.expect(runtime.personal_reschedule_pending);
-    try std.testing.expect(runtime.state.catalog.request_generation > old_generation);
-    try std.testing.expect(!old_job.selection.enabled(.claude_user));
-    harness.runQueued();
-    harness.queue_blocked = true; // A non-Skill job now occupies the executor.
-    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
-    try std.testing.expect(runtime.personal_job == null and runtime.personal_reschedule_pending);
-    try std.testing.expect(runtime.state.catalog.source_checks == null);
-    try std.testing.expectEqual(catalog.CatalogAvailability.loading, runtime.personalCatalogProjection().availability);
-    harness.queue_blocked = false; // Its ordinary completion wake drives sync.
-    for (0..4) |_| {
-        _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
-        if (harness.queued != null) harness.runQueued();
-    }
-    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
-    try std.testing.expect(!runtime.personal_reschedule_pending and !runtime.findWorkspace(1).?.reschedule_pending);
-    try std.testing.expectEqual(@as(usize, 3), harness.query_count);
-    try std.testing.expectEqual(@as(u64, 3), (try store.load(std.testing.allocator)).ready.revision);
-}
-
-test "normalizing a partial brand preserves unchanged personal query and unknown sources deny new authority" {
-    var harness: TestHarness = .{};
-    var runtime = try testRuntime(&harness);
-    defer runtime.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    runtime.state.source_file_store = &store;
-    runtime.state.source_settings = .{ .selection = .{ .values = .{ false, false, true, false } } };
-    try store.commit(runtime.state.source_settings.?);
-    try runtime.refreshPersonal();
-    const generation = runtime.state.catalog.request_generation;
-    try std.testing.expect(runtime.setSourceEnabled(.codex, true, 1, harness.budget()).applied);
-    const saved = (try store.load(std.testing.allocator)).ready;
-    try std.testing.expectEqual(@as(u64, 2), saved.revision);
-    try std.testing.expectEqualDeep([_]bool{ false, false, true, true }, saved.selection.values);
-    try std.testing.expectEqual(generation, runtime.state.catalog.request_generation);
-    try std.testing.expect(!runtime.personal_reschedule_pending);
-    harness.runQueued();
-    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
-    try std.testing.expect(runtime.state.catalog.source_checks != null);
-    runtime.markSourcesUnavailable(.outcome_unknown, harness.budget());
-    try std.testing.expectError(error.CatalogUnavailable, runtime.refreshPersonal());
-    try std.testing.expectEqual(catalog.CatalogAvailability.unavailable, runtime.personalCatalogProjection().availability);
-    try std.testing.expect(!runtime.sourceSettings().can_reset);
-}
-
-test "source recovery reobserves changed files and never resets oversized or unknown formats" {
-    var harness: TestHarness = .{};
-    var runtime = try testRuntime(&harness);
-    defer runtime.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    runtime.state.source_file_store = &store;
-    runtime.markSourcesUnavailable(.corrupt, harness.budget());
-    const old_token = runtime.sourceSettings().recovery_token.?;
-    const huge = [_]u8{' '} ** (sources.max_store_bytes + 1);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sources.file_name, .data = &huge });
-    const rejected = runtime.recoverSourceSettings(.reset, old_token, harness.budget());
-    try std.testing.expect(!rejected.applied and rejected.changed);
-    try std.testing.expectEqual(state.SourceHealth.too_large, runtime.sourceSettings().health);
-    try std.testing.expect(!runtime.sourceSettings().can_reset);
-    try std.testing.expectEqualDeep(sources.Load.too_large, try store.load(std.testing.allocator));
-    try std.testing.expectEqual(state.SourceSettingsReason.stale_recovery_token, runtime.recoverSourceSettings(.reread, old_token, harness.budget()).reason.?);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sources.file_name, .data = "{\"schema\":2}" });
-    _ = runtime.recoverSourceSettings(.reread, runtime.sourceSettings().recovery_token.?, harness.budget());
-    try std.testing.expectEqual(state.SourceHealth.unsupported_schema, runtime.sourceSettings().health);
-    try std.testing.expectEqual(state.SourceSettingsReason.recovery_not_allowed, runtime.recoverSourceSettings(.reset, runtime.sourceSettings().recovery_token.?, harness.budget()).reason.?);
-    try store.commit(.{ .revision = 17, .selection = .{ .values = .{ true, false, true, false } } });
-    const recovered = runtime.recoverSourceSettings(.reread, runtime.sourceSettings().recovery_token.?, harness.budget());
-    try std.testing.expect(recovered.applied);
-    try std.testing.expectEqual(@as(?u64, 18), recovered.revision);
-    try std.testing.expect(runtime.state.source_settings.?.selection.enabled(.claude_user));
-    try std.testing.expectEqual(@as(u64, 18), (try store.load(std.testing.allocator)).ready.revision);
-    runtime.beginShutdown();
-    runtime.finishShutdownAfterExecutorJoin(harness.budget(), test_snapshot_limits);
-}
-
-test "source write failure keeps trusted values and reset of missing settings advances revision" {
-    var harness: TestHarness = .{};
-    var runtime = try testRuntime(&harness);
-    defer runtime.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    runtime.state.source_file_store = &store;
-    try tmp.dir.createDir(std.testing.io, sources.file_name, .default_dir);
-    const failure = runtime.setSourceEnabled(.claude, true, 1, harness.budget());
-    try std.testing.expectEqual(state.SourceSettingsReason.write_failed, failure.reason.?);
-    try std.testing.expect(!runtime.state.source_settings.?.selection.enabled(.claude_user));
-    try std.testing.expect(!runtime.state.source_settings.?.selection.enabled(.claude_workspace));
-    try std.testing.expectEqual(@as(u64, 1), runtime.state.source_settings.?.revision);
-    try tmp.dir.deleteDir(std.testing.io, sources.file_name);
-    runtime.markSourcesUnavailable(.missing, harness.budget());
-    const reset = runtime.recoverSourceSettings(.reset, runtime.sourceSettings().recovery_token.?, harness.budget());
-    try std.testing.expect(reset.applied);
-    try std.testing.expectEqual(@as(?u64, 2), reset.revision);
-    runtime.beginShutdown();
-    runtime.finishShutdownAfterExecutorJoin(harness.budget(), test_snapshot_limits);
-}
-
 test "ordinary or stale jobs cannot complete or clear another transaction verification" {
     var harness: TestHarness = .{};
     var runtime = try testRuntime(&harness);
@@ -3599,31 +3279,6 @@ test "ordinary or stale jobs cannot complete or clear another transaction verifi
     try std.testing.expect(runtime.state.reconciliation == null);
 }
 
-test "source durable outcome unknown freezes new work until valid reread is reconfirmed" {
-    var harness: TestHarness = .{};
-    var runtime = try testRuntime(&harness);
-    defer runtime.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-    runtime.state.source_file_store = &store;
-    try store.commit(.{});
-    store.commit_fault = .after_rename;
-    const uncertain = runtime.setSourceEnabled(.codex, true, 1, harness.budget());
-    try std.testing.expectEqual(state.SourceSettingsReason.persistence_outcome_unknown, uncertain.reason.?);
-    try std.testing.expect(uncertain.changed and !uncertain.applied);
-    try std.testing.expect(runtime.sourceSettings().settings == null);
-    try std.testing.expect(!runtime.sourceSettings().can_reset);
-    try std.testing.expectError(error.CatalogUnavailable, runtime.refreshPersonal());
-    try std.testing.expect((try store.load(std.testing.allocator)).ready.selection.enabled(.codex_user));
-    store.commit_fault = .none;
-    const recovered = runtime.recoverSourceSettings(.reread, runtime.sourceSettings().recovery_token.?, harness.budget());
-    try std.testing.expectEqual(@as(?u64, 3), recovered.revision);
-    try std.testing.expect(recovered.applied and runtime.state.source_settings.?.selection.enabled(.codex_user));
-    runtime.beginShutdown();
-    runtime.finishShutdownAfterExecutorJoin(harness.budget(), test_snapshot_limits);
-}
-
 test "source worker resolves real fixed roots and refuses partial catalog on blocked default root" {
     var harness: TestHarness = .{};
     var tmp = std.testing.tmpDir(.{});
@@ -3634,7 +3289,7 @@ test "source worker resolves real fixed roots and refuses partial catalog on blo
     var effect_ports = harness.effectPorts();
     effect_ports.source_roots = .{};
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, effect_ports, .{
-        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{ .selection = .{ .values = .{ true, false, false, false } } } } } } },
+        .state = .{},
         .max_workspaces = 1,
         .canonical_user_home = home,
     }, .{ .max_assets = 2, .max_workspaces = 1, .max_policy_keys = 2, .max_policy_key_bytes = 64 });
@@ -3643,10 +3298,8 @@ test "source worker resolves real fixed roots and refuses partial catalog on blo
     harness.runQueued();
     _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
     try std.testing.expectEqual(sources.default_source_priority, harness.last_default_source_priority);
-    try std.testing.expectEqual(@as(usize, 1), harness.last_source_count);
-    try std.testing.expectEqual(sources.Id.claude_user, harness.last_source_ids[0]);
-    try std.testing.expectEqual(agent.CatalogSourceScope.user, harness.last_source_scopes[0]);
-    try std.testing.expectEqual(sources.RootCheck.checked, runtime.state.catalog.source_checks.?.checks[0]);
+    try std.testing.expectEqual(@as(usize, 0), harness.last_source_count);
+    try std.testing.expectEqual(sources.RootCheck.missing, runtime.state.catalog.source_checks.?.default_user);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".agents", .data = "not a directory" });
     try runtime.refreshPersonal();
     harness.runQueued();
@@ -3855,7 +3508,7 @@ test "import preparation binds revision source and target while managed updates 
     try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = "---\nname: demo\ndescription: Demo\n---\nRead note.txt.\n" });
     try source.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "one" });
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
-        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &persistence, .staging_root = staging_path } },
+        .state = .{ .management = .{ .file_store = &persistence, .staging_root = staging_path } },
         .max_workspaces = 1,
         .canonical_user_home = home_path,
     }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
@@ -3881,6 +3534,7 @@ test "import preparation binds revision source and target while managed updates 
     try std.testing.expectError(error.TargetChanged, runtime.validatePreparedImport(bound_directory.id, bound_directory.revision, .replace_directory));
     const replace = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
     try std.testing.expectEqual(ImportEffect.replace_directory, replace.effect);
+    try std.testing.expectError(error.InvalidConfirmation, runtime.validatePreparedImport(replace.id, replace.revision, .update));
     const installed = try runtime.commitPreparedImport(replace.id, replace.revision, .replace_directory, 100);
     try std.testing.expectError(error.InvalidPreparation, runtime.commitPreparedImport(replace.id, replace.revision, .replace_directory, 100));
     harness.runQueued();
@@ -3894,13 +3548,14 @@ test "import preparation binds revision source and target while managed updates 
     try std.testing.expect(runtime.refreshImportOutcome());
     try std.testing.expectEqual(state.ImportPhase.ready, runtime.state.import_operation.?.phase);
     try source.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "new update" });
+    const bound_update = try runtime.prepareImport(source_path, .local_directory, .{ .reimport = installed.install_id });
+    try std.testing.expectError(error.InvalidConfirmation, runtime.retargetImport(bound_update.id, bound_update.revision, .{ .scope = .personal }));
+    runtime.discardPreparedImport(bound_update.id);
     const update = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
     try std.testing.expectEqual(ImportEffect.update, update.effect);
     try std.testing.expectEqualSlices(u8, &installed.install_id, &update.install_id.?);
-    runtime.discardPreparedImport(update.id);
-    const bound_update = try runtime.prepareImport(source_path, .local_directory, .{ .reimport = installed.install_id });
-    try std.testing.expectError(error.InvalidConfirmation, runtime.retargetImport(bound_update.id, bound_update.revision, .{ .scope = .personal }));
-    const updated = try runtime.commitPreparedImport(bound_update.id, bound_update.revision, .update, 102);
+    try std.testing.expectError(error.InvalidConfirmation, runtime.validatePreparedImport(update.id, update.revision, .replace_directory));
+    const updated = try runtime.commitPreparedImport(update.id, update.revision, .update, 102);
     try std.testing.expectEqualSlices(u8, &installed.install_id, &updated.install_id);
     harness.runQueued();
     _ = runtime.sync(harness.budget(), test_snapshot_limits, 103);
@@ -3936,7 +3591,7 @@ test "managed imports bind source grants and publish effective bytes through exp
     try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/SKILL.md", .data = original });
     try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/qa-reference.txt", .data = "resource marker" });
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
-        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &persistence, .staging_root = staging_path } },
+        .state = .{ .management = .{ .file_store = &persistence, .staging_root = staging_path } },
         .max_workspaces = 1,
         .canonical_user_home = home_path,
     }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
@@ -4012,7 +3667,7 @@ test "managed imports bind source grants and publish effective bytes through exp
     var archive_store: management.FileStore = .{ .io = std.testing.io, .dir = archive_home.dir };
     var archive_harness: TestHarness = .{};
     var archive_runtime = try Runtime.init(std.testing.io, std.testing.allocator, archive_harness.effectPorts(), .{
-        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &archive_store, .staging_root = staging_path } },
+        .state = .{ .management = .{ .file_store = &archive_store, .staging_root = staging_path } },
         .max_workspaces = 1,
         .canonical_user_home = archive_home_path,
     }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });

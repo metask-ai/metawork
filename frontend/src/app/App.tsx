@@ -93,12 +93,7 @@ import {
 } from "../features/approvals/response-state.ts";
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
-import {
-  SkillsPage,
-  skillRefreshKey,
-  type SkillRefreshTarget,
-  type SkillRefreshRequests,
-} from "../features/skills/SkillsPage.tsx";
+import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import { McpInstallationCard } from "../features/mcp/McpInstallationCard.tsx";
 import { WorkspaceDirectoryFact } from "../features/workspaces/WorkspaceDirectoryFact.tsx";
@@ -451,14 +446,11 @@ export default function App() {
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
     useState<ModelRef | null>(null);
   const composerCatalogRefreshPending = useRef(new Set<string>());
-  const skillRefreshPending = useRef(new Set<string>());
-  const [skillRefreshRequests, setSkillRefreshRequests] =
-    useState<SkillRefreshRequests>({});
-  const sourceMutationPending = useRef(false);
-  const [sourceMutationBusy, setSourceMutationBusy] = useState(false);
-  const [sourceMutationError, setSourceMutationError] = useState<string | null>(
-    null,
-  );
+  const skillRefreshPending = useRef(false);
+  const [skillRefreshRequest, setSkillRefreshRequest] = useState<{
+    busy: boolean;
+    error: string | null;
+  }>({ busy: false, error: null });
   const [attachmentView, setAttachmentView] = useState<AddView | null>(null);
   const [attachmentRemoving, setAttachmentRemoving] = useState(false);
   const attachmentRemoval = useRef(
@@ -809,11 +801,8 @@ export default function App() {
     updateFeedbackState(resetFeedback);
     executionBusyRef.current = false;
     setExecutionBusy(false);
-    sourceMutationPending.current = false;
-    setSourceMutationBusy(false);
-    setSourceMutationError(null);
-    skillRefreshPending.current.clear();
-    setSkillRefreshRequests({});
+    skillRefreshPending.current = false;
+    setSkillRefreshRequest({ busy: false, error: null });
   }
   function resetAccountFeedback() {
     accountFeedbackRequest.current = {
@@ -3390,24 +3379,14 @@ export default function App() {
       composerCatalogRefreshPending.current.delete(key);
     }
   }
-  async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {
+  async function refreshSkillsPageCatalog() {
     const generation = bridgeGenerationRef.current;
-    const key = skillRefreshKey(target);
-    if (skillRefreshPending.current.has(key) || bridgeUnavailable) return;
-    skillRefreshPending.current.add(key);
-    setSkillRefreshRequests((requests) => ({
-      ...requests,
-      [key]: { busy: true, error: null },
-    }));
+    if (skillRefreshPending.current || bridgeUnavailable) return;
+    skillRefreshPending.current = true;
+    setSkillRefreshRequest({ busy: true, error: null });
     let failure: string | null = null;
     try {
-      const result =
-        target.scope === "personal"
-          ? await client.refreshSkillCatalog()
-          : await client.refreshWorkspaceSkillCatalog(
-              target.workspaceId,
-              target.expectedWorkspaceEpoch,
-            );
+      const result = await client.refreshSkillCatalog();
       if (!result.accepted) failure = t("skills.catalog_refresh_failed");
       await refreshCommittedView();
     } catch {
@@ -3415,41 +3394,8 @@ export default function App() {
       failure = t("skills.catalog_refresh_failed");
     } finally {
       if (generation === bridgeGenerationRef.current) {
-        skillRefreshPending.current.delete(key);
-        setSkillRefreshRequests((requests) => ({
-          ...requests,
-          [key]: { busy: false, error: failure },
-        }));
-      }
-    }
-  }
-  async function commitSkillSourceMutation(
-    mutation: () => Promise<
-      import("../bridge/contracts.ts").SkillSourceSettingsResult
-    >,
-  ) {
-    // This window owns the latch: navigating away does not cancel a Host write.
-    if (sourceMutationPending.current || bridgeUnavailable) return;
-    sourceMutationPending.current = true;
-    setSourceMutationBusy(true);
-    setSourceMutationError(null);
-    const generation = bridgeGenerationRef.current;
-    try {
-      const result = await mutation();
-      if (generation !== bridgeGenerationRef.current) return;
-      if (!result.applied)
-        setSourceMutationError(t(`skills.sources.failure.${result.reason}`));
-      // Failed commands can also change health and recovery capabilities.
-      await refreshCommittedView();
-    } catch {
-      if (generation !== bridgeGenerationRef.current) return;
-      await refreshSnapshot().catch(() => undefined);
-      if (generation === bridgeGenerationRef.current)
-        setSourceMutationError(t("skills.sources.uncertain"));
-    } finally {
-      if (generation === bridgeGenerationRef.current) {
-        sourceMutationPending.current = false;
-        setSourceMutationBusy(false);
+        skillRefreshPending.current = false;
+        setSkillRefreshRequest({ busy: false, error: failure });
       }
     }
   }
@@ -3462,23 +3408,14 @@ export default function App() {
       await refreshCommittedView();
     }
   }
-  async function setSkillEnabled(
-    target:
-      | {
-          scope: "personal";
-        }
-      | {
-          scope: "project";
-          workspaceId: string;
-          expectedWorkspaceEpoch: string;
-        },
+  async function setPersonalSkillEnabled(
     skillPolicyKey: string,
-    state: "inherit" | "enabled" | "disabled",
+    state: "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ): Promise<SkillEnablementResult> {
     const result = await client.setSkillEnabled(
-      target,
+      { scope: "personal" },
       skillPolicyKey,
       state,
       expectedCatalogRevision,
@@ -5167,30 +5104,17 @@ export default function App() {
           <SkillsPage
             management={snapshot.skillManagement}
             personalCatalog={snapshot.skillCatalog}
-            workspaces={snapshot.workspaces}
             query={skillsQuery}
-            refreshRequests={skillRefreshRequests}
-            sourceBusy={sourceMutationBusy}
-            sourceError={sourceMutationError}
-            onSetSourceEnabled={(id, enabled, revision) =>
-              void commitSkillSourceMutation(() =>
-                client.setSkillSourceEnabled(id, enabled, revision),
-              )
-            }
-            onRecoverSources={(action, token) =>
-              void commitSkillSourceMutation(() =>
-                client.recoverSkillSourceSettings(action, token),
-              )
-            }
+            refreshRequest={skillRefreshRequest}
             disabled={bridgeUnavailable}
             onQuery={setSkillsQuery}
-            onRefresh={(target) => void refreshSkillsPageCatalog(target)}
-            onSetEnabled={setSkillEnabled}
+            onRefresh={() => void refreshSkillsPageCatalog()}
+            onSetEnabled={setPersonalSkillEnabled}
             onChooseImport={(kind, target) =>
               client.chooseSkillImport(kind, target)
             }
-            onPrepareImport={(previewId, revision, target) =>
-              client.prepareSkillImport(previewId, revision, target)
+            onDiscardImport={(previewId, revision) =>
+              client.prepareSkillImport(previewId, revision, null)
             }
             onInstall={(previewId, revision, confirmation) =>
               commitSkillMutation(() =>
