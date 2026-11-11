@@ -5164,15 +5164,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-color: color-mix(in srgb, var(--metask-state-error) 58%, transparent);
 }
 
-.mcp-add-form .mcp-sensitive-endpoint {
-  display: flex;
-  min-height: 28px;
-  align-items: center;
-  gap: 8px;
-  color: var(--ui-content-primary);
-  font-weight: 500;
-}
-
 .mcp-existing-task-note {
   padding: 10px 11px;
   margin: 16px 0 0;
@@ -5335,10 +5326,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 0;
 }
 
-.mcp-form-advanced .mcp-form-pair {
-  margin-top: 14px;
-}
-
 .mcp-server-controls {
   padding-top: 20px;
   margin-top: 22px;
@@ -5383,27 +5370,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   gap: 6px;
 }
 
-.mcp-service-dialog[data-adding] {
+.mcp-service-dialog[data-form] {
   width: min(520px, calc(100vw - 32px));
 }
 
-.mcp-form-pair {
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(110px, 0.75fr);
-  gap: 10px;
-}
-
-.mcp-transport-choice,
-.mcp-auth-choice,
-.mcp-text-rows {
-  min-width: 0;
-  padding: 0;
-  margin: 0;
-  border: 0;
-}
-
-.mcp-transport-choice > legend,
-.mcp-auth-choice > legend,
 .mcp-field-label {
   display: block;
   margin-bottom: 7px;
@@ -5411,77 +5381,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-label);
   font-weight: 680;
   white-space: nowrap;
-}
-
-.mcp-transport-choice {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
-}
-
-.mcp-transport-choice > legend {
-  grid-column: 1 / -1;
-}
-
-.mcp-transport-choice > button {
-  display: grid;
-  min-height: 72px;
-  padding: 12px;
-  grid-template-columns: 20px minmax(0, 1fr);
-  align-items: flex-start;
-  gap: 9px;
-  border: 1px solid var(--ui-border);
-  border-radius: 10px;
-  color: var(--ui-content-muted);
-  background: var(--ui-surface-panel);
-  text-align: left;
-}
-
-.mcp-transport-choice > button[data-selected="true"] {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 50%, transparent);
-  color: var(--ui-action-selected-content);
-  background: color-mix(in srgb, var(--ui-action-primary) 5%, transparent);
-}
-
-.mcp-transport-choice strong,
-.mcp-transport-choice small {
-  display: block;
-}
-
-.mcp-transport-choice small {
-  margin-top: 4px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  font-weight: 450;
-  line-height: 1.4;
-}
-
-.mcp-auth-choice {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.mcp-auth-choice > legend {
-  width: 100%;
-}
-
-.mcp-auth-choice label {
-  display: inline-flex;
-  min-height: 32px;
-  padding: 0 10px;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid var(--ui-border);
-  border-radius: 8px;
-  background: var(--ui-surface-panel);
-}
-
-.mcp-auth-choice input {
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  accent-color: var(--ui-content-primary);
 }
 
 .mcp-installation-card {
@@ -5519,6 +5418,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .mcp-text-rows {
   display: grid;
   width: 100%;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
   gap: 7px;
 }
 
@@ -5546,11 +5449,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
   font-size: var(--text-label);
   font-weight: 650;
-}
-
-.mcp-oauth-fields {
-  display: grid;
-  gap: 12px;
 }
 
 .mcp-connection-summary {
@@ -5624,7 +5522,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-inline-start: 4px;
   font-size: var(--text-micro);
   font-weight: 500;
-  white-space: nowrap;
 }
 
 .mcp-draft-headers {
@@ -5716,25 +5613,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   font-weight: 450;
-  line-height: 1.5;
-}
-
-.mcp-add-defaults {
-  display: grid;
-  padding: 11px 12px;
-  grid-template-columns: 16px minmax(0, 1fr);
-  align-items: flex-start;
-  gap: 8px;
-  border: 1px solid
-    color-mix(in srgb, var(--metask-state-complete) 18%, transparent);
-  border-radius: 9px;
-  color: var(--metask-state-complete);
-  background: color-mix(in srgb, var(--metask-state-complete) 5%, transparent);
-}
-
-.mcp-add-defaults p {
-  margin: 0;
-  font-size: var(--text-label);
   line-height: 1.5;
 }
 
@@ -6291,7 +6169,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .scheduled-editor label > span,
-.mcp-service-dialog[data-adding]
+.mcp-service-dialog[data-form]
   .mcp-add-fields
   label:not(.mcp-draft-option)
   > span {
@@ -6305,7 +6183,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-editor input,
 .scheduled-editor select,
 .scheduled-editor textarea,
-.mcp-service-dialog[data-adding]
+.mcp-service-dialog[data-form]
   .mcp-add-form
   input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])) {
   width: 100%;
@@ -6322,7 +6200,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .scheduled-editor input::placeholder,
 .scheduled-editor textarea::placeholder,
-.mcp-service-dialog[data-adding] .mcp-add-form input::placeholder {
+.mcp-service-dialog[data-form] .mcp-add-form input::placeholder {
   color: var(--ui-content-muted);
 }
 
@@ -6507,18 +6385,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-top: 1px solid var(--ui-border);
 }
 
-.mcp-service-dialog:not([data-adding]) .mcp-add-form > footer button {
-  width: min(120px, calc((100% - 8px) / 2));
-  min-height: 34px;
-  font-size: var(--text-control);
-}
-
 .mcp-add-form > footer button:disabled {
   opacity: 0.5;
 }
 
 .scheduled-editor > footer button,
-.mcp-service-dialog[data-adding] .mcp-add-form > footer button {
+.mcp-service-dialog[data-form] .mcp-add-form > footer button {
   font-size: var(--text-control);
 }
 
@@ -6589,10 +6461,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     min-width: 44px;
   }
 
-  .mcp-add-form .mcp-sensitive-endpoint {
-    min-height: 44px;
-  }
-
   .mcp-header-actions {
     margin-left: auto;
   }
@@ -6643,11 +6511,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     width: 100%;
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .mcp-transport-choice,
-  .mcp-form-pair {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .skills-page-inner {

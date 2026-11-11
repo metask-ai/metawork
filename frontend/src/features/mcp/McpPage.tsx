@@ -283,13 +283,13 @@ function McpServerRow({
 }
 
 function McpServiceDialog({
-  adding,
+  form,
   closeLocked,
   headingRef,
   onClose,
   children,
 }: {
-  adding: boolean;
+  form: boolean;
   closeLocked: boolean;
   headingRef: RefObject<HTMLHeadingElement | null>;
   onClose: () => void;
@@ -306,7 +306,7 @@ function McpServiceDialog({
         <Dialog.Backdrop />
         <Dialog.Popup
           className="mcp-service-dialog w-[min(640px,calc(100vw-32px))] gap-0 overflow-hidden p-0"
-          data-adding={adding || undefined}
+          data-form={form || undefined}
           initialFocus={() => headingRef.current}
         >
           {children}
@@ -591,10 +591,6 @@ export function McpPage({
   const [applyPending, setApplyPending] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
   const [displayName, setDisplayName] = useState("");
-  const [negotiation, setNegotiation] = useState<
-    "automatic" | "modern_only" | "compat_only"
-  >("automatic");
-  const [timeoutMs, setTimeoutMs] = useState("30000");
   const [commandLine, setCommandLine] = useState("");
   const [structuredArgv, setStructuredArgv] = useState<string[] | null>(null);
   const saveOperation = useRef<symbol | null>(null);
@@ -789,7 +785,6 @@ export function McpPage({
   );
   const addValid =
     validMcpDisplayName(serviceName) &&
-    /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
     (transport === "stdio"
       ? (structuredArgv !== null
           ? validMcpArgv(structuredArgv)
@@ -843,8 +838,6 @@ export function McpPage({
     setDraftHeaders([]);
     setDraftAuth(null);
     setDraftOAuthClient(null);
-    setNegotiation("automatic");
-    setTimeoutMs("30000");
     setEndpoint("");
     setSensitiveEndpoint(false);
     setAuthMode("none");
@@ -861,8 +854,6 @@ export function McpPage({
     if (connection === null) return;
     setConnectionTestRequest(null);
     setDisplayName(server.displayName);
-    setNegotiation(server.negotiation);
-    setTimeoutMs(String(server.timeoutMs));
     setCommandLine("");
     setStructuredArgv(
       connection.kind === "stdio"
@@ -1084,8 +1075,8 @@ export function McpPage({
     try {
       const shared = {
         displayName: serviceName,
-        negotiation,
-        timeoutMs: Number(timeoutMs),
+        negotiation: selected?.negotiation ?? "automatic",
+        timeoutMs: selected?.timeoutMs ?? 30_000,
       };
       if (adding) {
         let result: McpHttpDraftAddResult;
@@ -1718,7 +1709,15 @@ export function McpPage({
   const refreshLabel = t(
     refreshing ? "mcp.refresh.refreshing" : "mcp.refresh.action",
   );
-  const showAddressHelp = !adding || (endpoint.length > 0 && !addressValid);
+  const showAddressHelp =
+    sensitiveEndpoint || (endpoint.length > 0 && !addressValid);
+  const connectionSourceChanged =
+    paneState?.kind === "replace" &&
+    selected?.connection &&
+    (selected.connection.kind === "streamable_http"
+      ? address !== selected.connection.endpoint
+      : (structuredArgv?.[0] ?? parseMcpCommandLine(commandLine)?.[0]) !==
+        selected.connection.command);
   const nextAction =
     paneState?.kind === "server" && selected
       ? renderNextAction(selected)
@@ -1771,11 +1770,11 @@ export function McpPage({
   const authenticationFields =
     transport === "stdio" ? (
       <>
-        <fieldset className="mcp-auth-choice">
+        <fieldset className="mcp-draft-options" disabled={createPending}>
           <legend>{t("mcp.add.authentication")}</legend>
           {(["none", "static"] as const).map((mode) => (
-            <label key={mode}>
-              <Input
+            <label className="mcp-draft-option" key={mode}>
+              <input
                 type="radio"
                 name="mcp-stdio-auth-mode"
                 checked={stdioAuthMode === mode}
@@ -1807,21 +1806,24 @@ export function McpPage({
           ))}
         </fieldset>
         {stdioAuthMode === "static" && (
-          <McpTextRows
-            label={t("mcp.add.environment")}
-            addLabel={t("mcp.add.environment_name")}
-            values={environmentNames}
-            onChange={setEnvironmentNames}
-          />
+          <>
+            <McpTextRows
+              label={t("mcp.add.environment")}
+              addLabel={t("mcp.add.environment_name")}
+              values={environmentNames}
+              onChange={setEnvironmentNames}
+            />
+            <p className="mcp-form-intro">{t("mcp.edit.secret_help")}</p>
+          </>
         )}
       </>
     ) : (
       <>
-        <fieldset className="mcp-auth-choice">
+        <fieldset className="mcp-draft-options" disabled={createPending}>
           <legend>{t("mcp.add.authentication")}</legend>
           {(["none", "static", "oauth"] as const).map((mode) => (
-            <label key={mode}>
-              <Input
+            <label className="mcp-draft-option" key={mode}>
+              <input
                 type="radio"
                 name="mcp-auth-mode"
                 checked={authMode === mode}
@@ -1852,37 +1854,38 @@ export function McpPage({
           ))}
         </fieldset>
         {authMode === "static" && (
-          <McpTextRows
-            label={t("mcp.add.headers")}
-            addLabel={t("mcp.add.header_name")}
-            values={headerNames}
-            onChange={setHeaderNames}
-          />
+          <>
+            <McpTextRows
+              label={t("mcp.add.headers")}
+              addLabel={t("mcp.add.header_name")}
+              values={headerNames}
+              onChange={setHeaderNames}
+            />
+            <p className="mcp-form-intro">{t("mcp.edit.secret_help")}</p>
+          </>
         )}
         {authMode === "oauth" && (
-          <div className="mcp-oauth-fields">
-            <label>
-              <span>{t("mcp.add.registration")}</span>
-              <SelectField
-                value={registrationKind}
-                onValueChange={(value) =>
-                  setRegistrationKind(value as typeof registrationKind)
-                }
-                options={[
-                  {
-                    value: "automatic",
-                    label: t("mcp.add.registration.automatic"),
-                  },
-                  {
-                    value: "pre_registered",
-                    label: t("mcp.add.registration.existing"),
-                  },
-                ]}
-                aria-label={t("mcp.add.registration")}
-              />
-            </label>
+          <fieldset className="mcp-draft-options" disabled={createPending}>
+            <legend>{t("mcp.add.oauth_client")}</legend>
+            {(["automatic", "pre_registered"] as const).map((kind) => (
+              <label className="mcp-draft-option" key={kind}>
+                <input
+                  type="radio"
+                  name="mcp-edit-oauth-client"
+                  checked={registrationKind === kind}
+                  onChange={() => setRegistrationKind(kind)}
+                />
+                <span>
+                  {t(
+                    kind === "automatic"
+                      ? "mcp.add.oauth_client.automatic"
+                      : "mcp.add.oauth_client.existing",
+                  )}
+                </span>
+              </label>
+            ))}
             {registrationKind === "pre_registered" && oauthClientFields}
-          </div>
+          </fieldset>
         )}
       </>
     );
@@ -2004,7 +2007,7 @@ export function McpPage({
 
         {paneState !== null && (
           <McpServiceDialog
-            adding={adding}
+            form={adding || paneState.kind === "replace"}
             closeLocked={paneCloseLocked}
             headingRef={paneHeading}
             onClose={closePane}
@@ -2023,7 +2026,11 @@ export function McpPage({
                       : selected?.displayName}
                 </Dialog.Title>
                 {selected && !nextAction && (
-                  <Dialog.Description>
+                  <Dialog.Description
+                    className={
+                      paneState.kind === "replace" ? "sr-only" : undefined
+                    }
+                  >
                     {paneState.kind === "replace"
                       ? selected.displayName
                       : t(
@@ -2259,36 +2266,6 @@ export function McpPage({
               >
                 <div className="mcp-add-fields">
                   {operationNotice}
-                  {!adding && (
-                    <p className="mcp-form-intro">{t("mcp.edit.intro")}</p>
-                  )}
-                  {!adding && (
-                    <fieldset className="mcp-transport-choice">
-                      <legend>{t("mcp.add.transport")}</legend>
-                      <button
-                        type="button"
-                        data-selected={transport === "stdio"}
-                        disabled
-                      >
-                        <Icon name="mcp" />
-                        <span>
-                          <strong>{t("mcp.transport.stdio")}</strong>
-                          <small>{t("mcp.add.stdio_help")}</small>
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        data-selected={transport === "streamable_http"}
-                        disabled
-                      >
-                        <Icon name="mcp" />
-                        <span>
-                          <strong>{t("mcp.transport.streamable_http")}</strong>
-                          <small>{t("mcp.add.http_help")}</small>
-                        </span>
-                      </button>
-                    </fieldset>
-                  )}
                   {displayNameField}
                   {transport === "stdio" ? (
                     <>
@@ -2434,88 +2411,23 @@ export function McpPage({
                           </small>
                         )}
                       </label>
-                      {!adding && (
-                        <label className="mcp-sensitive-endpoint">
-                          <Checkbox.Root
-                            checked={sensitiveEndpoint}
-                            disabled={createPending}
-                            onCheckedChange={(checked) => {
-                              setEndpoint("");
-                              setSensitiveEndpoint(checked);
-                            }}
-                          >
-                            <Checkbox.Indicator aria-hidden="true">
-                              ✓
-                            </Checkbox.Indicator>
-                          </Checkbox.Root>
-                          <span>{t("mcp.add.sensitive_endpoint")}</span>
-                        </label>
-                      )}
                     </div>
                   )}
                   {!adding && authenticationFields}
-                  {!adding && (
-                    <details className="mcp-advanced mcp-form-advanced">
-                      <summary>
-                        <span>{t("mcp.detail.advanced")}</span>
-                        <Icon name="chevron" />
-                      </summary>
-                      <div className="mcp-form-pair">
-                        <label>
-                          <span>{t("mcp.add.protocol")}</span>
-                          <SelectField
-                            value={negotiation}
-                            onValueChange={(value) =>
-                              setNegotiation(value as typeof negotiation)
-                            }
-                            options={[
-                              {
-                                value: "automatic",
-                                label: t("mcp.negotiation.automatic"),
-                              },
-                              {
-                                value: "modern_only",
-                                label: t("mcp.negotiation.modern_only"),
-                              },
-                              {
-                                value: "compat_only",
-                                label: t("mcp.negotiation.compat_only"),
-                              },
-                            ]}
-                            aria-label={t("mcp.add.protocol")}
-                          />
-                        </label>
-                        <label>
-                          <span>{t("mcp.add.timeout")}</span>
-                          <Input
-                            inputMode="numeric"
-                            value={timeoutMs}
-                            onChange={(event) =>
-                              setTimeoutMs(event.target.value)
-                            }
-                          />
-                          <small>
-                            {t("mcp.add.timeoutHelp", {
-                              limit: management.runtimeTimeoutLimitMs,
-                            })}
-                          </small>
-                        </label>
-                      </div>
-                    </details>
-                  )}
-                  {!adding && (
-                    <div className="mcp-add-defaults">
-                      <Icon name="check" />
-                      <p>{t("mcp.add.defaults")}</p>
-                    </div>
-                  )}
+                  {!adding &&
+                    connectionSourceChanged &&
+                    selected?.authMode !== "none" && (
+                      <p className="mcp-form-intro">
+                        {t("mcp.edit.reauthenticate")}
+                      </p>
+                    )}
                 </div>
                 <footer>
                   <Button
                     type="button"
                     variant="secondary"
                     size="sm"
-                    className={adding ? "min-w-24" : undefined}
+                    className="min-w-24"
                     disabled={paneCloseLocked}
                     onClick={closePane}
                   >
@@ -2525,7 +2437,7 @@ export function McpPage({
                     type="submit"
                     variant="primary"
                     size="sm"
-                    className={adding ? "min-w-24" : undefined}
+                    className="min-w-24"
                     disabled={
                       !addValid ||
                       mutationLocked ||

@@ -429,8 +429,8 @@ export const enUS = {
   "mcp.add.action": "Add manually",
   "mcp.add.title": "Add an MCP server",
   "mcp.edit.title": "Edit connection settings",
-  "mcp.edit.intro":
-    "Change the saved non-secret settings. Secret values stay hidden and are preserved only while the executable or endpoint remains unchanged.",
+  "mcp.edit.reauthenticate":
+    "Changing the address or program requires setting up credentials or signing in again.",
   "mcp.edit.action": "Edit connection",
   "mcp.edit.submit": "Save connection",
   "mcp.add.name": "Display name",
@@ -474,10 +474,6 @@ export const enUS = {
     "Couldn't check this configuration. Review the name and address and try again.",
   "mcp.add.probe.unavailable":
     "Connection checks are unavailable right now. Try again shortly.",
-  "mcp.add.transport": "Connection type",
-  "mcp.add.stdio_help": "Run a local process with structured arguments.",
-  "mcp.add.http_help": "Connect to a remote Streamable HTTP endpoint.",
-  "mcp.add.protocol": "Protocol policy",
   "mcp.add.timeout": "Timeout (ms)",
   "mcp.add.timeoutHelp":
     "Per-request timeout. Connection and catalog management are limited to {limit} ms; tool calls keep the configured timeout.",
@@ -505,17 +501,15 @@ export const enUS = {
   "mcp.add.environment_name": "Add environment name",
   "mcp.add.authentication": "Authentication",
   "mcp.add.headers": "Header names",
+  "mcp.edit.secret_help":
+    "Set or replace secret values in the connection details after saving.",
   "mcp.add.header_name": "Add header name",
-  "mcp.add.registration": "Client registration",
-  "mcp.add.registration.automatic": "Automatic (DCR)",
-  "mcp.add.registration.existing": "Existing client",
   "mcp.add.client_id": "Client ID",
   "mcp.add.client_auth_method": "Token endpoint client authentication",
   "mcp.client_auth.none": "Public client (no client secret)",
   "mcp.client_auth.client_secret_basic": "Client secret (HTTP Basic)",
   "mcp.client_auth.client_secret_post": "Client secret (request body)",
   "mcp.add.remove_row": "Remove row",
-  "mcp.add.sensitive_endpoint": "This address contains credentials",
   "mcp.add.sensitive_endpoint_replace":
     "Enter the full address to replace the saved address.",
   "mcp.install.phase.preparing": "Preparing configuration…",
@@ -560,8 +554,6 @@ export const enUS = {
   "mcp.add.endpoint": "Server address",
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
-  "mcp.add.defaults":
-    "Credentials use separate password fields. After saving, MetaWork shows the next action this connection needs.",
   "mcp.add.submit": "Add server",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",

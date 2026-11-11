@@ -1470,13 +1470,8 @@ test("MCP edit can add OAuth to a saved remote server", async () => {
   );
   fireEvent.click(within(dialog).getByRole("radio", { name: "OAuth" }));
   fireEvent.click(
-    within(dialog).getByRole("combobox", { name: "Client registration" }),
+    within(dialog).getByRole("radio", { name: "Use your own OAuth client" }),
   );
-  const existingClientOption = await screen.findByRole("option", {
-    name: "Existing client",
-  });
-  fireEvent.pointerDown(existingClientOption);
-  fireEvent.click(existingClientOption);
   await waitFor(() =>
     within(dialog).getByRole("textbox", { name: "Client ID" }),
   );
@@ -1651,6 +1646,11 @@ test("MCP tool allowlist mutation sends exact desired tools and generation", asy
 
 test("MCP edit preloads and preserves the complete public destination", async () => {
   const calls = [];
+  const server = {
+    ...servers[0],
+    negotiation: "modern_only",
+    timeoutMs: 45000,
+  };
   render(
     pageElement(
       {
@@ -1660,7 +1660,7 @@ test("MCP edit preloads and preserves the complete public destination", async ()
         desiredGeneration: "replacement-generation",
         runtimeAlignment: "current",
         redacted: false,
-        servers: [servers[0]],
+        servers: [server],
       },
       "",
       {
@@ -1677,8 +1677,33 @@ test("MCP edit preloads and preserves the complete public destination", async ()
   const dialog = screen.getByRole("dialog", {
     name: "Edit connection settings",
   });
-  assert.ok(
-    dialog.textContent.includes("Change the saved non-secret settings"),
+  assert.equal(within(dialog).queryByText("Advanced settings"), null);
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol policy" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Timeout (ms)" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("group", { name: "Connection type" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("checkbox", {
+      name: "This address contains credentials",
+    }),
+    null,
+  );
+  assert.equal(
+    within(dialog).getByRole("radio", { name: "OAuth" }).checked,
+    true,
+  );
+  assert.equal(
+    within(dialog).getByRole("radio", { name: "Register automatically" })
+      .checked,
+    true,
   );
   const endpoint = within(dialog).getByRole("textbox", {
     name: "Server address",
@@ -1687,6 +1712,23 @@ test("MCP edit preloads and preserves the complete public destination", async ()
     name: "Save connection",
   });
   assert.equal(endpoint.value, "https://github.example/mcp");
+  fireEvent.change(endpoint, {
+    target: { value: "https://updated.example/mcp" },
+  });
+  assert.ok(
+    within(dialog).getByText(
+      "Changing the address or program requires setting up credentials or signing in again.",
+    ),
+  );
+  fireEvent.change(endpoint, {
+    target: { value: "https://github.example/mcp" },
+  });
+  assert.equal(
+    within(dialog).queryByText(
+      "Changing the address or program requires setting up credentials or signing in again.",
+    ),
+    null,
+  );
   assert.equal(submit.disabled, false);
   fireEvent.click(submit);
 
@@ -1696,8 +1738,8 @@ test("MCP edit preloads and preserves the complete public destination", async ()
     "github-binding",
     {
       displayName: "GitHub",
-      negotiation: "automatic",
-      timeoutMs: 30000,
+      negotiation: "modern_only",
+      timeoutMs: 45000,
       endpoint: "https://github.example/mcp",
       authMode: "oauth",
       headerNames: [],
@@ -2575,12 +2617,10 @@ test("MCP sensitive address uses a one-shot password field and never refills a s
   assert.equal(replacement.type, "password");
   assert.equal(replacement.value, "");
   assert.equal(
-    within(form)
-      .getByRole("checkbox", {
-        name: /This address contains credentials/,
-      })
-      .getAttribute("aria-checked"),
-    "true",
+    within(form).queryByRole("checkbox", {
+      name: /This address contains credentials/,
+    }),
+    null,
   );
   fireEvent.change(replacement, {
     target: { value: "https://mcp.example/k/synthetic-key?scope=one" },

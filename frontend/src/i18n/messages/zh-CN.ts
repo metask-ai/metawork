@@ -368,8 +368,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.action": "手动添加",
   "mcp.add.title": "添加 MCP 服务",
   "mcp.edit.title": "编辑连接配置",
-  "mcp.edit.intro":
-    "修改已保存的非敏感配置。密钥值不会显示；只有可执行文件或 Endpoint 未改变时，已有密钥才会保留。",
+  "mcp.edit.reauthenticate":
+    "更换服务地址或启动程序后，需要重新设置密钥或登录。",
   "mcp.edit.action": "编辑连接",
   "mcp.edit.submit": "保存连接",
   "mcp.add.name": "显示名称",
@@ -406,10 +406,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.probe.busy": "另一个连接检测正在进行，请稍后重试。",
   "mcp.add.probe.rejected": "无法检测这份配置，请检查名称和地址后重试。",
   "mcp.add.probe.unavailable": "暂时无法检测连接，请稍后重试。",
-  "mcp.add.transport": "连接类型",
-  "mcp.add.stdio_help": "以结构化参数启动本地进程。",
-  "mcp.add.http_help": "连接远程 Streamable HTTP Endpoint。",
-  "mcp.add.protocol": "协议策略",
   "mcp.add.timeout": "超时（毫秒）",
   "mcp.add.timeoutHelp":
     "每次请求的等待时限。连接和目录管理最多 {limit} 毫秒，工具调用保留配置值。",
@@ -437,17 +433,14 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.environment_name": "添加环境变量名",
   "mcp.add.authentication": "身份认证",
   "mcp.add.headers": "请求标头名称",
+  "mcp.edit.secret_help": "保存后可在连接详情中设置或更换密钥。",
   "mcp.add.header_name": "添加标头名称",
-  "mcp.add.registration": "客户端注册",
-  "mcp.add.registration.automatic": "自动（DCR）",
-  "mcp.add.registration.existing": "已有客户端",
   "mcp.add.client_id": "Client ID",
   "mcp.add.client_auth_method": "Token Endpoint 客户端认证",
   "mcp.client_auth.none": "公开客户端（无 Client Secret）",
   "mcp.client_auth.client_secret_basic": "Client Secret（HTTP Basic）",
   "mcp.client_auth.client_secret_post": "Client Secret（请求体）",
   "mcp.add.remove_row": "删除此行",
-  "mcp.add.sensitive_endpoint": "此地址包含凭据",
   "mcp.add.sensitive_endpoint_replace": "请填写完整地址以替换已保存的地址。",
   "mcp.install.phase.preparing": "正在准备配置…",
   "mcp.install.phase.needs_authorization":
@@ -482,8 +475,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.endpoint": "服务地址",
   "mcp.add.endpoint_help":
     "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息和 fragment。",
-  "mcp.add.defaults":
-    "凭据仅通过独立密码字段提交。保存后，页面显示此连接需要完成的下一项操作。",
   "mcp.add.submit": "添加服务",
   "mcp.add.adding": "正在添加…",
   "mcp.rename.action": "保存名称",
