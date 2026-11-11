@@ -4789,7 +4789,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   width: 100%;
   min-height: 74px;
   padding: 12px 10px 12px 12px;
-  grid-template-columns: 22px minmax(0, 1fr) auto auto;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   border: 0;
@@ -4879,16 +4879,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: nowrap;
 }
 
-.mcp-server-tools,
 .mcp-server-state {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   white-space: nowrap;
-}
-
-.mcp-server-tools {
-  display: block;
-  justify-self: end;
 }
 
 .mcp-server-state {
@@ -4930,6 +4924,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.mcp-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .mcp-server-enablement-label {
@@ -6490,12 +6490,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     row-gap: 4px;
   }
 
-  .mcp-server-tools,
   .mcp-server-state {
     grid-column: 2;
     justify-self: start;
     text-align: left;
     white-space: normal;
+  }
+
+  .mcp-row-actions > button {
+    min-width: 44px;
   }
 
   .mcp-state-banner {

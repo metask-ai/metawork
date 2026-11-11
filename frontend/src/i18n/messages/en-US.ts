@@ -369,7 +369,6 @@ export const enUS = {
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.tool_access_summary": "{available}/{total} tools available",
   "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
   "mcp.access.restart_required": "Connecting",

@@ -451,6 +451,62 @@ test("MCP toggles a server from the list without opening details", async () => {
   );
 });
 
+test("MCP list actions edit the chosen connection and confirm deletion without opening details", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        ...emptyManagement,
+        desiredGeneration: "7",
+        servers,
+      },
+      "",
+      {
+        onRemove: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+  const actions = within(screen.getByRole("group", { name: "GitHub" }));
+  const edit = actions.getByRole("button", { name: "Edit connection" });
+  const remove = actions.getByRole("button", { name: "Delete server" });
+  assert.equal(screen.queryByText("Available to new tasks"), null);
+  assert.equal(screen.queryByText(/2\/2 tools available/), null);
+  fireEvent.click(edit);
+  const form = screen.getByRole("dialog", { name: "Edit connection settings" });
+  assert.equal(
+    within(form).getByRole("textbox", { name: "Display name" }).value,
+    "GitHub",
+  );
+  fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(document.activeElement === edit));
+  fireEvent.click(remove);
+  assert.equal(calls.length, 0);
+  let confirmation = screen.getByRole("alertdialog", {
+    name: "Delete this server?",
+  });
+  assert.ok(within(confirmation).getByText(/Renewal stops after deletion/));
+  fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(document.activeElement === remove));
+  fireEvent.click(remove);
+  confirmation = screen.getByRole("alertdialog", {
+    name: "Delete this server?",
+  });
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "Delete server" }),
+  );
+  await waitFor(() => assert.deepEqual(calls, [["7", "github-binding"]]));
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement ===
+        screen.getByRole("heading", { level: 1, name: "MCP" }),
+    ),
+  );
+  assert.equal(screen.queryByRole("dialog"), null);
+});
+
 test("MCP locks every server switch while one mutation is pending", async () => {
   const calls = [];
   let resolveFirstMutation = () => {};
@@ -498,6 +554,13 @@ test("MCP locks every server switch while one mutation is pending", async () => 
   await waitFor(() =>
     assert.equal(gitlabToggle.getAttribute("aria-disabled"), "true"),
   );
+  for (const name of ["Edit connection", "Delete server"]) {
+    assert.ok(
+      screen
+        .getAllByRole("button", { name })
+        .every((button) => button.disabled),
+    );
+  }
   fireEvent.click(gitlabToggle);
   assert.deepEqual(calls, [["shared-generation", "github-binding", false]]);
 
@@ -526,7 +589,7 @@ test("MCP keeps isolated test results in connection details", () => {
   );
 
   const row = screen.getByRole("button", { name: /GitHub/ });
-  assert.ok(within(row).getByText("Available to new tasks"));
+  assert.equal(within(row).queryByText("Available to new tasks"), null);
   assert.equal(within(row).queryByText("Failed · 2 issues"), null);
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
@@ -668,7 +731,7 @@ test("MCP keeps intentionally disabled servers out of the attention group", () =
   const row = within(disabledGroup).getByRole("button", {
     name: /Filesystem/,
   });
-  assert.ok(within(row).getByText("Disabled"));
+  assert.ok(within(row.closest("li")).getByText("Disabled"));
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "Filesystem" });
   assert.ok(within(dialog).getByRole("button", { name: "Enable" }));
@@ -699,7 +762,7 @@ test("MCP keeps disabled desired state separate from connection apply recovery",
   assert.ok(screen.getByText("Connection changes were not applied"));
   assert.equal(screen.queryByText("Needs attention"), null);
   const row = screen.getByRole("button", { name: /Filesystem/ });
-  assert.ok(within(row).getByText("Disabled"));
+  assert.ok(within(row.closest("li")).getByText("Disabled"));
   fireEvent.click(row);
   const dialog = screen.getByRole("dialog", { name: "Filesystem" });
   assert.equal(

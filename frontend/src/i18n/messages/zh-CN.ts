@@ -313,7 +313,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.status.invalid_catalog": "工具目录无效",
   "mcp.transport.stdio": "本地 · STDIO",
   "mcp.transport.streamable_http": "远程 · HTTP",
-  "mcp.tool_access_summary": "可用工具 {available}/{total}",
   "mcp.access.available": "新任务可用",
   "mcp.access.not_allowed": "未授权",
   "mcp.access.restart_required": "正在连接",

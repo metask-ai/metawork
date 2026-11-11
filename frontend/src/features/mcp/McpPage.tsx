@@ -182,22 +182,26 @@ function McpServerRow({
   server,
   applying,
   selected,
-  toggleDisabled,
+  controlsDisabled,
   onOpen,
   onToggle,
+  onEdit,
+  onRequestDelete,
 }: {
   server: McpServer;
   applying: boolean;
   selected: boolean;
-  toggleDisabled: boolean;
+  controlsDisabled: boolean;
   onOpen: (server: McpServer, trigger: HTMLElement) => void;
   onToggle: (server: McpServer, enabled: boolean, trigger: HTMLElement) => void;
+  onEdit: (server: McpServer, trigger: HTMLElement) => void;
+  onRequestDelete: (server: McpServer, trigger: HTMLElement) => void;
 }) {
   const { t } = useI18n();
   const enablementDescriptionId = useId();
-  const available = server.tools.filter(
-    (tool) => tool.availableToNewTasks,
-  ).length;
+  const stateKey = serverStateKey(server, applying);
+  const showState =
+    stateKey !== "mcp.access.available" && stateKey !== "mcp.desired.disabled";
   const enablementUnavailable =
     server.connection === null ||
     (!server.desiredEnabled && server.approvalStatus !== "approved");
@@ -229,55 +233,81 @@ function McpServerRow({
             {t(`mcp.auth.${server.authMode}`)}
           </span>
         </span>
-        <span className="mcp-server-tools">
-          {t("mcp.tool_access_summary", {
-            available,
-            total: server.tools.length,
-          })}
-        </span>
-        <span className="mcp-server-state">
-          <strong>{t(serverStateKey(server, applying))}</strong>
-          {server.taskReferenceCount > 0 && (
-            <small>
-              {t("mcp.tasks.count", { count: server.taskReferenceCount })}
-            </small>
-          )}
-        </span>
-      </button>
-      <span
-        className="mcp-server-enablement"
-        data-enabled={server.desiredEnabled}
-      >
-        <span className="mcp-server-enablement-label" aria-hidden="true">
-          {server.desiredEnabled
-            ? t("mcp.desired.enabled")
-            : t("mcp.desired.disabled")}
-        </span>
-        <Switch.Root
-          className="h-4 w-7 data-checked:bg-(--metask-state-complete)"
-          checked={server.desiredEnabled}
-          disabled={toggleDisabled || enablementUnavailable}
-          aria-label={t("mcp.enablement.label", {
-            server: server.displayName,
-          })}
-          aria-describedby={
-            enablementDescription ? enablementDescriptionId : undefined
-          }
-          title={t(
-            server.desiredEnabled ? "mcp.disable.action" : "mcp.enable.action",
-          )}
-          onClick={(event) =>
-            onToggle(server, !server.desiredEnabled, event.currentTarget)
-          }
-        >
-          <Switch.Thumb className="size-3 data-checked:translate-x-3" />
-        </Switch.Root>
-        {enablementDescription && (
-          <span id={enablementDescriptionId} className="sr-only">
-            {enablementDescription}
+        {(showState || server.taskReferenceCount > 0) && (
+          <span className="mcp-server-state">
+            {showState && <strong>{t(stateKey)}</strong>}
+            {server.taskReferenceCount > 0 && (
+              <small>
+                {t("mcp.tasks.count", { count: server.taskReferenceCount })}
+              </small>
+            )}
           </span>
         )}
-      </span>
+      </button>
+      <div
+        className="mcp-row-actions"
+        role="group"
+        aria-label={server.displayName}
+      >
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 text-base text-(--ui-content-muted) disabled:opacity-50"
+          aria-label={t("mcp.edit.action")}
+          title={t("mcp.edit.action")}
+          disabled={controlsDisabled || server.connection === null}
+          onClick={(event) => onEdit(server, event.currentTarget)}
+        >
+          <Icon name="edit" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 text-base text-(--ui-content-muted) hover:text-(--ui-content-error) disabled:opacity-50"
+          aria-label={t("mcp.delete.action")}
+          title={t("mcp.delete.action")}
+          disabled={controlsDisabled}
+          onClick={(event) => onRequestDelete(server, event.currentTarget)}
+        >
+          <Icon name="trash" />
+        </Button>
+        <span
+          className="mcp-server-enablement"
+          data-enabled={server.desiredEnabled}
+        >
+          <span className="mcp-server-enablement-label" aria-hidden="true">
+            {server.desiredEnabled
+              ? t("mcp.desired.enabled")
+              : t("mcp.desired.disabled")}
+          </span>
+          <Switch.Root
+            className="h-4 w-7 data-checked:bg-(--metask-state-complete)"
+            checked={server.desiredEnabled}
+            disabled={controlsDisabled || enablementUnavailable}
+            aria-label={t("mcp.enablement.label", {
+              server: server.displayName,
+            })}
+            aria-describedby={
+              enablementDescription ? enablementDescriptionId : undefined
+            }
+            title={t(
+              server.desiredEnabled
+                ? "mcp.disable.action"
+                : "mcp.enable.action",
+            )}
+            onClick={(event) =>
+              onToggle(server, !server.desiredEnabled, event.currentTarget)
+            }
+          >
+            <Switch.Thumb className="size-3 data-checked:translate-x-3" />
+          </Switch.Root>
+          {enablementDescription && (
+            <span id={enablementDescriptionId} className="sr-only">
+              {enablementDescription}
+            </span>
+          )}
+        </span>
+      </div>
     </li>
   );
 }
@@ -850,9 +880,10 @@ export function McpPage({
     setPaneState({ kind: "add" });
   }
 
-  function openReplacement(server: McpServer) {
+  function openReplacement(server: McpServer, trigger?: HTMLElement) {
     const connection = server.connection;
     if (connection === null) return;
+    if (trigger) paneTrigger.current = trigger;
     setConnectionTestRequest(null);
     setDisplayName(server.displayName);
     setCommandLine("");
@@ -1348,7 +1379,7 @@ export function McpPage({
               server={server}
               applying={isServerApplying(server)}
               selected={selected?.id === server.id}
-              toggleDisabled={
+              controlsDisabled={
                 mutationLocked ||
                 pendingServerId !== null ||
                 (management.authorizationOperation.kind !== "idle" &&
@@ -1357,6 +1388,10 @@ export function McpPage({
               }
               onOpen={openServer}
               onToggle={requestServerEnablement}
+              onEdit={openReplacement}
+              onRequestDelete={(server, trigger) =>
+                openConfirmation("delete", server, trigger)
+              }
             />
           ))}
         </ul>
@@ -3089,11 +3124,15 @@ export function McpPage({
                     ).then((result) => {
                       if (
                         action === "delete" &&
-                        selected?.id === target.id &&
                         (result?.outcome === "saved" ||
                           result?.outcome === "saved_recovery_required")
-                      )
-                        closePane();
+                      ) {
+                        if (selected?.id === target.id) closePane();
+                        else
+                          window.requestAnimationFrame(() =>
+                            title.current?.focus(),
+                          );
+                      }
                     });
                   }}
                 >
