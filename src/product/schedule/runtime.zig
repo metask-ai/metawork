@@ -592,14 +592,21 @@ pub const Runtime = struct {
                 self.stopForOccurrenceCapacity(due.id, redaction);
             } else if (err == error.ScheduleAdmissionWaiting) {
                 self.store.find(due.id).?.waiting_for_task_history = true;
-            } else if (self.persistence_health != .ready or
-                self.store.find(due.id).?.preflight_retry_at_unix_seconds == null)
-            {
-                // No claim may have been committed. Leave its cursor intact
-                // and wait for an authority/lifecycle wake, never arm the same
-                // overdue point again from this failed callback.
-                self.timer.cancelCurrent();
-                return;
+            } else {
+                const item = self.store.find(due.id).?;
+                const rejected = if (item.last_occurrence) |occurrence|
+                    occurrence.result == .rejected and occurrence.source == .timer and
+                        occurrence.planned_at_unix_seconds == due.planned_at_unix_seconds
+                else
+                    false;
+                // A confirmed rejection consumed this occurrence. Rearm for
+                // other definitions, but never replay an unclaimed due point.
+                if (self.persistence_health != .ready or
+                    (!rejected and item.preflight_retry_at_unix_seconds == null))
+                {
+                    self.timer.cancelCurrent();
+                    return;
+                }
             }
         };
         _ = self.rearmNoFail(binding, redaction);
@@ -879,7 +886,7 @@ pub const Runtime = struct {
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
-        candidate.finalizeOccurrenceTask(
+        const needs_attention = candidate.finalizeOccurrenceTask(
             candidate.find(pending.scheduled_task_id) orelse return false,
             pending.planned_at_unix_seconds,
             pending.source,
@@ -896,7 +903,7 @@ pub const Runtime = struct {
             .scheduled_task_id = committed.id,
             .task_id = pending.task_id,
             .title = committed.title,
-            .kind = if (resolution.permission_required)
+            .kind = if (needs_attention)
                 .needs_attention
             else if (resolution.outcome == .completed)
                 .completed
@@ -2087,6 +2094,29 @@ test "permission-required scheduled occurrence stops without waiting for UI" {
     try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
 }
 
+test "permission failure from an older definition stays in history without disabling the update" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("scheduled", "inspect");
+    const id = try runtime.create(definition, testBinding(), redaction);
+    const original_task = try runtime.runNow(id, 1, redaction, tasks.effects());
+    definition.permission_profile = .full_access;
+    try runtime.update(id, 1, definition, testBinding(), redaction);
+    tasks.terminal = .{ .outcome = .stopped, .permission_required = true };
+    tasks.terminal_task_id = original_task;
+    try std.testing.expect(runtime.reconcileNoFail(testBinding(), redaction, tasks.effects()));
+    const updated = runtime.store.find(id).?;
+    try std.testing.expect(updated.enabled);
+    try std.testing.expectEqual(Health.ready, updated.health);
+    try std.testing.expectEqual(PermissionProfile.full_access, updated.permission_profile);
+    try std.testing.expectEqual(FailureReason.permission_required, updated.occurrences()[0].reason.?);
+    try std.testing.expectEqual(TaskOutcome.stopped, updated.occurrences()[0].task_outcome.?);
+    try std.testing.expectEqual(NotificationKind.failed, effects.notification_kind.?);
+}
+
 test "input continuation gate includes submitted occurrences skipped after earlier write failure" {
     var effects: TestEffects = .{};
     var tasks: TestTasks = .{ .next_task_id = 41 };
@@ -2255,6 +2285,32 @@ test "allocation failure before launch never strands a committed claim" {
         }
     }
     try std.testing.expect(failures > 0);
+}
+
+test "only a confirmed launch rejection rearms the timer for another due schedule" {
+    for ([_]PersistenceCommit{ .committed, .failed, .outcome_unknown }) |commit| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{ .rejection = .{ .cause = error.TaskCapacity, .reason = .capacity_reached, .task_id = 0 }, .launch_effects = &effects, .launch_commit = commit };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const first = try runtime.create(testDefinition("first", "inspect"), testBinding(), redaction);
+        const second = try runtime.create(testDefinition("second", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 200;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(usize, 0), runtime.store.find(second).?.occurrence_count);
+        if (commit == .committed) {
+            try std.testing.expectEqual(Health.needs_attention, runtime.store.find(first).?.health);
+            try std.testing.expectEqual(@as(?u64, 200), effects.armed_at);
+            tasks.rejection = null;
+            runtime.onTimer(testBinding(), redaction, tasks.effects());
+            try std.testing.expectEqual(@as(u64, 42), runtime.store.find(second).?.last_occurrence.?.task_id);
+        } else {
+            try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+            try std.testing.expect(runtime.persistenceHealth() != .ready);
+        }
+    }
 }
 
 test "rejected launch notification follows a confirmed Schedule commit" {

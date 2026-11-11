@@ -197,6 +197,8 @@ pub const Occurrence = struct {
     reason: ?FailureReason = null,
     task_outcome: ?OccurrenceTaskOutcome = null,
     notification_sent: bool = false,
+    /// Live launch authority, deliberately absent from the store format.
+    claimed_definition_epoch: ?u64 = null,
 };
 
 pub const Definition = struct {
@@ -579,6 +581,7 @@ pub const Store = struct {
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = source,
             .result = .claimed,
+            .claimed_definition_epoch = item.epoch,
         });
         if (source == .timer)
             try advanceAfterTimer(item, triggered_at_unix_seconds);
@@ -646,7 +649,7 @@ pub const Store = struct {
         task_id: u64,
         outcome: OccurrenceTaskOutcome,
         reason: ?FailureReason,
-    ) error{InvalidSchedule}!void {
+    ) error{InvalidSchedule}!bool {
         if (reason != null and reason != .permission_required)
             return error.InvalidSchedule;
         var index = item.occurrence_count;
@@ -672,8 +675,11 @@ pub const Store = struct {
                 item.last_occurrence.?.reason = reason;
                 item.last_occurrence.?.notification_sent = true;
             }
-            if (reason) |value| self.markNeedsAttention(item, value);
-            return;
+            if (reason) |value| if (occurrence.claimed_definition_epoch == item.epoch) {
+                self.markNeedsAttention(item, value);
+                return true;
+            };
+            return false;
         }
         return error.InvalidSchedule;
     }
