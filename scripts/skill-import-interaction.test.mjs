@@ -19,6 +19,10 @@ for (const name of [
   "NodeFilter",
   "DocumentFragment",
   "Element",
+  "Event",
+  "FocusEvent",
+  "KeyboardEvent",
+  "MouseEvent",
   "HTMLElement",
   "HTMLButtonElement",
   "HTMLInputElement",
@@ -70,7 +74,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
     return this;
   },
 });
-const { render, screen, cleanup, fireEvent, act, waitFor } =
+const { render, screen, cleanup, fireEvent, act, waitFor, within } =
   await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const vite = await createServer({
@@ -120,12 +124,18 @@ test("Recovery-required details skip moving files and keep exact Retry and keybo
     name: /review.*Recovery required/,
   });
   await user.click(card);
-  await screen.findByRole("dialog");
+  const dialog = await screen.findByRole("dialog", {
+    name: recovery.displayName,
+  });
+  const heading = dialog.querySelector("h2");
+  await waitFor(() => assert.ok(document.activeElement === heading));
   assert.equal(detail.mock.callCount(), 0);
   assert.equal(screen.queryByRole("button", { name: "Export .skill" }), null);
   await user.click(screen.getByRole("button", { name: "Retry", exact: true }));
   assert.equal(retries.length, 1);
   assert.equal(retries[0].installId, recovery.installId);
+  await user.keyboard("{Escape}");
+  assert.equal(screen.getByRole("dialog"), dialog);
   assert.equal(
     screen.getByRole("button", { name: "Retry", exact: true }).disabled,
     true,
@@ -148,7 +158,172 @@ test("Recovery-required details skip moving files and keep exact Retry and keybo
   assert.equal(retries.length, 1);
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  assert.equal(document.activeElement, card);
+  await waitFor(() => assert.ok(document.activeElement === card));
+});
+
+test("Skill details show the description and safely format the readable body", async (ctx) => {
+  const asset = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/skill-recovery-required.fixture",
+      "utf8",
+    ),
+  );
+  const definition = [
+    "---",
+    "name: review",
+    "description: Hidden file metadata",
+    "---",
+    "# Review",
+    "",
+    "## Before editing",
+    "",
+    "Review the **selected changes**.",
+    "",
+    "[Reference](https://example.invalid/guide)",
+    "",
+    "![Diagram](https://example.invalid/diagram.png)",
+    "",
+    '<iframe src="https://example.invalid/embed"></iframe>',
+  ].join("\r\n");
+  const detail = ctx.mock.method(
+    BridgeClient.prototype,
+    "skillDetail",
+    async () => ({
+      available: true,
+      definition,
+      fileCount: 1,
+      totalBytes: definition.length,
+      reason: null,
+    }),
+  );
+  await fixture(ctx, (snapshot) => {
+    snapshot.skillManagement.assets = [
+      {
+        ...asset,
+        installId: null,
+        sourceKind: "external",
+        managementState: "externally_managed",
+        displayName: "pptx",
+        invocationName: "pptx",
+        description: "Create and edit presentations.",
+      },
+      {
+        ...asset,
+        description: "Review a project.",
+        managementState: "ready",
+        canExport: true,
+      },
+    ];
+  });
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("button", { name: /pptx.*presentations/ }));
+  const external = await screen.findByRole("dialog", { name: "pptx" });
+  assert.ok(within(external).getByText("Create and edit presentations."));
+  assert.equal(within(external).queryByText("/pptx"), null);
+  assert.equal(external.querySelector("details, footer"), null);
+  assert.equal(detail.mock.callCount(), 0);
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+
+  await user.click(screen.getByRole("button", { name: /review.*project/i }));
+  const managed = await screen.findByRole("dialog", { name: "review" });
+  const content = within(managed);
+  assert.ok(content.getByText("Review a project."));
+  assert.ok(await content.findByRole("heading", { name: "Before editing" }));
+  assert.equal(
+    content.getAllByRole("heading", { name: /^review$/i }).length,
+    1,
+  );
+  assert.equal(content.queryByText(/Hidden file metadata/), null);
+  assert.equal(content.getByText("selected changes").tagName, "STRONG");
+  assert.ok(content.getByText("Reference"));
+  assert.equal(managed.querySelector("a[href], img, iframe, details"), null);
+  assert.deepEqual(
+    detail.mock.calls.map(({ arguments: args }) => args),
+    [[asset.installId]],
+  );
+});
+
+test("Skill details keep enablement and uninstall in the footer and move file actions into the menu", async (ctx) => {
+  const asset = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/skill-recovery-required.fixture",
+      "utf8",
+    ),
+  );
+  Object.assign(asset, {
+    managementState: "ready",
+    canExport: true,
+    canReimport: true,
+    canUninstall: true,
+    canSetEnabled: true,
+    enabled: true,
+    enablementState: "enabled",
+    selectionRevision: "1",
+    skillPolicyKey: "review",
+  });
+  const { snapshot } = await fixture(ctx, (value) => {
+    value.skillManagement.assets = [asset];
+  });
+  const setEnabled = ctx.mock.method(
+    BridgeClient.prototype,
+    "setSkillEnabled",
+    async () => {
+      snapshot.revision = "50";
+      snapshot.skillManagement.assets = [
+        {
+          ...asset,
+          enabled: false,
+          enablementState: "disabled",
+          selectionRevision: "2",
+        },
+      ];
+      return { applied: true, selectionRevision: "2", reason: null };
+    },
+  );
+  const exportSkill = ctx.mock.method(
+    BridgeClient.prototype,
+    "exportSkill",
+    async () => ({ exported: true, fileName: "review.skill", reason: null }),
+  );
+  const choose = ctx.mock.method(
+    BridgeClient.prototype,
+    "chooseSkillImport",
+    async () => ({ status: "cancelled" }),
+  );
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: /review.*description/i }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "review" });
+  const footer = within(dialog.querySelector("footer"));
+  assert.deepEqual(
+    footer.getAllByRole("button").map((button) => button.textContent.trim()),
+    ["Disable", "Uninstall"],
+  );
+  await user.click(footer.getByRole("button", { name: "Disable" }));
+  await footer.findByRole("button", { name: "Enable" });
+  assert.deepEqual(setEnabled.mock.calls[0].arguments, [
+    { scope: "personal" },
+    "review",
+    "disabled",
+    "personal",
+    "1",
+  ]);
+  const more = within(dialog).getByRole("button", { name: "More actions" });
+  await user.click(more);
+  await user.click(await screen.findByRole("menuitem", { name: "Export" }));
+  await within(dialog).findByText(/Exported review.skill/);
+  assert.deepEqual(exportSkill.mock.calls[0].arguments, [asset.installId]);
+  await user.click(more);
+  await user.click(await screen.findByRole("menuitem", { name: "Reimport" }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Choose folder" }),
+  );
+  assert.deepEqual(choose.mock.calls[0].arguments, [
+    "directory",
+    { kind: "reimport", installId: asset.installId },
+  ]);
 });
 
 async function fixture(ctx, configure = () => {}) {
@@ -213,7 +388,7 @@ async function fixture(ctx, configure = () => {}) {
   fireEvent.click(
     await screen.findByRole("button", { name: "Skills", exact: true }),
   );
-  await screen.findByRole("heading", { name: "Skills", exact: true });
+  await screen.findByRole("heading", { name: "Skills", level: 1 });
   return { snapshot, refreshes };
 }
 
@@ -381,7 +556,7 @@ test("Import uses the personal scope, retains busy confirmation and shows Host v
       /demo has been published and is awaiting verification/,
     ),
   );
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assert.ok(document.activeElement === trigger));
   assert.equal(commits.length, 2);
 });
 
@@ -445,12 +620,12 @@ test("A project import preview is discarded without offering confirmation", asyn
   await fixture(ctx);
   const user = userEvent.setup({ document });
   await chooseImportMenu(user);
-  const drawer = await screen.findByRole("dialog");
+  const dialog = await screen.findByRole("dialog");
   assert.equal(
     screen.queryByRole("button", { name: "Update Skill", exact: true }),
     null,
   );
-  assert.ok(drawer.querySelector('[role="alert"]'));
+  assert.ok(dialog.querySelector('[role="alert"]'));
   assert.deepEqual(discards, [["7", "2", null]]);
 });
 

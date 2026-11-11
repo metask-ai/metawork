@@ -187,7 +187,7 @@ test("Skills center renders a compact local management surface", () => {
   assert.match(markup, /aria-label="Search skills"/);
   assert.match(markup, />Import</);
   assert.match(markup, /Review code changes/);
-  assert.match(markup, /<code>\/code-review<\/code>/);
+  assert.doesNotMatch(markup, /<code>\/code-review<\/code>/);
   assert.doesNotMatch(markup, /User defaults|Project settings/);
   assert.match(markup, /role="switch"/);
   assert.doesNotMatch(markup, /Check before release/);
@@ -301,7 +301,7 @@ test("Skills route uses canonical management and enablement commands", async () 
     assert.match(commands, new RegExp(`skills\\.${command}`));
   }
   assert.match(page, /title\.current\?\.focus\(\)/);
-  assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
+  assert.match(page, /<Dialog\.Root[\s\S]*?<Dialog\.Popup/);
   assert.doesNotMatch(
     page,
     /window\.zero|window\.confirm|localStorage|FileSystem/i,

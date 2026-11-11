@@ -282,7 +282,7 @@ Tasks
 - 页首右侧依次放置低强调的刷新图标、紧凑搜索入口和中性主按钮 `Import`。导入按钮使用与连接器添加按钮相同的加号。搜索复用连接器与定时任务的页首控件，关闭输入框时保留筛选，输入关键词后图标显示激活态。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
 - 资产列表展示个人范围。搜索过滤 display name、description、invocation 和 argument name；资产计数与分组从筛选结果派生。个人目录问题独立展示，搜索时仍可见；
 - `pending_verification` 独立进入“等待验证”，其他资产进入「技能」分组（英文为 `Skills`）；空分组不渲染，同一资产不重复。目录问题在资产之前按 code 和可空 invocation 独立展示与计数，即使没有 winner/资产也保持可见；asset issueCodes 仅解释关联问题，不再重复计为目录问题。不猜测冲突双方，不提供选择 winner 或通过单 Skill 启停消除冲突的动作；
-- 行主体显示线性 Skill 文档图标、display name、单行 description、可选 monospace invocation 和需处理的状态文字。悬停时名称出现下划线。来源、revision、资源数量和物理管理细节留在 drawer；
+- 行主体显示线性 Skill 文档图标、display name、单行 description 和需处理的状态文字。可查看的技能正文在详情弹窗中展示；
 - 能精确映射到个人 catalog 的资产在行尾显示独立启用开关。catalog 或 selection 不可用、身份无法确认时，开关不可操作；
 - 打开详情的按钮与开关是并列控件。开关最小命中区为 44 × 44 px，开启时与连接器、定时任务共用绿色状态 token，关闭时使用中性边框色。控件提供文字和键盘焦点，等待 committed Snapshot 后更新。窄窗将开关移到行下方；
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
@@ -291,18 +291,18 @@ Tasks
 
 页面不提供兼容目录开关；个人 Skill 通过导入管理。
 
-个人目录问题独立呈现；页首刷新以个人 catalog 为目标，失败时保留最后已提交的视图。正常根检查结果不占用常驻列表，来源详情使用普通文本，origin 未知时明确显示未知。
+个人目录问题独立呈现；页首刷新以个人 catalog 为目标，失败时保留最后已提交的视图。正常根检查结果不占用常驻列表。
 
-详情 drawer：
+详情弹窗：
 
-- 点击行主体打开右侧 drawer；窄窗切为整页详情。顶部显示名称、description、范围和 health；正文依次显示 invocation/参数、安全渲染的 `SKILL.md`、资源/脚本/模板列表、结构化 issue 和折叠的安装信息；
+- 点击行主体打开与连接器、定时任务同款的居中模态弹窗。窄窗保留安全边距，长内容只在正文区域滚动，标题和底部操作保持可见。正文按技能名称、用途说明、可读取的技能正文呈现。打开详情时读取有权查看的 `SKILL.md`，以只读 Markdown 呈现正文，跳过文件开头的元数据与重复标题。禁用、等待验证、需要恢复和目录问题就近显示；
 - Markdown 禁止 raw HTML、script、远程 embed 和隐式网络加载；文件区只允许查看 package 内受支持的文本资源，不形成通用仓库或磁盘浏览器；物理路径、raw diagnostic、credential、内部 handle 和 hash 不进入普通详情；
-- Drawer 底部提供 `Export .skill`、`Modify in new task` 和 `More`。`More` 仅在有精确管理 authority 时包含 `Re-import` 与 `Uninstall`；外部管理资产显示原因并隐藏不可执行动作；
-- `Modify in new task` 只导航到预填普通 Text draft，不创建 Skill editor 或专用 Agent protocol。关闭 drawer 后焦点回到原行的详情按钮；异步刷新不抢焦点或关闭用户正在阅读的详情。
+- 详情底栏与连接器一致，左侧提供当前可执行的启用或停用，右侧提供卸载。等待恢复时显示可执行的重试。导出与重新导入仅在具有对应权限时出现在右上角「更多操作」菜单。
+- 打开时聚焦标题，关闭后焦点回到原行的详情按钮。异步刷新不抢焦点或关闭用户正在阅读的详情。
 
-导入 drawer：
+导入弹窗：
 
-- 页首 `Import` 与 `Re-import` 先打开紧凑来源菜单，选择 `Choose .skill or .zip` 或 `Choose folder` 后打开对应 Host 原生 picker，再进入同一预览 drawer；当前产品合同尚未开放 Skill 导入拖放，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；Renderer 与 Native SDK UI/input 的边界以[高层架构](architecture.md#31-renderer)为准；
+- 页首 `Import` 与详情菜单中的 `Re-import` 提供相同的来源选择，选择 `Choose .skill or .zip` 或 `Choose folder` 后打开对应 Host 原生 picker，再进入同款居中预览弹窗；当前产品合同尚未开放 Skill 导入拖放，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；Renderer 与 Native SDK UI/input 的边界以[高层架构](architecture.md#31-renderer)为准；
 - Native 选择先生成 window-bound、一次性 staged capability；Renderer 只消费 opaque preview identity。Preview 显示名称、description、`SKILL.md`、文件清单、总大小、候选 invocation 和机械安全检查结果；导出同样通过 Host 原生目录选择取得一次性目标 authority，由 Host 生成规范文件名并写入，不让 Renderer提交路径；
 - 导入和重新导入的确认区显示个人范围；
 - 同名目录、相同 invocation 或 external asset 都必须在确认前说明精确影响，安全默认是取消；不提供自动重命名 invocation、静默覆盖或“仍然继续”绕过失败；
@@ -314,7 +314,7 @@ Tasks
 - `ready` 展示已提交 inventory 与 health；`degraded` 保留可用资产并独立展示目录问题。issue 只使用 bounded code、scope 和可选 invocation，不显示 raw diagnostic；
 - refresh pending 只禁用 Refresh 并显示 `Refreshing…`；失败保留最后 committed view 并提供 Retry，不清空成“没有 Skill”；
 - 首次目录加载且当前范围为空时显示加载提示；`unavailable` 显示恢复说明与 Refresh；真正 ready/degraded 且当前筛选无资产才显示空状态；
-- 全局空状态提供 `Import skill` 与 `Create in new task`。后者只打开预填 Text draft；返回 Skill 中心保留搜索，不持久化瞬时 drawer/progress；
+- 全局空状态提供 `Import skill` 与 `Create in new task`。后者只打开预填 Text draft；返回 Skill 中心保留搜索，不持久化瞬时弹窗或操作进度；
 - delete/uninstall 确认必须写明个人范围，并把安全的 Cancel 作为初始焦点。成功后焦点移到相邻行或分组标题；失败保留资产和操作入口，不静默消失。
 
 ### 5.4 MCP 服务

@@ -12,9 +12,10 @@ import type {
   SkillManagementView,
   SkillMutationResult,
 } from "../../bridge/contracts.ts";
+import { Markdown } from "../../components/ai/Markdown.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Drawer } from "../../components/ui/drawer.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
 import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { Input } from "../../components/ui/input.tsx";
@@ -28,6 +29,22 @@ type PersonalImportTarget = Extract<
   { kind: "personal" | "reimport" }
 >;
 type PreparedImport = Extract<SkillImportPreview, { status: "prepared" }>;
+
+function ImportChoices({ onChoose }: { onChoose: (kind: ImportKind) => void }) {
+  const { t } = useI18n();
+  return (
+    <>
+      <Menu.Item onClick={() => onChoose("package")}>
+        <Icon name="package" />
+        {t("skills.choose_package")}
+      </Menu.Item>
+      <Menu.Item onClick={() => onChoose("directory")}>
+        <Icon name="folder-up" />
+        {t("skills.choose_folder")}
+      </Menu.Item>
+    </>
+  );
+}
 
 function ImportMenu({
   label,
@@ -58,14 +75,9 @@ function ImportMenu({
       <Menu.Portal>
         <Menu.Positioner align="end">
           <Menu.Popup>
-            <Menu.Item onClick={() => onChoose("package", trigger.current)}>
-              <Icon name="package" />
-              {t("skills.choose_package")}
-            </Menu.Item>
-            <Menu.Item onClick={() => onChoose("directory", trigger.current)}>
-              <Icon name="folder-up" />
-              {t("skills.choose_folder")}
-            </Menu.Item>
+            <ImportChoices
+              onChoose={(kind) => onChoose(kind, trigger.current)}
+            />
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>
@@ -90,11 +102,71 @@ function skillRowIdentity(asset: Asset): string {
   return `${asset.installId ?? ""}:${asset.skillId ?? ""}:${asset.invocationName}`;
 }
 
-function sourceLabel(asset: Asset, t: ReturnType<typeof useI18n>["t"]) {
-  if (asset.sourceKind === "local_package") return t("skills.source.package");
-  if (asset.sourceKind === "local_directory")
-    return t("skills.source.directory");
-  return t("skills.source.external");
+function skillAttention(asset: Asset) {
+  if (asset.managementState === "recovery_required") return "recovery_required";
+  if (asset.managementState === "pending_verification") return "pending";
+  return asset.issueCodes.length > 0 ? "issue" : null;
+}
+
+function skillBody(definition: string, title: string) {
+  const leadingBlankLines = /^(?:[ \t]*\r?\n)+/;
+  const body = definition
+    .replace(/^---\r?\n(?:[^\n]*\n)*?---(?:\r?\n|\r?$)/, "")
+    .replace(leadingBlankLines, "");
+  const heading = /^#[ \t]+([^\r\n]+)(?:\r?\n|$)/.exec(body);
+  return heading &&
+    heading[1].trim().toLowerCase() === title.trim().toLowerCase()
+    ? body.slice(heading[0].length).replace(leadingBlankLines, "")
+    : body;
+}
+
+function SkillContent({
+  asset,
+  onDetail,
+}: {
+  asset: Asset;
+  onDetail: (installId: string) => Promise<SkillDetailResult>;
+}) {
+  const { t } = useI18n();
+  const [detail, setDetail] = useState<SkillDetailResult | "error" | null>(
+    null,
+  );
+  const requested = useRef(false);
+  const installId =
+    asset.managementState === "recovery_required" ? null : asset.installId;
+
+  useEffect(() => {
+    if (!installId || requested.current) return;
+    requested.current = true;
+    void onDetail(installId).then(setDetail, () => setDetail("error"));
+  }, [installId, onDetail]);
+
+  if (!installId) return null;
+
+  if (detail === null || detail === "error" || !detail.available) {
+    return (
+      <p
+        className="skill-detail-content skill-detail-content-status"
+        role="status"
+      >
+        {t(
+          detail === null
+            ? "skills.detail.loading"
+            : "skills.detail.unavailable",
+        )}
+      </p>
+    );
+  }
+
+  const body = skillBody(
+    detail.definition,
+    asset.displayName || asset.invocationName,
+  );
+  return body.trim() ? (
+    <Markdown className="skill-detail-content" interactive={false}>
+      {body}
+    </Markdown>
+  ) : null;
 }
 
 function SkillRow({
@@ -109,12 +181,9 @@ function SkillRow({
   enablementBusy: boolean;
 }) {
   const { t } = useI18n();
-  const attention =
-    asset.managementState === "recovery_required" ||
-    asset.managementState === "pending_verification" ||
-    asset.issueCodes.length > 0;
+  const attention = skillAttention(asset);
   return (
-    <li className="skill-row" data-attention={attention}>
+    <li className="skill-row" data-attention={attention !== null}>
       <button
         className="skill-row-open focus-ring"
         onClick={(event) => onOpen(asset, event.currentTarget)}
@@ -127,18 +196,11 @@ function SkillRow({
           <span className="skill-row-description">
             {asset.description || t("skills.no_description")}
           </span>
-          <span className="skill-row-meta">
-            {asset.invocationName && <code>/{asset.invocationName}</code>}
-            {attention && (
-              <span className="skill-row-attention">
-                {asset.managementState === "recovery_required"
-                  ? t("skills.status.recovery_required")
-                  : asset.managementState === "pending_verification"
-                    ? t("skills.status.pending")
-                    : t("skills.status.issue")}
-              </span>
-            )}
-          </span>
+          {attention && (
+            <span className="skill-row-attention">
+              {t(`skills.status.${attention}`)}
+            </span>
+          )}
         </span>
       </button>
       {asset.enabled !== null && (
@@ -225,11 +287,11 @@ export function SkillsPage({
 }) {
   const { t } = useI18n();
   const title = useRef<HTMLHeadingElement>(null);
-  const drawerHeading = useRef<HTMLHeadingElement>(null);
-  const drawer = useRef<HTMLDivElement>(null);
-  const drawerTrigger = useRef<HTMLElement | null>(null);
+  const dialogHeading = useRef<HTMLHeadingElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const dialogTrigger = useRef<HTMLElement | null>(null);
+  const detailMenuTrigger = useRef<HTMLButtonElement>(null);
   const [selected, setSelected] = useState<Asset | null>(null);
-  const [detail, setDetail] = useState<SkillDetailResult | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [preview, setPreview] = useState<PreparedImport | null>(null);
   const [reimportTarget, setReimportTarget] = useState<Asset | null>(null);
@@ -239,7 +301,6 @@ export function SkillsPage({
   const discardRef = useRef(onDiscardImport);
   discardRef.current = onDiscardImport;
   const [busy, setBusy] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -260,12 +321,20 @@ export function SkillsPage({
       asset.managementState === "recovery_required",
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
-  const drawerOpen = selected !== null || importOpen;
+  const dialogOpen = selected !== null || importOpen;
+  const selectedAttention = selected && skillAttention(selected);
+  const showDetailMenu =
+    selected?.installId && (selected.canExport || selected.canReimport);
+  const showDetailActions =
+    selected &&
+    (selected.canSetEnabled ||
+      (selected.installId && (selected.canRetry || selected.canUninstall)));
   const refreshing = refreshRequest.busy || catalog.availability === "loading";
 
   async function setEnablementState(
     asset: Asset,
     state: "enabled" | "disabled",
+    reportError: (message: string | null) => void = setEnablementError,
   ) {
     if (
       !asset.canSetEnabled ||
@@ -275,7 +344,7 @@ export function SkillsPage({
       return;
     if (!catalog.revision) return;
     setEnablementBusy(asset.skillPolicyKey);
-    setEnablementError(null);
+    reportError(null);
     try {
       const result = await onSetEnabled(
         asset.skillPolicyKey,
@@ -283,9 +352,9 @@ export function SkillsPage({
         catalog.revision,
         asset.selectionRevision,
       );
-      if (!result.applied) setEnablementError(t("skills.error.enablement"));
+      if (!result.applied) reportError(t("skills.error.enablement"));
     } catch {
-      setEnablementError(t("skills.error.enablement"));
+      reportError(t("skills.error.enablement"));
     } finally {
       setEnablementBusy(null);
     }
@@ -311,52 +380,19 @@ export function SkillsPage({
   );
 
   useEffect(() => {
-    if (!drawerOpen) return;
-    const frame = window.requestAnimationFrame(() =>
-      drawerHeading.current?.focus(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [drawerOpen, selected?.installId]);
-
-  useEffect(() => {
     if (!selected) return;
     const selectedIdentity = skillRowIdentity(selected);
     const current = personalAssets.find(
       (asset) => skillRowIdentity(asset) === selectedIdentity,
     );
     if (current) setSelected(current);
-    else closeDrawer(false);
-    // closeDrawer deliberately follows the committed personal inventory.
+    else closeDialog();
+    // closeDialog deliberately follows the committed personal inventory.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personalAssets]);
 
-  useEffect(() => {
-    if (!drawerOpen) return;
-    function keydown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) closeDrawer();
-      if (event.key !== "Tab" || !drawer.current) return;
-      const focusable = Array.from(
-        drawer.current.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]',
-        ),
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  });
-
   function rememberTrigger(trigger?: HTMLElement) {
-    drawerTrigger.current =
+    dialogTrigger.current =
       trigger ??
       (document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -373,44 +409,25 @@ export function SkillsPage({
         .catch(() => {});
   }
 
-  function closeDrawer(restoreFocus = true) {
+  function closeDialog() {
     importAudience.current += 1;
     discardPreview();
-    const trigger = drawerTrigger.current;
     setSelected(null);
-    setDetail(null);
     setImportOpen(false);
     setPreview(null);
     setBusy(false);
     setReimportTarget(null);
 
-    setDetailLoading(false);
     setConfirmUninstall(false);
     setNotice(null);
     setError(null);
-    if (restoreFocus)
-      window.requestAnimationFrame(() => {
-        if (trigger?.isConnected) trigger.focus();
-      });
   }
 
-  async function openDetail(asset: Asset, trigger: HTMLElement) {
+  function openDetail(asset: Asset, trigger: HTMLElement) {
     rememberTrigger(trigger);
     setImportOpen(false);
     setSelected(asset);
-    setDetail(null);
     setError(null);
-    if (!asset.installId || asset.managementState === "recovery_required")
-      return;
-    setDetailLoading(true);
-    try {
-      setDetail(await onDetail(asset.installId));
-    } catch {
-      setDetail(null);
-      setError(t("skills.error.detail"));
-    } finally {
-      setDetailLoading(false);
-    }
   }
 
   function importError(reason: SkillMutationReason) {
@@ -423,7 +440,7 @@ export function SkillsPage({
     target?: Asset,
   ) {
     if (busy || disabled) return;
-    if (!trigger || !drawer.current?.contains(trigger))
+    if (!trigger || !dialog.current?.contains(trigger))
       rememberTrigger(trigger ?? undefined);
     discardPreview();
     const audience = ++importAudience.current;
@@ -496,7 +513,7 @@ export function SkillsPage({
       // Committed work continues in Host; closing never cancels a transaction.
       previewRef.current = null;
       setPreview(null);
-      closeDrawer();
+      closeDialog();
     } catch {
       if (audience === importAudience.current) {
         previewRef.current = null;
@@ -521,7 +538,7 @@ export function SkillsPage({
         setError(t("skills.error.mutation"));
         return;
       }
-      if (close) closeDrawer();
+      if (close) closeDialog();
     } catch {
       setError(t("skills.error.mutation"));
     } finally {
@@ -565,7 +582,7 @@ export function SkillsPage({
             <SkillRow
               key={skillRowIdentity(asset)}
               asset={asset}
-              onOpen={(item, trigger) => void openDetail(item, trigger)}
+              onOpen={openDetail}
               onSetState={(item, state) => void setEnablementState(item, state)}
               enablementBusy={
                 enablementBusy === asset.skillPolicyKey &&
@@ -646,7 +663,7 @@ export function SkillsPage({
         </header>
 
         {visibleOperation && (
-          <p className="skill-drawer-notice" role="status">
+          <p className="skill-dialog-notice" role="status">
             {t(`skills.operation.${visibleOperation.phase}`, {
               skill: visibleOperation.invocationName,
             })}
@@ -763,45 +780,98 @@ export function SkillsPage({
         )}
       </div>
 
-      <Drawer.Root
-        open={drawerOpen}
+      <Dialog.Root
+        open={dialogOpen}
         onOpenChange={(open) => {
-          if (!open && !busy) closeDrawer();
+          if (!open && !busy) closeDialog();
         }}
       >
-        <Drawer.Portal>
-          <Drawer.Backdrop className="skill-drawer-backdrop" />
-          <Drawer.Popup
-            ref={drawer}
-            className="skill-drawer w-[min(500px,calc(100vw-28px))] max-[620px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
-            aria-labelledby="skill-drawer-title"
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup
+            ref={dialog}
+            className="skill-dialog w-[min(640px,calc(100vw-32px))] gap-0 overflow-hidden p-0"
+            initialFocus={dialogHeading}
+            finalFocus={() =>
+              dialogTrigger.current?.isConnected
+                ? dialogTrigger.current
+                : title.current
+            }
           >
             <header>
               <div>
-                <small>
-                  {importOpen
-                    ? t("skills.import.eyebrow")
-                    : t("skills.detail.eyebrow")}
-                </small>
-                <h2 id="skill-drawer-title" ref={drawerHeading} tabIndex={-1}>
+                <Dialog.Title ref={dialogHeading} tabIndex={-1}>
                   {importOpen
                     ? reimportTarget
                       ? t("skills.reimport")
                       : t("skills.import")
                     : selected?.displayName || selected?.invocationName}
-                </h2>
+                </Dialog.Title>
               </div>
-              <button
-                className="icon-button focus-ring"
-                aria-label={t("common.close")}
-                disabled={busy}
-                onClick={() => closeDrawer()}
-              >
-                <Icon name="close" />
-              </button>
+              <div className="skill-dialog-header-actions">
+                {showDetailMenu && selected && (
+                  <Menu.Root>
+                    <Menu.Trigger
+                      ref={detailMenuTrigger}
+                      className="icon-button"
+                      aria-label={t("skills.more_actions")}
+                      disabled={busy || disabled}
+                    >
+                      <Icon name="more" />
+                    </Menu.Trigger>
+                    <Menu.Portal>
+                      <Menu.Positioner align="end">
+                        <Menu.Popup>
+                          {selected.canExport && (
+                            <Menu.Item onClick={() => void runExport()}>
+                              <Icon name="download" />
+                              {t("skills.export")}
+                            </Menu.Item>
+                          )}
+                          {selected.canReimport && (
+                            <Menu.SubmenuRoot>
+                              <Menu.SubmenuTrigger openOnHover={false}>
+                                <Icon name="upload" />
+                                <span className="flex-1">
+                                  {t("skills.reimport")}
+                                </span>
+                                <Icon name="chevron-right" />
+                              </Menu.SubmenuTrigger>
+                              <Menu.Portal>
+                                <Menu.Positioner side="right" align="start">
+                                  <Menu.Popup aria-label={t("skills.reimport")}>
+                                    <ImportChoices
+                                      onChoose={(kind) =>
+                                        void beginImport(
+                                          kind,
+                                          detailMenuTrigger.current,
+                                          selected,
+                                        )
+                                      }
+                                    />
+                                  </Menu.Popup>
+                                </Menu.Positioner>
+                              </Menu.Portal>
+                            </Menu.SubmenuRoot>
+                          )}
+                        </Menu.Popup>
+                      </Menu.Positioner>
+                    </Menu.Portal>
+                  </Menu.Root>
+                )}
+                <button
+                  type="button"
+                  className="icon-button focus-ring"
+                  aria-label={t("common.close")}
+                  disabled={busy}
+                  onClick={() => closeDialog()}
+                >
+                  <Icon name="close" />
+                </button>
+              </div>
             </header>
 
-            <div className="skill-drawer-scroll">
+            <div className="skill-dialog-scroll" tabIndex={0}>
               {importOpen ? (
                 <>
                   {!preview ? (
@@ -839,7 +909,7 @@ export function SkillsPage({
                           <p>{t("skills.resource_context_notice")}</p>
                         </div>
                       </div>
-                      <div className="skill-drawer-notice" role="status">
+                      <div className="skill-dialog-notice" role="status">
                         <strong>{t(`skills.effect.${preview.effect}`)}</strong>
                         <p>{t("skills.scope.personal")}</p>
                         <p>
@@ -856,82 +926,48 @@ export function SkillsPage({
                     </>
                   )}
                   {error && (
-                    <p className="skill-drawer-error" role="alert">
+                    <p className="skill-dialog-error" role="alert">
                       {error}
                     </p>
                   )}
                 </>
               ) : selected ? (
                 <>
-                  <div className="skill-detail-summary">
-                    <div>
-                      <span>{t("skills.detail.invocation")}</span>
-                      <code>{selected.invocationName}</code>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.scope")}</span>
-                      <strong>{t("skills.scope.personal")}</strong>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.source")}</span>
-                      <strong>{sourceLabel(selected, t)}</strong>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.origin")}</span>
-                      <strong>
-                        {selected.origin
-                          ? `${selected.origin.ecosystem === "agents" ? ".agents" : selected.origin.ecosystem} · ${t(selected.origin.scope === "personal" ? "skills.sources.scope.user" : "skills.sources.scope.workspace")}`
-                          : t("skills.sources.unknown_origin")}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>{t("skills.detail.status")}</span>
-                      <strong>
-                        {selected.managementState === "recovery_required"
-                          ? t("skills.status.recovery_required")
-                          : selected.managementState === "pending_verification"
-                            ? t("skills.status.pending")
-                            : selected.issueCodes.length > 0
-                              ? t("skills.status.issue")
-                              : t("skills.status.ready")}
-                      </strong>
-                    </div>
-                  </div>
                   {selected.description && (
-                    <p className="skill-detail-description">
+                    <Dialog.Description className="skill-detail-description">
                       {selected.description}
+                    </Dialog.Description>
+                  )}
+                  {selected.enabled === false && (
+                    <p className="skill-detail-status">
+                      {t("skills.enablement.disabled")}
                     </p>
                   )}
-                  {selected.issueCodes.length > 0 && (
-                    <div className="skill-drawer-notice" role="status">
-                      <strong>{t("skills.issue_title")}</strong>
-                      <p>{selected.issueCodes.join(" · ")}</p>
+                  {selectedAttention && (
+                    <div className="skill-dialog-notice" role="status">
+                      <strong>{t(`skills.status.${selectedAttention}`)}</strong>
+                      {selected.issueCodes.map((code) => (
+                        <p key={code}>{t(`skills.issue.${code}`)}</p>
+                      ))}
                     </div>
                   )}
-                  <section className="skill-definition">
-                    <h3>{t("skills.detail.definition")}</h3>
-                    {selected.installId === null ? (
-                      <p>{t("skills.detail.external_body")}</p>
-                    ) : detailLoading ? (
-                      <p>{t("skills.detail.loading")}</p>
-                    ) : detail?.available ? (
-                      <pre>{detail.definition}</pre>
-                    ) : (
-                      <p>{t("skills.detail.unavailable")}</p>
-                    )}
-                  </section>
+                  <SkillContent
+                    key={skillRowIdentity(selected)}
+                    asset={selected}
+                    onDetail={onDetail}
+                  />
                   {error && (
-                    <p className="skill-drawer-error" role="alert">
+                    <p className="skill-dialog-error" role="alert">
                       {error}
                     </p>
                   )}
                   {notice && (
-                    <p className="skill-drawer-success" role="status">
+                    <p className="skill-dialog-success" role="status">
                       {notice}
                     </p>
                   )}
                   {confirmUninstall && (
-                    <div className="skill-drawer-notice" role="alert">
+                    <div className="skill-dialog-notice" role="alert">
                       <strong>{t("skills.uninstall_confirm_title")}</strong>
                       <p>{t("skills.uninstall_confirm")}</p>
                     </div>
@@ -940,128 +976,128 @@ export function SkillsPage({
               ) : null}
             </div>
 
-            <footer>
-              {importOpen ? (
-                <>
-                  {preview && (
-                    <ImportMenu
-                      label={t("skills.choose_again")}
-                      disabled={busy || disabled}
-                      onChoose={(kind, trigger) =>
-                        void beginImport(
-                          kind,
-                          trigger,
-                          reimportTarget ?? undefined,
-                        )
-                      }
-                    />
-                  )}
-                  <span />
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => closeDrawer()}
-                  >
-                    {t("common.cancel")}
-                  </Button>
-                  {preview && (
+            {(importOpen || showDetailActions) && (
+              <footer data-detail={!importOpen || undefined}>
+                {importOpen ? (
+                  <>
+                    {preview && (
+                      <ImportMenu
+                        label={t("skills.choose_again")}
+                        disabled={busy || disabled}
+                        onChoose={(kind, trigger) =>
+                          void beginImport(
+                            kind,
+                            trigger,
+                            reimportTarget ?? undefined,
+                          )
+                        }
+                      />
+                    )}
+                    <span />
                     <Button
-                      variant="primary"
+                      variant="secondary"
                       size="sm"
-                      disabled={busy || disabled || importBlocker !== null}
-                      onClick={() => void commitImport()}
+                      disabled={busy}
+                      onClick={() => closeDialog()}
                     >
-                      {busy
-                        ? t("skills.working")
-                        : t(`skills.effect.${preview.effect}`)}
+                      {t("common.cancel")}
                     </Button>
-                  )}
-                </>
-              ) : selected?.installId ? (
-                <>
-                  {selected.canExport && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={busy}
-                      onClick={() => void runExport()}
-                    >
-                      <Icon name="download" /> {t("skills.export")}
-                    </button>
-                  )}
-                  {selected.canReimport && (
-                    <ImportMenu
-                      label={t("skills.reimport")}
-                      disabled={busy || disabled}
-                      onChoose={(kind, trigger) =>
-                        void beginImport(kind, trigger, selected)
-                      }
-                    />
-                  )}
-                  {selected.canRetry && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={busy}
-                      onClick={() =>
-                        void runMutation(() => onRetry(selected.installId!))
-                      }
-                    >
-                      <Icon name="refresh" /> {t("skills.retry")}
-                    </button>
-                  )}
-                  <span />
-                  {selected.canUninstall &&
-                    (confirmUninstall ? (
-                      <>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => setConfirmUninstall(false)}
-                        >
-                          {t("common.cancel")}
-                        </Button>
+                    {preview && (
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={busy || disabled || importBlocker !== null}
+                        onClick={() => void commitImport()}
+                      >
+                        {busy
+                          ? t("skills.working")
+                          : t(`skills.effect.${preview.effect}`)}
+                      </Button>
+                    )}
+                  </>
+                ) : selected ? (
+                  <>
+                    {selected.canSetEnabled && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          busy ||
+                          disabled ||
+                          enablementBusy !== null ||
+                          !catalog.revision
+                        }
+                        onClick={() =>
+                          void setEnablementState(
+                            selected,
+                            selected.enabled ? "disabled" : "enabled",
+                            setError,
+                          )
+                        }
+                      >
+                        {t(
+                          selected.enabled
+                            ? "skills.enablement.disable"
+                            : "skills.enablement.enable",
+                        )}
+                      </Button>
+                    )}
+                    {selected.installId && selected.canRetry && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() =>
+                          void runMutation(() => onRetry(selected.installId!))
+                        }
+                      >
+                        <Icon name="refresh" /> {t("skills.retry")}
+                      </Button>
+                    )}
+                    <span />
+                    {selected.installId &&
+                      selected.canUninstall &&
+                      (confirmUninstall ? (
+                        <>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => setConfirmUninstall(false)}
+                          >
+                            {t("common.cancel")}
+                          </Button>
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() =>
+                              void runMutation(
+                                () => onUninstall(selected.installId!),
+                                true,
+                              )
+                            }
+                          >
+                            <Icon name="trash" /> {t("skills.uninstall")}
+                          </Button>
+                        </>
+                      ) : (
                         <Button
                           variant="danger"
                           size="sm"
                           disabled={busy}
-                          onClick={() =>
-                            void runMutation(
-                              () => onUninstall(selected.installId!),
-                              true,
-                            )
-                          }
+                          onClick={() => setConfirmUninstall(true)}
                         >
                           <Icon name="trash" /> {t("skills.uninstall")}
                         </Button>
-                      </>
-                    ) : (
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => setConfirmUninstall(true)}
-                      >
-                        <Icon name="trash" /> {t("skills.uninstall")}
-                      </Button>
-                    ))}
-                </>
-              ) : (
-                <>
-                  <span />
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => closeDrawer()}
-                  >
-                    {t("common.close")}
-                  </Button>
-                </>
-              )}
-            </footer>
-          </Drawer.Popup>
-        </Drawer.Portal>
-      </Drawer.Root>
+                      ))}
+                  </>
+                ) : null}
+              </footer>
+            )}
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }
