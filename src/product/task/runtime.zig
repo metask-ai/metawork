@@ -2565,7 +2565,7 @@ pub const Runtime = struct {
     };
 
     pub fn advanceInputQueue(self: *Runtime, shutting_down: bool, effects: InputQueueEffects) void {
-        if (self.advancing_inputs) return;
+        if (self.advancing_inputs) @panic("Task input advancement reentered");
         self.advancing_inputs = true;
         defer self.advancing_inputs = false;
         const context = effects.waiting.context;
@@ -4053,13 +4053,10 @@ pub const Runtime = struct {
         installed: ?struct {
             target: ?models_contract.ModelRef,
             is_metask: bool,
-            intent_revision: u64,
             source_generation: u64,
             protocol: models_contract.Protocol,
-            base_url: []const u8,
         },
         metask_scope: u64,
-        credential_update_failed: bool,
     };
 
     pub fn modelFacts(self: *const Runtime, task_id: u64) ?ModelFacts {
@@ -4070,13 +4067,10 @@ pub const Runtime = struct {
             .installed = if (task.runtime.executionConst()) |execution| .{
                 .target = execution.modelRef(),
                 .is_metask = std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id),
-                .intent_revision = execution.model_intent_revision,
                 .source_generation = execution.source_generation,
                 .protocol = execution.protocol,
-                .base_url = execution.base_url,
             } else null,
             .metask_scope = task.runtime.metask_authorization_scope,
-            .credential_update_failed = task.runtime.credential_update_failed,
         };
     }
 
@@ -4084,6 +4078,37 @@ pub const Runtime = struct {
         const task = self.findConst(task_id) orelse return false;
         const execution = task.runtime.executionConst() orelse return false;
         return execution.matchesTarget(candidate);
+    }
+
+    pub fn installedIntentCurrent(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const intent = task.durable.model_intent orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesIntentRevision(intent.revision);
+    }
+
+    pub fn installedModelProviderMatches(self: *const Runtime, task_id: u64, target: models_contract.ModelRef, protocol: models_contract.Protocol) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesProvider(target, protocol);
+    }
+
+    pub fn installedModelEndpointMatches(self: *const Runtime, task_id: u64, target: models_contract.Target) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesEndpoint(target);
+    }
+
+    pub fn installedCredentialCurrent(self: *const Runtime, task_id: u64, source_generation: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return !task.runtime.credential_update_failed and execution.matchesSourceGeneration(source_generation);
+    }
+
+    pub fn installedModelSourceCurrent(self: *const Runtime, task_id: u64, source_generation: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return execution.matchesSourceGeneration(source_generation);
     }
 
     pub fn installedModelNeedsSourceChange(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
@@ -4399,20 +4424,46 @@ pub const Runtime = struct {
         task.initial_catalog_preparation = if (loading) .loading else .unavailable;
     }
 
-    pub fn skillPreparationGeneration(self: *const Runtime, task_id: u64, binding_epoch: u64) ?u64 {
-        const task = self.findConst(task_id) orelse return null;
-        const preparation = task.skill_preparation orelse return null;
-        return if (preparation.binding_epoch == binding_epoch) preparation.generation else null;
+    pub const SkillPreparationResult = union(enum) { inspect, started: u64, restarted: u64, pending, stale, ready, unavailable };
+    pub const SkillPreparationAction = union(enum) { done, start: CatalogRefreshFacts, restart: CatalogRefreshFacts, poll: struct { workspace: CatalogRefreshFacts, generation: u64 }, install };
+
+    /// Consumes external catalog facts; directory I/O and authority remain in Control.
+    pub fn advanceSkillPreparation(self: *Runtime, task_id: u64, binding_epoch: u64, result: SkillPreparationResult) (CatalogRefreshError || agent.Error || std.mem.Allocator.Error || error{CatalogLoading})!SkillPreparationAction {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.durable.permission_interaction != .interactive) return .done;
+        const workspace = try self.catalogRefreshFacts(task_id, binding_epoch);
+        switch (result) {
+            .inspect => {},
+            .started, .restarted => |generation| {
+                task.skill_preparation = .{ .binding_epoch = binding_epoch, .generation = generation };
+                if (result == .restarted) return error.CatalogLoading;
+            },
+            .pending => return error.CatalogLoading,
+            .stale => return .{ .restart = workspace },
+            .ready => return .install,
+            .unavailable => {
+                try self.suspendSkills(task_id);
+                return .done;
+            },
+        }
+        if (task.skill_preparation) |preparation| if (preparation.binding_epoch == binding_epoch)
+            return .{ .poll = .{ .workspace = workspace, .generation = preparation.generation } };
+        return .{ .start = workspace };
     }
 
-    pub fn setSkillPreparation(self: *Runtime, task_id: u64, binding_epoch: u64, generation: u64) void {
-        const task = self.find(task_id) orelse unreachable;
-        task.skill_preparation = .{ .generation = generation, .binding_epoch = binding_epoch };
-    }
+    /// The admission scope releases its completed preparation even if later
+    /// Workspace or attachment admission fails before prepareRun is reached.
+    pub const SkillAdmissionScope = struct {
+        runtime: *Runtime,
+        task_id: u64,
+        pub fn deinit(self: SkillAdmissionScope) void {
+            const task = self.runtime.find(self.task_id) orelse return;
+            task.skill_preparation = null;
+        }
+    };
 
-    pub fn clearSkillPreparation(self: *Runtime, task_id: u64) void {
-        const task = self.find(task_id) orelse unreachable;
-        task.skill_preparation = null;
+    pub fn skillAdmissionScope(self: *Runtime, task_id: u64) SkillAdmissionScope {
+        return .{ .runtime = self, .task_id = task_id };
     }
 
     pub fn catalogRefreshFacts(
@@ -4581,9 +4632,19 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn markDeletionStopFailed(self: *Runtime, task_id: u64) void {
-        const task = self.find(task_id) orelse unreachable;
-        task.deletion = .failed;
+    pub fn isAdvancingInputs(self: *const Runtime) bool {
+        return self.advancing_inputs;
+    }
+
+    pub const DeletionStart = union(enum) { unchanged, requested, stop_failed: ControlError };
+
+    pub fn beginDeletion(self: *Runtime, task_id: u64, effects: OperationEffects) DeletionError!DeletionStart {
+        if (!try self.requestDeletion(task_id)) return .unchanged;
+        self.stopOperation(task_id, effects) catch |err| {
+            self.find(task_id).?.deletion = .failed;
+            return .{ .stop_failed = err };
+        };
+        return .requested;
     }
 
     pub fn sessionReleaseFailureTaskId(self: *const Runtime) ?u64 {
@@ -4593,7 +4654,7 @@ pub const Runtime = struct {
         return null;
     }
 
-    pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
+    fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (deleteBlocker(task)) |blocker| switch (blocker) {
             .history_read_only => return error.TaskReadOnly,
@@ -11750,6 +11811,44 @@ test "generated image acceptance shares submission order and refresh preserves i
     context.effects.max_file_ref_field_bytes = 1;
     try std.testing.expectError(error.ToolCapacity, replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1));
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
+}
+
+test "Skill preparation retains one ticket until admission and rejects stale bindings" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    const epoch = task.durable.binding_epoch;
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .inspect) == .start);
+    const poll = try runtime.advanceSkillPreparation(1, epoch, .{ .started = 7 });
+    try std.testing.expectEqual(@as(u64, 7), poll.poll.generation);
+    try std.testing.expectError(error.CatalogLoading, runtime.advanceSkillPreparation(1, epoch, .pending));
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .stale) == .restart);
+    try std.testing.expectError(error.CatalogLoading, runtime.advanceSkillPreparation(1, epoch, .{ .restarted = 8 }));
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .ready) == .install);
+    try std.testing.expectEqual(@as(u64, 8), (try runtime.advanceSkillPreparation(1, epoch, .inspect)).poll.generation);
+    runtime.skillAdmissionScope(1).deinit();
+    try std.testing.expect(try runtime.advanceSkillPreparation(1, epoch, .inspect) == .start);
+    try std.testing.expectError(error.BindingEpochMismatch, runtime.advanceSkillPreparation(1, epoch + 1, .{ .started = 9 }));
+    try std.testing.expect(task.skill_preparation == null);
+}
+
+test "deletion start owns stop failure and repeated requests" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    try std.testing.expectEqual(.requested, try runtime.beginDeletion(1, projection.effects()));
+    try std.testing.expectEqual(.unchanged, try runtime.beginDeletion(1, projection.effects()));
+    task.deletion = .idle;
+    task.runtime.active_operation = .{ .run = 999 };
+    const failed = try runtime.beginDeletion(1, projection.effects());
+    try std.testing.expectEqual(error.NoSuchRun, failed.stop_failed);
+    try std.testing.expectEqual(task_deletion.State.failed, task.deletion);
+    try std.testing.expectError(error.UnknownTask, runtime.beginDeletion(2, projection.effects()));
 }
 
 test "direct deletion preserves archive and cancels waiting inputs without accepting new messages" {

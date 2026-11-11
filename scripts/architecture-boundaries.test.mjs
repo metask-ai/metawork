@@ -6,6 +6,54 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
+test("Task binding comparisons stay behind its runtime boundary", () => {
+  const control = read("src/product/control/runtime.zig");
+  const task = read("src/product/task/runtime.zig");
+  const facts = task.slice(
+    task.indexOf("pub const ModelFacts ="),
+    task.indexOf("pub fn modelFacts("),
+  );
+  assert.doesNotMatch(
+    facts,
+    /intent_revision|base_url|credential_update_failed/,
+  );
+  assert.doesNotMatch(
+    control,
+    /installed\.(?:intent_revision|base_url)|installed\.protocol\s*!=/,
+  );
+});
+
+test("Task owns Skill preparation and Control owns its restore allocation", () => {
+  const task = read("src/product/task/runtime.zig");
+  const control = read("src/product/control/runtime.zig");
+  assert.doesNotMatch(
+    task,
+    /pub fn (?:setSkillPreparation|clearSkillPreparation|skillPreparationGeneration)\(/,
+  );
+  assert.doesNotMatch(
+    control,
+    /task_runtime\.(?:setSkillPreparation|clearSkillPreparation|skillPreparationGeneration)\(|self\.skill\.allocator/,
+  );
+});
+
+test("Task owns deletion start and rejects lifecycle reentry in release builds", () => {
+  const task = read("src/product/task/runtime.zig");
+  const control = read("src/product/control/runtime.zig");
+  assert.doesNotMatch(
+    task,
+    /pub fn (?:requestDeletion|markDeletionStopFailed)\(/,
+  );
+  assert.doesNotMatch(
+    control,
+    /task_runtime\.(?:requestDeletion|markDeletionStopFailed)\(/,
+  );
+  assert.match(task, /if \(self\.advancing_inputs\) @panic\(/);
+  assert.match(
+    control,
+    /fn syncLifecycleFactsWithScheduleTimer\([^\n]*\) bool \{\s*if \(self\.task_runtime\.isAdvancingInputs\(\)\) @panic\(/,
+  );
+});
+
 function filesWithExtensions(directory, extensions) {
   return readdirSync(new URL(directory, root), { withFileTypes: true }).flatMap(
     (entry) => {

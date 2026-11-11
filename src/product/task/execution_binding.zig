@@ -105,6 +105,25 @@ pub const OwnedTaskExecution = struct {
             std.mem.eql(u8, self.secret, target.api_key);
     }
 
+    pub fn matchesIntentRevision(self: *const OwnedTaskExecution, revision: u64) bool {
+        return self.model_intent_revision == revision;
+    }
+
+    pub fn matchesSourceGeneration(self: *const OwnedTaskExecution, generation: u64) bool {
+        return self.source_generation == generation;
+    }
+
+    pub fn matchesProvider(self: *const OwnedTaskExecution, target: models_contract.ModelRef, protocol: models_contract.Protocol) bool {
+        const installed = self.modelRef() orelse return false;
+        const is_metask = std.mem.eql(u8, self.provider_id, models_contract.metask_source_id);
+        return self.protocol == protocol and is_metask == std.mem.eql(u8, target.source_id, models_contract.metask_source_id) and
+            std.mem.eql(u8, installed.source_id, target.source_id);
+    }
+
+    pub fn matchesEndpoint(self: *const OwnedTaskExecution, target: models_contract.Target) bool {
+        return self.protocol == target.protocol and std.mem.eql(u8, self.base_url, target.base_url);
+    }
+
     pub fn matchesTarget(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
         return self.owned and models_contract.sameImageCapabilities(self.image_capabilities.entries, target.target.image_capabilities) and
             self.protocol == target.target.protocol and std.mem.eql(u8, self.provider_id, target.target.provider_id) and

@@ -3540,31 +3540,35 @@ pub const Runtime = struct {
     /// One fresh query per new Run, shared by waiting consumers of a scope.
     /// A failed query withdraws grants before ordinary text can proceed.
     fn prepareTaskSkills(self: *Runtime, task_id: u64, binding_epoch: u64) Error!void {
-        const interaction = self.task_runtime.taskPermissionInteraction(task_id) orelse return error.UnknownTask;
-        if (interaction != .interactive) return;
-        const facts = try self.task_runtime.catalogRefreshFacts(task_id, binding_epoch);
-        const generation = self.task_runtime.skillPreparationGeneration(task_id, binding_epoch) orelse prepare: {
-            const prepared = self.skill.prepareWorkspaceCatalog(facts.workspace_id, facts.workspace_epoch) catch |err| switch (err) {
-                error.CatalogUnavailable => {
-                    try self.task_runtime.suspendSkills(task_id);
-                    return;
-                },
-                else => return err,
-            };
-            self.task_runtime.setSkillPreparation(task_id, binding_epoch, prepared);
-            self.bumpRevision();
-            break :prepare prepared;
-        };
-        switch (try self.skill.workspacePreparation(facts.workspace_id, facts.workspace_epoch, generation)) {
-            .pending => return error.CatalogLoading,
-            .stale => {
-                const refreshed = try self.skill.prepareWorkspaceCatalog(facts.workspace_id, facts.workspace_epoch);
-                self.task_runtime.setSkillPreparation(task_id, binding_epoch, refreshed);
-                return error.CatalogLoading;
+        var action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .inspect);
+        while (true) switch (action) {
+            .done => return,
+            .install => return self.installTaskCatalog(task_id, binding_epoch),
+            .start => |workspace| {
+                const generation = self.skill.prepareWorkspaceCatalog(workspace.workspace_id, workspace.workspace_epoch) catch |err| switch (err) {
+                    error.CatalogUnavailable => {
+                        action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .unavailable);
+                        continue;
+                    },
+                    else => return err,
+                };
+                action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .{ .started = generation });
+                self.bumpRevision();
             },
-            .ready => try self.installTaskCatalog(task_id, binding_epoch),
-            .unavailable => try self.task_runtime.suspendSkills(task_id),
-        }
+            .restart => |workspace| {
+                const generation = try self.skill.prepareWorkspaceCatalog(workspace.workspace_id, workspace.workspace_epoch);
+                action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, .{ .restarted = generation });
+            },
+            .poll => |request| {
+                const result = try self.skill.workspacePreparation(request.workspace.workspace_id, request.workspace.workspace_epoch, request.generation);
+                action = try self.task_runtime.advanceSkillPreparation(task_id, binding_epoch, switch (result) {
+                    .pending => .pending,
+                    .stale => .stale,
+                    .ready => .ready,
+                    .unavailable => .unavailable,
+                });
+            },
+        };
     }
 
     pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
@@ -4047,8 +4051,8 @@ pub const Runtime = struct {
         errdefer if (skill) |value| value.deinit() catch {};
         if (original.skill) |captured| {
             const catalog = facts.catalog orelse return error.CatalogUnavailable;
-            const ids = try self.skill.restoreCeiling(facts.workspace_id, facts.workspace_epoch, catalog);
-            defer self.skill.allocator.free(ids);
+            const ids = try self.skill.restoreCeiling(self.allocator, facts.workspace_id, facts.workspace_epoch, catalog);
+            defer self.allocator.free(ids);
             skill = try captured.narrow(.{ .granted_skill_ids = ids });
         }
         if (original.mcp) |captured| {
@@ -4745,7 +4749,7 @@ pub const Runtime = struct {
             .queued => null,
         };
         try self.prepareTaskSkills(task_id, binding_epoch);
-        defer self.task_runtime.clearSkillPreparation(task_id);
+        defer self.task_runtime.skillAdmissionScope(task_id).deinit();
         var staged: StagedTaskInput = .{};
         var acceptance_context: AttachmentRunAcceptanceContext = undefined;
         defer if (staged.borrow) |*borrow| borrow.rollback();
@@ -5103,15 +5107,15 @@ pub const Runtime = struct {
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-        const requested = try self.task_runtime.requestDeletion(task_id);
-        if (requested) {
-            self.task_runtime.stopOperation(task_id, self.taskRuntimeOperationEffects()) catch |err| {
-                self.task_runtime.markDeletionStopFailed(task_id);
+        const requested = switch (try self.task_runtime.beginDeletion(task_id, self.taskRuntimeOperationEffects())) {
+            .unchanged => false,
+            .requested => true,
+            .stop_failed => |err| {
                 self.reapTaskInputResources();
                 self.bumpRevision();
                 return err;
-            };
-        }
+            },
+        };
         self.reapTaskInputResources();
         if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
             if (self.workspace.facts(id)) |workspace| {
@@ -5428,6 +5432,7 @@ pub const Runtime = struct {
     }
 
     fn syncLifecycleFactsWithScheduleTimer(self: *Runtime, timer_elapsed: bool) bool {
+        if (self.task_runtime.isAdvancingInputs()) @panic("Product lifecycle sync during Task input advancement");
         self.scrubPublishedTerminalData();
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
@@ -5601,7 +5606,6 @@ pub const Runtime = struct {
                 self.prepareTaskSkills(task_id, batch.binding_epoch) catch |err| switch (err) {
                     error.CatalogLoading, error.TaskBusy => return false,
                     else => {
-                        self.task_runtime.clearSkillPreparation(task_id);
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
                         return true;
@@ -7641,17 +7645,12 @@ pub const Runtime = struct {
     fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
         const facts = self.task_runtime.modelFacts(task_id) orelse return false;
         const intent = facts.intent orelse return false;
-        const installed = facts.installed orelse return false;
-        if (installed.intent_revision == intent.revision and facts.metask_scope == 0) return false;
+        if (facts.installed == null) return false;
+        if (self.task_runtime.installedIntentCurrent(task_id) and facts.metask_scope == 0) return false;
         const authority = self.taskModelIntentAuthority(task_id) orelse return false;
         const protocol = self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) orelse return false;
-        const is_metask = std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id);
-        const provider_matches = if (installed.target) |target|
-            installed.is_metask == is_metask and std.mem.eql(u8, target.source_id, intent.target.source_id)
-        else
-            false;
-        if (installed.protocol != protocol or !provider_matches) return true;
-        if (installed.source_generation == authority.source_generation) return false;
+        if (!self.task_runtime.installedModelProviderMatches(task_id, intent.target, protocol)) return true;
+        if (self.task_runtime.installedModelSourceCurrent(task_id, authority.source_generation)) return false;
         if (facts.metask_scope == 0) return true;
         var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
         defer candidate.deinit();
@@ -7692,8 +7691,8 @@ pub const Runtime = struct {
             return null;
         };
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        if (facts.installed) |installed|
-            if (installed.intent_revision == intent.revision) {
+        if (facts.installed != null)
+            if (self.task_runtime.installedIntentCurrent(task_id)) {
                 // Membership is checked against current source authority. A
                 // renewed Metask credential must reach the renewal path below,
                 // rather than being rejected for the old owned generation.
@@ -7701,7 +7700,7 @@ pub const Runtime = struct {
                     !self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
                 if (facts.metask_scope == 0) return null;
                 const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-                if (!facts.credential_update_failed and installed.source_generation == current.source_generation) return null;
+                if (self.task_runtime.installedCredentialCurrent(task_id, current.source_generation)) return null;
             };
         if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null)
             return error.ExecutionUnavailable;
@@ -7712,7 +7711,7 @@ pub const Runtime = struct {
         errdefer candidate.deinit();
         const input = candidate.input();
         try self.prepareTaskCredential(input.api_key);
-        if (facts.installed) |installed| if (facts.metask_scope != 0 and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
+        if (facts.installed != null) if (facts.metask_scope != 0 and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
             const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
             const current = check.current() orelse return error.ExecutionUnavailable;
             const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, input.api_key, input.source_generation) catch |err| {
@@ -7724,13 +7723,13 @@ pub const Runtime = struct {
                 .deferred => return error.TaskBusy,
                 .updated, .unchanged => {},
             }
-            if (installed.intent_revision == intent.revision) {
+            if (self.task_runtime.installedIntentCurrent(task_id)) {
                 candidate.deinit();
                 return null;
             }
         };
-        if (facts.installed) |installed| if (facts.metask_scope != 0 and installed.intent_revision == intent.revision) {
-            if (installed.protocol != input.target.protocol or !std.mem.eql(u8, installed.base_url, input.target.base_url))
+        if (facts.installed != null) if (facts.metask_scope != 0 and self.task_runtime.installedIntentCurrent(task_id)) {
+            if (!self.task_runtime.installedModelEndpointMatches(task_id, input.target))
                 return error.ExecutionUnavailable;
         };
         return candidate;
@@ -15718,6 +15717,26 @@ test "Task model selection unknown commit resolves the original candidate before
             try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
         } else try std.testing.expect(task.durable.model_intent == null);
     }
+}
+
+test "unchanged Task binding skips candidate allocation and credential publication" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.testTask(3).?;
+    _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
+    var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
+    const original = control.custom_providers.metask_catalog.allocator;
+    control.custom_providers.metask_catalog.allocator = failing.allocator();
+    defer control.custom_providers.metask_catalog.allocator = original;
+    const revision = control.currentRevision();
+    const security_epoch = control.projection_security_epoch;
+    try std.testing.expect((try control.resolveTaskRunModel(3)) == null);
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    try std.testing.expectEqual(revision, control.currentRevision());
+    try std.testing.expectEqual(security_epoch, control.projection_security_epoch);
+    task.runtime.execution().?.model_intent_revision = 0;
+    try std.testing.expectError(error.OutOfMemory, control.resolveTaskRunModel(3));
 }
 
 test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
