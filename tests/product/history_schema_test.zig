@@ -124,16 +124,26 @@ test "attachment original marker migration keeps v3 history and old readers reje
     const a = arena.allocator();
     const path = try temporaryPath(a, temporary.dir);
     const state = try history.fixture(a);
+    const run = &state.tasks[0].runs[0];
+    const attachments = try a.dupe(history.wire.AttachmentWire, &.{.{ .kind = "image", .format = "png", .display_name = "legacy.png", .size_bytes = 7, .redacted = false }});
+    run.input = .{ .kind = "multimodal", .text = null, .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .attachments = attachments, .redacted = false };
     {
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..3]);
         defer database.destroy() catch unreachable;
         _ = try save(a, database.capability(), state);
+        // The exact v3 encoding has no `original` key at all, not a null one.
+        const v3_input =
+            \\{"kind":"multimodal","text":null,"skill_id":null,"catalog_revision":null,"invocation_name":null,"display_name":null,"argument_values":null,"attachments":[{"kind":"image","format":"png","display_name":"legacy.png","size_bytes":7,"redacted":false}],"redacted":false}
+        ;
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET input_json=?1", .params = &.{.{ .text = v3_input }} }, .expected_changes = .{ .exactly = 1 } }}));
     }
     {
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         try std.testing.expectEqual(@as(u32, 4), database.schemaVersion());
         try expectSame(a, database.capability(), state);
+        const loaded = try history.load(a, database.capability());
+        try std.testing.expect(loaded.tasks[0].runs[0].input.attachments.?[0].original == null);
     }
     try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..3]));
 }

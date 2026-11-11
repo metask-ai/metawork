@@ -5941,6 +5941,100 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(!workbench.releaseAttachment(retry_ids[0]));
 }
 
+test "Composer image messages keep a previewable retained original through the queued Run" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer automatic_root.deinit();
+    var attachment_store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer attachment_store.deinit();
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 2,
+        .max_tools_per_run = 1,
+    }, .{ .attachment_store = &attachment_store, .attachment_images = .{ .prepare_fn = fixture.prepareTestAttachmentImage }, .directories = .{ .testing_automatic_workspace_root = &automatic_root } });
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    fake_core.setNextPlan(.controlled);
+    defer fake_core.releaseControlled();
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "hold the Task" });
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+
+    // The ordinary Composer path: the busy Task accepts the message as a
+    // waiting record, and a later Run consumes its owned payload.
+    const photo = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    var descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
+    const descriptors = try workbench.stageAttachments(&.{.{ .display_name = "photo.jpg", .bytes = photo }}, &descriptor_storage);
+    const ids = [_]u64{descriptors[0].id};
+    const accepted = try workbench.sendInput("composer-image", task_id, .{ .multimodal = .{ .text = "", .attachment_ids = &ids } });
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    const task = workbench.testTask(task_id).?;
+    var waiting_images: usize = 0;
+    for (task.input_submissions.items) |record| {
+        if (record.input != .multimodal) continue;
+        try std.testing.expectEqual(.waiting, record.state);
+        for (record.input.multimodal.attachments) |item| {
+            try std.testing.expect(item.original == null);
+            waiting_images += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), waiting_images);
+    const chip = std.fmt.comptimePrint("{{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"{d}\",\"redacted\":false,\"previewable\":", .{photo.len});
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const waiting = try workbench.writeAggregateFixture(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, waiting, chip ++ "false}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, waiting, chip ++ "true}") == null);
+
+    fake_core.releaseControlled();
+    try waitControlSnapshot(&workbench, chip ++ "true}");
+    var run_id: u64 = 0;
+    for (task.durable.runs) |entry| if (entry) |run| {
+        if (run.input == .multimodal) run_id = run.id;
+    };
+    try std.testing.expect(run_id != 0);
+
+    const PreviewCapture = struct {
+        calls: usize = 0,
+        result: ?product_control.FilePreviewResult = null,
+        fn receive(context: *anyopaque, result: product_control.FilePreviewResult) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.result = result;
+        }
+        fn sink(self: *@This()) product_control.FilePreviewSink {
+            return .{ .context = self, .complete_fn = receive };
+        }
+    };
+    var preview = PreviewCapture{};
+    try std.testing.expectEqual(product_control.Runtime.FilePreviewAdmission.queued, workbench.beginRunAttachmentPreview(911, task_id, run_id, 0));
+    for (0..5000) |_| {
+        workbench.drainFilePreviewCompletions(preview.sink());
+        if (preview.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), preview.calls);
+    try std.testing.expectEqual(product_control.FilePreviewState.ready, preview.result.?.state);
+    const image = preview.result.?.image.?;
+    try std.testing.expectEqualSlices(u8, photo, try workbench.readFilePreviewImage(image.id, 0));
+    try std.testing.expect(workbench.releaseFilePreview(image.id));
+}
+
 test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
