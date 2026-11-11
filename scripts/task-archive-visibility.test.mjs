@@ -476,7 +476,7 @@ test("a stopped tool loop prepares a local draft and preserves existing edits", 
   await user.click(
     await screen.findByRole("button", { name: "Review current draft" }),
   );
-  await waitFor(() => assert.equal(document.activeElement, editor));
+  await waitFor(() => assertFocused(editor));
   assert.equal(editor.value, "My existing draft");
 });
 

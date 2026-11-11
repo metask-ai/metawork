@@ -372,7 +372,6 @@ export default function App() {
     "opener" | "external" | { taskId: string }
   >("opener");
   const taskStage = useRef<HTMLElement>(null);
-  const taskTitle = useRef<HTMLSpanElement>(null);
   const [taskStageExposed, setTaskStageExposed] = useState(false);
   const [documentAttention, setDocumentAttention] = useState(() =>
     typeof document === "undefined" ? false : documentHasAttention(document),
@@ -3836,11 +3835,7 @@ export default function App() {
       !settingsOpen &&
       workbench.activeTaskId === destination.taskId
     ) {
-      searchFocusTarget(
-        taskStageExposed ? taskStage.current : null,
-        taskTitle.current,
-        searchButton.current,
-      )?.focus({ preventScroll: true });
+      searchFocusTarget(taskStage.current)?.focus({ preventScroll: true });
     }
   }
   function handleTaskAction(task: TaskSummary, action: TaskMenuAction) {
@@ -4655,7 +4650,6 @@ export default function App() {
       onSearch={openGlobalSearch}
       searchButtonRef={searchButton}
       taskStageRef={taskStage}
-      taskTitleRef={taskTitle}
       taskStageLabel={
         route === "workbench" && selectedTaskSummary
           ? activeTaskTitle

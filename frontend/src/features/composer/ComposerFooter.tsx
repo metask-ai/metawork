@@ -240,7 +240,8 @@ export function ComposerFooter({
       !browse ||
       !historyAvailable ||
       browse.scope !== draftScope ||
-      browse.draft !== draft
+      // Another key can advance the owned draft before this effect runs.
+      browse.draft !== inputHistory?.currentDraft()
     ) {
       historyBrowse.current = null;
       setHistoryRead(null);

@@ -355,9 +355,16 @@ test("Skill uninstall confirms outside the scrolling body and focuses Cancel", a
   const cancel = within(confirmation).getByRole("button", { name: "Cancel" });
   assert.equal(detail.contains(confirmation), false);
   assert.ok(within(confirmation).getByText(/removed from your personal/));
-  await waitFor(() => assert.equal(document.activeElement, cancel));
+  await waitFor(() =>
+    assert.ok(document.activeElement === cancel, "Expected focus on Cancel"),
+  );
   await user.keyboard("{Escape}");
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement === trigger,
+      "Expected focus on the uninstall trigger",
+    ),
+  );
   assert.equal(uninstall.mock.callCount(), 0);
 
   await user.click(trigger);
