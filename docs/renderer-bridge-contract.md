@@ -183,6 +183,12 @@ Renderer 完整接收后释放 Host grant，以受限 MIME 的 data URL 交给�
 
 Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true` 及必填 nullable `presentationAnchor: { afterOutputCount, presentationOrder } | null`。afterOutputCount 为不超过输出槽位容量的非负整数，presentationOrder 为非零 canonical u64 string；null 只表示旧历史位置未知。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
+### Generated MP4 preview
+
+`tools[].fileRefs[]` 中的可信 Host 生视频引用精确增加 `generatedVideo: true` 和非空 `presentationAnchor`，沿用生图锚点语义。两种来源标记互斥。Renderer 通过同一个 `metawork.files.preview` 请求精确 Task、Run 和 reference，Host 按该来源及当前 Workspace 授权读取 16 字节至 64 MiB 的 MP4，检查容器标识并对完整字节执行有界凭据检查。文件变化、缺失、受限或格式不支持分别使用既有预览状态。
+
+成功响应沿用空正文的 `ready` shape，额外且精确携带 `video: { token, mediaType, sizeBytes, chunkBytes, securityEpoch }`，其中 mediaType 固定为 `video/mp4`。token、字段编码与分块长度沿用图片 grant；`metawork.files.preview.readVideoChunk` 复用相同的 request、response、连续 offset 和授权校验，并且只接受视频 grant。取消及释放使用既有 `metawork.files.preview.release`。Host 至多保留一份视频资源，复用预览期限与安全代次失效规则。Renderer 至多保留四份且合计不超过 64 MiB 编码字节，完整收到并释放 grant 后才以本地 blob URL 提供给播放器。离开保留区域、Task 或引用失效、断连及安全代次改变时撤销 URL。文件原件与 URL 不持久化。
+
 ## Workspace file browsing commands
 
 `metawork.files.listDirectory` 与 `metawork.files.previewWorkspace` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string，`previewId` 与原 File Preview command 共享连接内单调递增空间；`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。仅列根目录可使用空 `path`。这些 command 不接受 Run/reference identity、物理根路径或 URI；不改变原引用预览 command 的 request。

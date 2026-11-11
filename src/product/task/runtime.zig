@@ -59,6 +59,7 @@ pub const FileReference = struct {
     locator_kind: FileLocatorKind,
     locator: []const u8,
     range: ?FileRange,
+    generated_video: bool = false,
 };
 
 /// Callback-scoped Host metadata; callers must copy before asynchronous work.
@@ -1223,7 +1224,7 @@ const EventContext = struct {
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
             .record_output_fn = recordEventOutput,
-            .retain_generated_image_fn = retainEventGeneratedImage,
+            .retain_generated_media_fn = retainEventGeneratedMedia,
             .record_file_changes_fn = recordEventFileChanges,
         };
     }
@@ -4404,6 +4405,7 @@ pub const Runtime = struct {
                         .uri => .uri,
                     },
                     .locator = reference.locator,
+                    .generated_video = reference.generated_video,
                     .range = if (reference.range) |range| .{
                         .start = .{ .line = range.start.line, .column = range.start.column },
                         .end = .{ .line = range.end.line, .column = range.end.column },
@@ -5121,12 +5123,19 @@ pub const Runtime = struct {
             changed = true;
         };
         for (&execution.terminal_receipts.generated_images) |*entry| if (entry.*) |*image| {
-            const tool = try retainGeneratedImage(&context, run, image.tool_route_digest, image.receipt.pathView(), task.durable.id);
+            const tool = try retainGeneratedMedia(&context, run, image.tool_route_digest, image.receipt.pathView(), task.durable.id, .image);
             tool.state = .completed;
             tool.is_error = false;
             entry.* = null;
             changed = true;
         };
+        if (execution.terminal_receipts.generated_video) |video| {
+            const tool = try retainGeneratedMedia(&context, run, video.tool_route_digest, video.receipt.pathView(), task.durable.id, .video);
+            tool.state = .completed;
+            tool.is_error = false;
+            execution.terminal_receipts.generated_video = null;
+            changed = true;
+        }
         return changed;
     }
 
@@ -8400,15 +8409,15 @@ fn discardEventTool(context: *EventContext, tool: *task_state.ToolView) void {
     if (tool.file_refs) |refs| context.runtime.allocator.free(refs);
 }
 
-fn retainEventGeneratedImage(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64) task_state.EventProjectionError!*task_state.ToolView {
+fn retainEventGeneratedMedia(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
     const context: *EventContext = @ptrCast(@alignCast(raw_context));
-    return retainGeneratedImage(context, run, toolRouteDigest(id), path, task_id);
+    return retainGeneratedMedia(context, run, toolRouteDigest(id), path, task_id, media);
 }
 
-fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64) task_state.EventProjectionError!*task_state.ToolView {
-    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = "image" }};
+fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
+    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = @tagName(media) }};
     if (findToolByRouteDigest(run.tools, digest)) |tool| {
-        try replaceToolFileReferences(context, tool, &generated, true, run.initial_credentials[0], task_id, run.generation);
+        try replaceToolFileReferences(context, tool, &generated, media, run.initial_credentials[0], task_id, run.generation);
         if (!tool.receipt_metadata) {
             // Existing owned identity moves from display accounting to the
             // already bounded trusted metadata owner, without copying it.
@@ -8431,7 +8440,7 @@ fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, dige
     const id = std.fmt.bufPrint(&storage, "tool-{d}", .{run.next_activity_order}) catch unreachable;
     const owned_id = try context.effects.text.projectReceipt(id, storage.len, &.{});
     errdefer context.runtime.allocator.free(owned_id.value);
-    const name = try context.effects.text.projectReceipt("GenerateImage", context.effects.max_tool_field_bytes, run.redactionSecrets());
+    const name = try context.effects.text.projectReceipt(if (media == .image) "GenerateImage" else "GenerateVideo", context.effects.max_tool_field_bytes, run.redactionSecrets());
     errdefer context.runtime.allocator.free(name.value);
     var candidate = task_state.ToolView{
         .route_digest = digest,
@@ -8449,7 +8458,7 @@ fn retainGeneratedImage(context: *EventContext, run: *task_state.RunRecord, dige
         clearEventFileReferences(context, &candidate);
         if (candidate.file_refs) |refs| context.runtime.allocator.free(refs);
     }
-    try replaceToolFileReferences(context, &candidate, &generated, true, run.initial_credentials[0], task_id, run.generation);
+    try replaceToolFileReferences(context, &candidate, &generated, media, run.initial_credentials[0], task_id, run.generation);
     run.tools[slot] = candidate;
     return &run.tools[slot].?;
 }
@@ -8477,7 +8486,7 @@ fn replaceEventFileReferences(
         null;
     const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = envelope.generated_image_path orelse "" }, .title = "", .kind = "image" }};
     const values = if (envelope.generated_image_path != null) &generated else refs orelse &.{};
-    return replaceToolFileReferences(context, tool, values, envelope.generated_image_path != null, credential, task_id, run_generation);
+    return replaceToolFileReferences(context, tool, values, if (envelope.generated_image_path != null) .image else null, credential, task_id, run_generation);
 }
 
 const CoreKnownEvent = @FieldType(@FieldType(@FieldType(agent.OwnedCoreEvent, "event"), "value"), "known");
@@ -8493,7 +8502,8 @@ fn discardReferenceText(context: *EventContext, receipt: bool, value: []u8) void
     if (receipt) context.runtime.allocator.free(value) else context.effects.text.discardCandidate(value);
 }
 
-fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView, values: []const CoreFileReference, generated_image: bool, credential: []const u8, task_id: u64, run_generation: u64) task_state.EventProjectionError!void {
+fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView, values: []const CoreFileReference, media: ?task_state.GeneratedMedia, credential: []const u8, task_id: u64, run_generation: u64) task_state.EventProjectionError!void {
+    const receipt = media != null;
     var candidate = tool.*;
     candidate.file_refs = null;
     errdefer {
@@ -8533,7 +8543,8 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
             index + 1,
         );
         var owned = task_state.FileReferenceView{
-            .generated_image = generated_image,
+            .generated_image = media == .image,
+            .generated_video = media == .video,
             .id = undefined,
             .title = undefined,
             .display_path = undefined,
@@ -8551,17 +8562,17 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         var kind_live = false;
         var locator_live = false;
         errdefer {
-            if (id_live) discardReferenceText(context, generated_image, owned.id);
-            if (title_live) discardReferenceText(context, generated_image, owned.title);
-            if (display_live) discardReferenceText(context, generated_image, owned.display_path);
-            if (kind_live) discardReferenceText(context, generated_image, owned.kind);
-            if (locator_live) discardReferenceText(context, generated_image, owned.locator);
+            if (id_live) discardReferenceText(context, receipt, owned.id);
+            if (title_live) discardReferenceText(context, receipt, owned.title);
+            if (display_live) discardReferenceText(context, receipt, owned.display_path);
+            if (kind_live) discardReferenceText(context, receipt, owned.kind);
+            if (locator_live) discardReferenceText(context, receipt, owned.locator);
         }
-        owned.id = (try projectReferenceText(context, generated_image, id, id.len, &.{}, 0)).value;
+        owned.id = (try projectReferenceText(context, receipt, id, id.len, &.{}, 0)).value;
         id_live = true;
         const title = try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             reference.title,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -8577,7 +8588,7 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
             "file";
         const display = try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             display_source,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -8587,7 +8598,7 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         display_live = true;
         const kind = try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             reference.kind,
             context.effects.max_file_ref_field_bytes,
             context.secrets(credential),
@@ -8597,17 +8608,17 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         kind_live = true;
         owned.locator = (try projectReferenceText(
             context,
-            generated_image,
+            receipt,
             locator,
             context.effects.max_file_ref_field_bytes,
             &.{},
             0,
         )).value;
         locator_live = true;
-        if (owned.generated_image) {
+        if (receipt) {
             if (tool.file_refs) |previous| for (previous) |entry| {
                 const old = entry orelse continue;
-                if (old.generated_image and std.mem.eql(u8, old.id, owned.id) and std.mem.eql(u8, old.locator, owned.locator)) {
+                if (old.generated_image == owned.generated_image and old.generated_video == owned.generated_video and std.mem.eql(u8, old.id, owned.id) and std.mem.eql(u8, old.locator, owned.locator)) {
                     owned.presentation_anchor = old.presentation_anchor;
                     break;
                 }
@@ -8639,11 +8650,11 @@ fn clearEventFileReferences(context: *EventContext, tool: *task_state.ToolView) 
     const refs = tool.file_refs orelse return;
     for (refs) |*entry| {
         if (entry.*) |*reference| {
-            discardReferenceText(context, reference.generated_image, reference.id);
-            discardReferenceText(context, reference.generated_image, reference.title);
-            discardReferenceText(context, reference.generated_image, reference.display_path);
-            discardReferenceText(context, reference.generated_image, reference.kind);
-            discardReferenceText(context, reference.generated_image, reference.locator);
+            discardReferenceText(context, reference.generated(), reference.id);
+            discardReferenceText(context, reference.generated(), reference.title);
+            discardReferenceText(context, reference.generated(), reference.display_path);
+            discardReferenceText(context, reference.generated(), reference.kind);
+            discardReferenceText(context, reference.generated(), reference.locator);
         }
         entry.* = null;
     }
@@ -9098,11 +9109,11 @@ fn deinitFileReference(
     effects: ReleaseEffects,
     reference: *task_state.FileReferenceView,
 ) void {
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.id);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.title);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.display_path);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.kind);
-    releaseReferenceSlice(self, effects, reference.generated_image, reference.locator);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.id);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.title);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.display_path);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.kind);
+    releaseReferenceSlice(self, effects, reference.generated(), reference.locator);
     reference.* = undefined;
 }
 

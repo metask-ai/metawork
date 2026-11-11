@@ -1640,7 +1640,7 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
             self.calls += 1;
             self.state = result.state;
             std.debug.assert(result.content.len == 0 and !result.truncated and !result.redacted);
-            if (result.image) |image| {
+            if (result.media) |image| {
                 self.image_len = image.size_bytes;
                 self.image_id = image.id;
             }
@@ -1659,7 +1659,7 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expectEqual(image_product.control_api.FilePreviewState.ready, capture.state);
     try std.testing.expect(capture.image_len > 0);
-    const chunk = try control.readFilePreviewImage(capture.image_id, 0);
+    const chunk = try control.readFilePreviewMedia(capture.image_id, 0);
     try std.testing.expect(chunk.len > 0);
     try std.testing.expect(control.releaseFilePreview(capture.image_id));
     var snapshot: [256 * 1024]u8 = undefined;
@@ -2209,6 +2209,9 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
                 1 => {
                     saved_path = try onlyVideoPath(&h);
                     try std.testing.expectEqual(bytes.len, (try h.tmp.dir.statFile(std.testing.io, saved_path.?, .{})).size);
+                    var inline_storage: [64 * 1024]u8 = undefined;
+                    const inline_snapshot = try control.writeAggregateFixture(&inline_storage);
+                    try std.testing.expect(std.mem.indexOf(u8, inline_snapshot, "\"generatedVideo\":true,\"presentationAnchor\":{") != null);
                 },
                 else => return error.TestUnexpectedResult,
             }
@@ -2253,6 +2256,7 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     const saved = (try history.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, video_path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"presentation_state\":\"generated_video\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "video_execution") == null);
     try std.testing.expectEqual(@as(usize, 1), effects.catalog_calls.load(.acquire));
     try h.evidence(0, 0, "verified_for_delivery");

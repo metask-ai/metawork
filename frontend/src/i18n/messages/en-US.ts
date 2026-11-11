@@ -1211,6 +1211,8 @@ export const enUS = {
   "outputs.state.edit_unavailable":
     "Cannot prepare editing now. Check the file again.",
   "outputs.check": "Check file",
+  "video_preview.label": "Generated video",
+  "video_preview.failed": "Could not play the video",
   "outputs.reveal": "Show in folder",
   "outputs.cancel": "Cancel",
   "outputs.checking": "Checking file…",

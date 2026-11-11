@@ -679,6 +679,8 @@ pub const Session = struct {
     run_mcp_installation: ?McpInstallationInput = null,
     run_video: ?VideoGenerationRunInput = null,
     video_attempted: bool = false,
+    video_receipt: ?VideoGenerationReceipt = null,
+    matched_video_receipt: ?[tool_route_digest_bytes]u8 = null,
     video_cancellation: ?*image_http.Cancellation = null,
     delivery_attempts: usize = 0,
     delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
@@ -877,6 +879,8 @@ pub const Session = struct {
         std.debug.assert(self.run_video == null and self.video_cancellation == null);
         self.run_video = video;
         self.video_attempted = false;
+        self.video_receipt = null;
+        self.matched_video_receipt = null;
         self.delivery_attempts = 0;
         @memset(&self.delivery_receipts, null);
         @memset(&self.matched_delivery_receipts, false);
@@ -2860,6 +2864,11 @@ pub const Session = struct {
             result_out.* = emptyOwnedBytes();
             return self.failHostCallback();
         };
+        if (outcome == .saved) {
+            self.lock();
+            self.video_receipt = outcome.saved;
+            self.unlock();
+        }
         result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         transferred = true;
         return if (outcome == .saved) wire.HOST_OK else wire.HOST_FAILED;
@@ -3135,7 +3144,27 @@ pub const Session = struct {
         return null;
     }
 
-    fn acknowledgeReceipts(self: *Session, delivery: ?usize, image: ?usize) void {
+    fn matchGeneratedVideo(self: *Session, event: sdk.DecodedCoreEvent) !?[]u8 {
+        const result = switch (event) {
+            .known => |value| switch (value) {
+                .tool_result => |result| result,
+                else => return null,
+            },
+            .unknown => return null,
+        };
+        if (result.is_error or !std.mem.eql(u8, result.name, generate_video.name)) return null;
+        self.lock();
+        defer self.unlock();
+        if (self.matched_video_receipt != null) return null;
+        const receipt = self.video_receipt orelse return null;
+        var buffer: VideoResultBuffer = undefined;
+        const expected = generate_video.result(&buffer, .{ .saved = receipt }) catch unreachable;
+        if (!std.mem.eql(u8, result.content, expected)) return null;
+        self.matched_video_receipt = toolRouteDigest(result.id);
+        return try self.agent_runtime.allocator.dupe(u8, receipt.pathView());
+    }
+
+    fn acknowledgeReceipts(self: *Session, delivery: ?usize, image: ?usize, video: bool) void {
         self.lock();
         defer self.unlock();
         if (delivery) |index| {
@@ -3147,6 +3176,11 @@ pub const Session = struct {
             std.debug.assert(self.matched_image_receipts[index] != null);
             self.image_receipts[index] = null;
             self.matched_image_receipts[index] = null;
+        }
+        if (video) {
+            std.debug.assert(self.matched_video_receipt != null);
+            self.video_receipt = null;
+            self.matched_video_receipt = null;
         }
     }
 
@@ -3163,6 +3197,11 @@ pub const Session = struct {
             receipts.generated_images[index] = .{ .tool_route_digest = digest, .receipt = entry.*.? };
             entry.* = null;
             self.matched_image_receipts[index] = null;
+        }
+        if (self.matched_video_receipt) |digest| {
+            receipts.generated_video = .{ .tool_route_digest = digest, .receipt = self.video_receipt.? };
+            self.video_receipt = null;
+            self.matched_video_receipt = null;
         }
         return receipts;
     }
@@ -3335,9 +3374,18 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.EVENT_FATAL;
         };
+        const generated_video = self.matchGeneratedVideo(parsed.value) catch {
+            self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = .tool_result, .encoded_bytes = encoded.len });
+            if (generated_image) |image| self.agent_runtime.allocator.free(image.path);
+            self.agent_runtime.allocator.free(owned_json);
+            parsed.deinit();
+            self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
+            return wire.EVENT_FATAL;
+        };
         const delivered_file = self.matchDeliveredFile(parsed.value);
         var envelope = OwnedCoreEvent{
             .generated_image_path = if (generated_image) |image| image.path else null,
+            .generated_video_path = generated_video,
             .delivered_file = if (delivered_file) |delivery| delivery.receipt else null,
             .session_id = self.id,
             .run_id = run_id,
@@ -3376,7 +3424,7 @@ pub const Session = struct {
         };
         // The consumer may already have released the envelope. Only captured
         // slot identities are used after successful ownership transfer.
-        self.acknowledgeReceipts(if (delivered_file) |delivery| delivery.slot else null, if (generated_image) |image| image.slot else null);
+        self.acknowledgeReceipts(if (delivered_file) |delivery| delivery.slot else null, if (generated_image) |image| image.slot else null, generated_video != null);
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
             self.stopEventDelivery();

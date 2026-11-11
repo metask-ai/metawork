@@ -277,6 +277,7 @@ pub const PresentationAnchor = struct {
 pub const FileReferenceView = struct {
     presentation_anchor: ?PresentationAnchor = null,
     generated_image: bool = false,
+    generated_video: bool = false,
     id: []u8,
     title: []u8,
     display_path: []u8,
@@ -284,7 +285,13 @@ pub const FileReferenceView = struct {
     locator_kind: FileReferenceLocatorKind,
     locator: []u8,
     range: ?FileReferenceRangeView = null,
+
+    pub fn generated(self: FileReferenceView) bool {
+        return self.generated_image or self.generated_video;
+    }
 };
+
+pub const GeneratedMedia = enum { image, video };
 
 pub const FileChangeObservation = enum {
     collecting,
@@ -1677,7 +1684,7 @@ pub const TextProjectionResult = struct {
 /// performs memory mechanics and never retains Task, Run, or Agent values.
 pub const EventProjection = struct {
     context: *anyopaque,
-    retain_generated_image_fn: *const fn (*anyopaque, *RunRecord, []const u8, []const u8, u64) EventProjectionError!*ToolView,
+    retain_generated_media_fn: *const fn (*anyopaque, *RunRecord, []const u8, []const u8, u64, GeneratedMedia) EventProjectionError!*ToolView,
     record_output_fn: ?*const fn (*anyopaque, *RunRecord, *const agent.FileDeliveryReceipt) EventProjectionError!void = null,
     max_assistant_message_bytes: usize,
     max_commentary_segments_per_run: usize,
@@ -2320,7 +2327,9 @@ pub fn applyEvent(
 fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agent.OwnedCoreEvent, projection: EventProjection) EventProjectionError!void {
     const result = envelope.event.value.known.tool_result;
     const tool = if (envelope.generated_image_path) |path|
-        try projection.retain_generated_image_fn(projection.context, run, result.id, path, task_id)
+        try projection.retain_generated_media_fn(projection.context, run, result.id, path, task_id, .image)
+    else if (envelope.generated_video_path) |path|
+        try projection.retain_generated_media_fn(projection.context, run, result.id, path, task_id, .video)
     else
         try projection.findOrCreateTool(run, result.id, result.name, result.input);
     tool.is_error = result.is_error;
@@ -2340,7 +2349,7 @@ fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agen
     );
     tool.content_truncated = content.truncated;
     tool.redacted = tool.redacted or content.redacted;
-    if (envelope.generated_image_path == null and !tool.receipt_metadata)
+    if (!tool.receipt_metadata)
         try projection.replaceFileReferences(tool, envelope, run.initial_credentials[0], task_id, run.generation);
 }
 

@@ -2,6 +2,7 @@ import {
   GeneratedImagePreview,
   type FilePreviewLoader,
 } from "./GeneratedImagePreview.tsx";
+import { GeneratedVideoPreview } from "./GeneratedVideoPreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
@@ -772,6 +773,8 @@ export function TaskContent({
             run.finishedAtUnixMs,
             nowUnixMs,
           );
+          const videoPreviewLoader =
+            synchronized && !responseDisabled ? loadFilePreview : undefined;
           const references = new Map(
             [...runFileReferenceLinks(run)].map(([text, reference]) => [
               text,
@@ -884,7 +887,15 @@ export function TaskContent({
                 ))}
               {outputsEnabled && (
                 <RunOutputs
-                  outputs={run.outputs}
+                  outputs={run.outputs.filter(
+                    (output) =>
+                      !readingFlow.some(
+                        (entry) =>
+                          entry.kind === "video" &&
+                          !output.redacted &&
+                          entry.reference.displayPath === output.displayPath,
+                      ),
+                  )}
                   taskId={task.id}
                   runId={run.id}
                   disabled={responseDisabled || !synchronized}
@@ -1069,6 +1080,21 @@ export function TaskContent({
                         }
                       />
                     </Message>
+                  ) : entry.kind === "video" ? (
+                    videoPreviewLoader && (
+                      <Message
+                        role="assistant"
+                        key={entry.identity}
+                        data-reading-id={entry.identity}
+                      >
+                        <GeneratedVideoPreview
+                          taskId={task.id}
+                          runId={run.id}
+                          referenceId={entry.reference.id}
+                          load={videoPreviewLoader}
+                        />
+                      </Message>
+                    )
                   ) : entry.kind === "supplement" ? (
                     <Fragment key={entry.identity}>{supplement}</Fragment>
                   ) : entry.parts.some((part) => part.content) ||

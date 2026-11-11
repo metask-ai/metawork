@@ -5,7 +5,7 @@ const http = @import("agent_http_transport");
 const images = @import("image_generation.zig");
 
 pub const name = "GenerateVideo";
-pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically retry. After a successful save, use DeliverFile to deliver the finished file to the user.";
+pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. The video appears in the conversation after a successful save. Call DeliverFile for this video only if the user explicitly requests a separate file delivery. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically retry.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested video."}},"required":["prompt"],"additionalProperties":false}
 ;
@@ -52,6 +52,10 @@ pub const Receipt = struct {
     fn validate(self: *const Receipt) !void {
         if (self.path_len > self.path.len) return error.InvalidReceipt;
         try validateFile(self.path[0..self.path_len], self.size_bytes);
+    }
+
+    pub fn pathView(self: *const Receipt) []const u8 {
+        return self.path[0..self.path_len];
     }
 
     fn validateFile(path: []const u8, size_bytes: u64) !void {

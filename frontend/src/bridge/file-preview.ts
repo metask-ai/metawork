@@ -4,9 +4,12 @@ import {
   PreviewImageSecurityError as StaleSecurity,
 } from "./preview-image-pool.ts";
 import type { NativeSdkJson } from "@native-sdk/cli";
+import { maxPreviewVideoBytes } from "./contracts.ts";
 import type {
   FilePreview,
   FilePreviewLoadOptions,
+  FilePreviewResponse,
+  FilePreviewVideo,
   WorkspaceDirectory,
 } from "./contracts.ts";
 import { commands } from "./commands.ts";
@@ -39,6 +42,8 @@ function delay(ms: number, signal: AbortSignal) {
 }
 
 type Invoke = (command: string, payload: NativeSdkJson) => Promise<unknown>;
+type MediaDescriptor = NonNullable<FilePreviewResponse["video" | "image"]>;
+type PreviewKey = { generation: string; previewId: string };
 const failed = (reason?: "capacity"): FilePreview => ({
   state: "error",
   content: "",
@@ -57,6 +62,8 @@ export class FilePreviewLoader {
   private readonly invoke: Invoke;
   private readonly generation: () => string | undefined;
   private readonly images: PreviewImagePool;
+  private readonly videos = new Map<() => void, string>();
+  private videoBytes = 0;
   constructor(
     invoke: Invoke,
     generation: () => string | undefined,
@@ -72,6 +79,7 @@ export class FilePreviewLoader {
     this.session = new AbortController();
     this.epoch = null;
     this.images.clear();
+    for (const release of this.videos.keys()) release();
     for (const notify of this.epochWaiters) notify();
   }
   observeSecurityEpoch(epoch: string) {
@@ -79,6 +87,8 @@ export class FilePreviewLoader {
     if (epoch === this.epoch) return;
     this.epoch = epoch;
     this.images.observeSecurityEpoch(epoch);
+    for (const [release, ownerEpoch] of this.videos)
+      if (ownerEpoch !== epoch) release();
     for (const notify of this.epochWaiters) notify();
   }
   private waitForNewEpoch(previous: string | null, signal: AbortSignal) {
@@ -262,7 +272,7 @@ export class FilePreviewLoader {
             continue;
           }
           if (response.state === "stale_security") throw new StaleSecurity();
-          const descriptor = response.image;
+          const descriptor = response.video ?? response.image;
           if (!descriptor)
             return {
               state: response.state,
@@ -274,9 +284,47 @@ export class FilePreviewLoader {
           if (this.epoch === null) this.epoch = descriptor.securityEpoch;
           if (this.epoch !== descriptor.securityEpoch)
             throw new StaleSecurity();
+          if (response.video) {
+            const reservation = this.reserveVideo(
+              response.video.sizeBytes,
+              response.video.securityEpoch,
+            );
+            disposeReservation = reservation.release;
+            const parts: Uint8Array<ArrayBuffer>[] = [];
+            const error = await this.readMedia(
+              key,
+              response.video,
+              signal,
+              reservation.video.valid,
+              (base64) => {
+                const binary = atob(base64);
+                const bytes = new Uint8Array(binary.length);
+                for (let index = 0; index < binary.length; index++)
+                  bytes[index] = binary.charCodeAt(index);
+                parts.push(bytes);
+              },
+            );
+            if (error) return { ...failed(), state: error };
+            await releaseHost();
+            check(signal);
+            if (!reservation.video.valid()) throw new StaleSecurity();
+            reservation.setSource(
+              new Blob(parts, { type: response.video.mediaType }),
+            );
+            disposeReservation = undefined;
+            return {
+              state: "ready",
+              content: "",
+              truncated: false,
+              redacted: false,
+              video: reservation.video,
+              release: reservation.release,
+            };
+          }
+          const imageDescriptor = response.image!;
           const reservation = this.images.reserve(
             {
-              ...descriptor,
+              ...imageDescriptor,
               id: `file:${generation}:${previewId}`,
             },
             priority,
@@ -286,47 +334,20 @@ export class FilePreviewLoader {
           const releaseReceipt = await this.images.receive(signal, priority);
           try {
             const parts: string[] = [];
-            for (let offset = 0; offset < descriptor.sizeBytes;) {
-              check(signal);
-              if (!image.valid() || this.epoch !== descriptor.securityEpoch)
-                throw new StaleSecurity();
-              const chunk = decodePreviewChunk(
-                await this.invoke(commands.readPreviewImage, {
-                  ...key,
-                  token: descriptor.token,
-                  securityEpoch: descriptor.securityEpoch,
-                  offset: String(offset),
-                }),
-              );
-              if (chunk.state === "stale_security") throw new StaleSecurity();
-              if (chunk.state !== "ready")
-                return {
-                  ...failed(),
-                  state: chunk.state === "restricted" ? "restricted" : "error",
-                };
-              const count = Math.min(
-                descriptor.chunkBytes,
-                descriptor.sizeBytes - offset,
-              );
-              if (
-                chunk.token !== descriptor.token ||
-                chunk.offset !== offset ||
-                chunk.bytes !== count ||
-                (count < descriptor.chunkBytes &&
-                  offset + count !== descriptor.sizeBytes) ||
-                (offset + count < descriptor.sizeBytes &&
-                  chunk.dataBase64.includes("="))
-              )
-                throw Error("Invalid preview chunk identity");
-              parts.push(chunk.dataBase64);
-              offset += count;
-            }
+            const error = await this.readMedia(
+              key,
+              imageDescriptor,
+              signal,
+              image.valid,
+              (data) => parts.push(data),
+            );
+            if (error) return { ...failed(), state: error };
             await releaseHost();
             check(signal);
             if (!image.valid() || this.epoch !== descriptor.securityEpoch)
               throw new StaleSecurity();
             reservation.setSource(
-              `data:${descriptor.mediaType};base64,${parts.join("")}`,
+              `data:${imageDescriptor.mediaType};base64,${parts.join("")}`,
             );
             parts.length = 0;
           } finally {
@@ -365,5 +386,91 @@ export class FilePreviewLoader {
       sessionSignal.removeEventListener("abort", abort);
       options.signal?.removeEventListener("abort", abort);
     }
+  }
+
+  private async readMedia(
+    key: PreviewKey,
+    descriptor: MediaDescriptor,
+    signal: AbortSignal,
+    valid: () => boolean,
+    append: (base64: string) => void,
+  ): Promise<"restricted" | "error" | undefined> {
+    const command =
+      descriptor.mediaType === "video/mp4"
+        ? commands.readPreviewVideo
+        : commands.readPreviewImage;
+    for (let offset = 0; offset < descriptor.sizeBytes;) {
+      check(signal);
+      if (!valid() || this.epoch !== descriptor.securityEpoch)
+        throw new StaleSecurity();
+      const chunk = decodePreviewChunk(
+        await this.invoke(command, {
+          ...key,
+          token: descriptor.token,
+          securityEpoch: descriptor.securityEpoch,
+          offset: String(offset),
+        }),
+      );
+      check(signal);
+      if (chunk.state === "stale_security") throw new StaleSecurity();
+      if (chunk.state !== "ready")
+        return chunk.state === "restricted" ? "restricted" : "error";
+      const count = Math.min(
+        descriptor.chunkBytes,
+        descriptor.sizeBytes - offset,
+      );
+      if (
+        chunk.token !== descriptor.token ||
+        chunk.offset !== offset ||
+        chunk.bytes !== count ||
+        (offset + count < descriptor.sizeBytes &&
+          chunk.dataBase64.includes("="))
+      )
+        throw Error("Invalid preview chunk identity");
+      append(chunk.dataBase64);
+      offset += count;
+    }
+  }
+
+  private reserveVideo(sizeBytes: number, securityEpoch: string) {
+    if (
+      this.videos.size >= 4 ||
+      this.videoBytes + sizeBytes > maxPreviewVideoBytes
+    )
+      throw new Capacity();
+    this.videoBytes += sizeBytes;
+    let valid = true;
+    let source = "";
+    const listeners = new Set<() => void>();
+    const release = () => {
+      if (!valid) return;
+      valid = false;
+      this.videos.delete(release);
+      this.videoBytes -= sizeBytes;
+      if (source) URL.revokeObjectURL(source);
+      source = "";
+      for (const notify of listeners) notify();
+      listeners.clear();
+    };
+    this.videos.set(release, securityEpoch);
+    const video: FilePreviewVideo = {
+      get src() {
+        return source;
+      },
+      valid: () => valid,
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    };
+    return {
+      video,
+      release,
+      setSource: (blob: Blob) => {
+        if (valid) source = URL.createObjectURL(blob);
+      },
+    };
   }
 }

@@ -1325,6 +1325,37 @@ test "production SQL history preserves Outputs metadata without file contents" {
     try expectSame(arena.allocator(), database.capability(), state);
 }
 
+test "SQL history preserves the generated video anchor in file reference JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    const task = &state.tasks[0];
+    task.presentation_format = 1;
+    task.next_presentation_order = 2;
+    for (task.input_submissions) |*input| input.submission.presentation_state = "legacy";
+    for (task.runs) |*run| {
+        if (run.submission) |*submission| submission.presentation_state = "legacy";
+        for (run.additional_inputs) |*input| {
+            if (input.submission) |*submission| submission.presentation_state = "legacy";
+        }
+    }
+    const reference = &task.runs[0].tools[0].file_refs.?[0];
+    reference.locator = "generated-videos/clip.mp4";
+    reference.locator_kind = "workspace_path";
+    reference.kind = "video";
+    reference.presentation_state = history.wire.FileReferenceWire.video_presentation_state;
+    reference.presentation_anchor = .{ .after_output_count = 0, .presentation_order = 1 };
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), state);
+    try expectSame(allocator, database.capability(), state);
+    const loaded = try history.load(allocator, database.capability());
+    const restored = loaded.tasks[0].runs[0].tools[0].file_refs.?[0];
+    try std.testing.expect(restored.isGeneratedVideo());
+    try std.testing.expectEqual(@as(u64, 1), restored.presentation_anchor.?.presentation_order);
+}
+
 test "largest legal Tool value exceeds the old SQL cap and round-trips" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

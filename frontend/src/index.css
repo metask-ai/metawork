@@ -9952,10 +9952,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
 }
 
+.generated-image-preview,
+.generated-video-preview {
+  max-width: min(100%, 576px);
+}
 .generated-image-preview {
   margin: 16px 0;
   width: fit-content;
-  max-width: min(100%, 576px);
 }
 .generated-image-open {
   display: block;
@@ -10102,6 +10105,36 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.generated-video-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  max-height: min(60vh, 480px);
+  border-radius: 8px;
+}
+
+.generated-video-preview video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+  background: #000;
+}
+
+.generated-video-preview > p {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 8px;
+  text-align: center;
+  color: var(--ui-content-muted);
 }
 
 @media (max-width: 640px) {

@@ -74,6 +74,7 @@
             .{ .name = "metawork.files.listDirectory", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.previewWorkspace", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.preview.readImageChunk", .origins = .{"zero://app"} },
+            .{ .name = "metawork.files.preview.readVideoChunk", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.preview.release", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.diff", .origins = .{"zero://app"} },
             .{ .name = "metawork.attachments.beginAdd", .origins = .{"zero://app"} },
