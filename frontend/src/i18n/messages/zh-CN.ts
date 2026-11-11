@@ -313,13 +313,9 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.status.invalid_catalog": "工具目录无效",
   "mcp.transport.stdio": "本地 · STDIO",
   "mcp.transport.streamable_http": "远程 · HTTP",
-  "mcp.access.available": "新任务可用",
   "mcp.access.not_allowed": "未授权",
   "mcp.access.restart_required": "正在连接",
   "mcp.access.unavailable": "新任务不可用",
-  "mcp.banner.restart.title": "正在应用连接变更",
-  "mcp.banner.restart.body":
-    "MetaWork 正在连接并发现工具；已打开的任务保持现有访问权限。",
   "mcp.banner.applying.title": "正在连接 MCP 服务",
   "mcp.banner.applying.body": "正在启动连接、完成 MCP 握手并发现工具。",
   "mcp.banner.apply_failed.title": "连接变更未能应用",
@@ -349,10 +345,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.empty_agent_hint": "有接入说明？把链接发到任务里，让 Agent 帮你接入。",
   "mcp.no_results_title": "没有匹配的服务或工具",
   "mcp.no_results_body": "没有与“{query}”匹配的内容。",
-  "mcp.detail.new_tasks": "新任务",
   "mcp.detail.tool_permissions": "工具权限",
   "mcp.detail.connection_test": "连接测试",
-  "mcp.detail.tools_available": "{count} 个工具可用",
   "mcp.detail.connection_and_auth": "连接与认证",
   "mcp.detail.advanced": "高级设置",
   "mcp.detail.display_name": "显示名称",
@@ -415,16 +409,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.add.add_argument": "添加参数",
   "mcp.add.remove_argument": "删除参数 {index}",
   "mcp.add.edit_command_line": "编辑完整启动命令",
-  "mcp.proposal.title": "MCP 服务提议",
-  "mcp.proposal.body":
-    "查看公开配置后添加服务、完成认证并选择工具。后续新任务可以使用选定工具。",
-  "mcp.proposal.review": "查看 MCP 配置",
-  "mcp.proposal.detached":
-    "来源任务已停止或删除。公开字段已保留为普通添加表单，请核对后自行提交。",
-  "mcp.proposal.expired":
-    "提议已失效，未自动重试。请关闭表单，核对实际保存的连接后再添加。",
-  "mcp.proposal.rejected":
-    "MCP 提议未能接纳。请核对公开配置，凭据仅通过密码字段或 OAuth 提交。",
   "mcp.add.command": "启动命令",
   "mcp.add.command_help":
     "粘贴你通常会执行的命令。MetaWork 不会执行管道、重定向或变量替换。",
@@ -1691,13 +1675,11 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.detail.arguments": "有序参数",
   "mcp.detail.cwd": "工作目录",
   "mcp.detail.environment_names": "环境变量名称",
-  "mcp.detail.endpoint_origin": "Endpoint Origin",
   "mcp.detail.header_names": "Header 名称",
   "mcp.detail.connection_unavailable": "连接配置不可显示",
   "mcp.detail.connection_unavailable_help":
     "配置无效或包含已识别的敏感文本。请删除后重新添加。",
   "mcp.detail.registration": "客户端注册",
-  "mcp.summary.configured": "已配置",
   "mcp.summary.not_configured": "未配置",
   "mcp.registration.none": "无",
   "mcp.registration.automatic": "自动（DCR）",
@@ -1706,9 +1688,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.approval.required": "旧连接尚未授权",
   "mcp.approval.help": "这是旧版本保存的配置，连接一次即可继续使用。",
   "mcp.approval.action": "连接并启用",
-  "mcp.capability.approval_unavailable": "当前设备无法进行连接审查。",
   "mcp.capability.capture_unavailable": "当前暂时无法提交凭据。",
-  "mcp.capability.oauth_unavailable": "当前设备不支持 OAuth。",
   "mcp.authorization_status.not_required": "无需授权",
   "mcp.authorization_status.missing_static_secret": "缺少一个或多个密钥",
   "mcp.authorization_status.missing_oauth_client_secret":

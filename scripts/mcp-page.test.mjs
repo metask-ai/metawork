@@ -44,16 +44,11 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { McpPage, filterMcpServers, parseMcpCommandLine, validMcpHttpEndpoint } =
-  await vite.ssrLoadModule("/src/features/mcp/McpPage.tsx");
+const { McpPage, filterMcpServers } = await vite.ssrLoadModule(
+  "/src/features/mcp/McpPage.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
-const endpointContract = JSON.parse(
-  await readFile(
-    join(process.cwd(), "src/product/mcp/testdata/mcp-http-endpoints.json"),
-    "utf8",
-  ),
-);
 
 test.afterEach(() => cleanup());
 test.after(async () => {
@@ -1650,30 +1645,6 @@ test("MCP gates OAuth client secret recovery and configuration on credential sub
       "Credential submission is temporarily unavailable. An existing selection can be preserved.",
     ),
   );
-});
-
-test("MCP endpoint validation matches the Host authority contract", () => {
-  for (const endpoint of endpointContract.accepted)
-    assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
-  for (const endpoint of endpointContract.rejected)
-    assert.equal(validMcpHttpEndpoint(endpoint), false, endpoint);
-});
-
-test("MCP launch command is tokenized without invoking shell syntax", () => {
-  assert.deepEqual(
-    parseMcpCommandLine(
-      'npx -y "@modelcontextprotocol/server-filesystem" "/workspace files"',
-    ),
-    [
-      "npx",
-      "-y",
-      "@modelcontextprotocol/server-filesystem",
-      "/workspace files",
-    ],
-  );
-  assert.equal(parseMcpCommandLine("npx server | tee output"), null);
-  assert.equal(parseMcpCommandLine("npx $(whoami)"), null);
-  assert.equal(parseMcpCommandLine('npx "unterminated'), null);
 });
 
 test("MCP tool allowlist mutation sends exact desired tools and generation", async () => {

@@ -369,13 +369,9 @@ export const enUS = {
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
   "mcp.access.restart_required": "Connecting",
   "mcp.access.unavailable": "Unavailable to new tasks",
-  "mcp.banner.restart.title": "Applying connection changes",
-  "mcp.banner.restart.body":
-    "MetaWork is connecting and discovering tools. Open tasks keep their current access.",
   "mcp.banner.applying.title": "Connecting MCP services",
   "mcp.banner.applying.body":
     "Launching connections, checking the MCP handshake, and discovering tools.",
@@ -409,10 +405,8 @@ export const enUS = {
     "Have a setup guide? Share its link with the agent in a task to connect the server.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
-  "mcp.detail.new_tasks": "New tasks",
   "mcp.detail.tool_permissions": "Tool permissions",
   "mcp.detail.connection_test": "Connection test",
-  "mcp.detail.tools_available": "{count} tools available",
   "mcp.detail.connection_and_auth": "Connection and authentication",
   "mcp.detail.advanced": "Advanced settings",
   "mcp.detail.display_name": "Display name",
@@ -483,16 +477,6 @@ export const enUS = {
   "mcp.add.add_argument": "Add argument",
   "mcp.add.remove_argument": "Remove argument {index}",
   "mcp.add.edit_command_line": "Edit as launch command",
-  "mcp.proposal.title": "MCP server suggestion",
-  "mcp.proposal.body":
-    "Review this public configuration, then add the server, authenticate and choose tools. New tasks can use the selected tools.",
-  "mcp.proposal.review": "Review MCP configuration",
-  "mcp.proposal.detached":
-    "The source task was stopped or deleted. Public settings are retained as a normal Add form; review and submit them explicitly.",
-  "mcp.proposal.expired":
-    "This suggestion has expired. No automatic retry was made. Close this form and check the saved connection before adding again.",
-  "mcp.proposal.rejected":
-    "An MCP suggestion could not be accepted. Review the public configuration and enter credentials only in password fields or OAuth.",
   "mcp.add.command": "Launch command",
   "mcp.add.command_help":
     "Paste the command you would normally run. Shell operators and substitutions are not executed.",
@@ -1953,13 +1937,11 @@ export const enUS = {
   "mcp.detail.arguments": "Arguments",
   "mcp.detail.cwd": "Working directory",
   "mcp.detail.environment_names": "Environment names",
-  "mcp.detail.endpoint_origin": "Endpoint origin",
   "mcp.detail.header_names": "Header names",
   "mcp.detail.connection_unavailable": "Connection settings unavailable",
   "mcp.detail.connection_unavailable_help":
     "The configuration is invalid or contains recognized sensitive text. Remove the server and add it again.",
   "mcp.detail.registration": "Client registration",
-  "mcp.summary.configured": "Configured",
   "mcp.summary.not_configured": "Not configured",
   "mcp.registration.none": "None",
   "mcp.registration.automatic": "Automatic (DCR)",
@@ -1969,11 +1951,8 @@ export const enUS = {
   "mcp.approval.help":
     "This setting was saved by an older version. Connect it once to continue.",
   "mcp.approval.action": "Connect and enable",
-  "mcp.capability.approval_unavailable":
-    "Connection review is unavailable on this device.",
   "mcp.capability.capture_unavailable":
     "Credential submission is currently unavailable.",
-  "mcp.capability.oauth_unavailable": "OAuth is unavailable on this device.",
   "mcp.authorization_status.not_required": "No authorization required",
   "mcp.authorization_status.missing_static_secret":
     "One or more secrets are missing",

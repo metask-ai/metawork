@@ -1,10 +1,28 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   commandLineToken,
   parseMcpCommandLine,
   validMcpArgv,
+  validMcpHttpEndpoint,
 } from "../frontend/src/features/mcp/configuration-input.ts";
+
+test("MCP endpoint validation matches the Host authority contract", async () => {
+  const { accepted, rejected } = JSON.parse(
+    await readFile(
+      new URL(
+        "../src/product/mcp/testdata/mcp-http-endpoints.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  for (const endpoint of accepted)
+    assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
+  for (const endpoint of rejected)
+    assert.equal(validMcpHttpEndpoint(endpoint), false, endpoint);
+});
 
 test("Windows commands preserve drive, UNC and quoted paths", () => {
   for (const [input, expected] of [
@@ -78,6 +96,20 @@ for (const platform of ["windows", "posix"]) {
       "node $HOME",
     ])
       assert.equal(parseMcpCommandLine(value, platform), null, value);
+  });
+  test(`${platform}: package command preserves quoted arguments`, () => {
+    assert.deepEqual(
+      parseMcpCommandLine(
+        'npx -y "@modelcontextprotocol/server-filesystem" "/workspace files"',
+        platform,
+      ),
+      [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/workspace files",
+      ],
+    );
   });
 }
 

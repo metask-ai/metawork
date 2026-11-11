@@ -4759,20 +4759,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: color-mix(in srgb, var(--metask-state-warning) 6%, transparent);
 }
 
-.mcp-tool-catalog > header {
-  display: flex;
-  margin-bottom: 10px;
-  align-items: center;
-  gap: 8px;
-}
-
-.mcp-tool-catalog > header h3 {
-  margin: 0;
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  font-weight: 600;
-}
-
 .mcp-tool-catalog > header span {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
@@ -5087,7 +5073,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 2px;
 }
 
-.mcp-detail-section {
+.mcp-detail-section,
+.mcp-tool-catalog {
   padding-top: 20px;
   margin-top: 20px;
   border-top: 1px solid var(--ui-border);
@@ -5173,12 +5160,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
   font-size: var(--text-label);
   line-height: 1.5;
-}
-
-.mcp-tool-catalog {
-  padding-top: 20px;
-  margin-top: 20px;
-  border-top: 1px solid var(--ui-border);
 }
 
 .mcp-tool-list {
@@ -5383,11 +5364,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.55;
 }
 
-.mcp-address-fields {
-  display: grid;
-  gap: 6px;
-}
-
 .mcp-service-dialog[data-form] {
   width: min(520px, calc(100vw - 32px));
 }
@@ -5589,8 +5565,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   list-style: none;
 }
 
-.mcp-secret-slots li,
-.mcp-client-secret-action {
+.mcp-secret-slots li {
   display: flex;
   min-height: 44px;
   padding: 8px 11px;
@@ -5599,13 +5574,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   gap: 10px;
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
-}
-
-.mcp-client-secret-action {
-  margin-top: 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 9px;
-  background: var(--ui-surface-panel);
 }
 
 .mcp-secret-form {
