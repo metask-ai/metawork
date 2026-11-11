@@ -321,6 +321,32 @@ test("an empty minimized viewport keeps the sidebar and the measured layout", ()
   }
 });
 
+test("regaining the desktop width restores the saved sidebar choice", () => {
+  // A minimized window on a scaled Windows display can report a narrow,
+  // non-empty viewport, so the sidebar must return with the real width.
+  const { root, resizeViewport } = renderTaskPanelShell(1400);
+
+  resizeViewport(787);
+  assert.equal(root?.getAttribute("data-left-open"), "false");
+  assert.equal(
+    dom.window.localStorage.getItem("metawork.panel.workspaces"),
+    null,
+  );
+
+  resizeViewport(1400);
+  assert.equal(root?.getAttribute("data-left-open"), "true");
+});
+
+test("an explicitly collapsed sidebar stays collapsed after a narrow layout", () => {
+  const { root, resizeViewport } = renderTaskPanelShell(1400);
+  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  assert.equal(root?.getAttribute("data-left-open"), "false");
+
+  resizeViewport(787);
+  resizeViewport(1400);
+  assert.equal(root?.getAttribute("data-left-open"), "false");
+});
+
 test("right-side separator reverses pointer and arrow direction", () => {
   const commits = [];
 

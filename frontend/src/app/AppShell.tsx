@@ -141,10 +141,13 @@ function initialRightShare() {
   return normalizeRightShare(parsed);
 }
 
+function preferredPanelOpen(key: string) {
+  return readLocalPreference(key) !== "closed";
+}
+
 function initialPanel(key: string, minimumWidth: number) {
   if (typeof window === "undefined") return true;
-  const stored = readLocalPreference(key);
-  return window.innerWidth >= minimumWidth && stored !== "closed";
+  return window.innerWidth >= minimumWidth && preferredPanelOpen(key);
 }
 
 // A minimized or hidden window can report an empty viewport. That is not a
@@ -303,6 +306,16 @@ export function AppShell({
   useEffect(() => {
     if (effectiveRightPanelOpen && workbenchWidth < 820) setLeftOpen(false);
   }, [effectiveRightPanelOpen, workbenchWidth]);
+
+  // Narrow layouts collapse the sidebar without rewriting the saved choice, so
+  // regaining the desktop width restores that choice.
+  const wideWorkbench = workbenchWidth >= 820;
+  const wasWideWorkbench = useRef(wideWorkbench);
+  useEffect(() => {
+    const widened = wideWorkbench && !wasWideWorkbench.current;
+    wasWideWorkbench.current = wideWorkbench;
+    if (widened) setLeftOpen(preferredPanelOpen(leftPreference));
+  }, [wideWorkbench]);
 
   useEffect(() => {
     if (!resizingRight || (effectiveRightPanelOpen && rightPanelDocked)) return;
