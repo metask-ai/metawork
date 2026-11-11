@@ -1,7 +1,6 @@
 //! Agent runtime lifecycle and shared execution helpers.
 
 const std = @import("std");
-const is_test = @import("builtin").is_test;
 const multimodal = @import("multimodal.zig");
 const identity_profile = @import("identity.zig");
 const sdk = @import("metask_agentcore");
@@ -70,7 +69,6 @@ const max_mcp_configuration_applies: usize = 128;
 
 pub const Runtime = struct {
     image_test: ?root.ImageGenerationTestOptions = null,
-    video_fixture: bool = false,
     image_budget: image.Budget = .{ .limit = 0 },
     image_results_created: std.atomic.Value(usize) = .init(0),
     image_results_released: std.atomic.Value(usize) = .init(0),
@@ -114,7 +112,7 @@ pub const Runtime = struct {
         allocator: std.mem.Allocator,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
-        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, null, false);
+        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, null);
     }
 
     /// Test-only injection boundary. `raw_api` is borrowed for the Agent
@@ -125,23 +123,16 @@ pub const Runtime = struct {
         raw_api: *const wire.ApiV1,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
-        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, null, false);
+        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, null);
     }
 
     /// Isolated transport and budget injection; the tool set matches product init.
     pub fn initImageGenerationForTesting(io: std.Io, allocator: std.mem.Allocator, limits: Limits, options: root.ImageGenerationTestOptions) !*Runtime {
-        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, options, false);
+        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, options);
     }
 
     pub fn initImageGenerationWithApiForTesting(io: std.Io, allocator: std.mem.Allocator, raw_api: *const wire.ApiV1, limits: Limits, options: root.ImageGenerationTestOptions) !*Runtime {
-        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, options, false);
-    }
-
-    /// Exercise the complete Host Tool route with canonical Core and a fixture effect.
-    pub fn initVideoGenerationForTesting(io: std.Io, allocator: std.mem.Allocator, limits: Limits, raw_api: ?*const wire.ApiV1) !*Runtime {
-        if (!is_test) return error.InvalidLimits;
-        const api = if (raw_api) |raw| try sdk.Api.validate(raw) else try sdk.Api.discover();
-        return initWithValidatedApi(io, allocator, api, limits, null, true);
+        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, options);
     }
 
     fn initWithValidatedApi(
@@ -150,7 +141,6 @@ pub const Runtime = struct {
         api: sdk.Api,
         limits: Limits,
         image_test: ?root.ImageGenerationTestOptions,
-        video_fixture: bool,
     ) (Error || std.mem.Allocator.Error)!*Runtime {
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.max_multimodal_input_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
@@ -229,7 +219,7 @@ pub const Runtime = struct {
         video_descriptor.release_result = Session.releaseVideoResult;
         const host_tools = [_]wire.HostToolV1{ image_descriptor, delivery_descriptor, mcp_descriptor, video_descriptor };
         runtime_config.host_tools = &host_tools;
-        runtime_config.host_tool_count = if (video_fixture) host_tools.len else host_tools.len - 1;
+        runtime_config.host_tool_count = host_tools.len;
         const mcp_registry_generation = if (limits.mcp_input) |input|
             input.generation
         else
@@ -257,7 +247,6 @@ pub const Runtime = struct {
 
         self.* = .{
             .image_test = image_test,
-            .video_fixture = video_fixture,
             .image_budget = .{ .limit = if (image_test) |options| options.limits.memory_bytes else image.production_limits.memory_bytes },
             .io = io,
             .allocator = allocator,
@@ -281,8 +270,7 @@ pub const Runtime = struct {
     }
 
     fn allocAllowedTools(self: *Runtime) ![]wire.BytesViewV1 {
-        const host_names = [_][]const u8{ image_tool.name, delivery_tool.name, mcp_install.name, video_tool.name };
-        const names = if (self.video_fixture) &host_names else host_names[0 .. host_names.len - 1];
+        const names = [_][]const u8{ image_tool.name, delivery_tool.name, mcp_install.name, video_tool.name };
         const views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + names.len);
         for (capabilities.builtins, views[0..capabilities.builtins.len]) |tool, *view|
             view.* = sdk.bytesView(capabilities.wireName(tool));

@@ -4046,7 +4046,7 @@ test "restart recovery revalidates live authority and continues the same Convers
             .argument_values = &.{},
         } }),
     );
-    try std.testing.expectEqual(@as(usize, 13), fake_core.last_restored_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 14), fake_core.last_restored_allowed_tool_count);
 
     _ = try runPreparedTask(&restored, task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
@@ -11472,7 +11472,7 @@ const ImageAdmissionProbe = struct {
         self.workspace_epoch = authority.epoch;
         if (!self.available) return null;
         return .{
-            .candidate = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, self.secret, 7) catch unreachable,
+            .candidate = models_contract.OwnedMediaCandidate.copy(std.testing.allocator, .image, self.model, self.secret, 7) catch unreachable,
             .transport = .{ .perform_fn = imageHttp },
             .output = .{ .context = self, .commit_fn = output },
             .output_owner = self,

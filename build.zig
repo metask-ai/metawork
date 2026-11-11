@@ -826,6 +826,7 @@ const WiredModules = struct {
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
     image_output: *std.Build.Module,
+    video_output: *std.Build.Module,
     output_file: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
@@ -1177,6 +1178,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
     cases.addImport("image_output", modules.image_output);
+    cases.addImport("video_output", modules.video_output);
     cases.addImport("app_output_file", modules.output_file);
     cases.addImport("models_coordinator", modules.models_coordinator);
     cases.addImport("metawork_account", modules.account);
@@ -2271,6 +2273,14 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const video_output = b.createModule(.{
+        .root_source_file = b.path("src/app/video_output.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    video_output.addImport("metawork_agent", agent);
+    video_output.addImport("metawork_product_workspace", product_workspace);
+    video_output.addImport("app_output_file", output_file);
     product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
     image_output.addImport("app_select_start", app_select_start);
@@ -2459,6 +2469,7 @@ fn wireAgentCore(
     models_coordinator.addImport("metawork_product_task", product_task);
     models_coordinator.addImport("metawork_product_workspace", product_workspace);
     models_coordinator.addImport("image_output", image_output);
+    models_coordinator.addImport("video_output", video_output);
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),
         .target = target,
@@ -2584,6 +2595,7 @@ fn wireAgentCore(
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
         .image_output = image_output,
+        .video_output = video_output,
         .output_file = output_file,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,

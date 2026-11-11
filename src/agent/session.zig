@@ -54,6 +54,8 @@ pub const ImageGenerationCredentialReader = image_generation.CredentialReader;
 pub const VideoGenerationRunInput = generate_video.Input;
 pub const VideoGenerationOutcome = generate_video.Outcome;
 pub const VideoGenerationReceipt = generate_video.Receipt;
+pub const VideoGenerationOutput = generate_video.Output;
+pub const max_generated_video_bytes = generate_video.max_file_bytes;
 
 const RunImage = struct {
     binding: image_generation.OwnedBinding,
@@ -677,7 +679,7 @@ pub const Session = struct {
     run_mcp_installation: ?McpInstallationInput = null,
     run_video: ?VideoGenerationRunInput = null,
     video_attempted: bool = false,
-    video_cancellation: ?*std.atomic.Value(bool) = null,
+    video_cancellation: ?*image_http.Cancellation = null,
     delivery_attempts: usize = 0,
     delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
     matched_delivery_receipts: [deliver_file.max_receipts_per_run]bool = @splat(false),
@@ -795,7 +797,7 @@ pub const Session = struct {
         return self.prepareRunOwnedTools(input, &image, null, null, null);
     }
 
-    /// Freeze one Host-resolved image configuration with the Run. A null input
+    /// Freeze the Host-resolved tool inputs with the Run. A null input
     /// explicitly means unavailable; no Session fixture/default is consulted.
     pub fn prepareRunWithTools(
         self: *Session,
@@ -803,20 +805,16 @@ pub const Session = struct {
         image_input: ?ImageGenerationRunInput,
         delivery_input: ?FileDeliveryInput,
         mcp_input: ?McpInstallationInput,
+        video_input: ?VideoGenerationRunInput,
     ) (Error || std.mem.Allocator.Error)!u64 {
+        if (video_input) |video| video.validate() catch return error.InvalidRunInput;
         var image: ?RunImage = if (image_input) |value| .{
             .binding = image_generation.OwnedBinding.init(self.agent_runtime.allocator, value.binding) catch |err|
                 return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRunInput,
             .transport = value.transport,
         } else null;
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedTools(input, &image, delivery_input, mcp_input, null);
-    }
-
-    pub fn prepareRunWithVideoForTesting(self: *Session, input: RunInput, video: VideoGenerationRunInput) (Error || std.mem.Allocator.Error)!u64 {
-        if (!self.agent_runtime.video_fixture) return error.InvalidRunInput;
-        var image: ?RunImage = null;
-        return self.prepareRunOwnedTools(input, &image, null, null, video);
+        return self.prepareRunOwnedTools(input, &image, delivery_input, mcp_input, video_input);
     }
 
     fn prepareRunOwnedTools(self: *Session, input: RunInput, image: *?RunImage, delivery: ?FileDeliveryInput, mcp_input: ?McpInstallationInput, video: ?VideoGenerationRunInput) (Error || std.mem.Allocator.Error)!u64 {
@@ -2887,7 +2885,7 @@ pub const Session = struct {
             return .{ .failed = if (err == error.OutOfMemory) .capacity else .invalid_arguments };
         defer allocator.free(prompt);
 
-        var cancelled = std.atomic.Value(bool).init(false);
+        var call: image_generation.Call = undefined;
         const input = input: {
             self.lock();
             defer self.unlock();
@@ -2895,8 +2893,14 @@ pub const Session = struct {
                 return .{ .failed = .cancelled };
             const input = self.run_video orelse return .{ .failed = .unavailable };
             if (self.video_attempted) return .{ .failed = .capacity };
+            const io = self.agent_runtime.io;
+            call = .{
+                .cancellation = image_http.Cancellation.init(input.transport),
+                .deadline_ns = std.Io.Timestamp.now(io, .awake).nanoseconds + generate_video.timeout_ns,
+                .io = io,
+            };
             self.video_attempted = true;
-            self.video_cancellation = &cancelled;
+            self.video_cancellation = &call.cancellation;
             break :input input;
         };
         defer {
@@ -2904,7 +2908,12 @@ pub const Session = struct {
             self.video_cancellation = null;
             self.unlock();
         }
-        return input.generate_fn(input.context, prompt, &cancelled);
+        const watchdog = std.Thread.spawn(.{}, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };
+        defer {
+            call.finished.store(true, .release);
+            watchdog.join();
+        }
+        return generate_video.perform(allocator, input, prompt, &call);
     }
 
     const McpResultHeader = struct { allocation_len: usize };
@@ -3699,7 +3708,7 @@ fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
     if (self.termination_signal == null) self.termination_signal = signal;
     for (self.image_calls) |call| if (call) |active| active.cancellation.request();
     for (self.delivery_calls) |call| if (call) |active| active.store(true, .release);
-    if (self.video_cancellation) |active| active.store(true, .release);
+    if (self.video_cancellation) |active| active.request();
 }
 
 fn isRunProgressState(state: SessionState) bool {

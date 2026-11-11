@@ -1,4 +1,4 @@
-//! Application-owned buffered HTTP/TLS effect for Agent Completion.
+//! Application-owned HTTP/TLS effect for Agent requests.
 
 const std = @import("std");
 const agent = @import("metawork_agent");
@@ -79,7 +79,9 @@ pub const Backend = struct {
         request: agent.CompletionHttpRequest,
         response_buffer: []u8,
     ) agent.CompletionTransportError!agent.CompletionTransportResponse {
-        if (request.url.len == 0 or request.body.len == 0 or request.headers.len > 16)
+        if (request.url.len == 0 or request.headers.len > 16 or
+            (request.method == .post and (request.body.len == 0 or request.stream != null)) or
+            (request.method == .get and request.body.len != 0))
             return error.InvalidHttp;
         var headers: [16]std.http.Header = undefined;
         for (request.headers, 0..) |header, index| {
@@ -95,10 +97,11 @@ pub const Backend = struct {
             .io = self.io,
         };
         defer client.deinit();
+        if (request.stream != null) return fetchStream(&client, request, headers[0..request.headers.len]);
         const result = client.fetch(.{
             .location = .{ .url = request.url },
-            .method = .POST,
-            .payload = request.body,
+            .method = if (request.method == .post) .POST else .GET,
+            .payload = if (request.method == .post) request.body else null,
             .redirect_behavior = .unhandled,
             .response_writer = &response_writer,
             .extra_headers = headers[0..request.headers.len],
@@ -107,6 +110,24 @@ pub const Backend = struct {
             .status = @intFromEnum(result.status),
             .body = response_writer.buffered(),
         };
+    }
+
+    fn fetchStream(client: *std.http.Client, input: agent.CompletionHttpRequest, headers: []const std.http.Header) agent.CompletionTransportError!agent.CompletionTransportResponse {
+        const uri = std.Uri.parse(input.url) catch return error.InvalidHttp;
+        var request = client.request(.GET, uri, .{ .redirect_behavior = .unhandled, .keep_alive = false, .extra_headers = headers }) catch |err| return mapFetchError(err);
+        defer request.deinit();
+        request.sendBodiless() catch |err| return mapFetchError(err);
+        var response = request.receiveHead(&.{}) catch |err| return mapFetchError(err);
+        const status: u16 = @intFromEnum(response.head.status);
+        if (status == 200) {
+            if (response.head.content_encoding != .identity) return error.InvalidHttp;
+            const content_type = response.head.content_type;
+            const content_length = response.head.content_length;
+            var transfer_buffer: [1024]u8 = undefined;
+            const stream = input.stream.?;
+            stream.receive_fn(stream.context, content_type, content_length, response.reader(&transfer_buffer));
+        }
+        return .{ .status = status, .body = &.{} };
     }
 };
 

@@ -1,9 +1,11 @@
 //! Model-facing GenerateVideo contract. The Run supplies the execution effect.
 const std = @import("std");
 const delivery = @import("agent_file_delivery");
+const http = @import("agent_http_transport");
+const images = @import("image_generation.zig");
 
 pub const name = "GenerateVideo";
-pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. A request may incur a charge even if it fails or is interrupted. Do not automatically retry. After a successful save, use DeliverFile to deliver the finished file to the user.";
+pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically retry. After a successful save, use DeliverFile to deliver the finished file to the user.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested video."}},"required":["prompt"],"additionalProperties":false}
 ;
@@ -11,15 +13,28 @@ pub const schema =
 pub const max_prompt_bytes = 16 * 1024;
 pub const max_arguments_bytes = max_prompt_bytes * 6 + 64;
 pub const result_bytes = delivery.Receipt.max_path_bytes * 6 + 128;
+pub const max_file_bytes = 64 * 1024 * 1024;
+pub const timeout_ns = 11 * 60 * std.time.ns_per_s;
 
-/// The owner retains the context until Run callbacks are quiescent. The effect
-/// borrows the prompt and cancellation signal only during the call. It returns
-/// saved only after committing the file, including if cancellation races with
-/// that commit. Once submitted, an uncertain provider outcome must be reported
-/// as outcome_unknown and must not be retried by the effect.
+/// The Run owner retains the immutable strings and effect contexts through
+/// callback quiescence. Credentials are copied into one request at a time.
 pub const Input = struct {
+    endpoint: []const u8,
+    model: []const u8,
+    credential: images.CredentialReader,
+    transport: http.Transport,
+    output: Output,
+
+    pub fn validate(self: Input) !void {
+        try images.validateEndpoint(self.endpoint);
+        if (!std.mem.endsWith(u8, self.endpoint, "/v1/videos") or self.model.len == 0 or self.model.len > 512 or
+            !std.unicode.utf8ValidateSlice(self.model)) return error.InvalidBinding;
+    }
+};
+
+pub const Output = struct {
     context: *anyopaque,
-    generate_fn: *const fn (*anyopaque, []const u8, *const std.atomic.Value(bool)) Outcome,
+    commit_fn: *const fn (*anyopaque, *std.Io.Reader, ?u64, *const http.Cancellation) Outcome,
 };
 
 pub const Receipt = struct {
@@ -40,18 +55,18 @@ pub const Receipt = struct {
     }
 
     fn validateFile(path: []const u8, size_bytes: u64) !void {
-        if (size_bytes == 0 or !std.mem.endsWith(u8, path, ".mp4")) return error.InvalidReceipt;
+        if (size_bytes == 0 or size_bytes > max_file_bytes or !std.mem.endsWith(u8, path, ".mp4")) return error.InvalidReceipt;
         delivery.validatePath(path) catch return error.InvalidReceipt;
     }
 };
 
-pub const Failure = enum { invalid_arguments, unavailable, capacity, cancelled, outcome_unknown, provider_rejected, invalid_response, output_failed };
+pub const Failure = enum { invalid_arguments, unavailable, capacity, cancelled, outcome_unknown, provider_rejected, invalid_response, output_failed, cleanup_incomplete };
 pub const Outcome = union(enum) { saved: Receipt, failed: Failure };
 
-const PromptText = struct {
+const JsonText = struct {
     value: []const u8,
 
-    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !PromptText {
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !JsonText {
         if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
         return .{ .value = try std.json.innerParse([]const u8, allocator, source, options) };
     }
@@ -59,7 +74,7 @@ const PromptText = struct {
 
 pub fn prompt(allocator: std.mem.Allocator, arguments: []const u8) ![]u8 {
     if (arguments.len > max_arguments_bytes) return error.InvalidArguments;
-    const parsed = std.json.parseFromSlice(struct { prompt: PromptText }, allocator, arguments, .{
+    const parsed = std.json.parseFromSlice(struct { prompt: JsonText }, allocator, arguments, .{
         .duplicate_field_behavior = .@"error",
         .max_value_len = max_prompt_bytes,
     }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidArguments;
@@ -86,3 +101,134 @@ pub fn result(buffer: []u8, outcome: Outcome) ![]const u8 {
     }
     return writer.buffered();
 }
+
+const max_id_bytes = 256;
+const max_json_bytes = 64 * 1024;
+const TaskState = enum { pending, complete, failed };
+const Task = struct {
+    id: [max_id_bytes]u8 = undefined,
+    id_len: usize,
+    state: TaskState,
+
+    fn decode(allocator: std.mem.Allocator, body: []const u8) !Task {
+        const parsed = try std.json.parseFromSlice(struct { id: ?JsonText = null, task_id: ?JsonText = null, status: JsonText }, allocator, body, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const value = parsed.value;
+        const explicit_id = if (value.task_id) |task_id| task_id.value else "";
+        const id = if (explicit_id.len > 0) explicit_id else (value.id orelse return error.InvalidTask).value;
+        if (id.len == 0 or id.len > max_id_bytes) return error.InvalidTask;
+        for (id) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidTask;
+        const state = std.StaticStringMap(TaskState).initComptime(.{
+            .{ "queued", .pending },     .{ "in_progress", .pending }, .{ "pending", .pending }, .{ "running", .pending },
+            .{ "completed", .complete }, .{ "succeeded", .complete },  .{ "failed", .failed },   .{ "cancelled", .failed },
+            .{ "canceled", .failed },    .{ "error", .failed },        .{ "expired", .failed },
+        }).get(value.status.value) orelse return error.InvalidTask;
+        var task: Task = .{ .id_len = id.len, .state = state };
+        @memcpy(task.id[0..id.len], id);
+        return task;
+    }
+
+    fn idView(self: *const Task) []const u8 {
+        return self.id[0..self.id_len];
+    }
+};
+
+fn request(input: Input, call: *images.Call, endpoint: []const u8, body: []const u8, buffer: []u8, stream: ?http.ResponseStream) !http.Response {
+    if (call.cancellation.isRequested()) return error.Cancelled;
+    var auth: [7 + 4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &auth);
+    const len = input.credential.read_fn(input.credential.context, auth[7..]) orelse return error.CredentialUnavailable;
+    if (len == 0 or len > auth.len - 7 or std.mem.indexOfAny(u8, auth[7..][0..len], "\r\n\x00") != null)
+        return error.CredentialUnavailable;
+    @memcpy(auth[0..7], "Bearer ");
+    if (call.cancellation.isRequested()) return error.Cancelled;
+    if (body.len != 0) call.sent = true;
+    return input.transport.perform(.{
+        .url = endpoint,
+        .method = if (body.len == 0) .get else .post,
+        .headers = &.{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Accept", .value = if (stream == null) "application/json" else "video/mp4" },
+            .{ .name = "Accept-Encoding", .value = "identity" },
+            .{ .name = "Authorization", .value = auth[0 .. 7 + len], .sensitive = true },
+        },
+        .body = body,
+        .stream = stream,
+    }, &call.cancellation, buffer);
+}
+
+fn waitForPoll(call: *images.Call) bool {
+    const end = std.Io.Timestamp.now(call.io, .awake).nanoseconds + 5 * std.time.ns_per_s;
+    while (!call.cancellation.isRequested()) {
+        const remaining = end - std.Io.Timestamp.now(call.io, .awake).nanoseconds;
+        if (remaining <= 0) return true;
+        std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromNanoseconds(@min(remaining, 50 * std.time.ns_per_ms)), .clock = .awake } }, call.io) catch return false;
+    }
+    return false;
+}
+
+pub fn perform(allocator: std.mem.Allocator, input: Input, value: []const u8, call: *images.Call) Outcome {
+    const body = std.json.Stringify.valueAlloc(allocator, .{
+        .model = input.model,
+        .input = .{ .prompt = value },
+        .parameters = .{ .duration = @as(u8, 5), .resolution = "720P", .ratio = "16:9", .audio = true },
+    }, .{}) catch return .{ .failed = .capacity };
+    defer allocator.free(body);
+    const buffer = allocator.alloc(u8, max_json_bytes) catch return .{ .failed = .capacity };
+    defer {
+        std.crypto.secureZero(u8, buffer);
+        allocator.free(buffer);
+    }
+    const created = request(input, call, input.endpoint, body, buffer, null) catch |err| return .{ .failed = if (call.sent) .outcome_unknown else if (err == error.Cancelled) .cancelled else .unavailable };
+    switch (created.status) {
+        200...299 => {},
+        400, 401, 403, 404, 422, 429 => return .{ .failed = .provider_rejected },
+        else => return .{ .failed = .outcome_unknown },
+    }
+    const initial = Task.decode(allocator, created.body) catch return .{ .failed = .outcome_unknown };
+    var url_buffer: [2048 + 1 + max_id_bytes + "/content".len]u8 = undefined;
+    const query_url = std.fmt.bufPrint(&url_buffer, "{s}/{s}", .{ input.endpoint, initial.idView() }) catch unreachable;
+    var state = initial.state;
+    while (state == .pending) {
+        if (!waitForPoll(call)) return .{ .failed = .outcome_unknown };
+        const queried = request(input, call, query_url, &.{}, buffer, null) catch return .{ .failed = .outcome_unknown };
+        if (queried.status != 200) return .{ .failed = .outcome_unknown };
+        const task = Task.decode(allocator, queried.body) catch return .{ .failed = .outcome_unknown };
+        if (!std.mem.eql(u8, initial.idView(), task.idView())) return .{ .failed = .outcome_unknown };
+        state = task.state;
+    }
+    if (state == .failed) return .{ .failed = .provider_rejected };
+    @memcpy(url_buffer[query_url.len..][0.."/content".len], "/content");
+    var download: Download = .{ .output = input.output, .cancellation = &call.cancellation };
+    _ = request(input, call, url_buffer[0 .. query_url.len + "/content".len], &.{}, &.{}, .{ .context = &download, .receive_fn = Download.receive }) catch {};
+    return download.outcome;
+}
+
+const Download = struct {
+    output: Output,
+    cancellation: *const http.Cancellation,
+    outcome: Outcome = .{ .failed = .output_failed },
+
+    fn receive(context: *anyopaque, content_type: ?[]const u8, length: ?u64, reader: *std.Io.Reader) void {
+        const self: *Download = @ptrCast(@alignCast(context));
+        if (self.cancellation.isRequested()) return;
+        const mime = content_type orelse {
+            self.outcome = .{ .failed = .invalid_response };
+            return;
+        };
+        const base = std.mem.trim(u8, mime[0 .. std.mem.indexOfScalar(u8, mime, ';') orelse mime.len], " \t");
+        if ((!std.ascii.eqlIgnoreCase(base, "video/mp4") and !std.ascii.eqlIgnoreCase(base, "application/octet-stream")) or
+            (length != null and (length.? < 16 or length.? > max_file_bytes)))
+        {
+            self.outcome = .{ .failed = .invalid_response };
+            return;
+        }
+        const header = reader.peek(12) catch return;
+        const box_bytes = std.mem.readInt(u32, header[0..4], .big);
+        if (!std.mem.eql(u8, header[4..8], "ftyp") or box_bytes < 16 or (length != null and box_bytes > length.?)) {
+            self.outcome = .{ .failed = .invalid_response };
+            return;
+        }
+        self.outcome = self.output.commit_fn(self.output.context, reader, length, self.cancellation);
+    }
+};

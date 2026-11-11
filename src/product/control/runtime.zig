@@ -1390,6 +1390,7 @@ pub const Runtime = struct {
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
+    video_run_preparation: ?control_ports.VideoRunPreparation = null,
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
@@ -4669,9 +4670,21 @@ pub const Runtime = struct {
         operation_effects.prepared_input = task_input;
         var image = self.prepareRunImage(workspace);
         defer if (image) |*value| value.deinit();
+        var video = video: {
+            const preparation = self.video_run_preparation orelse break :video null;
+            if (self.task_runtime.taskPermissionInteraction(task_id) != .interactive) break :video null;
+            var prepared = preparation.prepare(workspace) orelse break :video null;
+            self.prepareTaskCredential(prepared.candidate.input().bearer) catch {
+                prepared.deinit();
+                break :video null;
+            };
+            break :video prepared;
+        };
+        defer if (video) |*value| value.deinit();
         var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(workspace) else null;
         defer if (delivery) |*value| value.deinit();
         operation_effects.image_execution = &image;
+        operation_effects.video_execution = &video;
         operation_effects.file_delivery = &delivery;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         if (staged.borrow != null) {
@@ -9796,6 +9809,10 @@ pub const Runtime = struct {
         self.image_run_preparation = preparation;
     }
 
+    pub fn setVideoRunPreparation(self: *Runtime, preparation: ?control_ports.VideoRunPreparation) void {
+        self.video_run_preparation = preparation;
+    }
+
     pub fn setFileDeliveryPreparation(self: *Runtime, preparation: ?control_ports.FileDeliveryPreparation) void {
         self.file_delivery_preparation = preparation;
     }
@@ -9814,7 +9831,7 @@ pub const Runtime = struct {
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
-            .prepare_image_candidate_fn = controlPrepareImageCandidate,
+            .prepare_media_candidate_fn = controlPrepareMediaCandidate,
             .start_custom_providers_fn = controlStartCustomProviders,
             .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
             .stop_custom_providers_fn = controlStopCustomProviders,
@@ -10361,8 +10378,8 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
 }
-fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
-    return controlOwner(context).custom_providers.prepareImageCandidate(input);
+fn controlPrepareMediaCandidate(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
+    return controlOwner(context).custom_providers.prepareMediaCandidate(input);
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
@@ -11570,7 +11587,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
-        .initial_credentials = .{ task_execution.input().api_key, &.{} },
+        .initial_credentials = .{ task_execution.input().api_key, &.{}, &.{} },
     };
     control.testTaskSlots()[0] = try control.allocator.create(TestTask);
     control.testTaskSlots()[0].?.* = .{

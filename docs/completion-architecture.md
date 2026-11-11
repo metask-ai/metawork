@@ -23,7 +23,7 @@ Completion.complete(request, cancellation) -> Result | Failure
 ## 2. Owner 与配置
 
 - `src/agent` 拥有 Completion 请求、结果、错误、协议 codec 和调用语义。
-- `src/app` 只实现一次 buffered HTTP/TLS 请求及请求级取消。
+- `src/app` 为 Completion 实现单次有界 HTTP/TLS 请求及请求级取消。
 - Product Models 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Models aggregate 独立拥有 Custom Provider credential authority，Completion 不拥有任一服务实例或 credential authority。
 - Completion 使用与对应 Agent Run 相同、已冻结的模型执行绑定；不发现、选择或替换模型。
 - MetaWork 不修改 `metacodes`，也不要求 AgentCore 提供 Completion。
@@ -95,7 +95,7 @@ perform(http_request, cancellation, response_buffer)
 - 生产 TLS 使用系统 CA，不接受 Completion 自定义证书配置；
 - redirect 不自动跟随。
 
-这沿用仓库现有 buffered fetch/cancel 模式，不维护 socket、Connection 或逐块 read 生命周期。
+Completion 使用有界 buffered fetch。共享 HTTP adapter 还支持带有界缓冲的 GET，以及在请求 worker 内借用成功响应 reader 的 GET。视频下载消费后者，reader 和 header 仅在同步回调内有效。请求返回前须等待读取和回调静止，协议与落盘规则由 [AgentCore 集成契约](agentcore-integration.md#host-tools)定义。
 
 ## 5. Completion 结果
 

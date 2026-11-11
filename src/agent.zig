@@ -222,4 +222,6 @@ pub const ImageGenerationCredentialReader = session_impl.ImageGenerationCredenti
 pub const VideoGenerationRunInput = session_impl.VideoGenerationRunInput;
 pub const VideoGenerationOutcome = session_impl.VideoGenerationOutcome;
 pub const VideoGenerationReceipt = session_impl.VideoGenerationReceipt;
+pub const VideoGenerationOutput = session_impl.VideoGenerationOutput;
+pub const max_generated_video_bytes = session_impl.max_generated_video_bytes;
 pub const Session = session_impl.Session;

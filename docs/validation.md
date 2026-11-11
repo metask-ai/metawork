@@ -388,9 +388,11 @@ Task completion receipt 的最小充分证据必须跨越实际 owner：Product 
 
 File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
 
-### GenerateVideo Agent fixture
+### GenerateVideo 验证
 
-`zig build test-generate-video` 使用当前 canonical AgentCore、本地对话 Provider 和注入的视频执行 effect 验证 `GenerateVideo`。覆盖工具声明、当次审批、拒绝及无本 Run 输入时零执行、MP4 原始字节与回执、结果未知后同 Run 的重复调用、Stop/关闭/shutdown 的 callback 收口，以及现有三个 Host Tool 集合 checkpoint 有或无 Write grant 的恢复。该用例也由标准 Native graph 执行，证据范围限于测试 Runtime 的工具调用与恢复。
+`zig build test-generate-video` 使用当前 canonical AgentCore、普通 Runtime、本地对话 Provider 和 Metask 视频 HTTP fixture 验证 `GenerateVideo`。覆盖工具声明、当次审批、拒绝及无本 Run 输入时零执行、提交/查询/下载、MP4 原始字节与回执、结果未知后同 Run 的重复调用、Stop/关闭/shutdown 的 callback 收口，以及旧 Host Tool 集合 checkpoint 有或无 Write grant 的恢复。
+
+同一入口通过真实 Account、Models、Application coordinator 和 Product Control 接纳交互 Run。生成与 `DeliverFile` 分别经过当次审批，核对同一 Run 的文件路径、大小、实际字节摘要、`Outputs` 投影、历史成果记录和执行资源释放。该入口纳入标准 Native graph。真实服务验收须使用实际 Metask 模型和账号授权，观察生成终态、`/content` 字节及成果登记。
 
 ### GenerateImage 输出格式验证
 

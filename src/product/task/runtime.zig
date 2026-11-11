@@ -400,6 +400,7 @@ pub const OperationEffects = struct {
     /// Caller owns until a Run record is installed; preparation consumes it.
     /// The pointer is callback-scoped and cleared from retained effects.
     image_execution: ?*?task_state.OwnedImageExecution = null,
+    video_execution: ?*?task_state.OwnedVideoExecution = null,
     file_delivery: ?*?task_state.OwnedFileDelivery = null,
     mcp_installation: ?agent.McpInstallationInput = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
@@ -3153,10 +3154,11 @@ pub const Runtime = struct {
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts, null);
         const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
+        const video = if (effects.video_execution) |owned| if (owned.*) |*value| value.input() else null else null;
         const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
         var mcp_installation = effects.mcp_installation;
         if (mcp_installation) |*value| value.task_id = task.durable.id;
-        const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation);
+        const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation, video);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -3170,6 +3172,10 @@ pub const Runtime = struct {
         if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
         if (effects.image_execution) |owned| {
             run_record.image_execution = owned.*;
+            owned.* = null;
+        }
+        if (effects.video_execution) |owned| {
+            run_record.video_execution = owned.*;
             owned.* = null;
         }
         if (effects.file_delivery) |owned| {
@@ -4174,7 +4180,7 @@ pub const Runtime = struct {
             task_state.findRun(task.durable.runs, task.runtime.active_run_id)
         else
             null;
-        if (run) |record| try record.credential_views.ensureUnusedCapacity(self.allocator, if (record.credential_views.items.len == 0) 3 else 1);
+        if (run) |record| try record.credential_views.ensureUnusedCapacity(self.allocator, if (record.credential_views.items.len == 0) record.initialCredentialViews().len + 1 else 1);
         access.updateCredential(replacement) catch |err| switch (err) {
             // The worker may enter checkpoint export after sessionState.
             error.SessionNotIdle => {
@@ -4187,7 +4193,7 @@ pub const Runtime = struct {
         execution.installCredential(replacement, generation);
         installed = true;
         if (run) |record| {
-            if (record.credential_views.items.len == 0) record.credential_views.appendSliceAssumeCapacity(&record.initial_credentials);
+            if (record.credential_views.items.len == 0) record.credential_views.appendSliceAssumeCapacity(record.initialCredentialViews());
             record.credential_views.appendAssumeCapacity(replacement);
         }
         task.runtime.credential_update_failed = false;
@@ -4214,7 +4220,7 @@ pub const Runtime = struct {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
-            changed = self.renewMetaskImages(id, scope, generation, credential) or changed;
+            changed = self.renewMetaskMedia(id, scope, generation, credential) or changed;
             if (self.metaskCredentialScope(id) != scope) continue;
             const value = credential orelse {
                 self.failCredentialRenewal(id, generation, true, false);
@@ -4250,31 +4256,36 @@ pub const Runtime = struct {
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
     }
 
-    pub fn renewMetaskImages(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: ?[]const u8) bool {
+    fn renewMetaskMedia(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: ?[]const u8) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;
-        for (task.durable.runs) |*entry| if (entry.*) |*run| if (run.image_execution) |*image| {
-            if (image.metask_authorization_scope != scope or image.credential_generation == generation) continue;
-            const source = image.credential_source orelse continue;
-            image.credential_generation = generation;
-            changed = true;
-            const key = value orelse {
-                source.invalidate();
-                continue;
-            };
-            installImageCredential(self.allocator, run, image, key) catch source.invalidate();
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            if (run.image_execution) |*image|
+                changed = renewMediaCredential(self.allocator, run, &image.authorization, scope, generation, value) or changed;
+            if (run.video_execution) |*video|
+                changed = renewMediaCredential(self.allocator, run, &video.authorization, scope, generation, value) or changed;
         };
         return changed;
     }
 
-    fn installImageCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, image: *task_state.OwnedImageExecution, value: []const u8) !void {
-        const source = image.credential_source.?;
+    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, scope: u64, generation: u64, value: ?[]const u8) bool {
+        if (authorization.scope != scope or authorization.generation == generation) return false;
+        const source = authorization.source orelse return false;
+        authorization.generation = generation;
+        if (value) |key| {
+            installMediaCredential(allocator, run, authorization, key) catch source.invalidate();
+        } else source.invalidate();
+        return true;
+    }
+
+    fn installMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, value: []const u8) !void {
+        const source = authorization.source.?;
         if (!source.matches(value)) {
-            try image.credential_versions.ensureUnusedCapacity(source.allocator, 1);
-            try run.credential_views.ensureUnusedCapacity(allocator, if (run.credential_views.items.len == 0) 3 else 1);
+            try authorization.versions.ensureUnusedCapacity(source.allocator, 1);
+            try run.credential_views.ensureUnusedCapacity(allocator, if (run.credential_views.items.len == 0) run.initialCredentialViews().len + 1 else 1);
             const owned = try source.allocator.dupe(u8, value);
-            image.credential_versions.appendAssumeCapacity(owned);
-            if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(&run.initial_credentials);
+            authorization.versions.appendAssumeCapacity(owned);
+            if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(run.initialCredentialViews());
             run.credential_views.appendAssumeCapacity(owned);
         }
         source.replace(value);
@@ -5458,13 +5469,8 @@ pub const Runtime = struct {
                     .none, .settled => {},
                     .exporting, .failure_ready, .candidate_ready => continue,
                 }
-                if (run.image_execution) |image| {
-                    if (!effects.prepareCredentialRelease(image.candidate.input().bearer)) continue;
-                    const ready = for (image.credential_versions.items) |credential| {
-                        if (!effects.prepareCredentialRelease(credential)) break false;
-                    } else true;
-                    if (!ready) continue;
-                }
+                if (run.image_execution) |image| if (!prepareMediaCredentialRelease(effects, &image.candidate, &image.authorization)) continue;
+                if (run.video_execution) |video| if (!prepareMediaCredentialRelease(effects, &video.candidate, &video.authorization)) continue;
                 releaseRunEffects(self, run, effects);
                 releaseAutomaticTitle(&execution.automatic_title);
                 self.allocator.destroy(execution);
@@ -8999,12 +9005,24 @@ fn releaseExecutionValueNoFail(
     execution.deinit();
 }
 
+fn prepareMediaCredentialRelease(effects: ReleaseEffects, candidate: *const models_contract.OwnedMediaCandidate, authorization: *const task_state.MediaCredentials) bool {
+    if (!effects.prepareCredentialRelease(candidate.input().bearer)) return false;
+    for (authorization.versions.items) |credential| if (!effects.prepareCredentialRelease(credential)) return false;
+    return true;
+}
+
 fn releaseRunEffects(self: *Runtime, run: *task_state.RunRecord, effects: ReleaseEffects) void {
     if (run.image_execution) |*image| {
         effects.redactAll(image.candidate.input().bearer);
-        for (image.credential_versions.items) |value| effects.redactAll(value);
+        for (image.authorization.versions.items) |value| effects.redactAll(value);
         image.deinit();
         run.image_execution = null;
+    }
+    if (run.video_execution) |*video| {
+        effects.redactAll(video.candidate.input().bearer);
+        for (video.authorization.versions.items) |value| effects.redactAll(value);
+        video.deinit();
+        run.video_execution = null;
     }
     if (run.file_delivery) |*delivery| {
         delivery.deinit();
@@ -9012,7 +9030,7 @@ fn releaseRunEffects(self: *Runtime, run: *task_state.RunRecord, effects: Releas
     }
     run.credential_views.deinit(self.allocator);
     run.credential_views = .empty;
-    run.initial_credentials = .{ &.{}, &.{} };
+    run.initial_credentials = @splat(&.{});
 }
 
 fn releaseProjectedSlice(
@@ -9495,7 +9513,12 @@ fn reserveRun(
         return error.RunGenerationExhausted;
     // Keep one no-allocation cancellation receipt beyond the next decision.
     try ensureUiHistory(self.allocator, task);
-    var input_record = try copyRunInput(self, task, input, &.{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} }, effects);
+    const initial_credentials = [3][]const u8{
+        execution.api_key,
+        if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{},
+        if (effects.video_execution) |owned| if (owned.*) |*video| video.candidate.input().bearer else &.{} else &.{},
+    };
+    var input_record = try copyRunInput(self, task, input, &initial_credentials, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
     const tools = try self.allocator.alloc(
         ?task_state.ToolView,
@@ -9555,7 +9578,7 @@ fn reserveRun(
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = diagnostic,
-        .initial_credentials = .{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} },
+        .initial_credentials = initial_credentials,
         .execution = run_execution,
         .model_error_storage = model_error_storage,
         .model_error_source = if (std.mem.eql(u8, execution.target.provider_id, models_contract.metask_source_id)) .metask else .custom_provider,
@@ -9635,6 +9658,7 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     clean.input_catalog = null;
     clean.prepared_input = null;
     clean.image_execution = null;
+    clean.video_execution = null;
     clean.file_delivery = null;
     clean.mcp_installation = null;
     return clean;
@@ -9747,21 +9771,19 @@ const RetainedCredentials = struct {
     task: *const task_state.Task,
     index: usize = 0,
     retired_index: usize = 0,
-    image_run_index: usize = 0,
-    image_version_index: usize = 0,
+    media_index: usize = 0,
+    media_version_index: usize = 0,
 
     fn next(self: *RetainedCredentials) ?[]const u8 {
-        while (self.index < 3 + self.task.durable.runs.len) {
+        while (self.index < 3) {
             const index = self.index;
             self.index += 1;
             if (index == 0) {
                 if (self.task.runtime.executionConst()) |execution| return execution.secret;
             } else if (index == 1) {
                 if (self.task.runtime.restore_job) |job| return job.credential;
-            } else if (index == 2) {
-                if (self.task.runtime.restore_job) |job| if (job.rebind) |rebind| return rebind.original_credential;
             } else {
-                if (self.task.durable.runs[index - 3]) |*run| if (run.image_execution) |*image| return image.candidate.input().bearer;
+                if (self.task.runtime.restore_job) |job| if (job.rebind) |rebind| return rebind.original_credential;
             }
         }
         if (self.task.runtime.executionConst()) |execution| {
@@ -9771,16 +9793,24 @@ const RetainedCredentials = struct {
                 return value;
             }
         }
-        while (self.image_run_index < self.task.durable.runs.len) {
-            if (self.task.durable.runs[self.image_run_index]) |*run| if (run.image_execution) |*image| {
-                if (self.image_version_index < image.credential_versions.items.len) {
-                    const value = image.credential_versions.items[self.image_version_index];
-                    self.image_version_index += 1;
-                    return value;
+        while (self.media_index / 2 < self.task.durable.runs.len) {
+            if (self.task.durable.runs[self.media_index / 2]) |*run| {
+                const Secrets = struct { candidate: *const models_contract.OwnedMediaCandidate, authorization: *const task_state.MediaCredentials };
+                const media: ?Secrets = if (self.media_index % 2 == 0)
+                    if (run.image_execution) |*image| .{ .candidate = &image.candidate, .authorization = &image.authorization } else null
+                else if (run.video_execution) |*video|
+                    .{ .candidate = &video.candidate, .authorization = &video.authorization }
+                else
+                    null;
+                if (media) |value| {
+                    const index = self.media_version_index;
+                    self.media_version_index += 1;
+                    if (index == 0) return value.candidate.input().bearer;
+                    if (index <= value.authorization.versions.items.len) return value.authorization.versions.items[index - 1];
                 }
-            };
-            self.image_run_index += 1;
-            self.image_version_index = 0;
+            }
+            self.media_index += 1;
+            self.media_version_index = 0;
         }
         return null;
     }

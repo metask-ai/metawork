@@ -44,7 +44,7 @@ pub const AccountCommitSink = struct {
 /// Control keeps registry/default-selection transactions behind these calls.
 pub const ModelsManagement = struct {
     context: *anyopaque,
-    prepare_image_candidate_fn: *const fn (*anyopaque, models_contract.ImagePreparationInput) models_contract.ImagePreparation,
+    prepare_media_candidate_fn: *const fn (*anyopaque, models_contract.MediaPreparationInput) models_contract.MediaPreparation,
     start_custom_providers_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_custom_providers_unavailable_fn: *const fn (*anyopaque) void,
     stop_custom_providers_fn: *const fn (*anyopaque) void,
@@ -60,8 +60,8 @@ pub const ModelsManagement = struct {
     complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
     fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
     metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
-    pub fn prepareImageCandidate(self: ModelsManagement, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
-        return self.prepare_image_candidate_fn(self.context, input);
+    pub fn prepareMediaCandidate(self: ModelsManagement, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
+        return self.prepare_media_candidate_fn(self.context, input);
     }
     pub fn startCustomProviders(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_custom_providers_fn(self.context, directory, vault);
@@ -149,6 +149,16 @@ pub const ImageRunPreparation = struct {
     prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedImageExecution,
 
     pub fn prepare(self: ImageRunPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        return self.prepare_fn(self.context, authority);
+    }
+};
+
+/// Main-thread preparation of one Run-owned video effect for the Workspace.
+pub const VideoRunPreparation = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedVideoExecution,
+
+    pub fn prepare(self: VideoRunPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedVideoExecution {
         return self.prepare_fn(self.context, authority);
     }
 };
