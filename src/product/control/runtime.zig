@@ -2050,7 +2050,9 @@ pub const Runtime = struct {
     /// bounded PNG the model input used, so large photos stay previewable.
     pub fn beginRunAttachmentPreview(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, index: u32) FilePreviewAdmission {
         if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
-        if (!self.attachments.available()) return .{ .immediate = .unsupported };
+        // Without the attachment store or codec the retained original cannot
+        // be produced; to the user that is the same as a missing original.
+        if (!self.attachments.available()) return .{ .immediate = .missing };
         var buffer: [product_attachment.store.max_relative_bytes]u8 = undefined;
         const retained = self.retainedImagePath(task_id, run_id, index, &buffer) orelse return .{ .immediate = .missing };
         if (retained.size > self.limits.max_attachment_file_bytes) return .{ .immediate = .image_limit };
@@ -2068,6 +2070,7 @@ pub const Runtime = struct {
             .max_lines = 0,
             .max_line_bytes = 0,
             .attachment_index = index,
+            .prepared_limit = product_attachment.max_image_preview_bytes,
         }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
         return .queued;
     }
@@ -10136,6 +10139,26 @@ pub const TestSupport = if (builtin.is_test) struct {
     /// Image preparation copies its input, so a draft preview equals its bytes.
     pub fn attachmentPreviewFixture(control: *Runtime, store: *AttachmentFileStore) !void {
         try initTestRuntimeWithLimits(control, testLimits(), .{ .attachment_store = store, .attachment_images = .{ .prepare_fn = testAttachmentPreview } });
+    }
+
+    /// Replaces fixture Task 3 / Run 7 input with one JPEG chip, as restored
+    /// history would hold it; `original == null` models pre-0004 history.
+    pub fn installRunImageInput(control: *Runtime, original: ?[32]u8, size_bytes: u64) !void {
+        const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+        const name = try control.copyBounded("photo.jpg", control.limits.max_tool_field_bytes);
+        errdefer control.freeTracked(name);
+        const items = try control.allocator.alloc(task_test_state.AttachmentRecord, 1);
+        items[0] = .{ .kind = .image, .format = .jpeg, .display_name = name, .size_bytes = size_bytes, .original = original };
+        switch (run.input) {
+            .text => |text| control.freeTracked(text.value),
+            .multimodal => |multimodal| {
+                if (multimodal.text) |text| control.freeTracked(text);
+                for (multimodal.attachments) |item| control.freeTracked(item.display_name);
+                control.allocator.free(multimodal.attachments);
+            },
+            .skill => unreachable,
+        }
+        run.input = .{ .multimodal = .{ .text = null, .attachments = items } };
     }
 
     pub fn invalidatePreviewSecurity(control: *Runtime) void {

@@ -85,6 +85,8 @@ pub const Input = struct {
     attachment_index: u32 = 0,
     /// Copied by `begin`; only `attachment_draft` may supply bytes.
     supplied: []const u8 = &.{},
+    /// `attachment_original`: upper bound of the preview prepared from it.
+    prepared_limit: usize = 0,
 };
 
 pub const Completion = struct {
@@ -162,6 +164,7 @@ const Job = struct {
     max_line_bytes: usize,
     attachment_id: u64 = 0,
     attachment_index: u32 = 0,
+    prepared_limit: usize = 0,
     image_info: ?ImageInfo = null,
     reserved_image_bytes: usize = 0,
     reserved_original: bool = false,
@@ -219,7 +222,7 @@ const Job = struct {
             .access_sub_paths = true,
             .follow_symlinks = false,
         }) catch {
-            self.state = .restricted;
+            self.state = if (self.source == .attachment_original) .missing else .restricted;
             return .completed;
         };
         defer root.close(self.lane.io);
@@ -359,9 +362,10 @@ const Job = struct {
         return .completed;
     }
 
-    /// The recorded size is exact: a retained original never changes, so any
-    /// other file is not the one the Run accepted. One original is held at a
-    /// time; its bytes stay in the Job until the main thread prepares them.
+    /// A retained original never changes, so anything other than the exact
+    /// recorded regular image file reads as `missing`; only resource pressure
+    /// is retryable. The preview's image slot is held before any byte is read,
+    /// so a busy result never repeats the read and the main-thread decode.
     fn readRetainedOriginal(self: *Job, root: std.Io.Dir) ReadOutcome {
         var file = root.openFile(self.lane.io, self.relative_path, .{
             .allow_directory = false,
@@ -369,8 +373,8 @@ const Job = struct {
             .resolve_beneath = true,
         }) catch |err| {
             self.state = switch (err) {
-                error.FileNotFound, error.NotDir => .missing,
-                else => .restricted,
+                error.SystemResources, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.DeviceBusy, error.PipeBusy, error.AntivirusInterference => .failed,
+                else => .missing,
             };
             return .completed;
         };
@@ -384,7 +388,13 @@ const Job = struct {
             self.state = .missing;
             return .completed;
         }
+        if (!self.lane.reserveImage(self.prepared_limit)) {
+            self.state = .busy;
+            return .completed;
+        }
+        self.reserved_image_bytes = self.prepared_limit;
         if (!self.lane.reserveOriginal()) {
+            self.clearContent();
             self.state = .busy;
             return .completed;
         }
@@ -416,10 +426,9 @@ const Job = struct {
             self.state = .failed;
             return .completed;
         };
-        if (read != bytes.len or metadataChanged(before, after)) return .changed;
-        if (!isImage(bytes)) {
+        if (read != bytes.len or metadataChanged(before, after) or !isImage(bytes)) {
             self.clearContent();
-            self.state = .unsupported;
+            self.state = .missing;
             return .completed;
         }
         self.content = bytes;
@@ -447,25 +456,43 @@ const Job = struct {
             return .completed;
         }
         self.reserved_image_bytes = bytes.len;
+        self.inspectHeldImage();
+        return .completed;
+    }
+
+    /// The held image bytes already own their image reservation.
+    fn inspectHeldImage(self: *Job) void {
+        const bytes = self.buffer;
         const info = image_container.inspect(bytes) catch {
             self.clearContent();
             self.state = .unsupported;
-            return .completed;
+            return;
         };
         if (info.animated) {
             self.clearContent();
             self.state = .animated_image;
-            return .completed;
+            return;
         }
         if (info.width > max_image_side or info.height > max_image_side or info.pixels() > max_image_pixels) {
             self.clearContent();
             self.state = .image_limit;
-            return .completed;
+            return;
         }
         self.content = bytes;
         self.image_info = info;
         self.state = .ready;
-        return .completed;
+    }
+
+    /// Ends the original's bytes and single-read slot; the image slot stays.
+    fn releaseOriginalBytes(self: *Job) void {
+        if (self.buffer.len != 0) {
+            std.crypto.secureZero(u8, self.buffer);
+            self.lane.allocator.free(self.buffer);
+        }
+        self.buffer = &.{};
+        self.content = &.{};
+        if (self.reserved_original) self.lane.releaseOriginal();
+        self.reserved_original = false;
     }
 
     fn readDirectory(self: *Job, root: std.Io.Dir) ReadOutcome {
@@ -572,6 +599,7 @@ pub const Lane = struct {
 
     pub fn begin(self: *Lane, input: Input) Error!void {
         std.debug.assert((input.source == .attachment_draft) == (input.supplied.len != 0));
+        std.debug.assert((input.source == .attachment_original) == (input.prepared_limit != 0));
         self.lock();
         if (!self.accepting) {
             self.unlock();
@@ -619,6 +647,7 @@ pub const Lane = struct {
             .max_line_bytes = input.max_line_bytes,
             .attachment_id = input.attachment_id,
             .attachment_index = input.attachment_index,
+            .prepared_limit = input.prepared_limit,
             .buffer = supplied,
         };
         self.lock();
@@ -738,15 +767,26 @@ pub const Lane = struct {
         return false;
     }
 
-    /// Main thread: swaps a ready retained original for its bounded preview,
-    /// which then passes the ordinary held-image admission. Takes `prepared`.
+    /// Main thread: swaps a ready retained original for its bounded preview.
+    /// The preview keeps the image slot reserved before the read, shrunk to
+    /// its actual size, so admission can no longer fail. Takes `prepared`.
     pub fn adoptPrepared(self: *Lane, taken: *Taken, prepared: []u8) State {
-        _ = self;
         const job: *Job = @ptrCast(@alignCast(taken.job));
-        std.debug.assert(job.source == .attachment_original and job.state == .ready);
-        job.clearContent();
-        job.buffer = prepared;
-        _ = job.adoptSupplied();
+        std.debug.assert(job.source == .attachment_original and job.state == .ready and job.reserved_image_bytes == job.prepared_limit);
+        job.releaseOriginalBytes();
+        if (prepared.len == 0 or prepared.len > job.reserved_image_bytes or !isImage(prepared)) {
+            std.crypto.secureZero(u8, prepared);
+            self.allocator.free(prepared);
+            job.clearContent();
+            job.state = .failed;
+        } else {
+            self.lock();
+            self.image_bytes -= job.reserved_image_bytes - prepared.len;
+            self.unlock();
+            job.reserved_image_bytes = prepared.len;
+            job.buffer = prepared;
+            job.inspectHeldImage();
+        }
         taken.completion.state = job.state;
         taken.completion.content = job.content;
         taken.completion.image_info = job.image_info;
@@ -1142,6 +1182,142 @@ test "draft attachment previews adopt an owned copy under the shared image admis
     defer lane.release(rejected);
     try std.testing.expectEqual(State.unsupported, rejected.completion.state);
     try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+}
+
+const RetainedTest = struct {
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++
+        "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+        job.execute_fn(job.context);
+    }
+    fn wake(_: ?*anyopaque) bool {
+        return true;
+    }
+    fn input(root: []const u8, relative: []const u8, size: usize) Input {
+        return .{ .source = .attachment_original, .completion_id = 1, .task_id = 3, .run_id = 7, .workspace_id = 0, .workspace_epoch = 0, .reference_id = "", .workspace_root = root, .relative_path = relative, .max_bytes = size, .max_lines = 0, .max_line_bytes = 0, .prepared_limit = 64 };
+    }
+};
+
+test "retained originals hold their preview slot before reading and keep it through preparation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "3");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "3/original.jpg", .data = RetainedTest.jpeg });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = RetainedTest.wake }, .{ .context = &context, .enqueue_fn = RetainedTest.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    try lane.begin(RetainedTest.input(root, "3/original.jpg", RetainedTest.jpeg.len));
+    var taken = lane.take().?;
+    try std.testing.expectEqual(State.ready, taken.completion.state);
+    try std.testing.expectEqualSlices(u8, RetainedTest.jpeg, taken.completion.content);
+    try std.testing.expect(taken.completion.image_info == null);
+    try std.testing.expectEqual(@as(usize, 1), lane.image_count);
+    try std.testing.expectEqual(@as(usize, 64), lane.image_bytes);
+    try std.testing.expect(lane.original_held);
+
+    try std.testing.expectEqual(State.ready, lane.adoptPrepared(&taken, try std.testing.allocator.dupe(u8, RetainedTest.jpeg)));
+    try std.testing.expectEqual(@as(u32, 3), taken.completion.image_info.?.width);
+    try std.testing.expectEqualSlices(u8, RetainedTest.jpeg, taken.completion.content);
+    try std.testing.expectEqual(@as(usize, 1), lane.image_count);
+    try std.testing.expectEqual(RetainedTest.jpeg.len, lane.image_bytes);
+    try std.testing.expect(!lane.original_held);
+    lane.release(taken);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_bytes);
+
+    // A preparation that is not an image within the reserved bound fails
+    // retryably and returns every reservation.
+    try lane.begin(RetainedTest.input(root, "3/original.jpg", RetainedTest.jpeg.len));
+    taken = lane.take().?;
+    try std.testing.expectEqual(State.failed, lane.adoptPrepared(&taken, try std.testing.allocator.dupe(u8, "not an image")));
+    lane.release(taken);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+    try std.testing.expect(!lane.original_held);
+}
+
+test "retained originals other than the recorded image file read as missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "3/directory.jpg");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "3/original.jpg", .data = RetainedTest.jpeg });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "3/text.jpg", .data = "plain text, same size as the jp" });
+    try tmp.dir.symLink(std.testing.io, "original.jpg", "3/link.jpg", .{});
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = RetainedTest.wake }, .{ .context = &context, .enqueue_fn = RetainedTest.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    const missing_root = try std.fs.path.join(std.testing.allocator, &.{ root, "absent-store" });
+    defer std.testing.allocator.free(missing_root);
+    const cases = [_]Input{
+        RetainedTest.input(root, "3/original.jpg", RetainedTest.jpeg.len + 1),
+        RetainedTest.input(root, "3/text.jpg", "plain text, same size as the jp".len),
+        RetainedTest.input(root, "3/link.jpg", RetainedTest.jpeg.len),
+        RetainedTest.input(root, "3/directory.jpg", RetainedTest.jpeg.len),
+        RetainedTest.input(root, "3/absent.jpg", RetainedTest.jpeg.len),
+        RetainedTest.input(missing_root, "3/original.jpg", RetainedTest.jpeg.len),
+    };
+    for (cases) |case| {
+        try lane.begin(case);
+        const taken = lane.take().?;
+        defer lane.release(taken);
+        try std.testing.expectEqual(State.missing, taken.completion.state);
+        try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
+        try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+        try std.testing.expect(!lane.original_held);
+    }
+}
+
+test "a busy retained preview is decided before any original byte is read" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "3");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "3/original.jpg", .data = RetainedTest.jpeg });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = RetainedTest.wake }, .{ .context = &context, .enqueue_fn = RetainedTest.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    var source = RetainedTest.jpeg.*;
+    var held: [2]Taken = undefined;
+    for (&held, 0..) |*slot, index| {
+        try lane.begin(.{ .source = .attachment_draft, .completion_id = 10 + index, .task_id = 0, .run_id = 0, .workspace_id = 0, .workspace_epoch = 0, .reference_id = "", .workspace_root = "", .relative_path = "", .max_bytes = 0, .max_lines = 0, .max_line_bytes = 0, .attachment_id = 1, .supplied = &source });
+        slot.* = lane.take().?;
+        try std.testing.expectEqual(State.ready, slot.completion.state);
+    }
+    try lane.begin(RetainedTest.input(root, "3/original.jpg", RetainedTest.jpeg.len));
+    const no_slot = lane.take().?;
+    try std.testing.expectEqual(State.busy, no_slot.completion.state);
+    try std.testing.expectEqual(@as(usize, 0), no_slot.completion.content.len);
+    try std.testing.expect(!lane.original_held);
+    lane.release(no_slot);
+
+    // With an image slot free but the single original slot taken, the second
+    // read also stops before reading and returns its image reservation.
+    lane.release(held[0]);
+    try lane.begin(RetainedTest.input(root, "3/original.jpg", RetainedTest.jpeg.len));
+    const reading = lane.take().?;
+    try std.testing.expectEqual(State.ready, reading.completion.state);
+    lane.release(held[1]);
+    try lane.begin(RetainedTest.input(root, "3/original.jpg", RetainedTest.jpeg.len));
+    const second = lane.take().?;
+    try std.testing.expectEqual(State.busy, second.completion.state);
+    try std.testing.expectEqual(@as(usize, 1), lane.image_count);
+    lane.release(second);
+    lane.release(reading);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+    try std.testing.expect(!lane.original_held);
 }
 
 test "cancelled queued reads publish once without opening or reserving an image" {

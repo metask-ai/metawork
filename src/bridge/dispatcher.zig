@@ -6656,11 +6656,44 @@ test "file preview of attachment commands resolves only owned drafts and exact R
     try std.testing.expectEqual(staged[1].id, boundary.attachment_grants.release(issued[1].token, 1, 3).?);
     try std.testing.expect(control.attachments.release(staged[1].id));
 
-    // Sent images are addressed by an exact JSON u32 position; a Run without a
-    // recorded image original reads as missing.
+    // Sent images are addressed by an exact JSON u32 position. A text Run and
+    // restored pre-0004 history without a recorded original read as missing.
     try capture.runInput(native, "{\"generation\":\"1\",\"previewId\":\"7\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":0}");
     try capture.expectState("missing");
-    for ([_][]const u8{ "\"0\"", "0.0", "-1", "1e0", "4294967296" }, 8..) |index, preview_id| {
+    try product_control.TestSupport.installRunImageInput(control, null, jpeg.len);
+    try capture.runInput(native, "{\"generation\":\"1\",\"previewId\":\"8\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":0}");
+    try capture.expectState("missing");
+
+    // A recorded original is regenerated and served through the same chunks.
+    const identity = "0123456789abcdef0123456789abcdef";
+    try tmp.dir.createDirPath(std.testing.io, "3");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "3/" ++ identity ++ ".jpg", .data = jpeg });
+    try product_control.TestSupport.installRunImageInput(control, identity.*, jpeg.len);
+    var calls = capture.calls;
+    try capture.runInput(native, "{\"generation\":\"1\",\"previewId\":\"9\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":0}");
+    try capture.wait(control, &boundary, calls + 1);
+    try capture.expectState("ready");
+    var sent = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer sent.deinit();
+    const sent_image = sent.value.object.get("result").?.object.get("image").?.object;
+    const sent_payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"1\",\"previewId\":\"9\",\"token\":\"{s}\",\"offset\":\"0\",\"securityEpoch\":\"{s}\"}}", .{ sent_image.get("token").?.string, sent_image.get("securityEpoch").?.string });
+    defer std.testing.allocator.free(sent_payload);
+    const sent_chunk_text = try reader.invoke_fn(reader.context, .{ .request = .{ .id = "read", .command = commands.read_preview_image, .payload = sent_payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, output);
+    var sent_chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, sent_chunk_text, .{});
+    defer sent_chunk.deinit();
+    try std.base64.standard.Decoder.decode(&decoded, sent_chunk.value.object.get("dataBase64").?.string);
+    try std.testing.expectEqualSlices(u8, jpeg, &decoded);
+    try release.invoke_fn(release.context, .{ .request = .{ .id = "release", .command = commands.release_preview, .payload = "{\"generation\":\"1\",\"previewId\":\"9\"}" }, .source = release_source }, .{ .context = &capture, .source = release_source, .respond_fn = Capture.receive });
+    try std.testing.expect(!control.hasFilePreviews());
+
+    // A recorded size that no longer matches the file is not that original.
+    try product_control.TestSupport.installRunImageInput(control, identity.*, jpeg.len + 1);
+    calls = capture.calls;
+    try capture.runInput(native, "{\"generation\":\"1\",\"previewId\":\"10\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":0}");
+    try capture.wait(control, &boundary, calls + 1);
+    try capture.expectState("missing");
+
+    for ([_][]const u8{ "\"0\"", "0.0", "-1", "1e0", "4294967296" }, 11..) |index, preview_id| {
         var request: [160]u8 = undefined;
         try capture.runInput(native, try std.fmt.bufPrint(&request, "{{\"generation\":\"1\",\"previewId\":\"{d}\",\"taskId\":\"3\",\"runId\":\"7\",\"attachmentIndex\":{s}}}", .{ preview_id, index }));
         try capture.expectState("error");
