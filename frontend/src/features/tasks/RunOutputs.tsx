@@ -24,6 +24,7 @@ export function RunOutputs({
   disabled = false,
   onAction,
   onPrepareEdit,
+  layout = "outputs",
 }: {
   outputs: readonly DeliveredOutputView[];
   taskId?: string;
@@ -31,25 +32,32 @@ export function RunOutputs({
   disabled?: boolean;
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
+  layout?: "outputs" | "file-actions";
 }) {
   const { t } = useI18n();
   if (outputs.length === 0) return null;
+  const actionsOnly = layout === "file-actions";
+  const rows = (
+    <ul className="run-outputs-list">
+      {outputs.map((output) => (
+        <OutputRow
+          key={output.id}
+          output={output}
+          taskId={taskId}
+          runId={runId}
+          disabled={disabled}
+          onAction={onAction}
+          onPrepareEdit={onPrepareEdit}
+          actionsOnly={actionsOnly}
+        />
+      ))}
+    </ul>
+  );
+  if (actionsOnly) return rows;
   return (
     <section className="run-outputs" aria-label={t("outputs.title")}>
       <h3 className="run-outputs-title">{t("outputs.title")}</h3>
-      <ul className="run-outputs-list">
-        {outputs.map((output) => (
-          <OutputRow
-            key={output.id}
-            output={output}
-            taskId={taskId}
-            runId={runId}
-            disabled={disabled}
-            onAction={onAction}
-            onPrepareEdit={onPrepareEdit}
-          />
-        ))}
-      </ul>
+      {rows}
     </section>
   );
 }
@@ -60,6 +68,7 @@ function OutputRow({
   disabled,
   onAction,
   onPrepareEdit,
+  actionsOnly,
 }: {
   output: DeliveredOutputView;
   taskId?: string;
@@ -67,6 +76,7 @@ function OutputRow({
   disabled: boolean;
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
+  actionsOnly: boolean;
 }) {
   const { locale, t } = useI18n();
   const nameId = useId();
@@ -149,35 +159,46 @@ function OutputRow({
     }
   };
   return (
-    <li className="run-output" data-output-id={output.id}>
-      <span className="run-output-icon" aria-hidden="true">
-        <Icon name="skill-file" />
-      </span>
+    <li
+      className={actionsOnly ? undefined : "run-output"}
+      data-output-id={output.id}
+    >
+      {!actionsOnly && (
+        <span className="run-output-icon" aria-hidden="true">
+          <Icon name="skill-file" />
+        </span>
+      )}
       <div className="run-output-content">
         <p className="run-output-name" id={nameId}>
           {output.redacted
             ? t("outputs.hidden_path")
             : output.displayPath.split("/").at(-1)}
         </p>
-        {!output.redacted && output.displayPath.includes("/") && (
-          <p className="run-output-path">{output.displayPath}</p>
+        {!actionsOnly &&
+          !output.redacted &&
+          output.displayPath.includes("/") && (
+            <p className="run-output-path">{output.displayPath}</p>
+          )}
+        {!actionsOnly && (
+          <p className="run-output-meta">
+            {t("outputs.delivered_size", {
+              bytes: formatInteger(locale, BigInt(output.sizeBytes)),
+            })}
+          </p>
         )}
-        <p className="run-output-meta">
-          {t("outputs.delivered_size", {
-            bytes: formatInteger(locale, BigInt(output.sizeBytes)),
-          })}
-        </p>
         {onAction && taskId && runId && (
           <div className="run-output-actions">
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-describedby={nameId}
-              disabled={disabled || pending !== null || output.redacted}
-              onClick={() => void perform("check")}
-            >
-              {t("outputs.check")}
-            </Button>
+            {!actionsOnly && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || pending !== null || output.redacted}
+                onClick={() => void perform("check")}
+              >
+                {t("outputs.check")}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -196,7 +217,7 @@ function OutputRow({
             >
               {t("outputs.save")}
             </Button>
-            {onPrepareEdit && (
+            {!actionsOnly && onPrepareEdit && (
               <Button
                 variant="ghost"
                 size="sm"

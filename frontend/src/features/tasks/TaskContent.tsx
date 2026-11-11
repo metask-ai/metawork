@@ -863,6 +863,34 @@ export function TaskContent({
                 ))}
               </details>
             ) : null;
+          const deliveredVideos = [];
+          const otherOutputs = [];
+          for (const output of outputsEnabled ? run.outputs : []) {
+            if (
+              !output.redacted &&
+              readingFlow.some(
+                (entry) =>
+                  entry.kind === "video" &&
+                  entry.reference.displayPath === output.displayPath,
+              )
+            ) {
+              deliveredVideos.push(output);
+            } else {
+              otherOutputs.push(output);
+            }
+          }
+          const deliveryActions = outputsEnabled &&
+            onOutputAction &&
+            deliveredVideos.length > 0 && (
+              <RunOutputs
+                outputs={deliveredVideos}
+                taskId={task.id}
+                runId={run.id}
+                disabled={responseDisabled || !synchronized}
+                onAction={onOutputAction}
+                layout="file-actions"
+              />
+            );
           const supplement = (
             <>
               {renderRunSupplement?.({
@@ -918,15 +946,7 @@ export function TaskContent({
                 ))}
               {outputsEnabled && (
                 <RunOutputs
-                  outputs={run.outputs.filter(
-                    (output) =>
-                      !readingFlow.some(
-                        (entry) =>
-                          entry.kind === "video" &&
-                          !output.redacted &&
-                          entry.reference.displayPath === output.displayPath,
-                      ),
-                  )}
+                  outputs={otherOutputs}
                   taskId={task.id}
                   runId={run.id}
                   disabled={responseDisabled || !synchronized}
@@ -946,6 +966,7 @@ export function TaskContent({
                 <RunProcess
                   presentation={presentation}
                   approvalHistory={approvalHistory}
+                  deliveryActions={deliveryActions}
                   reviewingPermission={false}
                   fileChanges={fileChangesEnabled ? run.fileChanges : null}
                   elapsedMs={run.elapsedMs}

@@ -8912,7 +8912,7 @@ test("generated MP4 renders a bare player on approach and releases it offscreen"
   }
 });
 
-test("the assistant anchors a generated video once and leaves unrelated deliveries in Outputs", () => {
+test("the assistant previews a generated video and exposes explicit file actions in Execution details", async () => {
   const reference = {
     id: "video-ref",
     title: "",
@@ -9005,6 +9005,44 @@ test("the assistant anchors a generated video once and leaves unrelated deliveri
   assert.match(beforeDelivery, /generated-video-preview/);
   assert.doesNotMatch(beforeDelivery, /class="run-outputs"/);
   assert.doesNotMatch(beforeDelivery, /returned no final response/);
+
+  const actions = [];
+  const view = render(
+    taskContentElement(task({ runs: [completed] }), "1", {
+      ...props,
+      loadFilePreview: async () => ({ state: "missing" }),
+      onOutputAction: async (taskId, runId, outputId, action, signal) => {
+        assert.equal(signal.aborted, false);
+        actions.push([taskId, runId, outputId, action]);
+        return action === "save" ? "saved" : "revealed";
+      },
+    }),
+  );
+  assert.equal(
+    view.container.querySelector(`[data-output-id="${duplicate.id}"]`),
+    null,
+  );
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("button", { name: /^Execution details/ }));
+  const delivery = view.container.querySelector(
+    `[data-output-id="${duplicate.id}"]`,
+  );
+  assert.ok(delivery?.closest(".run-process-body"));
+  assert.equal(delivery.closest(".run-outputs"), null);
+  assert.deepEqual(
+    [...delivery.querySelectorAll("button")].map(
+      (button) => button.textContent,
+    ),
+    ["Show in folder", "Save as…"],
+  );
+  await user.click(
+    within(delivery).getByRole("button", { name: "Show in folder" }),
+  );
+  await user.click(within(delivery).getByRole("button", { name: "Save as…" }));
+  assert.deepEqual(actions, [
+    [task().id, completed.id, duplicate.id, "reveal"],
+    [task().id, completed.id, duplicate.id, "save"],
+  ]);
 });
 
 test("generated image loads only its reference and opens the existing preview", async () => {
