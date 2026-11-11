@@ -6,9 +6,31 @@
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-11-11
+
+### Added
+
+- 普通 Task 现在可以通过 `GenerateVideo` 调用 Metask 模型生成短 MP4。成片会保存到当前 Workspace，并直接显示在对应回复中，支持播放和文件操作。
+- 定时任务新增基于 IANA 时区的日历规则，支持每日、每周多日和每月多日期执行；时间编辑、任务管理和运行历史界面同步重做。
+
+### Changed
+
+- AgentCore 执行边界进一步收紧：分别记录 Stop 意图、abort 回执与实际终止结果，根据终态事实和 Session 健康度决定是否复用，并保留合法的段外输出与 Host 故障原因。
+- Task、Workspace、Schedule、Attachment 和 MCP 的运行推进与恢复职责进一步明确；排队输入、审批进度和终态输出由 Task 自身管理，单个 Schedule 故障不再影响其他 Task。
+- MCP 页面更名为“连接器”。手动添加 HTTP 服务时会在保存前进行隔离验证，OAuth 登录则延后到配置确认之后；服务列表、详情和编辑流程也同步简化。
+- Skill 页面调整为全局个人 Skill 管理入口，统一提供导入、启停和健康状态；项目 Skill 仍由已授权项目中的 Task 自动发现，内置 Skill 也会明确标识。
+
 ### Removed
 
-- MCP 页面移除「粘贴配置」和 JSON 导入表单。
+- 连接器页面不再提供“粘贴配置”和 JSON 导入表单。
+- Skill 页面不再提供 Claude/Codex 兼容目录开关和项目范围管理，也不再自动发现这些工具的专有目录。
+
+### Fixed
+
+- 修复定时任务在触发准入、已消费触发点重放、重启恢复、权限失败隔离和瞬时凭据读取方面的问题。
+- 修复排队输入可能抢占审批恢复、Run 终态交接与反馈不一致，以及确认型历史提交可能被普通投影延迟或覆盖的问题。
+- 修复自定义模型无法保存时看不到原因的问题；对于包含版本路径的 Base URL，新增 Chat Completions endpoint 选项。
+- 修复全局搜索的键盘导航、焦点和分页；同时修复 Workspace 文件链接无法打开、侧栏状态恢复、代码复制按钮遮挡、快速连续召回输入历史和退出登录确认等 Renderer 问题。
 
 ## [0.2.11] - 2026-11-07
 
@@ -538,7 +560,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.11...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.12...HEAD
+[0.2.12]: https://github.com/metask-ai/metawork/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/metask-ai/metawork/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/metask-ai/metawork/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/metask-ai/metawork/compare/v0.2.8...v0.2.9
