@@ -4219,7 +4219,7 @@ test "real Core connects a restored expired grant only with committed new bearer
         old_retired: bool = false,
         fn now(raw: ?*anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
-            return self.seconds;
+            return self.seconds * 1000;
         }
         fn probe(raw: ?*anyopaque, locator: []const u8) mcp_configuration.CredentialPresence {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
@@ -4271,7 +4271,7 @@ test "real Core connects a restored expired grant only with committed new bearer
             management.locator_generator = .{ .available = true, .context = &self.durable, .fill_fn = DurableRegistry.fillIdentity };
             management.credentials = .{ .available = true, .context = self, .probe_fn = probe, .create_fn = create, .delete_fn = delete };
             return .{ .core = core, .control = try product_control.Runtime.init(allocator, std.testing.io, core, .{ .worker_count = 1, .queue_capacity = 4 }, .{
-                .schedule_timer = .{ .enabled = true, .context = self, .now_unix_seconds = now },
+                .run_clock = .{ .context = self, .now_unix_ms_fn = now },
                 .mcp = .{ .preparation = &preparation, .management = management, .host_capabilities = .{ .oauth = true, .connection_approval = true } },
             }) };
         }

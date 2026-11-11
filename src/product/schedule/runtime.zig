@@ -306,10 +306,14 @@ pub const TaskLaunchOutcome = union(enum) {
     rejected: TaskLaunchFailure,
 };
 
+/// Causes are returned to the caller unchanged; Schedule branches only on
+/// these admission categories, never on another aggregate's error names.
+pub const TaskPreflight = union(enum) { ready, wait, retry: anyerror, rejected: anyerror };
+
 pub const TaskEffects = struct {
     context: *anyopaque,
     has_active_fn: *const fn (*anyopaque, u64) bool,
-    preflight_fn: *const fn (*anyopaque, TaskLaunch) anyerror!void,
+    preflight_fn: *const fn (*anyopaque, TaskLaunch) TaskPreflight,
     launch_fn: *const fn (*anyopaque, TaskLaunch) TaskLaunchOutcome,
     observe_fn: *const fn (*anyopaque, u64) TaskObservation,
 
@@ -586,7 +590,7 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
-            } else if (err == error.TaskHistoryWriterBusy) {
+            } else if (err == error.ScheduleAdmissionWaiting) {
                 self.store.find(due.id).?.waiting_for_task_history = true;
             } else if (self.persistence_health != .ready or
                 self.store.find(due.id).?.preflight_retry_at_unix_seconds == null)
@@ -917,21 +921,25 @@ pub const Runtime = struct {
             const binding = item.bindingView();
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
-            tasks.preflight_fn(tasks.context, .{
+            switch (tasks.preflight_fn(tasks.context, .{
                 .title = item.title,
                 .input = item.input.borrowed(),
                 .model_ref = binding.model_ref,
                 .source_generation = binding.source_generation,
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
-            }) catch |err| {
-                if (err == error.TaskHistoryWriterBusy) return err;
-                item.preflight_retry_at_unix_seconds = null;
-                if (err == error.ExecutionUnavailable or err == error.ExecutionInUse or
-                    err == error.ExecutionGenerationMismatch)
+            })) {
+                .ready => {},
+                .wait => return error.ScheduleAdmissionWaiting,
+                .retry => |cause| {
                     item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
-                return err;
-            };
+                    return cause;
+                },
+                .rejected => |cause| {
+                    item.preflight_retry_at_unix_seconds = null;
+                    return cause;
+                },
+            }
         }
         item.preflight_retry_at_unix_seconds = null;
         const begin = try self.beginOccurrence(
@@ -1389,16 +1397,18 @@ const TestTasks = struct {
     terminal_task_id: u64 = 0,
     active_task_id: u64 = 0,
     preflight_error: ?anyerror = null,
+    preflight_result: TaskPreflight = .ready,
     preflight_blocked_title: ?[]const u8 = null,
     rejection: ?TaskLaunchFailure = null,
     launch_effects: ?*TestEffects = null,
     launch_commit: PersistenceCommit = .committed,
 
-    fn preflight(context: *anyopaque, input: TaskLaunch) anyerror!void {
+    fn preflight(context: *anyopaque, input: TaskLaunch) TaskPreflight {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.preflight_blocked_title) |title|
-            if (std.mem.eql(u8, title, input.title)) return error.ExecutionUnavailable;
-        if (self.preflight_error) |err| return err;
+            if (std.mem.eql(u8, title, input.title)) return .{ .retry = error.ExecutionUnavailable };
+        if (self.preflight_error) |err| return .{ .retry = err };
+        return self.preflight_result;
     }
 
     fn hasActive(context: *anyopaque, id: u64) bool {
@@ -1685,6 +1695,29 @@ test "full protected history stops without eviction or an overdue timer retry" {
             },
             .failed => try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth()),
             .outcome_unknown => try std.testing.expectEqual(PersistenceHealth.outcome_unknown, runtime.persistenceHealth()),
+        }
+    }
+}
+
+test "preflight policy follows admission categories rather than opaque causes" {
+    for ([_]TaskPreflight{ .wait, .{ .retry = error.OpaqueAdmissionFailure }, .{ .rejected = error.OpaqueAdmissionFailure } }) |result| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{ .preflight_result = result };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("preflight", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        effects.now = 200;
+        const commits = effects.commits;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(commits, effects.commits);
+        try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+        switch (result) {
+            .wait => try std.testing.expect(runtime.hasTaskHistoryWaits()),
+            .retry => try std.testing.expectEqual(@as(?u64, 260), effects.armed_at),
+            .rejected => try std.testing.expectEqual(@as(?u64, null), effects.armed_at),
+            .ready => unreachable,
         }
     }
 }

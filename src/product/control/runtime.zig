@@ -898,19 +898,25 @@ fn mcpTimerPort(timer: McpRefreshTimer) mcp_ports.Timer {
     };
 }
 
+fn runClockUnixSeconds(clock: task_runtime.RunClock) ?u64 {
+    const milliseconds = clock.nowUnixMs() orelse return null;
+    const seconds = milliseconds / 1000;
+    return if (seconds != 0) seconds else null;
+}
+
 fn productMcpPorts(
     executor: *executor_impl.Executor,
     catalog: mcp_ports.Catalog,
     timer: McpRefreshTimer,
     notifier: ChangeNotifier,
-    clock: ScheduleTimer,
+    clock: task_runtime.RunClock,
 ) mcp_ports.Ports {
     return .{
         .executor = mcpExecutorPort(executor),
         .catalog = catalog,
         .timer = mcpTimerPort(timer),
         .notifier = mcpNotifierPort(notifier),
-        .unix_clock = .{ .enabled = clock.enabled, .context = clock.context, .now_seconds_fn = clock.now_unix_seconds },
+        .unix_clock = .{ .enabled = true, .context = clock.context, .now_ms_fn = clock.now_unix_ms_fn },
     };
 }
 
@@ -1713,7 +1719,7 @@ pub const Runtime = struct {
                     configuration.mcp_catalog orelse mcpCatalogPort(agent_runtime),
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
-                    configuration.schedule_timer,
+                    control.run_clock,
                 ),
             );
             mcp_startup = null;
@@ -2681,7 +2687,7 @@ pub const Runtime = struct {
         // linearized admission in this same owner-thread command.
         try self.checkSkillMutationAuthority(preparation.scope);
         const previous_health = self.skill.managementHealth();
-        const result = self.skill.commitPreparedImport(id, revision, confirmation, self.schedule.now()) catch |err| {
+        const result = self.skill.commitPreparedImport(id, revision, confirmation, runClockUnixSeconds(self.run_clock)) catch |err| {
             self.publishSkillManagementChanges(previous_health);
             self.bumpRevision();
             return err;
@@ -2705,7 +2711,7 @@ pub const Runtime = struct {
         const previous_health = self.skill.managementHealth();
         const result = self.skill.uninstall(
             install_id,
-            self.schedule.now(),
+            runClockUnixSeconds(self.run_clock),
         ) catch |err| {
             self.publishSkillManagementChanges(previous_health);
             return err;
@@ -2722,7 +2728,7 @@ pub const Runtime = struct {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const previous_health = self.skill.managementHealth();
-        const result = self.skill.retryVerification(install_id, self.schedule.now()) catch |err| {
+        const result = self.skill.retryVerification(install_id, runClockUnixSeconds(self.run_clock)) catch |err| {
             self.publishSkillManagementChanges(previous_health);
             return err;
         };
@@ -3295,7 +3301,7 @@ pub const Runtime = struct {
         return self.skill.sync(
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
-            self.schedule.now(),
+            runClockUnixSeconds(self.run_clock),
         );
     }
 
@@ -5072,7 +5078,7 @@ pub const Runtime = struct {
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         ) catch |err| switch (err) {
-            error.PreviousTaskActive, error.TaskHistoryWriterBusy => error.TaskBusy,
+            error.PreviousTaskActive, error.ScheduleAdmissionWaiting => error.TaskBusy,
             else => return @errorCast(err),
         };
     }
@@ -7904,14 +7910,18 @@ pub const Runtime = struct {
         return self.task_runtime.taskHasActiveOperation(task_id);
     }
 
-    fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
+    fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) product_schedule.TaskPreflight {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (self.requiredHistoryBlocked()) return error.TaskHistoryWriterBusy;
-        try self.validateScheduledBinding(.{
+        if (self.requiredHistoryBlocked()) return .wait;
+        self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
             .protocol = input.protocol,
-        });
+        }) catch |err| return switch (err) {
+            error.ExecutionUnavailable, error.ExecutionInUse, error.ExecutionGenerationMismatch => .{ .retry = err },
+            else => .{ .rejected = err },
+        };
+        return .ready;
     }
 
     fn scheduleTaskLaunch(
@@ -8953,7 +8963,7 @@ pub const Runtime = struct {
         const previous_health = self.skill.managementHealth();
         self.skill.recoverTransactionsForScopeNoFail(
             scope,
-            self.schedule.now(),
+            runClockUnixSeconds(self.run_clock),
         );
         self.publishSkillManagementChanges(previous_health);
     }
@@ -10126,8 +10136,8 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn skillImportFixture(control: *Runtime, root: []const u8, store: *skill_runtime.testing.ManagementFileStore) !void {
         const Clock = struct {
-            fn now(_: ?*anyopaque) ?u64 {
-                return 100;
+            fn unixMs(_: ?*anyopaque) ?u64 {
+                return 100_000;
             }
             fn catalog(_: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
                 return error.CatalogUnavailable;
@@ -10135,7 +10145,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         };
         try initTestRuntimeWithLimits(control, testLimits(), .{
             .skill_management = .{ .file_store = store, .staging_root = root },
-            .schedule_timer = .{ .enabled = true, .now_unix_seconds = Clock.now },
+            .run_clock = .{ .now_unix_ms_fn = Clock.unixMs },
         });
         errdefer control.deinit();
         // Install fixture ports before supplying a home: normal init immediately
@@ -11434,7 +11444,7 @@ test "queued input recovery does not run global lifecycle reconciliation" {
     };
     var clock: Clock = .{};
     var control = try testRuntimeWith(.{
-        .schedule_timer = .{ .enabled = true, .context = &clock, .now_unix_seconds = Clock.now },
+        .run_clock = .{ .context = &clock, .now_unix_ms_fn = Clock.now },
     });
     defer control.deinit();
     const missing_task = std.math.maxInt(u64);
@@ -15717,6 +15727,26 @@ test "Task model selection unknown commit resolves the original candidate before
             try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
         } else try std.testing.expect(task.durable.model_intent == null);
     }
+}
+
+test "Skill and MCP Unix time remains available without a Schedule timer" {
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            const value: *u64 = @ptrCast(@alignCast(context.?));
+            return value.*;
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var milliseconds: u64 = 123_456;
+    control.run_clock = .{ .context = &milliseconds, .now_unix_ms_fn = Clock.now };
+    try std.testing.expect(!control.schedule.timerEnabled());
+    const ports = productMcpPorts(control.executor, mcpCatalogPort(control.agent_runtime), .{}, .{}, control.run_clock);
+    try std.testing.expectEqual(@as(?u64, 123), runClockUnixSeconds(control.run_clock));
+    try std.testing.expectEqual(@as(?u64, 123_456), ports.unix_clock.nowMs());
+    milliseconds = 0;
+    try std.testing.expectEqual(@as(?u64, null), runClockUnixSeconds(control.run_clock));
+    try std.testing.expectEqual(@as(?u64, null), ports.unix_clock.nowMs());
 }
 
 test "unchanged Task binding skips candidate allocation and credential publication" {
@@ -20509,7 +20539,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             mcpCatalogPort(control.agent_runtime),
             .{},
             .{},
-            .{},
+            control.run_clock,
         ),
         .{
             .preparation = preparation.take(),

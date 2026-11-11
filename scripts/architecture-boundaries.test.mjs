@@ -6,6 +6,26 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
+test("Skill and MCP read time independently of Schedule timers", () => {
+  const control = read("src/product/control/runtime.zig");
+  assert.doesNotMatch(control, /self\.schedule\.now\(/);
+  const ports = control.slice(
+    control.indexOf("fn productMcpPorts("),
+    control.indexOf("fn querySkillCatalog("),
+  );
+  assert.doesNotMatch(ports, /ScheduleTimer|clock\.enabled|now_unix_seconds/);
+});
+
+test("Schedule consumes classified admission without external error policy", () => {
+  const source = read("src/product/schedule/runtime.zig");
+  const production = source.slice(0, source.indexOf("const TestEffects ="));
+  assert.doesNotMatch(
+    production,
+    /error\.(?:TaskHistoryWriterBusy|ExecutionUnavailable|ExecutionInUse|ExecutionGenerationMismatch)/,
+  );
+  assert.doesNotMatch(source, /preflight_fn:[^\n]*anyerror!void/);
+});
+
 test("Task binding comparisons stay behind its runtime boundary", () => {
   const control = read("src/product/control/runtime.zig");
   const task = read("src/product/task/runtime.zig");

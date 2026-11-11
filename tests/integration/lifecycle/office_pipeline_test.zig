@@ -478,10 +478,9 @@ test "Skill resource context reads a managed import through tool and typed input
         var enablement: f.product_skill.enablement.FileStore = .{ .io = std.testing.io, .dir = temporary.dir };
         var configuration = f.productControlConfiguration();
         configuration.directories.canonical_user_home = root;
-        configuration.schedule_timer.enabled = true;
-        configuration.schedule_timer.now_unix_seconds = struct {
+        configuration.run_clock.now_unix_ms_fn = struct {
             fn now(_: ?*anyopaque) ?u64 {
-                return 1_800_000_000;
+                return 1_800_000_000_000;
             }
         }.now;
         configuration.skill_management = .{ .file_store = &store, .staging_root = stage };
