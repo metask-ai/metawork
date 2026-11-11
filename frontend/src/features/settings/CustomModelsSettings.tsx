@@ -19,6 +19,7 @@ import { useI18n } from "../../i18n/context.ts";
 
 import {
   builtinProviderEndpoint,
+  type EndpointIssue,
   inspectModelEndpoint,
   protocolFromEndpoint,
 } from "./model-connection.ts";
@@ -137,6 +138,15 @@ type Draft = {
   baseUrl: string;
   apiKey: string;
 };
+type FormField = "choice" | "address" | "api_key" | "model_id";
+type AddressProblem = EndpointIssue | "required" | "root";
+const fieldIds: Record<FormField, string> = {
+  choice: "model-form-vendor",
+  address: "model-form-address",
+  api_key: "model-form-api-key",
+  model_id: "model-form-model-id",
+};
+const fieldErrorId = (field: FormField) => `${fieldIds[field]}-error`;
 const emptyDraft = (): Draft => ({
   choice: "",
   modelId: "",
@@ -167,6 +177,10 @@ export function CustomModelsSettings({
   const [failed, setFailed] = useState(false);
   const [savedParts, setSavedParts] = useState<ModelEditPart[]>([]);
   const [addressTouched, setAddressTouched] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+  const [focusRequest, setFocusRequest] = useState<{
+    field: FormField;
+  } | null>(null);
   const [testFailure, setTestFailure] = useState<{
     sourceId: string;
     modelId: string;
@@ -186,10 +200,40 @@ export function CustomModelsSettings({
   );
   const endpoint = inspectModelEndpoint(draft?.baseUrl ?? "");
   const detectedProtocol = endpoint.protocol;
-  const addressInvalid = !preset && endpoint.issue !== null;
   const editing =
     draft?.originalModelId !== null && draft?.originalModelId !== undefined;
   const busy = disabled || pending;
+  const unchanged =
+    draft !== null &&
+    editing &&
+    provider !== undefined &&
+    draft.modelId.trim() === draft.originalModelId &&
+    !draft.apiKey &&
+    draft.protocol === provider.protocol &&
+    draft.baseUrl.trim() === provider.normalizedBaseUrl;
+  const addressProblem: AddressProblem | null =
+    !draft?.choice || preset
+      ? null
+      : !draft.baseUrl.trim()
+        ? "required"
+        : (endpoint.issue ?? (draft.protocol ? null : "root"));
+  const problems: FormField[] = [];
+  if (draft && !draft.choice) problems.push("choice");
+  else if (draft) {
+    if (addressProblem) problems.push("address");
+    if (!provider && !draft.apiKey) problems.push("api_key");
+    if (!draft.modelId.trim()) problems.push("model_id");
+  }
+  const showProblem = (field: FormField) =>
+    attempted && problems.includes(field);
+  // Format problems appear once the address is pasted or left; a missing or
+  // unconfirmed root address is only an error after the user tries to save.
+  const addressProblemVisible =
+    addressProblem !== null &&
+    (attempted ||
+      (addressTouched &&
+        addressProblem !== "required" &&
+        addressProblem !== "root"));
   const rows = models.customProviders.flatMap((source) =>
     source.models.map((model) => ({ source, model })),
   );
@@ -207,6 +251,7 @@ export function CustomModelsSettings({
     setFailed(false);
     setSavedParts([]);
     setAddressTouched(false);
+    setAttempted(false);
     setReviewNotice(false);
     setDraft(
       source
@@ -263,12 +308,17 @@ export function CustomModelsSettings({
       setRemoval({ ...removal, source: current });
     }
   }, [models.customProviders, removal, pending]);
+  useEffect(() => {
+    if (focusRequest)
+      document.getElementById(fieldIds[focusRequest.field])?.focus();
+  }, [focusRequest]);
   function choose(value: string) {
     const recipe = models.builtinProviderPresets.find(
       (item) => value === `preset:${item.id}`,
     );
     setFailed(false);
     setAddressTouched(false);
+    setAttempted(false);
     setDraft({
       ...emptyDraft(),
       choice: value,
@@ -300,19 +350,15 @@ export function CustomModelsSettings({
     }
   }
   async function submit() {
-    if (!draft || !draft.modelId.trim() || !draft.protocol || addressInvalid)
+    if (!draft || unchanged) return;
+    if (problems.length > 0) {
+      setAttempted(true);
+      setFocusRequest({ field: problems[0] });
       return;
+    }
+    if (!draft.protocol) return;
     const protocol = draft.protocol;
     const modelId = draft.modelId.trim();
-    if (
-      editing &&
-      provider &&
-      modelId === draft.originalModelId &&
-      !draft.apiKey &&
-      draft.protocol === provider.protocol &&
-      draft.baseUrl.trim() === provider.normalizedBaseUrl
-    )
-      return;
     if (editing) {
       if (!provider) return;
       const version = dialogVersion.current;
@@ -579,6 +625,7 @@ export function CustomModelsSettings({
               </Dialog.Description>
               <form
                 className="settings-model-form"
+                noValidate
                 onSubmit={(event) => {
                   event.preventDefault();
                   void submit();
@@ -588,6 +635,7 @@ export function CustomModelsSettings({
                   <label className="settings-model-form-field">
                     <span>{t("settings.model_connection_provider")}</span>
                     <SelectionMenu
+                      triggerId={fieldIds.choice}
                       triggerClassName="settings-control"
                       value={draft.choice}
                       options={choiceOptions}
@@ -595,6 +643,12 @@ export function CustomModelsSettings({
                         "settings.model_connection_choose_provider",
                       )}
                       ariaLabel={t("settings.model_connection_provider")}
+                      ariaInvalid={showProblem("choice")}
+                      ariaDescribedBy={
+                        showProblem("choice")
+                          ? fieldErrorId("choice")
+                          : undefined
+                      }
                       leading={
                         draft.choice ? (
                           <BrandIcon brand={preset?.id ?? "custom"} />
@@ -604,6 +658,14 @@ export function CustomModelsSettings({
                       onValueChange={choose}
                     />
                   </label>
+                )}
+                {!editing && showProblem("choice") && (
+                  <p
+                    id={fieldErrorId("choice")}
+                    className="text-sm text-(--ui-content-danger)"
+                  >
+                    {t("settings.model_form_error.choice")}
+                  </p>
                 )}
                 {draft.choice && (
                   <>
@@ -625,14 +687,14 @@ export function CustomModelsSettings({
                             )}
                           </span>
                           <Input
+                            id={fieldIds.address}
                             className="settings-custom-provider-input"
                             type="url"
                             autoComplete="off"
                             value={draft.baseUrl}
-                            aria-invalid={
-                              (addressTouched && addressInvalid) || undefined
-                            }
+                            aria-invalid={addressProblemVisible || undefined}
                             onBlur={() => setAddressTouched(true)}
+                            onPaste={() => setAddressTouched(true)}
                             aria-describedby="model-endpoint-help"
                             maxLength={2048}
                             placeholder={
@@ -667,7 +729,16 @@ export function CustomModelsSettings({
                           ) : endpoint.root ? (
                             <>
                               {draft.protocol !== "gemini_native" && (
-                                <p className="text-xs text-(--ui-content-muted)">
+                                <p
+                                  role={
+                                    addressProblemVisible ? "alert" : undefined
+                                  }
+                                  className={
+                                    addressProblemVisible
+                                      ? "text-sm text-(--ui-content-danger)"
+                                      : "text-xs text-(--ui-content-muted)"
+                                  }
+                                >
                                   {t("settings.custom_model_root_help")}
                                 </p>
                               )}
@@ -691,13 +762,17 @@ export function CustomModelsSettings({
                                 {t("settings.custom_model_gemini_confirm")}
                               </label>
                             </>
-                          ) : addressTouched && endpoint.issue ? (
+                          ) : addressProblemVisible &&
+                            addressProblem !== null &&
+                            addressProblem !== "root" ? (
                             <p
                               role="alert"
                               className="text-sm text-(--ui-content-danger)"
                             >
                               {t(
-                                `settings.custom_model_address_error.${endpoint.issue}`,
+                                addressProblem === "required"
+                                  ? "settings.model_form_error.address"
+                                  : `settings.custom_model_address_error.${addressProblem}`,
                               )}
                             </p>
                           ) : (
@@ -730,17 +805,32 @@ export function CustomModelsSettings({
                       <label className="settings-model-form-field">
                         <span>{t("settings.api_key")}</span>
                         <Input
+                          id={fieldIds.api_key}
                           className="settings-custom-provider-input"
                           type="password"
                           autoComplete="off"
                           maxLength={8192}
                           value={draft.apiKey}
                           disabled={busy}
+                          aria-invalid={showProblem("api_key") || undefined}
+                          aria-describedby={
+                            showProblem("api_key")
+                              ? fieldErrorId("api_key")
+                              : undefined
+                          }
                           onChange={(event) =>
                             setDraft({ ...draft, apiKey: event.target.value })
                           }
                         />
                       </label>
+                    )}
+                    {showProblem("api_key") && (
+                      <p
+                        id={fieldErrorId("api_key")}
+                        className="text-sm text-(--ui-content-danger)"
+                      >
+                        {t("settings.model_form_error.api_key")}
+                      </p>
                     )}
                     {provider && editing && (
                       <div className="settings-model-connection-details">
@@ -783,6 +873,7 @@ export function CustomModelsSettings({
                       <span>{t("settings.custom_model_id")}</span>
                       {preset && !editing ? (
                         <SelectionMenu
+                          triggerId={fieldIds.model_id}
                           triggerClassName="settings-control"
                           value={draft.modelId}
                           options={preset.modelIds.map((id) => ({
@@ -791,6 +882,12 @@ export function CustomModelsSettings({
                           }))}
                           placeholder={t("account.choose_model")}
                           ariaLabel={t("settings.custom_model_id")}
+                          ariaInvalid={showProblem("model_id")}
+                          ariaDescribedBy={
+                            showProblem("model_id")
+                              ? fieldErrorId("model_id")
+                              : undefined
+                          }
                           disabled={busy}
                           onValueChange={(modelId) =>
                             setDraft({ ...draft, modelId })
@@ -798,17 +895,36 @@ export function CustomModelsSettings({
                         />
                       ) : (
                         <Input
+                          id={fieldIds.model_id}
                           className="settings-custom-provider-input settings-custom-provider-input-mono"
                           maxLength={256}
                           autoComplete="off"
                           value={draft.modelId}
                           disabled={busy}
+                          aria-invalid={showProblem("model_id") || undefined}
+                          aria-describedby={
+                            showProblem("model_id")
+                              ? fieldErrorId("model_id")
+                              : undefined
+                          }
                           onChange={(event) =>
                             setDraft({ ...draft, modelId: event.target.value })
                           }
                         />
                       )}
                     </label>
+                    {showProblem("model_id") && (
+                      <p
+                        id={fieldErrorId("model_id")}
+                        className="text-sm text-(--ui-content-danger)"
+                      >
+                        {t(
+                          preset && !editing
+                            ? "settings.model_form_error.model_choice"
+                            : "settings.model_form_error.model_id",
+                        )}
+                      </p>
+                    )}
                     {preset && (
                       <p className="text-xs text-(--ui-content-muted)">
                         <a
@@ -870,22 +986,7 @@ export function CustomModelsSettings({
                   >
                     {t("common.cancel")}
                   </Button>
-                  <Button
-                    type="submit"
-                    disabled={
-                      busy ||
-                      !draft.choice ||
-                      !draft.modelId.trim() ||
-                      !draft.protocol ||
-                      addressInvalid ||
-                      (editing &&
-                        draft.modelId.trim() === draft.originalModelId &&
-                        !draft.apiKey &&
-                        draft.protocol === provider?.protocol &&
-                        draft.baseUrl.trim() === provider?.normalizedBaseUrl) ||
-                      (!provider && (!draft.apiKey || !draft.baseUrl.trim()))
-                    }
-                  >
+                  <Button type="submit" disabled={busy || unchanged}>
                     {pending ? t("common.saving") : t("common.save")}
                   </Button>
                 </div>

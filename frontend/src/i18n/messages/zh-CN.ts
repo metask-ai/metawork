@@ -1420,9 +1420,14 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_model_address_error.address":
     "请填写有效网址，不包含用户名、密码、查询参数或片段。",
   "settings.custom_model_address_error.secure":
-    "请使用 HTTPS；仅本机地址支持 HTTP。",
+    "API Key 会以明文发送，仅本机地址（localhost、127.0.0.1、[::1]）可使用 HTTP；局域网服务请改用 HTTPS。",
   "settings.custom_model_address_error.path":
     "请填写以 /chat/completions、/responses 或 /v1/messages 结尾的完整端点。",
+  "settings.model_form_error.choice": "请先选择模型厂商。",
+  "settings.model_form_error.address": "请填写请求地址。",
+  "settings.model_form_error.api_key": "请填写 API Key。",
+  "settings.model_form_error.model_id": "请填写模型 ID。",
+  "settings.model_form_error.model_choice": "请选择模型 ID。",
   "settings.custom_model_test_start_failed": "尚未确认 {model} 的测试是否开始",
   "settings.custom_model_remove_failed": "模型移除结果尚未确认",
   "settings.model_edit_partial":

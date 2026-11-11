@@ -2035,6 +2035,11 @@ summary::-webkit-details-marker {
   opacity: 1;
 }
 
+.settings-model-form .settings-custom-provider-input[aria-invalid="true"],
+.settings-model-form .selection-trigger.settings-control[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--metask-state-error) 58%, transparent);
+}
+
 .settings-control-compact {
   width: 200px;
 }

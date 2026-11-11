@@ -777,6 +777,14 @@ async function chooseModelSource(user, label) {
   );
   return dialog;
 }
+function accessibleDescription(element) {
+  return (element.getAttribute("aria-describedby") ?? "")
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
+}
 
 test("Models exposes a model list and Add model action instead of a Provider directory", () => {
   const incomplete = renderSettings(readySettingsAccount);
@@ -1311,15 +1319,24 @@ test("a service root needs explicit Gemini confirmation and an endpoint replaces
     name: "Request URL (Endpoint)",
   });
   await user.type(address, "https://api.openai.com");
-  assert.equal(
-    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
-    true,
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
+  assert.equal(submissions.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /If this is a Gemini Native service root, confirm below/,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+  assert.equal(document.activeElement, address);
   await user.click(
     within(dialog).getByRole("checkbox", {
       name: "This is a Gemini Native service root",
     }),
   );
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
   await user.clear(address);
   await user.type(address, "https://example.com/v1/responses");
   assert.equal(
@@ -1365,10 +1382,11 @@ test("invalid endpoints explain the problem before submission and keep the other
     /endpoint ending/,
   );
   assert.equal(address.getAttribute("aria-invalid"), "true");
-  assert.equal(
-    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
-    true,
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
+  assert.equal(submitted.length, 0);
+  assert.equal(document.activeElement, address);
   assert.equal(within(dialog).getByLabelText("API key").value, "fake-test-key");
   await user.clear(address);
   await user.type(address, "https://example.com/v1/responses");
@@ -1378,6 +1396,259 @@ test("invalid endpoints explain the problem before submission and keep the other
     false,
   );
   assert.equal(submitted.length, 0);
+});
+
+test("Save explains each missing custom model field instead of silently doing nothing", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const save = within(dialog).getByRole("button", {
+    name: "Save",
+    exact: true,
+  });
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  const key = within(dialog).getByLabelText("API key");
+  const modelId = within(dialog).getByRole("textbox", { name: "Model ID" });
+  assert.equal(save.disabled, false);
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
+
+  await user.click(save);
+  assert.equal(submitted.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Enter the request URL\./,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+  assert.equal(key.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(key), "Enter an API key.");
+  assert.equal(modelId.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(modelId), "Enter a model ID.");
+  assert.equal(document.activeElement, address);
+
+  await user.type(address, "https://example.com/v1/chat/completions");
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(address.getAttribute("aria-invalid"), null);
+  await user.click(save);
+  assert.equal(submitted.length, 0);
+  assert.equal(document.activeElement, key);
+
+  await user.type(key, "example-key");
+  assert.equal(key.getAttribute("aria-invalid"), null);
+  assert.doesNotMatch(dialog.textContent, /Enter an API key/);
+  await user.type(modelId, "example-model");
+  assert.doesNotMatch(dialog.textContent, /Enter a model ID/);
+  await user.click(save);
+  assert.deepEqual(submitted, [
+    {
+      displayName: "example.com",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: "https://example.com/v1/chat/completions",
+      apiKey: "example-key",
+      model: { id: "example-model" },
+    },
+  ]);
+});
+
+test("a pasted address is checked at once without waiting for blur", async () => {
+  const user = userEvent.setup({ document });
+  renderModelSettings();
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.click(address);
+  await user.paste("https://api.example.com/v1/");
+  assert.equal(document.activeElement, address);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /endpoint ending in \/chat\/completions/,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+});
+
+test("typed endpoint problems wait for blur or submission, and LAN HTTP explains the plaintext risk", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://example.com/api");
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  await user.keyboard("{Enter}");
+  assert.equal(submitted.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /endpoint ending in \/chat\/completions/,
+  );
+  assert.equal(document.activeElement, address);
+
+  await user.clear(address);
+  await user.type(address, "http://192.168.1.5:1234/v1");
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /API key would be sent unencrypted.*localhost, 127\.0\.0\.1, \[::1\].*HTTPS/,
+  );
+  assert.equal(submitted.length, 0);
+});
+
+test("a scheme-less address reaches the form's own explanation instead of native URL validation", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "api.example.com/v1");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.equal(submitted.length, 0);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Enter a valid URL/,
+  );
+  assert.equal(
+    accessibleDescription(within(dialog).getByLabelText("API key")),
+    "Enter an API key.",
+  );
+  assert.equal(document.activeElement, address);
+});
+
+test("Save names the missing vendor and the missing preset fields", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateBuiltinProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = screen.getByRole("dialog", { name: "Add model" });
+  const save = within(dialog).getByRole("button", {
+    name: "Save",
+    exact: true,
+  });
+  const vendor = within(dialog).getByRole("combobox", { name: "Model vendor" });
+  assert.equal(save.disabled, false);
+  await user.click(save);
+  assert.equal(vendor.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(vendor), "Select a model vendor first.");
+  assert.equal(document.activeElement, vendor);
+
+  await user.click(vendor);
+  await user.click(
+    await screen.findByRole("option", { name: "DeepSeek", exact: true }),
+  );
+  assert.equal(vendor.getAttribute("aria-invalid"), null);
+  assert.doesNotMatch(dialog.textContent, /Select a model vendor first/);
+  await user.click(save);
+  const key = within(dialog).getByLabelText("API key");
+  const model = within(dialog).getByRole("combobox", { name: "Model ID" });
+  assert.equal(key.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(key), "Enter an API key.");
+  assert.equal(model.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(model), "Choose a model ID.");
+  assert.equal(document.activeElement, key);
+  assert.equal(submitted.length, 0);
+
+  await user.type(key, "official-secret");
+  await user.click(model);
+  await user.click(
+    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
+  );
+  assert.equal(model.getAttribute("aria-invalid"), null);
+  await user.click(save);
+  assert.deepEqual(submitted, [
+    {
+      providerId: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "official-secret",
+      model: { id: "deepseek-flash" },
+    },
+  ]);
+});
+
+test("editing keeps Save disabled without changes and explains an emptied model ID", async () => {
+  const user = userEvent.setup({ document });
+  const changes = [];
+  const source = {
+    id: "source-empty-model",
+    builtinProviderId: null,
+    displayName: "Team",
+    protocol: "openai_chat_completions",
+    normalizedBaseUrl: "https://example.com/v1/chat/completions",
+    state: "ready",
+    credentialStatus: "ready",
+    enabled: true,
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [
+      {
+        id: "model-a",
+        displayName: "Model A",
+        metadata: {},
+        metadataProvenance: "unknown",
+        testStatus: "connected",
+        ready: true,
+      },
+    ],
+  };
+  renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onSaveCustomModel: async (input) => {
+      changes.push(input);
+      return {
+        accepted: true,
+        applied: [],
+        source,
+        modelId: input.nextModelId,
+        reviewRequired: false,
+      };
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  const save = within(dialog).getByRole("button", {
+    name: "Save",
+    exact: true,
+  });
+  assert.equal(save.disabled, true);
+  const modelId = within(dialog).getByRole("textbox", { name: "Model ID" });
+  await user.clear(modelId);
+  assert.equal(save.disabled, false);
+  await user.click(save);
+  assert.equal(changes.length, 0);
+  assert.equal(modelId.getAttribute("aria-invalid"), "true");
+  assert.equal(accessibleDescription(modelId), "Enter a model ID.");
+  assert.equal(document.activeElement, modelId);
 });
 
 test("model test rejection and exceptions produce an actionable local message", async () => {
