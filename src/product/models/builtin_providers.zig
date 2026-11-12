@@ -74,6 +74,15 @@ pub const definitions = [_]Definition{
         .documentation_url = "https://docs.bigmodel.cn/cn/api/introduction",
         .model_ids = &.{ "glm-5.3", "glm-5.2", "glm-5.1" },
     },
+    .{
+        .id = .hunyuan,
+        .display_name = "腾讯混元",
+        .protocol = .openai_chat_completions,
+        .default_base_url = "https://tokenhub.tencentmaas.com/v1",
+        .api_key_url = "https://console.cloud.tencent.com/tokenhub/apikey",
+        .documentation_url = "https://cloud.tencent.com/document/product/1823/132252",
+        .model_ids = &.{ "hy4", "hy4-preview", "hy3" },
+    },
 };
 
 pub fn find(id: contract.BuiltinProviderId) *const Definition {
@@ -96,7 +105,7 @@ pub fn views() []const contract.BuiltinProviderPresetView {
 test "official Provider recipes use explicit execution routes" {
     const std = @import("std");
 
-    try std.testing.expectEqual(@as(usize, 4), definitions.len);
+    try std.testing.expectEqual(@typeInfo(contract.BuiltinProviderId).@"enum".fields.len, definitions.len);
     for (definitions) |definition| {
         try std.testing.expect(definition.display_name.len != 0);
         try std.testing.expect(contract.validProviderBaseUrl(definition.default_base_url));

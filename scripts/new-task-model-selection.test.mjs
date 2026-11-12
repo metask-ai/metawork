@@ -105,6 +105,9 @@ test("official catalog icons identify model families without changing model auth
     "glm-5.3-flash",
     "kimi-k3.1-pro",
     "MiniMax-M3",
+    "Hy4-preview",
+    "hy3",
+    "hunyuan-turbos-latest",
     "unrecognized-model",
     "my-deepseek-model",
   ];
@@ -116,7 +119,18 @@ test("official catalog icons identify model families without changing model auth
   const options = readyModelOptions(models, "metask");
   assert.deepEqual(
     options.map((option) => option.vendor),
-    ["deepseek", "glm", "glm", "kimi", "minimax", "custom", "custom"],
+    [
+      "deepseek",
+      "glm",
+      "glm",
+      "kimi",
+      "minimax",
+      "hunyuan",
+      "hunyuan",
+      "hunyuan",
+      "custom",
+      "custom",
+    ],
   );
   assert.deepEqual(
     options.map((option) => option.modelRef),
@@ -141,6 +155,7 @@ test("custom endpoints never infer brands from model ids and builtin presets kee
       "glm-5.3-flash",
       "kimi-k3.1-pro",
       "minimax-m3",
+      "hy4",
     ].map((id) => ({ id, displayName: id, metadata, ready: true })),
   };
   models.customProviders = [

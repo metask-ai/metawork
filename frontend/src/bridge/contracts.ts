@@ -65,6 +65,7 @@ export const builtinProviderIds = [
   "kimi",
   "minimax",
   "glm",
+  "hunyuan",
 ] as const;
 export type BuiltinProviderId = (typeof builtinProviderIds)[number];
 export type BuiltinProviderPresetView = {

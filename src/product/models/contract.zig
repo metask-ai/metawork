@@ -72,6 +72,7 @@ pub const BuiltinProviderId = enum {
     kimi,
     minimax,
     glm,
+    hunyuan,
 };
 
 pub const BuiltinProviderPresetView = struct {

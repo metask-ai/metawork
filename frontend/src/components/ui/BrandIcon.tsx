@@ -2,6 +2,7 @@ import deepseekUrl from "@lobehub/icons-static-svg/icons/deepseek.svg?url";
 import kimiUrl from "@lobehub/icons-static-svg/icons/kimi.svg?url";
 import minimaxUrl from "@lobehub/icons-static-svg/icons/minimax.svg?url";
 import glmUrl from "@lobehub/icons-static-svg/icons/zai.svg?url";
+import hunyuanUrl from "@lobehub/icons-static-svg/icons/hunyuan.svg?url";
 import { Icon } from "./Icon.tsx";
 
 const marks = {
@@ -9,6 +10,7 @@ const marks = {
   kimi: kimiUrl,
   minimax: minimaxUrl,
   glm: glmUrl,
+  hunyuan: hunyuanUrl,
 };
 
 export type Brand = keyof typeof marks | "custom";
