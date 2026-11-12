@@ -16,6 +16,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
@@ -859,54 +860,57 @@ export function ComposerFooter({
             aria-label={t("run.context")}
           >
             <div className="composer-context-actions">
-              {attachmentsEnabled && draft.kind !== "skill" && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  ref={attachmentButtonRef}
-                  className="composer-attachment-add"
-                  data-busy={attachmentBusy || undefined}
-                  aria-busy={attachmentBusy || undefined}
-                  aria-label={t(
-                    attachmentRemoving
-                      ? "attachment.removing"
-                      : attachmentCancelling
-                        ? "attachment.cancelling"
-                        : attachmentBusy && onCancelAttachments
-                          ? "attachment.cancel"
-                          : "attachment.add",
-                  )}
-                  title={t(
-                    attachmentRemoving
-                      ? "attachment.removing"
-                      : attachmentCancelling
-                        ? "attachment.cancelling"
-                        : attachmentBusy && onCancelAttachments
-                          ? "attachment.cancel"
-                          : "attachment.add",
-                  )}
-                  disabled={
-                    composeDisabled ||
-                    attachmentActionsDisabled ||
-                    attachmentCancelling ||
-                    (attachmentBusy && !onCancelAttachments)
-                  }
-                  onClick={
-                    attachmentBusy ? onCancelAttachments : onChooseAttachments
-                  }
-                >
-                  <Icon
-                    name={
-                      attachmentBusy
-                        ? onCancelAttachments
-                          ? "close"
-                          : "loading"
-                        : "plus"
+              {draft.kind !== "skill" &&
+                (attachmentBusy ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    ref={attachmentButtonRef}
+                    className="composer-attachment-add"
+                    data-busy
+                    aria-busy
+                    aria-label={t(
+                      attachmentRemoving
+                        ? "attachment.removing"
+                        : attachmentCancelling
+                          ? "attachment.cancelling"
+                          : onCancelAttachments
+                            ? "attachment.cancel"
+                            : "composer.add",
+                    )}
+                    title={t(
+                      attachmentRemoving
+                        ? "attachment.removing"
+                        : attachmentCancelling
+                          ? "attachment.cancelling"
+                          : onCancelAttachments
+                            ? "attachment.cancel"
+                            : "composer.add",
+                    )}
+                    disabled={
+                      composeDisabled ||
+                      attachmentActionsDisabled ||
+                      attachmentCancelling ||
+                      !onCancelAttachments
                     }
+                    onClick={onCancelAttachments}
+                  >
+                    <Icon name={onCancelAttachments ? "close" : "loading"} />
+                  </Button>
+                ) : (
+                  <ComposerAddMenu
+                    key={draftScope}
+                    triggerRef={attachmentButtonRef}
+                    disabled={composeDisabled || attachmentActionsDisabled}
+                    attachmentsEnabled={attachmentsEnabled}
+                    skillText={draft.kind === "text" ? draft.text : null}
+                    skillCatalog={skillCatalog}
+                    onChooseAttachments={onChooseAttachments}
+                    onRefreshSkills={onRefreshSkillCatalog}
+                    onChooseSkill={chooseCandidate}
                   />
-                </Button>
-              )}
+                ))}
               {approvalModeControl}
               {workspaceEditable && workspaceContext}
             </div>

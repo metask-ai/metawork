@@ -817,6 +817,9 @@ export const zhCN: Record<MessageId, string> = {
   "run.activity.unsynchronized": "状态尚未同步",
   "run.activity.requesting_stop": "正在请求停止…",
   "attachment.add": "添加文件",
+  "composer.add": "添加内容",
+  "composer.add_skill": "添加技能",
+  "composer.add_skill_with_attachments": "请先移除附件，再添加技能。",
   "attachment.removing": "正在移除文件…",
   "attachment.error.release_unconfirmed":
     "无法确认文件清理结果，正在恢复连接；未发送的附件需要重新选择。",

@@ -473,14 +473,19 @@ async function fixture(ctx, { batches, cancelResult } = {}) {
     });
   };
   await select("First attachment task");
-  await screen.findByRole("button", { name: "Add files" });
+  await screen.findByRole("button", { name: "Add to message" });
   return { releases, adds, runs, select, drop: (paths) => drops(paths) };
+}
+
+async function chooseFiles(user = userEvent.setup({ document })) {
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Add files" }));
 }
 
 test("App removal blocks rapid add/send/drop, preserves typing and never writes another Task", async (ctx) => {
   const f = await fixture(ctx);
   const user = userEvent.setup({ document });
-  await user.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles(user);
   await screen.findByRole("button", { name: "Remove a.html" });
   const textbox = document.querySelector("textarea");
   fireEvent.change(textbox, { target: { value: "first text" } });
@@ -515,7 +520,7 @@ test("App removal blocks rapid add/send/drop, preserves typing and never writes 
 
 test("App ignores unconfirmed feedback after leaving and returning to the same scope", async (ctx) => {
   const f = await fixture(ctx);
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles();
   fireEvent.click(await screen.findByRole("button", { name: "Remove a.html" }));
   fireEvent.change(document.querySelector("textarea"), {
     target: { value: "keep this text" },
@@ -545,7 +550,7 @@ test("App ignores unconfirmed feedback after leaving and returning to the same s
 test("App waits for release before restoring adjacent focus and never interrupts typing", async (ctx) => {
   const f = await fixture(ctx);
   const user = userEvent.setup({ document });
-  await user.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles(user);
   await user.click(
     await screen.findByRole("button", { name: "Remove a.html" }),
   );
@@ -588,28 +593,28 @@ test("App allows 5+3 in one message and full drafts coexist with other Task and 
   fireEvent.change(document.querySelector("textarea"), {
     target: { value: "keep original text" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles();
   await waitFor(() => assert.equal(visibleAttachments().length, 5));
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles();
   await waitFor(() => assert.equal(visibleAttachments().length, 8));
   assert.deepEqual(
     f.adds.map((add) => add.remainingFiles),
     [8, 3],
   );
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles();
   await screen.findByText("You can attach up to 8 files per message.");
   assert.equal(f.adds.length, 2);
   assert.equal(visibleAttachments().length, 8);
   await f.select("Second attachment task");
   await waitFor(() => assert.equal(visibleAttachments().length, 0));
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles();
   await waitFor(() => assert.equal(visibleAttachments().length, 1));
   assert.equal(f.adds[2].remainingFiles, 8);
   fireEvent.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
   await waitFor(() => assert.equal(visibleAttachments().length, 0));
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await chooseFiles();
   await waitFor(() => assert.equal(visibleAttachments().length, 1));
   assert.equal(f.adds[3].remainingFiles, 8);
   await f.select("First attachment task");
@@ -620,7 +625,7 @@ test("App allows 5+3 in one message and full drafts coexist with other Task and 
 for (const source of ["drop", "paste"]) {
   test(`App rejects 7+2 ${source} before creating an operation or reading files`, async (ctx) => {
     const f = await fixture(ctx, { batches: [attachmentBatch(0, 7)] });
-    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await chooseFiles();
     await waitFor(() => assert.equal(visibleAttachments().length, 7));
     const textbox = document.querySelector("textarea");
     fireEvent.change(textbox, { target: { value: "still editable" } });
@@ -656,9 +661,9 @@ for (const cleanupFailed of [false, true]) {
       batches: [attachmentBatch(0, 7), attachmentBatch(7, 2)],
       cancelResult: cleanupFailed ? { status: "cleanup_failed" } : undefined,
     });
-    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await chooseFiles();
     await waitFor(() => assert.equal(visibleAttachments().length, 7));
-    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await chooseFiles();
     await waitFor(() => assert.equal(f.adds[1]?.cancelled, true));
     await screen.findByText(
       cleanupFailed

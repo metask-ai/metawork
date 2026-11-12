@@ -956,6 +956,10 @@ export const enUS = {
   "run.activity.unsynchronized": "Status not synchronized",
   "run.activity.requesting_stop": "Requesting stop…",
   "attachment.add": "Add files",
+  "composer.add": "Add to message",
+  "composer.add_skill": "Add Skill",
+  "composer.add_skill_with_attachments":
+    "Remove attachments before adding a Skill.",
   "attachment.removing": "Removing file…",
   "attachment.error.release_unconfirmed":
     "File cleanup could not be confirmed. Restoring the connection; unsent files need to be selected again.",

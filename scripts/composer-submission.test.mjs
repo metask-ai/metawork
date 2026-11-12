@@ -529,7 +529,11 @@ async function renderPendingPasteApp(ctx, options) {
 
 test("App image paste reports unavailable attachments without starting a writer", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { attachmentsEnabled: false });
-  assert.ok(screen.queryByRole("button", { name: "Add files" }) === null);
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  assert.ok(await screen.findByRole("menuitem", { name: "Add Skill" }));
+  assert.equal(screen.queryByRole("menuitem", { name: "Add files" }), null);
+  await user.keyboard("{Escape}");
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
   ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () =>
     assert.fail("Unavailable attachments must not reserve resources"),
@@ -550,7 +554,7 @@ test("App cancelled image paste preserves edits and ignores a late ready result"
   fireEvent.click(screen.getByRole("button", { name: "Cancel adding files" }));
   await waitFor(() =>
     assert.equal(
-      screen.getByRole("button", { name: "Add files" }).disabled,
+      screen.getByRole("button", { name: "Add to message" }).disabled,
       false,
     ),
   );

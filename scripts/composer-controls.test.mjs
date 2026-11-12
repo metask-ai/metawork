@@ -2869,7 +2869,12 @@ test("Slash Tab leaves an unknown or disabled candidate instead of trapping focu
       fireEvent.keyDown(composer.textarea, { key: "Enter" });
       assert.equal(composer.submissions(), 0);
       await user.tab();
-      assert.equal(document.activeElement, after);
+      assert.equal(
+        document.activeElement?.getAttribute("aria-label"),
+        "Add to message",
+      );
+      await user.tab();
+      assert.ok(document.activeElement === after);
     } finally {
       after.remove();
       cleanup();
@@ -2894,8 +2899,14 @@ test("Slash Tab releases focus when its highlighted command becomes disabled", a
   document.body.append(after);
   try {
     composer.textarea.focus();
-    await userEvent.setup({ document }).tab();
-    assert.equal(document.activeElement, after);
+    const user = userEvent.setup({ document });
+    await user.tab();
+    assert.equal(
+      document.activeElement?.getAttribute("aria-label"),
+      "Add to message",
+    );
+    await user.tab();
+    assert.ok(document.activeElement === after);
     assert.equal(composer.submissions(), 0);
   } finally {
     after.remove();
@@ -3714,7 +3725,61 @@ test("multimodal drafts expose ordered removable chips and preserve keyboard foc
   );
 });
 
-test("removing the last attachment returns keyboard focus to the picker", async () => {
+test("Composer Add menu selects an enabled Skill and preserves the message", async () => {
+  const user = userEvent.setup({ document });
+  const draftChanges = [];
+  let picks = 0;
+  let refreshes = 0;
+  const skill = {
+    skillId: "review-id",
+    skillPolicyKey: "review-policy",
+    invocationName: "review",
+    displayName: "Review code",
+    description: "",
+    argumentNames: ["message"],
+    maxValues: 1,
+    enabled: true,
+  };
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    skillCatalog: {
+      availability: "ready",
+      revision: "4",
+      selectionRevision: "2",
+      skills: [
+        skill,
+        {
+          ...skill,
+          skillId: "disabled-id",
+          invocationName: "disabled",
+          displayName: "Disabled Skill",
+          enabled: false,
+        },
+      ],
+    },
+    onChooseAttachments: () => picks++,
+    onRefreshSkillCatalog: () => refreshes++,
+    onDraftChange: (draft) => draftChanges.push(draft),
+  });
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  assert.ok(await screen.findByRole("menuitem", { name: "Add files" }));
+  assert.equal(picks, 0);
+  await user.click(screen.getByRole("menuitem", { name: "Add Skill" }));
+  const option = await screen.findByRole("menuitem", { name: "Review code" });
+  assert.equal(
+    screen.queryByRole("menuitem", { name: "Disabled Skill" }),
+    null,
+  );
+  assert.equal(refreshes, 1);
+  await user.click(option);
+  assert.equal(composer.textarea.value, "请检查当前实现");
+  assert.equal(document.activeElement, composer.textarea);
+  assert.equal(composer.submissions(), 0);
+  assert.equal(draftChanges.at(-1).skillId, "review-id");
+  assert.deepEqual(draftChanges.at(-1).argumentValues, ["请检查当前实现"]);
+});
+
+test("removing the last attachment returns keyboard focus to the Add menu", async () => {
   const removed = [];
   let composer;
   composer = renderComposer({
@@ -3743,7 +3808,7 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(
     document.activeElement,
-    screen.getByRole("button", { name: "Add files" }),
+    screen.getByRole("button", { name: "Add to message" }),
   );
 });
 
