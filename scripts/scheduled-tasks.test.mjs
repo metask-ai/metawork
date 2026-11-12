@@ -893,6 +893,7 @@ test("schedule selection submits exact source proof independently of generic New
           sourceId: "custom",
           modelId: "fixture-model",
         };
+        snapshot.models.defaultSelectionDisplayName = null;
       }
       let created = null;
       renderDom(
@@ -1161,6 +1162,7 @@ test("an invalid starting preference can be replaced without default admission",
     sourceId: "removed",
     modelId: "disabled",
   };
+  snapshot.models.defaultSelectionDisplayName = null;
   snapshot.newTaskAdmission.available = false;
   let created = null;
   renderDom(

@@ -2281,6 +2281,7 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     availability: "ready",
     providers: [],
     defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
+    defaultSelectionDisplayName: null,
     builtinProviderPresets: [],
     customProviders: [
       {

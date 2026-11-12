@@ -125,7 +125,7 @@ Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，M
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 
-`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。生图不形成用户选择、独立 revision 或持久化 intent。
+`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
 
 Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
 

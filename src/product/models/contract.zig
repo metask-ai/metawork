@@ -194,6 +194,7 @@ pub const ModelsView = struct {
     persistence_health: PersistenceHealth,
     providers: []const ProviderView = &.{},
     default_selection: ?ModelRef = null,
+    default_selection_display_name: ?[]const u8 = null,
     selection_revision: u64 = 0,
     operation: ModelsOperation = .idle,
     error_code: ModelsError = .none,

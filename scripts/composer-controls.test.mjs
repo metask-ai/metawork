@@ -473,6 +473,7 @@ const readySettingsModels = {
   ],
 
   defaultSelection: { sourceId: "metask", modelId: "model-1" },
+  defaultSelectionDisplayName: null,
   selectionRevision: "1",
   operation: "idle",
   errorCode: "none",

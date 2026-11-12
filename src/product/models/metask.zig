@@ -275,6 +275,15 @@ pub const CatalogSession = struct {
         return self.models.items[index].protocol;
     }
 
+    pub fn preferenceDisplayName(self: *const CatalogSession, model_id: []const u8) []const u8 {
+        const index = self.findModel(model_id) orelse return "";
+        const model = &self.models.items[index];
+        const credential = self.credential.view();
+        const name = model.display_name.view();
+        if (model.protocol == null or credential.len == 0 or std.mem.indexOf(u8, name, credential) != null) return "";
+        return name;
+    }
+
     pub fn ownsSourceSelection(
         self: *const CatalogSession,
         account_id: []const u8,

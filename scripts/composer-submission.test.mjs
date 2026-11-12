@@ -769,7 +769,9 @@ for (const catalogFirst of [true, false]) {
     if (!catalogFirst) await disableModel();
 
     const selector = await screen.findByRole("combobox", { name: "Model" });
-    await waitFor(() => assert.equal(selector.textContent, original.id));
+    await waitFor(() =>
+      assert.equal(selector.textContent, original.displayName),
+    );
     assert.equal(selector.disabled, false);
     assert.equal(
       screen.getByRole("combobox", { name: "Choose working directory" })
@@ -1130,6 +1132,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   ];
   const defaultModel = { sourceId: "metask", modelId: "minimax-m3" };
   fixture.snapshot.models.defaultSelection = defaultModel;
+  fixture.snapshot.models.defaultSelectionDisplayName = "minimax-m3";
   await fixture.publish();
   const selector = screen.getByRole("combobox", { name: "Model" });
   await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
@@ -1259,6 +1262,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
     sourceId: "cc",
     modelId: "gpt-5.6-sol",
   };
+  fixture.snapshot.models.defaultSelectionDisplayName = null;
   await fixture.publish();
   await user.click(screen.getByRole("combobox", { name: "Model" }));
   assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
@@ -1327,6 +1331,31 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   assert.deepEqual(fixture.snapshot.models.defaultSelection, {
     sourceId: "cc",
     modelId: "gpt-5.6-sol",
+  });
+});
+
+test("App sends the current Metask model ID for a unique saved display name", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const metask = fixture.snapshot.models.providers.find(
+    (provider) => provider.id === "metask",
+  );
+  const original = metask.models[0];
+  fixture.snapshot.models.defaultSelection = {
+    sourceId: "metask",
+    modelId: original.id,
+  };
+  fixture.snapshot.models.defaultSelectionDisplayName = original.displayName;
+  metask.models = [{ ...original, id: "current-metask-model" }];
+  metask.catalogGeneration = "98";
+  await fixture.publish();
+
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Use the saved model{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  assert.deepEqual(fixture.createRequests[0][1], {
+    targetModelRef: { sourceId: "metask", modelId: "current-metask-model" },
+    expectedSourceGeneration: metask.sourceGeneration,
+    expectedCatalogGeneration: "98",
   });
 });
 

@@ -112,6 +112,7 @@ function signedOut() {
   Object.assign(snapshot.models, {
     availability: "needs_authentication",
     defaultSelection: null,
+    defaultSelectionDisplayName: null,
     customProviders: [],
   });
   Object.assign(snapshot.models.providers[0], {

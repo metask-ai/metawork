@@ -7029,6 +7029,10 @@ pub const Runtime = struct {
         }
         writer.writeAll("],\"defaultSelection\":") catch return error.SnapshotTooLarge;
         try self.writeOptionalModelRef(writer, view.default_selection);
+        writer.writeAll(",\"defaultSelectionDisplayName\":") catch return error.SnapshotTooLarge;
+        if (view.default_selection_display_name) |name| {
+            try self.projectedJsonValue(writer, name);
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"builtinProviderPresets\":[", .{
             view.selection_revision,
             @tagName(view.operation),

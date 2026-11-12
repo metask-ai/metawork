@@ -115,7 +115,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 新 Task 必须提交完整 `ModelRef + expected source generation + expected catalog generation`；Host 精确解析目标来源、当前 protocol、endpoint 与 credential，建立 Task-owned execution binding。起始偏好不授予执行资格，不存在进程级 active default execution 或空选模创建路径。已有 Task 与 Run 保留自身 generation 和历史事实。
 
-New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以完整来源与 model id 区分候选。无草稿选择时显示 Host 保存的起始偏好；无偏好时要求明确选择，不自动采用目录首项。偏好或草稿选择失效时保留模型名称与草稿，允许选择其他合法候选，仅阻止无效发送，不回退其他模型。所有创建均提交显式完整目标；创建成功后保存 Task 模型意图。
+New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以完整来源与 model id 区分候选。无草稿选择时使用 Host 保存的起始偏好。Metask 起始偏好按显示名在当前可选 Metask 对话目录中区分大小写匹配，唯一匹配时采用该项的当前模型 ID 和目录代次。未保存显示名、零匹配或重名时要求明确重选。显式草稿选择和 Custom Provider 偏好按完整来源与模型 ID 解析；无偏好时要求明确选择，不自动采用目录首项。偏好或草稿选择失效时保留模型名称与草稿，允许选择其他合法候选，仅阻止无效发送，不回退其他模型。所有创建均提交显式完整目标；创建成功后保存 Task 模型意图。
 
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 protocol、model、base URL 或 API Key；
 - Metask 模型用途与当前模型设置、Composer 的展示资格只由 `capabilities.endpoints` 判定：`messages`、`responses` 或 `chat_completions` 至少一个明确 `supported = true`，且 `images_generations`、`videos` 均未声明支持，才属于当前可选对话目录；同时支持对话和媒体生成端点的混合模型也排除。端点缺失、null 或 false 按不支持处理；全局及端点内部的 input/output、其他能力字段和模型名称不作为第二套用途判定。协议优先级由 [Models source 合同](product-architecture.md#21-models-aggregate-与-account-handoff)拥有。图片等输入能力不影响展示资格，Host 对设置选择与新的执行解析使用同一合格目录。

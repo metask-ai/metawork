@@ -1100,7 +1100,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - Metask 的 credential authority 由 OAuth 会话隐式提供，Models 页面不显示或选择 API Key；user-managed Provider 的 credential 通过 Models 内专用服务配置表单管理，不要求先选择默认模型，已保存 secret 永不显示或回填；
 
 - 添加模型时选择厂商或自定义服务只准备表单，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
-- 模型管理不提交模型选择 mutation。New task Composer 直接列出所有来源的 ready 模型；缺少选择但已有可用候选时，恢复动作直接打开输入区模型列表，不能再要求用户进入管理页设置默认值；
+- 模型管理不提交模型选择 mutation。New task Composer 直接列出所有来源的 ready 模型，Metask 同名项在菜单内附上各自的模型 ID 以便重选；缺少选择但已有可用候选时，恢复动作直接打开输入区模型列表，不能再要求用户进入管理页设置默认值；
 - 模型图标表示模型厂商品牌，使用同一套本地打包的小尺寸标志；未知厂商与自定义来源的通用模型图标使用线框立方体。Metask 官方目录按模型 ID 的已知系列映射对应厂商，无法识别时使用通用模型图标；内置厂商预设按 Host 发布的预设身份显示对应厂商标志；自定义接口始终使用通用模型图标，不根据用户填写的模型 ID、显示名称、服务名称或地址推断厂商。该展示映射不参与模型 identity、protocol、credential 或执行资格判定。添加模型的厂商选择器、模型管理列表、Composer 菜单与当前模型触发器复用同一图标组件，沿用文字颜色适配深浅主题，不增加 Provider 名称文案、独立操作或可访问名称；来源仍由菜单分组表达。
 - 既有 Task 只显示解释历史所需的 protocol、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持可读，恢复资格由 Host 发布；设置变化不能使其静默采用起始偏好或伪造 Session；

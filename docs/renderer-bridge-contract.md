@@ -405,6 +405,8 @@ Host 将 Desired Registry 的完整非敏感 typed connection、authorization op
 
 Renderer 的 Slash Resolver 只在 Composer 首 token 处理 `/` 手势。单一 Command registry 当前只由 `App` action controller 复用既有 New task 动作；Command 原文在 Renderer 消费，不产生 Run。Skill 候选来自当前 Workspace catalog projection，未选工作目录的新任务草稿使用顶层 personal catalog projection。选择后形成带稳定 identity、pinned revision 与 positional arguments 的 tagged draft，经 `tasks.sendInput` 提交。Command/Skill 同名时裸名称归 Command，Skill 使用 `/skill:name`；Renderer 不读取 Skill body、物理路径或 policy。
 
+`models.defaultSelectionDisplayName` 为必需的 nullable string，仅在保存了非空 Metask 起始偏好显示名时为字符串。新任务 Composer 依据[产品需求](requirements.md#52-账号provider模型与执行配置)将它解析为目录中的当前 `ModelRef`，创建命令继续提交精确模型 ID 和当前 generation。
+
 退役 `metawork.models.configureMetaskSelection` 与 `metawork.models.selectDefault` Renderer command，不提供旧 payload 兼容。起始偏好仅由 Host 在交互 Task 创建成功或主动模型意图 confirmed commit 后 best-effort 保存；自动创建、目录更新或浏览历史不更新。偏好写失败不改变已确认 Task 结果，根 Models.errorCode 发布 `preference_not_saved` 独立非阻塞提示；Provider errorCode 不产生此值。
 
 生图模型由 Host 的 Models owner 自动解析，不提供 Renderer 选择或清除命令。退休 `metawork.models.configureMetaskImageSelection` 不再注册或允许；Renderer 不能提交图片 model、endpoint、credential、目录顺序或生成参数。执行授权仍在每个 Run admission 通过即时 lease 取得，不由设置操作授予。

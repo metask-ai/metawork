@@ -99,6 +99,7 @@ pub const Registry = struct {
     metask_source_generation: u64 = 0,
     default_source_id: []u8 = &.{},
     default_model_id: []u8 = &.{},
+    default_display_name: []u8 = &.{},
     selection_revision: u64 = 0,
     view_storage: std.ArrayList(contract.CustomProviderView) = .empty,
     model_view_storage: std.ArrayList(contract.CustomProviderModelView) = .empty,
@@ -117,8 +118,7 @@ pub const Registry = struct {
         self.view_storage.deinit(self.allocator);
         self.model_view_storage.deinit(self.allocator);
         self.freeSelectionText(&self.metask_principal_ref);
-        self.freeSelectionText(&self.default_source_id);
-        self.freeSelectionText(&self.default_model_id);
+        self.clearDefaultSelection();
         self.* = undefined;
     }
 
@@ -145,6 +145,8 @@ pub const Registry = struct {
             result.default_source_id = try self.allocator.dupe(u8, self.default_source_id);
         if (self.default_model_id.len != 0)
             result.default_model_id = try self.allocator.dupe(u8, self.default_model_id);
+        if (self.default_display_name.len != 0)
+            result.default_display_name = try self.allocator.dupe(u8, self.default_display_name);
         try result.providers.ensureTotalCapacity(
             self.allocator,
             self.providers.items.len,
@@ -542,14 +544,18 @@ pub const Registry = struct {
 
     /// Called only with a confirmed consumer selection. Catalog membership is
     /// execution authority; remembering an identity does not grant authority.
-    pub fn rememberPreference(self: *Registry, target: contract.ModelRef, revision: u64) (std.mem.Allocator.Error || Error)!void {
+    pub fn rememberPreference(self: *Registry, target: contract.ModelRef, display_name: []const u8, revision: u64) (std.mem.Allocator.Error || Error)!void {
         if (target.source_id.len == 0 or target.source_id.len > contract.Limits.provider_id_bytes or target.model_id.len == 0 or target.model_id.len > contract.Limits.model_id_bytes or revision == 0 or revision == self.selection_revision) return error.InvalidData;
+        if (!validPreferenceName(target.source_id, display_name)) return error.InvalidData;
         const source = try self.allocator.dupe(u8, target.source_id);
         errdefer self.allocator.free(source);
         const model = try self.allocator.dupe(u8, target.model_id);
+        errdefer self.allocator.free(model);
+        const name: []u8 = if (display_name.len == 0) &.{} else try self.allocator.dupe(u8, display_name);
         self.clearDefaultSelection();
         self.default_source_id = source;
         self.default_model_id = model;
+        self.default_display_name = name;
         self.selection_revision = revision;
     }
 
@@ -565,6 +571,7 @@ pub const Registry = struct {
     fn clearDefaultSelection(self: *Registry) void {
         self.freeSelectionText(&self.default_source_id);
         self.freeSelectionText(&self.default_model_id);
+        self.freeSelectionText(&self.default_display_name);
     }
 
     /// Reconciles a credential that the platform store no longer contains.
@@ -804,7 +811,27 @@ const MetaskSourceWire = struct { principal_ref: []const u8, source_generation: 
 const ModelRefWire = struct {
     source_id: []const u8,
     model_id: []const u8,
+    display_name: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: ModelRefWire, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("source_id");
+        try writer.write(self.source_id);
+        try writer.objectField("model_id");
+        try writer.write(self.model_id);
+        if (self.display_name) |name| {
+            try writer.objectField("display_name");
+            try writer.write(name);
+        }
+        try writer.endObject();
+    }
 };
+
+fn validPreferenceName(source_id: []const u8, name: []const u8) bool {
+    return name.len == 0 or
+        (std.mem.eql(u8, source_id, contract.metask_source_id) and
+            name.len <= contract.Limits.model_display_name_bytes and std.unicode.utf8ValidateSlice(name));
+}
 
 const CanonicalModelMetadata = struct {
     value: contract.ModelMetadata,
@@ -900,6 +927,7 @@ pub fn encodeAlloc(
     const default_selection: ?ModelRefWire = if (registry.defaultSelection()) |selection| .{
         .source_id = selection.source_id,
         .model_id = selection.model_id,
+        .display_name = if (registry.default_display_name.len == 0) null else registry.default_display_name,
     } else null;
     const wire: CanonicalWire = .{
         .schema = 3,
@@ -1009,8 +1037,11 @@ pub fn decode(
             wire.selection_revision == 0)
             return error.InvalidData;
         if (selection.source_id.len > contract.Limits.provider_id_bytes or selection.model_id.len > contract.Limits.model_id_bytes) return error.InvalidData;
+        const display_name = selection.display_name orelse "";
+        if (!validPreferenceName(selection.source_id, display_name)) return error.InvalidData;
         result.default_source_id = try allocator.dupe(u8, selection.source_id);
         result.default_model_id = try allocator.dupe(u8, selection.model_id);
+        if (display_name.len != 0) result.default_display_name = try allocator.dupe(u8, display_name);
     }
     for (result.views()) |view|
         contract.validateCustomProviderView(view) catch return error.InvalidData;
@@ -1508,7 +1539,7 @@ test "provider deletion preserves a remembered identity across canonical round t
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
     try testCreate(&registry, .{ .provider_id = "slot", .spec = .{ .display_name = "OpenAI", .protocol = .openai_responses, .normalized_base_url = "https://api.openai.com/v1/responses" }, .credential_slot = .{ .id = "slot" }, .model = .{ .id = "gpt-5" } });
-    try registry.rememberPreference(.{ .source_id = "slot", .model_id = "gpt-5" }, 7);
+    try registry.rememberPreference(.{ .source_id = "slot", .model_id = "gpt-5" }, "", 7);
     try registry.remove(.{ .source_id = "slot", .expected_provider_revision = 1 });
     try std.testing.expectEqualStrings("gpt-5", registry.defaultSelection().?.model_id);
     try std.testing.expectEqual(@as(u64, 7), registry.selection_revision);
@@ -1541,7 +1572,7 @@ test "display-only provider updates settle stale probes without revoking readine
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try registry.rememberPreference(.{ .source_id = "slot-retest", .model_id = "gpt-5" }, 7);
+    try registry.rememberPreference(.{ .source_id = "slot-retest", .model_id = "gpt-5" }, "", 7);
     try registry.markTesting(probe);
 
     try registry.update(.{
@@ -1594,7 +1625,7 @@ test "Metask source authority never changes remembered consumer identity" {
     defer registry.deinit();
     try registry.configureMetaskSource("principal-1", 3);
     try std.testing.expect(registry.defaultSelection() == null);
-    try registry.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, 7);
+    try registry.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, "", 7);
     try registry.configureMetaskSource("principal-2", 9);
     try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
     try std.testing.expectEqual(@as(u64, 7), registry.selection_revision);
@@ -1631,7 +1662,7 @@ test "registry fails closed when a durable credential disappears" {
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try registry.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }, 7);
+    try registry.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }, "", 7);
 
     try registry.markCredentialMissing(selection);
 
@@ -1684,7 +1715,7 @@ test "registry codec restores opaque slots and the durable default binding" {
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try registry.rememberPreference(.{ .source_id = "custom-provider-0123456789abcdef0123456789abcdef", .model_id = "gemini-2.5-flash" }, 9);
+    try registry.rememberPreference(.{ .source_id = "custom-provider-0123456789abcdef0123456789abcdef", .model_id = "gemini-2.5-flash" }, "", 9);
 
     const encoded = try encodeAlloc(std.testing.allocator, &registry);
     defer std.testing.allocator.free(encoded);
@@ -1738,7 +1769,7 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
     };
     try registry.markTesting(model_a_probe);
     try registry.completeTest(model_a_probe, true);
-    try registry.rememberPreference(.{ .source_id = "slot-multi", .model_id = "model-a" }, 10);
+    try registry.rememberPreference(.{ .source_id = "slot-multi", .model_id = "model-a" }, "", 10);
     try registry.markTesting(model_a_probe);
 
     try registry.addCustomModel(.{

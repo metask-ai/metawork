@@ -245,6 +245,7 @@ export type ModelsView = {
     safeDiagnostic: string;
   }[];
   defaultSelection: ModelRef | null;
+  defaultSelectionDisplayName: string | null;
   selectionRevision: string;
   operation: "idle" | "refreshing_catalog";
   errorCode: ModelsErrorCode;
