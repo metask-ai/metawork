@@ -3486,7 +3486,10 @@ button.run-process-tool:hover {
   z-index: 50;
   display: grid;
   grid-template-columns:
-    max(72px, calc(var(--left-column) - var(--commandbar-left-inset)))
+    minmax(
+      max-content,
+      max(72px, calc(var(--left-column) - var(--commandbar-left-inset)))
+    )
     minmax(0, 1fr) auto auto;
   align-items: center;
   min-height: var(--window-bar-height);
@@ -3643,6 +3646,26 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .icon-button:hover {
   color: var(--ui-content-primary);
   background: color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
+}
+
+@media (max-width: 414px) {
+  html[data-metawork-renderer-window-controls="true"] .workbench-commandbar {
+    /* Reserve room for window controls, gaps and all seven workbench actions. */
+    --commandbar-action-width: clamp(24px, (100vw - 150px) / 7, 32px);
+  }
+
+  html[data-metawork-renderer-window-controls="true"]
+    .workbench-commandbar
+    .window-controls
+    button {
+    width: 32px;
+  }
+
+  html[data-metawork-renderer-window-controls="true"]
+    .workbench-commandbar
+    :is(.icon-button, .commandbar-alert summary, .task-attention-locator) {
+    width: var(--commandbar-action-width);
+  }
 }
 
 .commandbar-context {
@@ -9419,10 +9442,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     background: var(--ui-overlay-scrim);
   }
 
-  .workbench-commandbar {
-    grid-template-columns: 72px minmax(0, 1fr) auto auto;
-  }
-
   .commandbar-alert-slot {
     justify-self: end;
   }
@@ -9505,10 +9524,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .brand-subtitle {
     display: none;
-  }
-
-  .workbench-commandbar {
-    grid-template-columns: 72px minmax(0, 1fr) auto auto;
   }
 
   .delete-confirmation {

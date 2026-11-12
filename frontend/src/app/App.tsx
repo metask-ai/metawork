@@ -4648,6 +4648,8 @@ export default function App() {
         ) : null
       }
       onSearch={openGlobalSearch}
+      onNewTask={beginNewTask}
+      newTaskDisabled={bridgeUnavailable}
       searchButtonRef={searchButton}
       taskStageRef={taskStage}
       taskStageLabel={
@@ -4750,7 +4752,7 @@ export default function App() {
               <button
                 className="sidebar-capability focus-ring"
                 data-active={route === "workbench" && newTaskDraftActive}
-                disabled={viewSyncFailed || !bridgeReady}
+                disabled={bridgeUnavailable}
                 onClick={beginNewTask}
               >
                 <span className="sidebar-capability-mark" aria-hidden="true">
