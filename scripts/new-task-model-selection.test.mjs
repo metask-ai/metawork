@@ -69,6 +69,7 @@ function metaskModels() {
       },
     ],
     defaultSelection: { sourceId: "metask", modelId: "model-1" },
+    defaultSelectionDisplayName: "Model one",
     customProviders: [],
   };
 }
@@ -95,6 +96,65 @@ test("a new Task resolves its starting preference into an explicit source-qualif
       modelOptionId({ sourceId: "metask", modelId }),
     ),
   );
+});
+
+test("a saved Metask display name selects the current ID and generations", () => {
+  const models = metaskModels();
+  models.defaultSelectionDisplayName = "Model one";
+  models.providers[0].models[0].id = "model-1-new-upstream";
+  const state = newTaskModelSelectionState(models, null);
+  assert.equal(state.selectedModelLabel, "Model one");
+  assert.equal(
+    state.selectedModelId,
+    modelOptionId(state.intent.targetModelRef),
+  );
+  assert.deepEqual(state.intent, {
+    targetModelRef: { sourceId: "metask", modelId: "model-1-new-upstream" },
+    expectedSourceGeneration: "7",
+    expectedCatalogGeneration: "11",
+  });
+});
+
+test("Metask preference requires a unique name even if the saved ID still exists", () => {
+  const models = metaskModels();
+  models.defaultSelectionDisplayName = "Model one";
+  const [first, second] = models.providers[0].models;
+  second.displayName = first.displayName;
+  let state = newTaskModelSelectionState(models, null);
+  assert.equal(state.intent, null);
+  assert.equal(state.selectedModelId, "");
+  assert.deepEqual(
+    state.options.map((option) => option.menuLabel),
+    ["Model one (model-1)", "Model one (model-2)"],
+  );
+  const requested = { sourceId: "metask", modelId: second.id };
+  assert.deepEqual(
+    newTaskModelSelectionState(models, requested).intent.targetModelRef,
+    requested,
+  );
+
+  first.displayName = "New name";
+  second.displayName = "Another name";
+  state = newTaskModelSelectionState(models, null);
+  assert.equal(state.intent, null);
+  assert.equal(state.selectedModelLabel, "Model one");
+});
+
+test("a Metask preference without a saved display name requires selection", () => {
+  const models = metaskModels();
+  models.defaultSelectionDisplayName = null;
+  models.defaultSelection.modelId = "glm-5.3-flash";
+  models.providers[0].models[0] = {
+    id: "glm-5.3-flash-ksyun",
+    displayName: "glm-5.3-flash",
+    metadata,
+  };
+  const state = newTaskModelSelectionState(models, null);
+  assert.equal(state.intent, null);
+  assert.equal(state.selectedModelId, "");
+
+  models.providers[0].models[0].id = "glm-5.3-flash";
+  assert.equal(newTaskModelSelectionState(models, null).intent, null);
 });
 
 test("official catalog icons identify model families without changing model authority", () => {
@@ -243,6 +303,7 @@ test("a ready custom source can select another model for only the new Task", () 
     persistenceHealth: "ready",
     providers: [],
     defaultSelection: { sourceId: "provider-1", modelId: "custom-1" },
+    defaultSelectionDisplayName: null,
     customProviders: [
       {
         id: "provider-1",

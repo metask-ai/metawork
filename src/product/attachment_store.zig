@@ -133,6 +133,41 @@ pub const FileStore = struct {
         return .{ .handle = source, .before = stat };
     }
 
+    /// The caller validates the relative path before queuing the job. Open
+    /// each component without following links and retain the final handle.
+    pub fn openWorkspaceSource(self: *FileStore, root: []const u8, path: []const u8) Error!Source {
+        var dir = std.Io.Dir.openDirAbsolute(self.io, root, .{ .follow_symlinks = false }) catch return error.ReadFailed;
+        defer dir.close(self.io);
+        var segments = std.mem.splitScalar(u8, path, '/');
+        while (segments.next()) |segment| {
+            if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..") or
+                std.mem.indexOfAny(u8, segment, "\\:") != null) return error.ReadFailed;
+            if (segments.peek() == null) {
+                const expected = dir.statFile(self.io, segment, .{ .follow_symlinks = false }) catch return error.ReadFailed;
+                if (expected.kind != .file or expected.size == 0) return error.UnsupportedType;
+                const file = positionalHandle(dir.openFile(self.io, segment, .{
+                    .allow_directory = false,
+                    .follow_symlinks = false,
+                    .resolve_beneath = true,
+                    // Darwin acquires this lock with O_NONBLOCK at open,
+                    // including if the file was replaced by a FIFO after stat.
+                    .lock = if (@import("builtin").os.tag == .macos) .shared else .none,
+                    .lock_nonblocking = true,
+                }) catch return error.ReadFailed);
+                errdefer file.close(self.io);
+                const stat = file.stat(self.io) catch return error.ReadFailed;
+                if (stat.kind != .file or stat.size == 0) return error.UnsupportedType;
+                if (stat.inode != expected.inode) return error.FileChanged;
+                return .{ .handle = file, .before = stat };
+            }
+            const child = dir.openDir(self.io, segment, .{ .follow_symlinks = false }) catch return error.ReadFailed;
+            dir.close(self.io);
+            dir = child;
+            if ((dir.stat(self.io) catch return error.ReadFailed).kind != .directory) return error.ReadFailed;
+        }
+        return error.ReadFailed;
+    }
+
     /// Source is opened exactly once at probe; copy keeps that identity and
     /// checks cancellation between bounded reads and writes.
     pub fn copySource(self: *FileStore, source: Source, value: File, cancelled: ?*const std.atomic.Value(bool)) (Error || error{Cancelled})!void {

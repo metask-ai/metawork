@@ -9299,7 +9299,7 @@ fn validateRunInput(
             }
             if (multimodal.attachments.len > parts.len - part_count)
                 return error.RunInputTooLarge;
-            var has_text_attachment = false;
+            var requires_instruction = false;
             for (multimodal.attachments) |item| {
                 if (part_count >= parts.len) return error.RunInputTooLarge;
                 parts[part_count] = switch (item.kind) {
@@ -9313,9 +9313,9 @@ fn validateRunInput(
                     } },
                     .file => text: {
                         if (item.format != null) return error.InvalidRunInput;
-                        has_text_attachment = true;
+                        requires_instruction = requires_instruction or item.workspace_reference_path == null;
                         break :text .{ .text_attachment = .{
-                            .display_name = item.display_name,
+                            .display_name = item.workspace_reference_path orelse item.display_name,
                             .bytes = item.bytes,
                         } };
                     },
@@ -9327,7 +9327,7 @@ fn validateRunInput(
                     part_count += 1;
                 }
             }
-            if (has_text_attachment and
+            if (requires_instruction and
                 std.mem.trim(u8, multimodal.text, " \t\r\n").len == 0)
                 return error.MissingInstruction;
             break :blk .{ .multimodal = parts[0..part_count] };
@@ -11282,6 +11282,29 @@ test "permission review historical groups include only adopted inputs in adoptio
     try std.testing.expectEqual(@as(usize, 4), input.omitted_user_messages);
     var mandatory: [4]u8 = undefined;
     try std.testing.expectError(error.WriteFailed, currentReviewIntent(&runs[2].?, 0, &mandatory));
+}
+
+test "workspace reference supplies the selected path and complete text as Agent input" {
+    const original = "selected workspace file contents";
+    const selected_path = "docs/brief.md";
+    var owned = try task_state.OwnedRunInput.clone(std.testing.allocator, .{ .multimodal = .{
+        .text = "",
+        .attachments = &.{.{
+            .kind = .file,
+            .format = null,
+            .display_name = "brief.md",
+            .bytes = original,
+            .workspace_reference_path = selected_path,
+        }},
+    } }, 1024);
+    defer owned.deinit(std.testing.allocator);
+    // A multimodal input does not consult Task state.
+    var task: task_state.Task = undefined;
+    var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
+    const input = try validateRunInput(&task, owned.input, undefined, &parts, null);
+    try std.testing.expectEqual(@as(usize, 1), input.multimodal.len);
+    try std.testing.expectEqualStrings(selected_path, input.multimodal[0].text_attachment.display_name);
+    try std.testing.expectEqualStrings(original, input.multimodal[0].text_attachment.bytes);
 }
 
 test "permission review intent includes only bounded explicit Skill and multimodal metadata" {

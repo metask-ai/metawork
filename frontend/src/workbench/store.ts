@@ -156,6 +156,7 @@ export const initialWorkbenchState: WorkbenchState = {
       persistenceHealth: "unavailable",
       providers: [],
       defaultSelection: null,
+      defaultSelectionDisplayName: null,
       selectionRevision: "0",
       operation: "idle",
       errorCode: "none",

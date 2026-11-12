@@ -1705,6 +1705,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
     "persistenceHealth",
     "providers",
     "defaultSelection",
+    "defaultSelectionDisplayName",
     "selectionRevision",
     "operation",
     "errorCode",
@@ -1828,6 +1829,21 @@ function decodeModels(value: unknown, path: string): ModelsView {
     item.defaultSelection,
     `${path}.defaultSelection`,
   );
+  const defaultSelectionDisplayName =
+    item.defaultSelectionDisplayName === null
+      ? null
+      : nonEmptyString(
+          item.defaultSelectionDisplayName,
+          `${path}.defaultSelectionDisplayName`,
+        );
+  if (
+    defaultSelectionDisplayName !== null &&
+    defaultSelection?.sourceId !== "metask"
+  )
+    fail(
+      `${path}.defaultSelectionDisplayName`,
+      "display name requires a Metask preference",
+    );
   // Durable selections are intent. An authoritative ready catalog can
   // exclude them; Host admission and commands validate current membership.
   return {
@@ -1843,6 +1859,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
     ),
     providers,
     defaultSelection,
+    defaultSelectionDisplayName,
     selectionRevision: wireId(
       item.selectionRevision,
       `${path}.selectionRevision`,

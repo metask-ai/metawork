@@ -46,7 +46,9 @@ pub const ArchiveTool = struct {
 // Eight encoded previews plus the user text fit the official prompt ceiling.
 pub const max_image_preview_bytes: usize = 1_400_000;
 pub const max_image_preview_pixels: usize = 2_100_000;
-pub const ReceiveFile = struct { display_name: []const u8, size_bytes: usize };
+pub const WorkspaceReference = struct { id: u64, epoch: u64, task_id: u64, path: []const u8 = "" };
+pub const max_workspace_reference_bytes = 32 * 1024;
+pub const ReceiveFile = struct { display_name: []const u8, size_bytes: usize, workspace_reference: ?WorkspaceReference = null };
 const Receive = struct { id: u64, indices: []usize, file_index: usize = 0, offset: usize = 0 };
 pub const Descriptor = struct { id: u64, kind: Kind, format: ?Format, display_name: []const u8, size_bytes: u64 };
 pub const BorrowedPart = union(enum) {
@@ -68,6 +70,9 @@ const Entry = struct {
     file: store.File,
     preview: []u8 = &.{},
     reference: []u8 = &.{},
+    workspace_reference: ?WorkspaceReference = null,
+    workspace_path: []u8 = &.{},
+    workspace_text: []u8 = &.{},
 };
 pub const CleanupDebt = struct { count: usize, bytes: usize };
 pub const Runtime = struct {
@@ -144,18 +149,24 @@ pub const Runtime = struct {
         const entries = try self.allocator.alloc(Entry, files.len);
         defer self.allocator.free(entries);
         var prepared: usize = 0;
-        errdefer for (entries[0..prepared]) |entry| self.allocator.free(entry.display_name);
+        errdefer for (entries[0..prepared]) |entry| {
+            self.allocator.free(entry.display_name);
+            self.allocator.free(entry.workspace_path);
+        };
         const indices = try self.allocator.alloc(usize, files.len);
         var owns_indices = true;
         errdefer if (owns_indices) self.allocator.free(indices);
         for (files, entries) |file, *entry| {
             const name = try self.allocator.dupe(u8, file.display_name);
             errdefer self.allocator.free(name);
-            entry.* = .{ .state = .input_reserved, .display_name = name, .file = file: {
+            const path: []u8 = if (file.workspace_reference) |reference| try self.allocator.dupe(u8, reference.path) else &.{};
+            errdefer self.allocator.free(path);
+            entry.* = .{ .state = .input_reserved, .display_name = name, .workspace_reference = file.workspace_reference, .workspace_path = path, .file = file: {
                 var value = try fs.allocate(file.size_bytes);
                 value.extension = store.Extension.fromName(file.display_name);
                 break :file value;
             } };
+            if (entry.workspace_reference) |*reference| reference.path = path;
             prepared += 1;
         }
         for (entries, 0..) |entry, index| {
@@ -247,6 +258,16 @@ pub const Runtime = struct {
     }
     pub fn finishValidated(self: *Runtime, id: u64, output: []Descriptor) Error![]const Descriptor {
         return self.finish(id, output, true);
+    }
+    pub fn setPreparedWorkspaceText(self: *Runtime, id: u64, text: []const u8) Error!void {
+        try self.validateComplete(id);
+        const batch = self.receiving.?;
+        if (batch.indices.len != 1) return error.InvalidTransfer;
+        const entry = &self.slots[batch.indices[0]].?;
+        if (entry.workspace_reference == null or entry.workspace_text.len != 0 or
+            text.len != entry.file.size or text.len > max_workspace_reference_bytes)
+            return error.InvalidTransfer;
+        entry.workspace_text = try self.allocator.dupe(u8, text);
     }
     fn finish(self: *Runtime, id: u64, output: []Descriptor, validated: bool) Error![]const Descriptor {
         const receive = self.receiving orelse return error.StaleTransfer;
@@ -366,6 +387,13 @@ pub const Runtime = struct {
             entry.state = .borrowed;
             borrowed += 1;
             try self.file_store.?.move(&entry.file, task_id);
+            if (entry.workspace_reference != null) {
+                parts[index] = if (entry.format != null)
+                    .{ .image = .{ .id = entry.id, .format = .png, .bytes = entry.preview, .reference = entry.workspace_path } }
+                else
+                    .{ .text = .{ .id = entry.id, .bytes = entry.workspace_text } };
+                continue;
+            }
             const path = try self.file_store.?.pathAlloc(self.allocator, entry.file);
             defer self.allocator.free(path);
             const escaped_path = try std.json.Stringify.valueAlloc(self.allocator, path, .{});
@@ -381,6 +409,11 @@ pub const Runtime = struct {
             parts[index] = if (entry.format != null) .{ .image = .{ .id = entry.id, .format = .png, .bytes = entry.preview, .reference = entry.reference } } else .{ .text = .{ .id = entry.id, .bytes = entry.reference } };
         }
         return .{ .runtime = self, .indices = indices[0..ids.len] };
+    }
+    pub fn workspaceReference(self: *const Runtime, id: u64) ?struct { binding: WorkspaceReference, text: []const u8 } {
+        const index = self.findIndex(id) orelse return null;
+        const entry = self.slots[index].?;
+        return .{ .binding = entry.workspace_reference orelse return null, .text = entry.workspace_text };
     }
     pub fn release(self: *Runtime, id: u64) bool {
         return self.releaseChecked(id) catch false;
@@ -422,6 +455,7 @@ pub const Runtime = struct {
         return true;
     }
     fn classify(self: *Runtime, entry: *Entry) Error!void {
+        if (entry.workspace_text.len != 0) return;
         var prefix: [12]u8 = undefined;
         const count = try self.file_store.?.read(entry.file, 0, &prefix);
         if (detectFormat(prefix[0..count])) |format| {
@@ -445,6 +479,7 @@ pub const Runtime = struct {
             entry.format = format;
             return;
         }
+        if (entry.workspace_reference != null) return error.UnsupportedType;
     }
     fn descriptor(_: *const Runtime, entry: Entry) Descriptor {
         return .{ .id = entry.id, .kind = if (entry.format == null) .file else .image, .format = entry.format, .display_name = entry.display_name, .size_bytes = entry.file.size };
@@ -465,7 +500,7 @@ pub const Runtime = struct {
         return true;
     }
     fn freeEntryMemory(self: *Runtime, entry: *Entry) void {
-        for ([_][]u8{ entry.display_name, entry.preview, entry.reference }) |bytes| {
+        for ([_][]u8{ entry.display_name, entry.preview, entry.reference, entry.workspace_path, entry.workspace_text }) |bytes| {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);
         }

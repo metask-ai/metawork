@@ -476,7 +476,7 @@ pub const FilePreviewKey = struct { generation: []const u8, previewId: []const u
 pub const WorkspaceFileRequest = struct {
     generation: []const u8,
     previewId: []const u8,
-    taskId: []const u8,
+    taskId: ?[]const u8,
     workspaceId: []const u8,
     workspaceEpoch: []const u8,
     path: []const u8,
@@ -507,9 +507,15 @@ pub const AttachmentAddBegin = struct {
     batchId: []const u8,
     remainingFiles: JsonU32 = .{ .value = product_control.max_attachment_batch_files },
     source: struct {
-        kind: enum { picker, native_paths, file_bytes },
+        kind: enum { picker, native_paths, file_bytes, workspace_reference },
         paths: ?[]const []const u8 = null,
         files: ?[]const struct { name: []const u8, sizeBytes: []const u8 } = null,
+        reference: ?struct {
+            taskId: ?[]const u8,
+            workspaceId: []const u8,
+            workspaceEpoch: []const u8,
+            path: []const u8,
+        } = null,
     },
 };
 pub const AttachmentReceiveAppend = struct {

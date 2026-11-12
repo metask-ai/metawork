@@ -172,6 +172,7 @@ import { WorkbenchConnection } from "../bridge/connection.ts";
 import {
   AttachmentCleanupError,
   type AttachmentAddOperation,
+  type AddSource,
   type AddView,
 } from "../bridge/attachment-receive.ts";
 import type {
@@ -1299,7 +1300,7 @@ export default function App() {
     rightPanelOpen && fileTreeOpen && !settingsOpen,
     useCallback(
       (
-        taskId: string,
+        taskId: string | null,
         workspaceId: string,
         workspaceEpoch: string,
         path: string,
@@ -1638,6 +1639,28 @@ export default function App() {
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
+  const workspaceReferenceTarget =
+    !bridgeUnavailable &&
+    composerWorkspace?.authorization === "available" &&
+    !composerWorkspace.redacted &&
+    ((newTaskDraftActive &&
+      workbench.draftWorkspaceId === composerWorkspace.id &&
+      !composerWorkspace.projectRemoved) ||
+      (!newTaskDraftActive && activeTask))
+      ? {
+          taskId: newTaskDraftActive ? null : (activeTask?.id ?? null),
+          workspaceId: composerWorkspace.id,
+          workspaceEpoch: composerWorkspace.epoch,
+        }
+      : null;
+  const workspaceReferenceScope = JSON.stringify([
+    composerDraftScope,
+    bridgeGeneration,
+    snapshot.securityEpoch,
+    workspaceReferenceTarget,
+  ]);
+  const workspaceReferenceScopeRef = useRef(workspaceReferenceScope);
+  workspaceReferenceScopeRef.current = workspaceReferenceScope;
   const composerWorkspaceLabel =
     composerWorkspace?.canonicalRoot || t("workspace.select");
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
@@ -2810,14 +2833,15 @@ export default function App() {
         settleOperationFeedback(token, null);
         return null;
       }
+      const diagnostic = errorText(error);
       settleOperationFeedback(
         token,
         attentionStatus(
-          "workspace.selection_failed",
+          diagnostic === "WorkspaceCapacity"
+            ? "workspace.selection_capacity"
+            : "workspace.selection_failed",
           { scope: "workspace", workspaceId: null },
-          {
-            diagnostic: errorText(error),
-          },
+          { diagnostic },
         ),
         snapshot.securityEpoch,
       );
@@ -2831,7 +2855,16 @@ export default function App() {
   function setDraftWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
     if (workspaceId === automaticWorkspaceOptionId) {
-      if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
+      if (
+        newTaskDraftId &&
+        newTaskDraftId !== unscopedNewTaskDraftId &&
+        !(
+          composerDraftRef.current.kind === "multimodal" &&
+          composerDraftRef.current.attachments.some(
+            (attachment) => attachment.workspacePath,
+          )
+        )
+      )
         newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
       dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
       window.requestAnimationFrame(() => composer.current?.focus());
@@ -3053,14 +3086,14 @@ export default function App() {
     await refreshSnapshot().catch(() => undefined);
   }
   async function addAttachments(
-    input?:
-      | {
-          paths: string[];
-        }
-      | {
-          files: File[];
-        },
+    source: AddSource = { kind: "picker" },
+    referenceScope?: string,
   ) {
+    const reference =
+      source.kind === "workspace_reference" ? source.reference : null;
+    const referenceCurrent = () =>
+      !reference || referenceScope === workspaceReferenceScopeRef.current;
+    if (!referenceCurrent()) return;
     if (attachmentBusyRef.current || attachmentRemoval.current.busy) {
       setAttachmentError("input_busy");
       return;
@@ -3084,11 +3117,14 @@ export default function App() {
     if (!requestedDraft) return;
     const maxFiles = snapshot.capabilities.attachments.maxFiles;
     const remainingFiles = remainingAttachmentFiles(requestedDraft, maxFiles);
-    const selectedCount = input
-      ? "files" in input
-        ? input.files.length
-        : input.paths.length
-      : null;
+    const selectedCount =
+      source.kind === "file_bytes"
+        ? source.files.length
+        : source.kind === "native_paths"
+          ? source.paths.length
+          : source.kind === "workspace_reference"
+            ? 1
+            : null;
     if (
       remainingFiles === 0 ||
       (selectedCount !== null && selectedCount > remainingFiles)
@@ -3117,13 +3153,9 @@ export default function App() {
       attachmentOperation.current === operation &&
       composerDraftScopeRef.current === requestedScope &&
       bridgeGenerationRef.current === requestedGeneration &&
+      referenceCurrent() &&
       !operation.cancelled;
     try {
-      const source = input
-        ? "files" in input
-          ? { kind: "file_bytes" as const, files: input.files }
-          : { kind: "native_paths" as const, paths: input.paths }
-        : { kind: "picker" as const };
       const result = await add.run(source, (view) => {
         if (attachmentOperation.current === operation) setAttachmentView(view);
       });
@@ -3132,9 +3164,16 @@ export default function App() {
         if (
           attachmentOperation.current === operation &&
           composerDraftScopeRef.current === requestedScope &&
+          referenceCurrent() &&
           (result.reason === "cleanup_failed" || !operation.cancelled)
         )
-          setAttachmentError(result.reason);
+          setAttachmentError(
+            reference && result.reason === "unsupported_type"
+              ? "workspace_reference_type"
+              : reference && result.reason === "text_file_too_large"
+                ? "workspace_reference_size"
+                : result.reason,
+          );
         return;
       }
       const current = target.currentDraft(targetId);
@@ -3164,7 +3203,11 @@ export default function App() {
         text: current.text,
         attachments: [
           ...(current.kind === "multimodal" ? current.attachments : []),
-          ...result.attachments,
+          ...result.attachments.map((attachment) =>
+            reference
+              ? { ...attachment, workspacePath: reference.path }
+              : attachment,
+          ),
         ],
       };
       const handedOff = add.handoff(() => {
@@ -3203,7 +3246,7 @@ export default function App() {
       searchOpen
     )
       return;
-    void addAttachments({ paths });
+    void addAttachments({ kind: "native_paths", paths });
   };
   useEffect(() => {
     if (!client.available()) return;
@@ -4257,18 +4300,6 @@ export default function App() {
           />
         ) : null,
       )}
-      {workspaceSelectionFeedback?.tone === "attention" &&
-        !workspaceSelectionFeedback.dismissed && (
-          <p
-            className="projection-note workspace-selection-feedback"
-            role="status"
-          >
-            {t(
-              workspaceSelectionFeedback.id,
-              workspaceSelectionFeedback.values,
-            )}
-          </p>
-        )}
       {currentStopFeedback &&
         !(
           stopRequestPending &&
@@ -4353,13 +4384,30 @@ export default function App() {
         )}
         workspaceLabel={composerWorkspaceLabel}
         workspaceTitle={composerWorkspaceLabel}
-        workspaceDiagnostic={
-          [
-            workspaceSelectionFeedback?.diagnostic,
-            composerCatalogFeedback?.diagnostic,
-          ]
-            .filter(Boolean)
-            .join("\n\n") || undefined
+        workspaceDiagnostic={composerCatalogFeedback?.diagnostic}
+        workspaceNotice={
+          workspaceSelectionFeedback?.tone === "attention" &&
+          !workspaceSelectionFeedback.dismissed ? (
+            <div
+              className="composer-workspace-notice"
+              key={workspaceSelectionFeedback.cycle}
+            >
+              <p>
+                {t(
+                  workspaceSelectionFeedback.id,
+                  workspaceSelectionFeedback.values,
+                )}
+              </p>
+              {workspaceSelectionFeedback.id !==
+                "workspace.selection_capacity" &&
+                workspaceSelectionFeedback.diagnostic && (
+                  <details>
+                    <summary>{t("feedback.details")}</summary>
+                    <pre>{workspaceSelectionFeedback.diagnostic}</pre>
+                  </details>
+                )}
+            </div>
+          ) : undefined
         }
         workspaceOptions={[
           {
@@ -4478,6 +4526,27 @@ export default function App() {
         }
         onDraftChange={updateComposerDraft}
         onChooseAttachments={() => void addAttachments()}
+        workspaceFiles={
+          workspaceReferenceTarget
+            ? {
+                scope: workspaceReferenceScope,
+                target: workspaceReferenceTarget,
+                load: (taskId, workspaceId, epoch, path, options) =>
+                  client.listWorkspaceDirectory(
+                    taskId,
+                    workspaceId,
+                    epoch,
+                    path,
+                    options,
+                  ),
+                choose: (reference) =>
+                  void addAttachments(
+                    { kind: "workspace_reference", reference },
+                    workspaceReferenceScope,
+                  ),
+              }
+            : undefined
+        }
         onDropFiles={(files) => {
           if (
             client.attachmentInputMode === "file_bytes" &&
@@ -4485,11 +4554,11 @@ export default function App() {
             !settingsOpen &&
             !searchOpen
           )
-            void addAttachments({ files });
+            void addAttachments({ kind: "file_bytes", files });
         }}
         onPasteImages={(files) => {
           if (route === "workbench" && !settingsOpen && !searchOpen)
-            void addAttachments({ files });
+            void addAttachments({ kind: "file_bytes", files });
         }}
         onCancelAttachments={
           attachmentOperation.current && attachmentView === "adding"

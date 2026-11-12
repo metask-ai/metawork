@@ -16,6 +16,10 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import {
+  ComposerAddMenu,
+  type ComposerWorkspaceFiles,
+} from "./ComposerAddMenu.tsx";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
@@ -69,6 +73,7 @@ function attachmentTypeLabel(
   attachment: ComposerAttachment,
   t: ReturnType<typeof useI18n>["t"],
 ) {
+  if (attachment.workspacePath) return t("composer.workspace_file");
   return t(
     attachment.kind === "image"
       ? "attachment.type.image"
@@ -78,6 +83,8 @@ function attachmentTypeLabel(
 
 function attachmentErrorMessage(reason: string): MessageId {
   const messages: Record<string, MessageId> = {
+    workspace_reference_type: "composer.reference_workspace_type",
+    workspace_reference_size: "composer.reference_workspace_size",
     unsupported_type: "attachment.error.unsupported_type",
     file_too_large: "attachment.error.file_too_large",
     text_file_too_large: "attachment.error.file_too_large",
@@ -123,6 +130,7 @@ export function ComposerFooter({
   workspaceLabel,
   workspaceTitle,
   workspaceDiagnostic,
+  workspaceNotice,
   workspaceOptions,
   selectedWorkspaceOptionId,
   workspaceEditable,
@@ -141,6 +149,7 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
+  workspaceFiles,
   onDropFiles,
   onPasteImages,
   onCancelAttachments,
@@ -180,6 +189,7 @@ export function ComposerFooter({
   workspaceLabel: string;
   workspaceTitle: string;
   workspaceDiagnostic?: string;
+  workspaceNotice?: ReactNode;
   workspaceOptions: {
     id: string;
     label: string;
@@ -204,6 +214,7 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
+  workspaceFiles?: ComposerWorkspaceFiles;
   onDropFiles?: (files: File[]) => void;
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
@@ -687,8 +698,11 @@ export function ComposerFooter({
                     )}
                   </span>
                   <span className="composer-attachment-copy">
-                    <strong dir="auto" title={attachment.displayName}>
-                      {attachment.displayName}
+                    <strong
+                      dir="auto"
+                      title={attachment.workspacePath ?? attachment.displayName}
+                    >
+                      {attachment.workspacePath ?? attachment.displayName}
                     </strong>
                     <small>
                       {attachmentTypeLabel(attachment, t)} ·{" "}
@@ -859,54 +873,58 @@ export function ComposerFooter({
             aria-label={t("run.context")}
           >
             <div className="composer-context-actions">
-              {attachmentsEnabled && draft.kind !== "skill" && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  ref={attachmentButtonRef}
-                  className="composer-attachment-add"
-                  data-busy={attachmentBusy || undefined}
-                  aria-busy={attachmentBusy || undefined}
-                  aria-label={t(
-                    attachmentRemoving
-                      ? "attachment.removing"
-                      : attachmentCancelling
-                        ? "attachment.cancelling"
-                        : attachmentBusy && onCancelAttachments
-                          ? "attachment.cancel"
-                          : "attachment.add",
-                  )}
-                  title={t(
-                    attachmentRemoving
-                      ? "attachment.removing"
-                      : attachmentCancelling
-                        ? "attachment.cancelling"
-                        : attachmentBusy && onCancelAttachments
-                          ? "attachment.cancel"
-                          : "attachment.add",
-                  )}
-                  disabled={
-                    composeDisabled ||
-                    attachmentActionsDisabled ||
-                    attachmentCancelling ||
-                    (attachmentBusy && !onCancelAttachments)
-                  }
-                  onClick={
-                    attachmentBusy ? onCancelAttachments : onChooseAttachments
-                  }
-                >
-                  <Icon
-                    name={
-                      attachmentBusy
-                        ? onCancelAttachments
-                          ? "close"
-                          : "loading"
-                        : "plus"
+              {draft.kind !== "skill" &&
+                (attachmentBusy ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    ref={attachmentButtonRef}
+                    className="composer-attachment-add"
+                    data-busy
+                    aria-busy
+                    aria-label={t(
+                      attachmentRemoving
+                        ? "attachment.removing"
+                        : attachmentCancelling
+                          ? "attachment.cancelling"
+                          : onCancelAttachments
+                            ? "attachment.cancel"
+                            : "composer.add",
+                    )}
+                    title={t(
+                      attachmentRemoving
+                        ? "attachment.removing"
+                        : attachmentCancelling
+                          ? "attachment.cancelling"
+                          : onCancelAttachments
+                            ? "attachment.cancel"
+                            : "composer.add",
+                    )}
+                    disabled={
+                      composeDisabled ||
+                      attachmentActionsDisabled ||
+                      attachmentCancelling ||
+                      !onCancelAttachments
                     }
+                    onClick={onCancelAttachments}
+                  >
+                    <Icon name={onCancelAttachments ? "close" : "loading"} />
+                  </Button>
+                ) : (
+                  <ComposerAddMenu
+                    key={workspaceFiles?.scope ?? draftScope}
+                    triggerRef={attachmentButtonRef}
+                    disabled={composeDisabled || attachmentActionsDisabled}
+                    attachmentsEnabled={attachmentsEnabled}
+                    skillText={draft.kind === "text" ? draft.text : null}
+                    skillCatalog={skillCatalog}
+                    onChooseAttachments={onChooseAttachments}
+                    workspaceFiles={workspaceFiles}
+                    onRefreshSkills={onRefreshSkillCatalog}
+                    onChooseSkill={chooseCandidate}
                   />
-                </Button>
-              )}
+                ))}
               {approvalModeControl}
               {workspaceEditable && workspaceContext}
             </div>
@@ -985,6 +1003,7 @@ export function ComposerFooter({
           </p>
         )}
       </div>
+      {workspaceNotice}
       {modelNotice}
       {sendDisabledReason && (
         <p className="composer-draft-note" role="status">

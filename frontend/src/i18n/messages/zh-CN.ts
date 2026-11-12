@@ -262,6 +262,8 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.grant_ready": "可以在这个已信任的工作区中开始任务。",
   "workspace.selection_cancelled": "已取消选择工作区。",
   "workspace.selection_failed": "未能打开工作区，请重新选择。",
+  "workspace.selection_capacity":
+    "工作区名额已满。从侧栏移除一个项目后，即可添加新目录。",
   "workspace.grant_confirmed": "已选择工作目录。",
   "workspace.access_required": "此工作目录当前不可用，请重新选择目录。",
   "workspace.access_required_short": "目录不可用",
@@ -817,6 +819,16 @@ export const zhCN: Record<MessageId, string> = {
   "run.activity.unsynchronized": "状态尚未同步",
   "run.activity.requesting_stop": "正在请求停止…",
   "attachment.add": "添加文件",
+  "composer.add": "添加内容",
+  "composer.add_skill": "添加技能",
+  "composer.reference_workspace_file": "引用工作区文件",
+  "composer.workspace_parent_folder": "返回上一级",
+  "composer.reference_workspace_type":
+    "请选择非空的 UTF-8 文本文件，或 PNG、JPEG、WebP 图片。",
+  "composer.reference_workspace_size":
+    "工作区引用支持不超过 32 KB 的文本文件。",
+  "composer.workspace_file": "工作区引用",
+  "composer.add_skill_with_attachments": "请先移除附件，再添加技能。",
   "attachment.removing": "正在移除文件…",
   "attachment.error.release_unconfirmed":
     "无法确认文件清理结果，正在恢复连接；未发送的附件需要重新选择。",

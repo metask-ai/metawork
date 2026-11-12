@@ -21,7 +21,14 @@ pub fn reject(err: anyerror) Rejection {
         else => .read_failed,
     };
 }
-pub const Input = struct { completion_id: u64, path_count: usize, paths: []const u8, limits: attachment.Limits, file_store: *attachment.FileStore };
+pub const Input = struct {
+    completion_id: u64,
+    path_count: usize,
+    paths: []const u8,
+    limits: attachment.Limits,
+    file_store: *attachment.FileStore,
+    workspace: ?struct { root: []const u8, binding: attachment.WorkspaceReference } = null,
+};
 pub const Phase = enum { probed, copied, initialized, written, validated };
 pub const Completion = struct { completion_id: u64, phase: Phase, rejection: ?Rejection, cancelled: bool, files: []const attachment.ReceiveFile };
 pub const Taken = struct { job: *anyopaque, completion: Completion };
@@ -43,6 +50,9 @@ const Job = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     rejection: ?Rejection = null,
     paths: []u8 = &.{},
+    workspace_root: []u8 = &.{},
+    workspace_binding: ?attachment.WorkspaceReference = null,
+    workspace_text: []u8 = &.{},
     metadata: []attachment.ReceiveFile = &.{},
     sources: []attachment.store.Source = &.{},
     source_count: usize = 0,
@@ -76,11 +86,25 @@ const Job = struct {
                 for (self.metadata, 0..) |*meta, index| {
                     try self.check();
                     const path = split.next() orelse return error.InvalidInput;
-                    if (path.len == 0 or !std.fs.path.isAbsolute(path)) return error.ReadFailed;
-                    const source = try self.file_store.openSource(path);
+                    if (path.len == 0) return error.ReadFailed;
+                    const source = if (self.workspace_binding != null)
+                        try self.file_store.openWorkspaceSource(self.workspace_root, path)
+                    else blk: {
+                        if (!std.fs.path.isAbsolute(path)) return error.ReadFailed;
+                        break :blk try self.file_store.openSource(path);
+                    };
                     self.sources[index] = source;
                     self.source_count += 1;
-                    meta.* = .{ .display_name = std.fs.path.basename(path), .size_bytes = std.math.cast(usize, source.before.size) orelse return error.FileTooLarge };
+                    if (self.workspace_binding != null) {
+                        var prefix: [12]u8 = undefined;
+                        const size = source.handle.readPositionalAll(self.file_store.io, &prefix, 0) catch return error.ReadFailed;
+                        if (attachment.detectFormat(prefix[0..size]) == null and source.before.size > attachment.max_workspace_reference_bytes) return error.TextFileTooLarge;
+                    }
+                    meta.* = .{
+                        .display_name = std.fs.path.basename(path),
+                        .size_bytes = std.math.cast(usize, source.before.size) orelse return error.FileTooLarge,
+                        .workspace_reference = self.workspace_binding,
+                    };
                 }
                 if (split.next() != null) return error.InvalidInput;
             },
@@ -101,6 +125,17 @@ const Job = struct {
             .validated => for (self.targets) |file| {
                 try self.check();
                 try self.file_store.finish(file);
+                if (self.workspace_binding != null) {
+                    var prefix: [12]u8 = undefined;
+                    const size = try self.file_store.read(file, 0, &prefix);
+                    if (attachment.detectFormat(prefix[0..size]) != null) continue;
+                    if (file.size > attachment.max_workspace_reference_bytes) return error.TextFileTooLarge;
+                    self.workspace_text = try self.file_store.readAlloc(self.lane.allocator, file);
+                    if (!std.unicode.utf8ValidateSlice(self.workspace_text)) return error.UnsupportedType;
+                    for (self.workspace_text) |byte| {
+                        if ((byte < 0x20 and byte != '\t' and byte != '\r' and byte != '\n') or byte == 0x7f) return error.UnsupportedType;
+                    }
+                }
             },
         }
         try self.check();
@@ -111,7 +146,7 @@ const Job = struct {
     }
     fn deinit(self: *Job) void {
         self.closeSources();
-        for ([_][]u8{ self.paths, self.chunk }) |bytes| {
+        for ([_][]u8{ self.paths, self.chunk, self.workspace_root, self.workspace_text }) |bytes| {
             std.crypto.secureZero(u8, bytes);
             self.lane.allocator.free(bytes);
         }
@@ -162,11 +197,18 @@ pub const Lane = struct {
     }
 
     pub fn beginPreparedPaths(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, path_count: usize, paths: []const u8) Error!void {
+        errdefer _ = runtime.cancelPreparing(id);
+        return self.beginPreparedPathInput(runtime, id, .{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
+    }
+    pub fn beginPreparedWorkspaceReference(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, root: []const u8, binding: attachment.WorkspaceReference, path: []const u8) Error!void {
+        errdefer _ = runtime.cancelPreparing(id);
+        return self.beginPreparedPathInput(runtime, id, .{ .completion_id = completion_id, .path_count = 1, .paths = path, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity, .workspace = .{ .root = root, .binding = binding } });
+    }
+    fn beginPreparedPathInput(self: *Lane, runtime: *attachment.Runtime, id: u64, input: Input) Error!void {
         if (self.operation != null) return error.InputBusy;
         if (runtime.preparing != id) return error.StaleTransfer;
-        errdefer _ = runtime.cancelPreparing(id);
-        try self.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
-        self.operation = .{ .completion_id = completion_id, .product_id = id };
+        try self.begin(input);
+        self.operation = .{ .completion_id = input.completion_id, .product_id = id };
     }
     pub fn beginPreparedBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, files: []const attachment.ReceiveFile) Error!void {
         if (self.operation != null) return error.InputBusy;
@@ -267,6 +309,15 @@ pub const Lane = struct {
                 continue;
             }
             var descriptors: [attachment.max_files_per_message]attachment.Descriptor = undefined;
+            const workspace_text = @as(*Job, @ptrCast(@alignCast(taken.job))).workspace_text;
+            if (workspace_text.len != 0) runtime.setPreparedWorkspaceText(op.product_id, workspace_text) catch |err| {
+                _ = runtime.cancelReceiveChecked(op.product_id) catch {
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
+                    continue;
+                };
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                continue;
+            };
             const ready = (if (raw.phase == .validated) runtime.finishValidated(op.product_id, &descriptors) else runtime.finishReceive(op.product_id, &descriptors)) catch |err| {
                 _ = runtime.cancelReceiveChecked(op.product_id) catch {
                     self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
@@ -323,6 +374,11 @@ pub const Lane = struct {
         const job = try self.allocate(input.completion_id, input.file_store);
         errdefer self.release(.{ .job = job, .completion = undefined });
         job.paths = try self.allocator.dupe(u8, input.paths);
+        if (input.workspace) |workspace| {
+            job.workspace_root = try self.allocator.dupe(u8, workspace.root);
+            job.workspace_binding = workspace.binding;
+            job.workspace_binding.?.path = job.paths;
+        }
         job.metadata = try self.allocator.alloc(attachment.ReceiveFile, input.path_count);
         job.sources = try self.allocator.alloc(attachment.store.Source, input.path_count);
         job.limits = input.limits;
@@ -490,4 +546,32 @@ test "path probe reserves before copy and cancellation joins the writer" {
     defer std.testing.allocator.free(original);
     try std.testing.expectEqualStrings("PK\x03\x04\x00\xffbinary", original);
     try std.testing.expect(runtime.release(ready[0].id));
+
+    try tmp.dir.createDir(std.testing.io, "docs", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "docs/brief.md", .data = "workspace contents\n" });
+    const reference_id = try lane.prepareAdd(&runtime);
+    try lane.beginPreparedWorkspaceReference(&runtime, 3, reference_id, root[0..len], .{ .id = 9, .epoch = 4, .task_id = 0 }, "docs/brief.md");
+    const Capture = struct {
+        descriptor_id: ?u64 = null,
+        fn complete(context: *anyopaque, _: u64, result: Result) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (result == .ready) self.descriptor_id = result.ready[0].id;
+        }
+    };
+    var capture: Capture = .{};
+    while (queue.pending != null) {
+        queue.run();
+        lane.drainCompletions(&runtime, .{ .context = &capture, .complete_fn = Capture.complete });
+    }
+    const selected = capture.descriptor_id orelse return error.ExpectedWorkspaceReference;
+    const reference = runtime.workspaceReference(selected).?;
+    try std.testing.expectEqual(@as(u64, 9), reference.binding.id);
+    try std.testing.expectEqualStrings("docs/brief.md", reference.binding.path);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "docs/brief.md", .data = "later edit" });
+    var parts: [1]attachment.BorrowedPart = undefined;
+    var indices: [1]usize = undefined;
+    var borrow = try runtime.borrow(&.{selected}, &parts, &indices, 7);
+    try std.testing.expectEqualStrings("workspace contents\n", parts[0].text.bytes);
+    borrow.rollback();
+    try std.testing.expect(runtime.release(selected));
 }

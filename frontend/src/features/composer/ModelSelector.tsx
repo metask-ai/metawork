@@ -6,6 +6,7 @@ import { useI18n } from "../../i18n/context.ts";
 export type ModelSelectorOption = {
   selectionId: string;
   displayName: string;
+  menuLabel?: string;
   triggerLabel?: string;
   group?: "custom";
   vendor?: Brand;
@@ -50,7 +51,10 @@ export function ModelSelector({
       options={options.map((model, index) => ({
         value: model.selectionId,
         label:
-          model.displayName || model.selectionId || t("account.model_fallback"),
+          model.menuLabel ||
+          model.displayName ||
+          model.selectionId ||
+          t("account.model_fallback"),
         triggerLabel:
           model.selectionId === selectedId ? label : model.triggerLabel,
         leading: <BrandIcon brand={model.vendor} />,

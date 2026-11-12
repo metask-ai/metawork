@@ -318,6 +318,8 @@ export const enUS = {
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed":
     "The workspace could not be opened. Choose it again.",
+  "workspace.selection_capacity":
+    "The workspace limit has been reached. Remove a project from the sidebar to add another folder.",
   "workspace.grant_confirmed": "Workspace selected.",
   "workspace.access_required":
     "This workspace is unavailable. Select the folder again.",
@@ -956,6 +958,17 @@ export const enUS = {
   "run.activity.unsynchronized": "Status not synchronized",
   "run.activity.requesting_stop": "Requesting stop…",
   "attachment.add": "Add files",
+  "composer.add": "Add to message",
+  "composer.add_skill": "Add Skill",
+  "composer.reference_workspace_file": "Reference workspace file",
+  "composer.workspace_parent_folder": "Up one folder",
+  "composer.reference_workspace_type":
+    "Choose a non-empty UTF-8 text file or a PNG, JPEG, or WebP image.",
+  "composer.reference_workspace_size":
+    "Workspace file references support text files up to 32 KB.",
+  "composer.workspace_file": "Workspace reference",
+  "composer.add_skill_with_attachments":
+    "Remove attachments before adding a Skill.",
   "attachment.removing": "Removing file…",
   "attachment.error.release_unconfirmed":
     "File cleanup could not be confirmed. Restoring the connection; unsent files need to be selected again.",

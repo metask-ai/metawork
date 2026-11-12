@@ -7,8 +7,8 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type DirectoryState = { state: "loading" } | WorkspaceDirectory;
-type DirectoryLoader = (
-  taskId: string,
+export type DirectoryLoader = (
+  taskId: string | null,
   workspaceId: string,
   workspaceEpoch: string,
   path: string,
@@ -45,13 +45,7 @@ export function useWorkspaceFileTree(
     return cancel;
   }, [scope]);
   function request(path: string) {
-    if (
-      !scope ||
-      !taskId ||
-      !workspaceId ||
-      !workspaceEpoch ||
-      requests.current.has(path)
-    )
+    if (!scope || !workspaceId || !workspaceEpoch || requests.current.has(path))
       return;
     if (admitted.current.size >= 64 && !admitted.current.has(path)) return;
     admitted.current.add(path);

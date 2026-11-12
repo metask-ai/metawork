@@ -1901,6 +1901,13 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         return self.attachment_lane.beginPreparedPaths(&self.attachments, completion_id, id, path_count, paths);
     }
+    pub fn beginPreparedWorkspaceReference(self: *Runtime, completion_id: u64, id: u64, task_id: u64, workspace_id: u64, epoch: u64, path: []const u8) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const binding = self.workspace.binding(workspace_id) orelse return error.InvalidTransfer;
+        if (binding.epoch != epoch or !self.workspaceFileAuthorized(task_id, workspace_id, epoch, binding.canonical_root) or
+            !file_preview.validWorkspacePath(path, false) or self.workspacePathHasCredential(path)) return error.InvalidTransfer;
+        return self.attachment_lane.beginPreparedWorkspaceReference(&self.attachments, completion_id, id, binding.canonical_root, .{ .id = workspace_id, .epoch = epoch, .task_id = task_id }, path);
+    }
     pub fn beginPreparedAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, files: []const product_attachment.ReceiveFile) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         return self.attachment_lane.beginPreparedBytes(&self.attachments, completion_id, id, files);
@@ -1917,7 +1924,32 @@ pub const Runtime = struct {
         return self.attachment_lane.cancelStaging(completion_id);
     }
     pub fn drainAttachmentStagingCompletions(self: *Runtime, sink: AttachmentStagingSink) void {
-        self.attachment_lane.drainCompletions(&self.attachments, sink);
+        const AuthoritySink = struct {
+            runtime: *Runtime,
+            downstream: AttachmentStagingSink,
+
+            fn complete(context: *anyopaque, id: u64, result: AttachmentStagingResult) void {
+                const adapter: *@This() = @ptrCast(@alignCast(context));
+                const runtime = adapter.runtime;
+                if (result == .ready and result.ready.len == 1) {
+                    const descriptor = result.ready[0];
+                    if (runtime.attachments.workspaceReference(descriptor.id)) |reference| {
+                        const workspace = reference.binding;
+                        const current = runtime.workspace.binding(workspace.id);
+                        if (current == null or !runtime.workspaceFileAuthorized(workspace.task_id, workspace.id, workspace.epoch, current.?.canonical_root) or
+                            runtime.containsKnownCredential(workspace.path) or runtime.containsKnownCredential(reference.text))
+                        {
+                            const reason: AttachmentStagingRejection = if (runtime.attachments.releaseChecked(descriptor.id)) |_| .invalid_transfer else |_| .cleanup_failed;
+                            adapter.downstream.complete_fn(adapter.downstream.context, id, .{ .rejected = reason });
+                            return;
+                        }
+                    }
+                }
+                adapter.downstream.complete_fn(adapter.downstream.context, id, result);
+            }
+        };
+        var adapter: AuthoritySink = .{ .runtime = self, .downstream = sink };
+        self.attachment_lane.drainCompletions(&self.attachments, .{ .context = &adapter, .complete_fn = AuthoritySink.complete });
     }
 
     /// Performs only bounded identity/authority work on the main thread and
@@ -1974,6 +2006,7 @@ pub const Runtime = struct {
 
     pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
         if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        if (task_id == 0 and !directory) return .{ .immediate = .restricted };
         const binding = self.workspace.binding(workspace_id) orelse return .{ .immediate = .missing };
         if (binding.epoch != workspace_epoch or !self.workspaceFileAuthorized(task_id, workspace_id, binding.epoch, binding.canonical_root) or !file_preview.validWorkspacePath(path, directory) or self.workspacePathHasCredential(path)) return .{ .immediate = .restricted };
         self.preview_lane.begin(.{
@@ -1994,6 +2027,11 @@ pub const Runtime = struct {
     }
 
     fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
+        if (task_id == 0) {
+            const fact = self.workspace.facts(workspace_id) orelse return false;
+            return fact.kind == .manual and fact.visible and !fact.project_removed and
+                self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
+        }
         return self.task_runtime.workspaceFileTaskMatches(task_id, workspace_id) and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
     }
 
@@ -4481,6 +4519,13 @@ pub const Runtime = struct {
                 if (multimodal.attachment_ids.len == 0 or
                     multimodal.attachment_ids.len > self.limits.max_attachments_per_draft)
                     return error.TooManyFiles;
+                for (multimodal.attachment_ids) |id| {
+                    const reference = self.attachments.workspaceReference(id) orelse continue;
+                    const binding = self.workspace.binding(reference.binding.id) orelse return error.InvalidRunInput;
+                    if (!self.workspaceFileAuthorized(task_id, binding.id, reference.binding.epoch, binding.canonical_root) or
+                        self.containsKnownCredential(reference.binding.path) or
+                        self.containsKnownCredential(reference.text)) return error.InvalidRunInput;
+                }
                 staged.borrow = try self.attachments.borrow(
                     multimodal.attachment_ids,
                     &staged.parts,
@@ -4515,6 +4560,7 @@ pub const Runtime = struct {
                             .display_name = descriptor.display_name,
                             .bytes = text.bytes,
                             .size_bytes = descriptor.size_bytes,
+                            .workspace_reference_path = if (self.attachments.workspaceReference(text.id)) |reference| reference.binding.path else null,
                         },
                     };
                 }
@@ -6710,6 +6756,10 @@ pub const Runtime = struct {
         }
         writer.writeAll("],\"defaultSelection\":") catch return error.SnapshotTooLarge;
         try writeOptionalModelRef(writer, view.default_selection, text);
+        writer.writeAll(",\"defaultSelectionDisplayName\":") catch return error.SnapshotTooLarge;
+        if (view.default_selection_display_name) |name| {
+            try text.writeJson(writer, name);
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"builtinProviderPresets\":[", .{
             view.selection_revision,
             @tagName(view.operation),
@@ -11836,7 +11886,7 @@ test "Workspace upsert unknown outcome stays usable and heals on retry" {
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
-test "Project removal and re-addition preserve empty Workspace identity and existing authorization" {
+test "Project removal frees a slot and re-addition preserves Workspace identity and authorization" {
     test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11844,7 +11894,11 @@ test "Project removal and re-addition preserve empty Workspace identity and exis
     defer control.deinit();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
+    try tmp.dir.createDir(std.testing.io, "another", .default_dir);
+    const another = try tmp.dir.realPathFileAlloc(std.testing.io, "another", std.testing.allocator);
+    defer std.testing.allocator.free(another);
     const id = try control.openWorkspace(.{ .workspace_root = root, .trust = .{ .temporary = root } });
+    try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = another, .trust = .explicitly_trusted }));
     try std.testing.expectError(error.WorkspaceEpochMismatch, control.removeProjectAtEpoch(id, 2));
     try std.testing.expect(!control.workspace.facts(id).?.project_removed);
     try control.removeProjectAtEpoch(id, 1);
@@ -11854,12 +11908,16 @@ test "Project removal and re-addition preserve empty Workspace identity and exis
     try std.testing.expectEqual(WorkspaceAuthorization.available, removed.authorization);
     try std.testing.expectEqual(@as(u64, 1), removed.epoch);
     try std.testing.expectEqualStrings(root, removed.trust.temporary);
+    const another_id = try control.openWorkspace(.{ .workspace_root = another, .trust = .explicitly_trusted });
+    try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    try std.testing.expect(control.workspace.facts(id).?.project_removed);
+    try control.removeProjectAtEpoch(another_id, 1);
     try std.testing.expectEqual(id, try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
     const restored = control.workspace.facts(id).?;
     try std.testing.expect(!restored.project_removed);
     try std.testing.expectEqual(@as(u64, 1), restored.epoch);
     try std.testing.expectEqualStrings(root, restored.trust.temporary);
-    try std.testing.expectEqual(@as(usize, 1), control.workspace.count(.manual));
+    try std.testing.expectEqual(@as(usize, 2), control.workspace.count(.manual));
 }
 
 test "Project removal survives Host restart while Workspace authority remains available" {
@@ -19128,6 +19186,7 @@ test "file preview workspace directory authority redacts names and rejects stale
     try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 2, "", true));
     try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 99, 2, 1, "", true));
     try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 1, "../outside", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "visible.txt", false));
     const Capture = struct {
         calls: usize = 0,
         state: FilePreviewState = .failed,
@@ -19146,7 +19205,7 @@ test "file preview workspace directory authority redacts names and rejects stale
         }
     };
     var capture = Capture{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 3, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 0, 2, 1, "", true));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;

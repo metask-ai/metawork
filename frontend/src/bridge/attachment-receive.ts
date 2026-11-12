@@ -4,14 +4,27 @@ import type {
   AttachmentAddAcceptance,
   AttachmentCancelResult,
 } from "./contracts.ts";
+export type WorkspaceFileReference = {
+  taskId: string | null;
+  workspaceId: string;
+  workspaceEpoch: string;
+  path: string;
+};
+
+type WorkspaceReferenceSource = {
+  kind: "workspace_reference";
+  reference: WorkspaceFileReference;
+};
 export type AddSource =
   | { kind: "picker" }
   | { kind: "native_paths"; paths: string[] }
-  | { kind: "file_bytes"; files: readonly File[] };
+  | { kind: "file_bytes"; files: readonly File[] }
+  | WorkspaceReferenceSource;
 export type AddWireSource =
   | { kind: "picker" }
   | { kind: "native_paths"; paths: string[] }
-  | { kind: "file_bytes"; files: { name: string; sizeBytes: string }[] };
+  | { kind: "file_bytes"; files: { name: string; sizeBytes: string }[] }
+  | WorkspaceReferenceSource;
 export type AddView = "adding" | "cancelling";
 export type AddPort = {
   begin(source: AddWireSource): Promise<AttachmentAddBeginResult>;

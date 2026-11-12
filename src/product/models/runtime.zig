@@ -116,7 +116,11 @@ pub const TestSupport = if (builtin.is_test) struct {
                 runtime.registry.selection_revision = 0;
             }
         }
-        try runtime.registry.rememberPreference(.{ .source_id = contract.metask_source_id, .model_id = selected_model }, default_selection_revision);
+        try runtime.registry.rememberPreference(
+            .{ .source_id = contract.metask_source_id, .model_id = selected_model },
+            runtime.metask_catalog.preferenceDisplayName(selected_model),
+            default_selection_revision,
+        );
         runtime.metask_catalog_state = .ready;
         runtime.metask_catalog_generation = catalog_generation;
         runtime.metask_catalog_authorization_generation = 17;
@@ -283,6 +287,7 @@ pub const Runtime = struct {
                 .unavailable,
             .providers = self.provider_views[0..],
             .default_selection = self.registry.defaultSelection(),
+            .default_selection_display_name = if (self.registry.default_display_name.len == 0) null else self.registry.default_display_name,
             .selection_revision = self.registry.selection_revision,
             .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
             .error_code = if (!self.store_healthy) .persistence_unavailable else if (self.preference_error != .none) self.preference_error else self.metask_error,
@@ -574,20 +579,31 @@ pub const Runtime = struct {
     fn commitPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        const display_name = self.preferenceDisplayName(target);
         if (self.registry.defaultSelection()) |current| {
             // After an unconfirmed write, retained memory is not evidence of
             // the canonical preference. Confirm this choice before clearing
             // the independent failure diagnostic, even if it matches memory.
-            if (self.preference_error == .none and std.mem.eql(u8, current.source_id, target.source_id) and std.mem.eql(u8, current.model_id, target.model_id)) return .acceptedResult();
+            if (self.preference_error == .none and
+                std.mem.eql(u8, current.source_id, target.source_id) and
+                std.mem.eql(u8, current.model_id, target.model_id) and
+                std.mem.eql(u8, self.registry.default_display_name, display_name))
+                return .acceptedResult();
         }
         var candidate = self.registry.clone() catch return .rejected(.local_resource_exhausted);
         defer candidate.deinit();
         const revision = self.freshGeneration(candidate.selection_revision) catch return .rejected(.local_resource_exhausted);
-        candidate.rememberPreference(target, revision) catch |err| return .rejected(mapRegistryError(err));
+        candidate.rememberPreference(target, display_name, revision) catch |err| return .rejected(mapRegistryError(err));
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err| return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
         const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
         return self.finishPreferenceCommit(&candidate, commitCanonical(self.allocator, store, encoded));
+    }
+
+    fn preferenceDisplayName(self: *Runtime, target: contract.ModelRef) []const u8 {
+        if (!std.mem.eql(u8, target.source_id, contract.metask_source_id)) return "";
+        if (self.metask_catalog_state != .ready) return "";
+        return self.metask_catalog.preferenceDisplayName(target.model_id);
     }
 
     fn finishPreferenceCommit(self: *Runtime, candidate: *registry_impl.Registry, outcome: CanonicalCommitOutcome) contract.CommandResult {
@@ -1421,7 +1437,7 @@ test "unconfirmed preference commits reject memory without revoking unchanged so
     for ([_]CanonicalCommitOutcome{ .not_committed, .unresolved }) |outcome| {
         var candidate = try runtime.registry.clone();
         defer candidate.deinit();
-        try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, 5);
+        try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, "Two", 5);
         try std.testing.expect(!runtime.finishPreferenceCommit(&candidate, outcome).accepted);
         try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
         try std.testing.expectEqual(@as(u64, 3), runtime.view().selection_revision);
@@ -1445,7 +1461,7 @@ test "choosing the retained preference after an unknown commit confirms the cano
 
     var candidate = try runtime.registry.clone();
     defer candidate.deinit();
-    try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, 5);
+    try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, "Two", 5);
     const encoded = try registry_impl.encodeAlloc(std.testing.allocator, &candidate);
     defer std.testing.allocator.free(encoded);
     try runtime.store.?.commit(encoded);
@@ -1461,6 +1477,8 @@ test "choosing the retained preference after an unknown commit confirms the cano
     var restored = try registry_impl.decode(std.testing.allocator, saved);
     defer restored.deinit();
     try std.testing.expectEqualStrings("model-1", restored.defaultSelection().?.model_id);
+    try std.testing.expectEqualStrings("One", restored.default_display_name);
+    try std.testing.expectEqualStrings("One", runtime.view().default_selection_display_name.?);
     try std.testing.expectEqual(contract.ModelsError.none, runtime.view().error_code);
     try std.testing.expect(runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
 }

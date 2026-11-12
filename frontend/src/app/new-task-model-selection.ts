@@ -12,6 +12,7 @@ export type NewTaskModelOption = {
   sourceGeneration: string;
   catalogGeneration: string;
   displayName: string;
+  menuLabel?: string;
   vendor: Brand;
   group?: "custom";
   metadata: ModelMetadata | null;
@@ -57,22 +58,28 @@ export function newTaskModelSelectionState(
         group: provider.id === "metask" ? undefined : ("custom" as const),
       })),
   );
-  const requestedOption = requested
-    ? options.find(
-        (option) =>
-          option.modelRef.sourceId === requested.sourceId &&
-          option.modelRef.modelId === requested.modelId,
-      )
+  const metask = models.providers.find((provider) => provider.id === "metask");
+  const restoringMetaskPreference =
+    requested === null && selected?.sourceId === "metask";
+  const preferredName = restoringMetaskPreference
+    ? models.defaultSelectionDisplayName
     : null;
-  const selectedOption =
-    requestedOption ??
-    (requested === null
-      ? options.find(
-          (option) =>
-            option.modelRef.sourceId === selected?.sourceId &&
-            option.modelRef.modelId === selected?.modelId,
-        )
-      : undefined);
+  const preferredModels =
+    preferredName === null
+      ? []
+      : (metask?.models.filter(
+          (model) => model.displayName === preferredName,
+        ) ?? []);
+  const target = !restoringMetaskPreference
+    ? selected
+    : preferredModels.length === 1
+      ? { sourceId: "metask", modelId: preferredModels[0].id }
+      : null;
+  const selectedOption = options.find(
+    (option) =>
+      option.modelRef.sourceId === target?.sourceId &&
+      option.modelRef.modelId === target?.modelId,
+  );
   const valid = selectedOption != null;
   const intent = selectedOption
     ? {
@@ -85,8 +92,12 @@ export function newTaskModelSelectionState(
     editable: options.length !== 0,
     valid,
     options,
-    selectedModelId: selected ? modelOptionId(selected) : "",
-    selectedModelLabel: selected ? modelDisplayLabel(models, selected) : "",
+    selectedModelId: target ? modelOptionId(target) : "",
+    selectedModelLabel: restoringMetaskPreference
+      ? (preferredName ?? selected.modelId)
+      : selected
+        ? modelDisplayLabel(models, selected)
+        : "",
     selectedMetadata: selectedOption?.metadata ?? null,
     intent,
   };
@@ -118,10 +129,20 @@ export function readyModelOptions(
     return [];
   const authority = resolveAuthority(models, sourceId);
   if (!authority) return [];
+  const labelCounts = new Map<string, number>();
+  if (sourceId === "metask") {
+    for (const { displayName } of authority.options) {
+      labelCounts.set(displayName, (labelCounts.get(displayName) ?? 0) + 1);
+    }
+  }
   return authority.options.map((option) => {
     const modelRef = { sourceId, modelId: option.selectionId };
     return {
       ...option,
+      menuLabel:
+        (labelCounts.get(option.displayName) ?? 0) > 1
+          ? `${option.displayName} (${modelRef.modelId})`
+          : undefined,
       modelRef,
       selectionId: modelOptionId(modelRef),
       sourceGeneration: authority.sourceGeneration,

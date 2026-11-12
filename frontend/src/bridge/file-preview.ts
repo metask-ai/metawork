@@ -135,7 +135,7 @@ export class FilePreviewLoader {
     );
   }
   async listDirectory(
-    taskId: string,
+    taskId: string | null,
     workspaceId: string,
     workspaceEpoch: string,
     path: string,

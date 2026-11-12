@@ -599,6 +599,15 @@ pub const Runtime = struct {
         return result;
     }
 
+    fn manualCapacityAvailable(self: *const Runtime) bool {
+        var used: usize = 0;
+        for (self.records) |entry| {
+            const record = entry orelse continue;
+            if (record.kind == .manual and !record.project_removed) used += 1;
+        }
+        return used < self.max_manual;
+    }
+
     pub fn automaticCapacityAvailable(self: *const Runtime) bool {
         return self.next_id != std.math.maxInt(u64);
     }
@@ -816,6 +825,8 @@ pub const Runtime = struct {
             if (record.kind == .automatic) return error.InvalidWorkspace;
             if (record.authorization == .removing)
                 return error.WorkspaceRemovalInProgress;
+            if (record.project_removed and !self.manualCapacityAvailable())
+                return error.WorkspaceCapacity;
             const reopening_removed = !record.visible;
             if (reopening_removed and record.epoch == std.math.maxInt(u64))
                 return error.WorkspaceEpochExhausted;
@@ -868,7 +879,7 @@ pub const Runtime = struct {
                 if (slot) |index| self.records[index] = replaced;
             }
         }
-        if (slot == null and self.count(.manual) >= self.max_manual)
+        if (!self.manualCapacityAvailable())
             return error.WorkspaceCapacity;
         if (slot == null) slot = findEmpty(self.records);
         const target = slot orelse try self.reserveSlot();

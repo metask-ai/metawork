@@ -473,6 +473,7 @@ const readySettingsModels = {
   ],
 
   defaultSelection: { sourceId: "metask", modelId: "model-1" },
+  defaultSelectionDisplayName: null,
   selectionRevision: "1",
   operation: "idle",
   errorCode: "none",
@@ -2868,7 +2869,12 @@ test("Slash Tab leaves an unknown or disabled candidate instead of trapping focu
       fireEvent.keyDown(composer.textarea, { key: "Enter" });
       assert.equal(composer.submissions(), 0);
       await user.tab();
-      assert.equal(document.activeElement, after);
+      assert.equal(
+        document.activeElement?.getAttribute("aria-label"),
+        "Add to message",
+      );
+      await user.tab();
+      assert.ok(document.activeElement === after);
     } finally {
       after.remove();
       cleanup();
@@ -2893,8 +2899,14 @@ test("Slash Tab releases focus when its highlighted command becomes disabled", a
   document.body.append(after);
   try {
     composer.textarea.focus();
-    await userEvent.setup({ document }).tab();
-    assert.equal(document.activeElement, after);
+    const user = userEvent.setup({ document });
+    await user.tab();
+    assert.equal(
+      document.activeElement?.getAttribute("aria-label"),
+      "Add to message",
+    );
+    await user.tab();
+    assert.ok(document.activeElement === after);
     assert.equal(composer.submissions(), 0);
   } finally {
     after.remove();
@@ -3713,7 +3725,116 @@ test("multimodal drafts expose ordered removable chips and preserve keyboard foc
   );
 });
 
-test("removing the last attachment returns keyboard focus to the picker", async () => {
+test("Composer Add menu selects an enabled Skill and preserves the message", async () => {
+  const user = userEvent.setup({ document });
+  const draftChanges = [];
+  let picks = 0;
+  let refreshes = 0;
+  const skill = {
+    skillId: "review-id",
+    skillPolicyKey: "review-policy",
+    invocationName: "review",
+    displayName: "Review code",
+    description: "",
+    argumentNames: ["message"],
+    maxValues: 1,
+    enabled: true,
+  };
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    skillCatalog: {
+      availability: "ready",
+      revision: "4",
+      selectionRevision: "2",
+      skills: [
+        skill,
+        {
+          ...skill,
+          skillId: "disabled-id",
+          invocationName: "disabled",
+          displayName: "Disabled Skill",
+          enabled: false,
+        },
+      ],
+    },
+    onChooseAttachments: () => picks++,
+    onRefreshSkillCatalog: () => refreshes++,
+    onDraftChange: (draft) => draftChanges.push(draft),
+  });
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  assert.ok(await screen.findByRole("menuitem", { name: "Add files" }));
+  assert.equal(
+    screen.queryByRole("menuitem", { name: "Reference workspace file" }),
+    null,
+  );
+  assert.equal(picks, 0);
+  await user.click(screen.getByRole("menuitem", { name: "Add Skill" }));
+  const option = await screen.findByRole("menuitem", { name: "Review code" });
+  assert.equal(
+    screen.queryByRole("menuitem", { name: "Disabled Skill" }),
+    null,
+  );
+  assert.equal(refreshes, 1);
+  await user.click(option);
+  assert.equal(composer.textarea.value, "请检查当前实现");
+  assert.equal(document.activeElement, composer.textarea);
+  assert.equal(composer.submissions(), 0);
+  assert.equal(draftChanges.at(-1).skillId, "review-id");
+  assert.deepEqual(draftChanges.at(-1).argumentValues, ["请检查当前实现"]);
+});
+
+test("Composer references a file from the new task's selected workspace", async () => {
+  const user = userEvent.setup({ document });
+  const browsed = [];
+  const chosen = [];
+  const target = { taskId: null, workspaceId: "2", workspaceEpoch: "4" };
+  renderComposer({
+    attachmentsEnabled: true,
+    workspaceFiles: {
+      scope: "new-task:2",
+      target,
+      load: async (taskId, workspaceId, workspaceEpoch, path) => {
+        browsed.push({ taskId, workspaceId, workspaceEpoch, path });
+        return {
+          state: "ready",
+          entries:
+            path === ""
+              ? [{ name: "docs", kind: "directory" }]
+              : [{ name: "requirements.md", kind: "file" }],
+          redacted: false,
+          truncated: false,
+        };
+      },
+      choose: (reference) => chosen.push(reference),
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  assert.deepEqual(
+    (await screen.findAllByRole("menuitem")).map((item) => item.textContent),
+    ["Add files", "Reference workspace file", "Add Skill"],
+  );
+  await user.click(
+    screen.getByRole("menuitem", { name: "Reference workspace file" }),
+  );
+  const submenu = await screen.findByRole("menu", {
+    name: "Reference workspace file",
+  });
+  const files = within(submenu);
+  assert.equal(screen.queryByRole("dialog"), null);
+  await user.click(await files.findByRole("menuitem", { name: "docs" }));
+  await files.findByRole("menuitem", { name: "requirements.md" });
+  await user.click(files.getByRole("menuitem", { name: "Up one folder" }));
+  await user.click(files.getByRole("menuitem", { name: "docs" }));
+  assert.equal(document.activeElement?.textContent, "Up one folder");
+  await user.keyboard("{ArrowDown}{Enter}");
+  assert.deepEqual(browsed, [
+    { ...target, path: "" },
+    { ...target, path: "docs" },
+  ]);
+  assert.deepEqual(chosen, [{ ...target, path: "docs/requirements.md" }]);
+});
+
+test("removing the last attachment returns keyboard focus to the Add menu", async () => {
   const removed = [];
   let composer;
   composer = renderComposer({
@@ -3742,7 +3863,7 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(
     document.activeElement,
-    screen.getByRole("button", { name: "Add files" }),
+    screen.getByRole("button", { name: "Add to message" }),
   );
 });
 
