@@ -100,6 +100,7 @@ export const commands = {
   setApprovalMode: "metawork.tasks.setApprovalMode",
   selectTaskModel: "metawork.tasks.selectModel",
   restoreTask: "metawork.tasks.restore",
+  retrySessionClose: "metawork.tasks.retrySessionClose",
   compact: "metawork.tasks.compact",
   cancelCompact: "metawork.tasks.cancelCompact",
   refreshTaskSkillCatalog: "metawork.tasks.refreshSkillCatalog",

@@ -4318,6 +4318,10 @@ pub const Runtime = struct {
             return result;
         }
         const retained = record.retry_payload orelse return result;
+        if (self.task_runtime.inputRetryBlockedByClose(task_id)) {
+            result.reason = .session_releasing;
+            return result;
+        }
         var ids: [product_attachment.max_files_per_message]u64 = undefined;
         const input: TaskRunInput = switch (retained.input) {
             .text => |value| .{ .text = value },
@@ -4897,6 +4901,15 @@ pub const Runtime = struct {
             return err;
         };
         self.bumpRevision();
+    }
+
+    pub fn retryTaskSessionClose(self: *Runtime, task_id: u64, expected_binding_epoch: u64) Error!bool {
+        if (self.shutting_down) return false;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        if (!try self.task_runtime.retryFailedSessionClose(task_id, expected_binding_epoch, self.taskRuntimeOperationEffects())) return false;
+        self.bumpRevision();
+        return true;
     }
 
     fn detachTaskSession(self: *Runtime, task_id: u64) Error!void {
@@ -5534,7 +5547,10 @@ pub const Runtime = struct {
         const self: *Runtime = @ptrCast(@alignCast(context));
         const id = self.admitTaskRunInternal(task_id, binding_epoch, .{ .queued = index }, null) catch |err| return switch (err) {
             error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => .retry,
-            else => .{ .rejected = sendInputRejection(err) },
+            else => .{ .rejected = .{
+                .reason = sendInputRejection(err),
+                .blocking_task_id = if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null,
+            } },
         };
         return .{ .admitted = id };
     }

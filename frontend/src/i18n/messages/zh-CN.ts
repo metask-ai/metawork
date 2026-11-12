@@ -1482,6 +1482,8 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.checkpoint_unavailable": "已保存的会话检查点不可用。",
   "mutation.reason.execution_rebind_required": "此会话需要可用的执行配置。",
   "input.retry_models_catalog": "重试刷新模型",
+  "input.session_close_failed": "此任务的会话关闭失败。",
+  "input.retry_session_close": "重试关闭会话",
   "mutation.reason.task_unavailable": "该任务已不可用。",
   "mutation.reason.model_changed":
     "任务模型已在其他位置更新，请刷新后重新选择。",

@@ -1022,6 +1022,22 @@ export class BridgeClient {
       );
     return item.discarded;
   }
+  async retrySessionClose(taskId: string, expectedBindingEpoch: string) {
+    const item = object(
+      await this.invoke(commands.retrySessionClose, {
+        taskId,
+        expectedBindingEpoch,
+      }),
+      "$",
+      ["accepted"],
+    );
+    if (typeof item.accepted !== "boolean")
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Invalid Session close retry result",
+      );
+    return item.accepted;
+  }
   async stopTask(taskId: string) {
     const item = object(await this.invoke(commands.stop, { taskId }), "$", [
       "taskId",

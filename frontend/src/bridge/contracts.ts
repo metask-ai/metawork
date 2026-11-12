@@ -1181,6 +1181,7 @@ export const modelInputBlockers = [
 
 export type TaskView = {
   modelInputBlocker?: (typeof modelInputBlockers)[number];
+  sessionCloseRetryAvailable?: true;
   signal: (typeof taskNavigationSignals)[number] | null;
   compactBlocker: TaskActionBlocker | null;
   inputReady: boolean;

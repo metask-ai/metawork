@@ -3576,6 +3576,9 @@ function decodeTask(
   manifest: RunManifest[],
 ): TaskView {
   const item = object(value, path, [
+    ...(Object.hasOwn(record(value, path), "sessionCloseRetryAvailable")
+      ? ["sessionCloseRetryAvailable"]
+      : []),
     ...(Object.hasOwn(record(value, path), "modelInputBlocker")
       ? ["modelInputBlocker"]
       : []),
@@ -4164,8 +4167,16 @@ function decodeTask(
   }
   if (continuationAvailable && continuationRecoveryAvailable)
     fail(path, "continuation and recovery cannot both be available");
+  if (
+    Object.hasOwn(item, "sessionCloseRetryAvailable") &&
+    item.sessionCloseRetryAvailable !== true
+  )
+    fail(path, "invalid Session close retry availability");
   return {
     inputReady: booleanValue(item.inputReady, `${path}.inputReady`),
+    ...(item.sessionCloseRetryAvailable === true
+      ? { sessionCloseRetryAvailable: true as const }
+      : {}),
     ...(Object.hasOwn(item, "modelInputBlocker")
       ? {
           modelInputBlocker: enumValue(

@@ -305,6 +305,8 @@ Skill catalog 的每个候选必填 `skillPolicyKey`，来自 Core 的逻辑策�
 
 Task 的可选 `modelInputBlocker` 由 Host 给出当前 Metask 模型准入阻塞原因，等待中的目录刷新不代表提交已失败。现有 `metawork.models.refreshCatalog` 可由旧任务的目录失败提示调用，完成后等待 canonical view。
 
+Task 可选 `sessionCloseRetryAvailable: true` 表示当前关闭失败允许显式重试。`metawork.tasks.retrySessionClose` 精确接收 `{ taskId, expectedBindingEpoch }`，返回 `{ accepted }`。Host 复核同一 Task、binding 与关闭资格；接收只表示关闭重试已请求，结果由后续 Task 投影确认。
+
 operationId 为 1–64 字节可打印 ASCII identity，只关联单次提交，不是重试 key，不得含凭据。result 精确为 `{ taskId, operationId, outcome, reason }`：`accepted` 表示 Task 已取得消息所有权，reason=null；`rejected` 的 reason 非空，不承诺实际 Run identity。接收后投递失败不反向改判未接收。内部 SDK receipt 的 accepted/adopted/unknown 继续保存在执行记录。接收前失败不能部分消费附件；接收后的断连不取消 Task 意图。
 
 Task Snapshot 必填 `inputReady`、`inputAcceptance:{ available, reason }` 和 `inputSubmissions`。inputReady 只展示当前 Run readiness；inputAcceptance 只表达真实接收资格，available 当且仅当 reason=null。等待记录通常精确为 `{ submission, input, state, reason }`；发送触发内部恢复时，名额失败也使用 `session_releasing | session_capacity | session_close_failed`，仅 `state=failed` 且 `reason=session_close_failed` 的记录额外且必须携带非零 canonical u64 `blockingTaskId`，其余记录禁止该字段。该 identity 与 reason 一样仅存在于运行时，Renderer 指明阻塞 Task 并保留显式重试语义。state=`waiting | failed | cancelled | interrupted`；waiting 和 interrupted 的 reason=null。具体失败原因只在进程内发布，不写历史；重启后安全等待记录显示 interrupted，不恢复原文或执行。数量由 Product Limits 配置且最多 64，使用有界共享原文/文件及安全投影预算，不建立 durable outbox。

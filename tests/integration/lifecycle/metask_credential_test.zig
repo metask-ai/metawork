@@ -187,6 +187,10 @@ test "Metask catalog loading defers a detached Task until refresh completes" {
     try characterizeCredentialExpiry(.catalog_loading_detached);
 }
 
+test "Metask Task retries failed Session close before explicit input retry" {
+    try characterizeCredentialExpiry(.session_close_retry);
+}
+
 test "Metask rejected credential update does not replay a Run and permits one explicit retry" {
     try characterizeCredentialExpiry(.update_rejected);
 }
@@ -296,7 +300,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
 }
 
-const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_loading_attached, catalog_loading_detached, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 const CatalogRetryTimer = struct {
     id: ?u64 = null,
@@ -450,6 +454,42 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     fake_core.setRestoreHistory(1, 0);
     fake_core.setRestoredModel(model_id);
     const default_revision = control.modelsView().selection_revision;
+    if (scenario == .session_close_retry) {
+        try std.testing.expect(!try control.retryTaskSessionClose(old_id, old_epoch));
+        fake_core.failNextSessionDestroy();
+        try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (old.runtime.close_failed) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CloseFailureDidNotSettle;
+        try expectBlocked(&control, old_id, "input-after-close-failed");
+        const failed = control.task_runtime.retrySubmission(old_id, "input-after-close-failed").?;
+        try std.testing.expectEqual(.session_close_failed, failed.reason.?);
+        try std.testing.expectEqual(old_id, failed.blocking_task_id.?);
+        const premature = try control.retryTaskInput(old_id, "input-after-close-failed", "premature-retry");
+        try std.testing.expectEqual(.rejected, premature.outcome);
+        try std.testing.expect(failed.retry_payload != null);
+        try std.testing.expect(!control.task_runtime.hasInputReceipt(old_id, "premature-retry"));
+        try std.testing.expect(!try control.retryTaskSessionClose(old_id, old_epoch + 1));
+        try std.testing.expect(try control.retryTaskSessionClose(old_id, old_epoch));
+        try std.testing.expect(!try control.retryTaskSessionClose(old_id, old_epoch));
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (old.runtime.attachment == .detached and old.runtime.close_thread == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CloseRetryDidNotSettle;
+        try std.testing.expectEqual(@as(usize, 1), runCalls());
+        const retried = try control.retryTaskInput(old_id, "input-after-close-failed", "retry-after-close");
+        try std.testing.expectEqual(.accepted, retried.outcome);
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.SessionCloseInputDidNotFinish;
+        try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "retry-after-close"));
+        return;
+    }
     if (scenario == .catalog_loading_attached or scenario == .catalog_loading_detached) {
         if (scenario == .catalog_loading_detached) {
             try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));

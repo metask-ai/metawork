@@ -479,6 +479,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.set_approval_mode, .function = setApprovalMode },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
             .{ .name = commands.restore_task, .function = restoreTask },
+            .{ .name = commands.retry_session_close, .function = retrySessionClose },
             .{ .name = commands.compact, .function = compactTask },
             .{ .name = commands.cancel_compact, .function = cancelCompact },
             .{ .name = commands.refresh_task_skill_catalog, .function = refreshTaskSkillCatalog },
@@ -3931,6 +3932,22 @@ pub const Dispatcher = struct {
             null,
             null,
         );
+    }
+
+    fn retrySessionClose(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskRestore, invocation.request.payload);
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
+        if (task_id == 0 or epoch == 0) return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        const accepted = try control.retryTaskSessionClose(task_id, epoch);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"accepted\":{}}}", .{accepted});
     }
 
     fn cancelCompact(

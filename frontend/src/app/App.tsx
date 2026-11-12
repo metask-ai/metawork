@@ -3149,6 +3149,31 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
     }
   }
+  async function retryFailedSessionClose(taskId: string, bindingEpoch: string) {
+    const key = `session-close:${taskId}`;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    inputRetryActions.current.add(key);
+    const audience = { scope: "task" as const, taskId };
+    const feedback = beginOperationFeedback(key, audience);
+    try {
+      const accepted = await client.retrySessionClose(taskId, bindingEpoch);
+      settleOperationFeedback(
+        feedback,
+        accepted
+          ? null
+          : attentionStatus("input.session_close_failed", audience),
+      );
+    } catch {
+      settleOperationFeedback(
+        feedback,
+        attentionStatus("feedback.unconfirmed", audience),
+      );
+    } finally {
+      await refreshSnapshot().catch(() => undefined);
+      inputRetryActions.current.delete(key);
+    }
+  }
+
   async function addAttachments(
     source: AddSource = { kind: "picker" },
     referenceScope?: string,
@@ -4349,6 +4374,27 @@ export default function App() {
       : undefined;
   const composerFooter = (
     <>
+      {activeTask?.sessionCloseRetryAvailable && (
+        <div>
+          <p className="projection-note" role="status">
+            {t("input.session_close_failed")}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={bridgeUnavailable}
+            onClick={() =>
+              void retryFailedSessionClose(
+                activeTask.id,
+                activeTask.binding.epoch,
+              )
+            }
+          >
+            {t("input.retry_session_close")}
+          </Button>
+        </div>
+      )}
       {activeTask?.lifecycle === "open" && activeTask.modelInputBlocker && (
         <div>
           <p className="projection-note" role="status">

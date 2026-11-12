@@ -216,6 +216,7 @@ pub const Input = struct {
     shutting_down: bool,
     input_acceptance_reason: ?task_state.SendInputReason = null,
     model_input_blocker: ?task_state.SendInputReason = null,
+    session_close_retry_available: bool = false,
     compact_blocker: ?ActionBlocker,
     text: TextProjection,
     catalog: CatalogProjection,
@@ -416,6 +417,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         writer.writeAll(",\"modelInputBlocker\":") catch return error.SnapshotTooLarge;
         jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge;
     }
+    if (input.session_close_retry_available)
+        writer.writeAll(",\"sessionCloseRetryAvailable\":true") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"inputSubmissions\":[") catch return error.SnapshotTooLarge;
     var first_submission = true;
     for (task.input_submissions.items) |record| {

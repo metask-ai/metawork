@@ -462,7 +462,10 @@ export function TaskContent({
             {record.reason && record.state === "failed" && (
               <p className="projection-note">
                 {t(`mutation.reason.${record.reason}` as MessageId, {
-                  task: record.blockingTaskId ?? "",
+                  task:
+                    record.blockingTaskId === task?.id
+                      ? (task?.title ?? "")
+                      : (record.blockingTaskId ?? ""),
                 })}
               </p>
             )}
@@ -475,7 +478,11 @@ export function TaskContent({
                     type="button"
                     size="sm"
                     variant="secondary"
-                    disabled={!synchronized}
+                    disabled={
+                      !synchronized ||
+                      task.sessionCloseRetryAvailable ||
+                      task.lifecycle === "closing"
+                    }
                     onClick={() =>
                       onRetryInput(task.id, record.submission.operationId)
                     }

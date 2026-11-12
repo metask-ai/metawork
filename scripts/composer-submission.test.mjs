@@ -1099,6 +1099,28 @@ test("An existing Task offers model catalog retry while preserving its draft", a
   assert.equal(fixture.inputs.length, 0);
 });
 
+test("A retryable Session close offers an epoch-bound action without sending input", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const close = ctx.mock.method(
+    BridgeClient.prototype,
+    "retrySessionClose",
+    async () => true,
+  );
+  const user = userEvent.setup({ document });
+  fixture.task.sessionCloseRetryAvailable = true;
+  await fixture.publish();
+  await user.click(
+    await screen.findByRole("button", { name: "Retry closing session" }),
+  );
+  await waitFor(() => assert.equal(close.mock.callCount(), 1));
+  assert.deepEqual(close.mock.calls[0].arguments, [
+    fixture.task.id,
+    fixture.task.binding.epoch,
+  ]);
+  assert.equal(fixture.inputs.length, 0);
+});
+
 test("App previous-generation rejection cannot disturb a new connection's creation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });

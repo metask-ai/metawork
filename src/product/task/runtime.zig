@@ -2559,7 +2559,7 @@ pub const Runtime = struct {
 
     pub const WaitingInputEffects = struct {
         pub const RestoreFailure = struct { reason: SendInputReason, blocking_task_id: ?u64 = null };
-        pub const RunAdmission = union(enum) { admitted: u64, retry, rejected: SendInputReason };
+        pub const RunAdmission = union(enum) { admitted: u64, retry, rejected: RestoreFailure };
 
         context: *anyopaque,
         restore_fn: *const fn (*anyopaque, u64, u64) ?RestoreFailure,
@@ -2682,7 +2682,7 @@ pub const Runtime = struct {
         switch (outcome) {
             .admitted => |id| self.finishWaitingInput(task_id, index, id, null, effects.release),
             .retry => return false,
-            .rejected => |reason| self.failWaitingInput(task_id, index, reason, null),
+            .rejected => |failure| self.failWaitingInput(task_id, index, failure.reason, failure.blocking_task_id),
         }
         return true;
     }
@@ -2773,6 +2773,11 @@ pub const Runtime = struct {
             if (record.state == .failed and std.mem.eql(u8, record.submission.operationId(), operation_id)) return record;
         }
         return null;
+    }
+
+    pub fn inputRetryBlockedByClose(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return true;
+        return task.runtime.close_failed or task.runtime.close_requested or task.runtime.hasClosingSession();
     }
 
     pub fn finishRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, submission: Submission) void {
@@ -3958,6 +3963,12 @@ pub const Runtime = struct {
             return err;
         };
         return true;
+    }
+
+    pub fn retryFailedSessionClose(self: *Runtime, task_id: u64, expected_binding_epoch: u64, effects: OperationEffects) CloseError!bool {
+        const task = self.find(task_id) orelse return false;
+        if (task.durable.binding_epoch != expected_binding_epoch or !canRetryFailedSessionClose(task)) return false;
+        return self.beginDetach(task_id, effects);
     }
 
     pub fn beginDetach(
@@ -6224,6 +6235,7 @@ pub const Runtime = struct {
                 .shutting_down = external.shutting_down,
                 .input_acceptance_reason = acceptance_reason,
                 .model_input_blocker = external.model_input_blocker,
+                .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .catalog = effects.catalog,
@@ -6425,6 +6437,7 @@ pub const Runtime = struct {
             .shutting_down = external.shutting_down,
             .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
             .model_input_blocker = external.model_input_blocker,
+            .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .catalog = effects.catalog,
@@ -10112,6 +10125,13 @@ fn idleSessionReleasable(task: *const task_state.Task) bool {
             run.checkpoint.lease != null or run.execution != null) return false;
     };
     return true;
+}
+
+fn canRetryFailedSessionClose(task: *const task_state.Task) bool {
+    return task.runtime.close_failed and task.runtime.liveConst() != null and
+        task.runtime.close_thread == null and !task.runtime.close_requested and
+        task.deletion == .idle and task.read_only_history == null and !task.durable.archived and
+        !task.model_intent_prepared and task.approval_change == null and closeReady(task);
 }
 
 fn closeReady(task: *const task_state.Task) bool {

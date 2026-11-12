@@ -100,6 +100,7 @@ pub const stop = "metawork.tasks.stop";
 pub const set_approval_mode = "metawork.tasks.setApprovalMode";
 pub const select_task_model = "metawork.tasks.selectModel";
 pub const restore_task = "metawork.tasks.restore";
+pub const retry_session_close = "metawork.tasks.retrySessionClose";
 pub const compact = "metawork.tasks.compact";
 pub const cancel_compact = "metawork.tasks.cancelCompact";
 pub const refresh_task_skill_catalog = "metawork.tasks.refreshSkillCatalog";
@@ -215,6 +216,7 @@ pub const product = [_][]const u8{
     set_approval_mode,
     select_task_model,
     restore_task,
+    retry_session_close,
     compact,
     cancel_compact,
     refresh_task_skill_catalog,

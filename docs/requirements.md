@@ -49,7 +49,7 @@ Task 是用户可持续补充的产品工作上下文，归属于 Workspace，�
 
 记录和展示容量不足不得终止 Run 或改写真实执行结果；已知记录缺口必须在所属 Run 明确呈现，完成仍可被用户查看、归档并持久保存为已读。真实依赖违约和非容量 Host 失败仍须失败收口；具体消费边界见 [AgentCore 集成契约](agentcore-integration.md#8-event-pump)。
 
-当前 Agent Session 因运行失败进入 poisoned 后，Host 必须在本轮 terminal、checkpoint 与资源引用全部收口后关闭并释放该 Session，再把同一 Task 转为可恢复的 detached 历史；用户后续发送消息沿既有 Conversation restore/fresh attach 路径继续，不要求结束 Task 或创建新 Task。Session close 或资源 release 失败时必须保留真实的 attached/closing 状态并拒绝伪恢复，不能丢弃 owner、泄漏资源或自动无限重试。
+当前 Agent Session 因运行失败进入 poisoned 后，Host 必须在本轮 terminal、checkpoint 与资源引用全部收口后关闭并释放该 Session，再把同一 Task 转为可恢复的 detached 历史；用户后续发送消息沿既有 Conversation restore/fresh attach 路径继续，不要求结束 Task 或创建新 Task。Session close 或资源 release 失败时必须保留真实的 attached/closing 状态并拒绝伪恢复，不能丢弃 owner、泄漏资源或自动无限重试。Host 确认可重试时允许用户在原 Task 重试关闭，完成后按普通会话恢复资格继续，失败消息仍需显式重发。
 
 MCP 不可用不得阻止普通 Text Task 创建。Task 标题附近的只读任务信息必须区分创建时已复制 MCP selection、MCP 已就绪但未选择工具，以及创建时 MCP 不可用；该事实不能被解释为可热附加能力，也不能包含 server、tool 或 credential 细节。
 

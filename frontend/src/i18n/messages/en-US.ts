@@ -1721,6 +1721,8 @@ export const enUS = {
   "mutation.reason.execution_rebind_required":
     "The saved conversation needs a valid execution setup.",
   "input.retry_models_catalog": "Retry model refresh",
+  "input.session_close_failed": "This task's session could not close.",
+  "input.retry_session_close": "Retry closing session",
   "mutation.reason.model_changed":
     "This task's model changed elsewhere. Refresh and choose again.",
   "task.model.updated": "Task model updated.",
