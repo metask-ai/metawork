@@ -37,6 +37,7 @@ pub const Definition = struct {
     }
 };
 
+// Order by display name, using pinyin for Chinese names.
 pub const definitions = [_]Definition{
     .{
         .id = .deepseek,
@@ -66,15 +67,6 @@ pub const definitions = [_]Definition{
         .model_ids = &.{ "MiniMax-M3.1-Flash", "MiniMax-M3" },
     },
     .{
-        .id = .glm,
-        .display_name = "智谱 GLM",
-        .protocol = .openai_chat_completions,
-        .default_base_url = "https://open.bigmodel.cn/api/paas/v4",
-        .api_key_url = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
-        .documentation_url = "https://docs.bigmodel.cn/cn/api/introduction",
-        .model_ids = &.{ "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.2", "glm-5.1" },
-    },
-    .{
         .id = .hunyuan,
         .display_name = "腾讯混元",
         .protocol = .openai_chat_completions,
@@ -82,6 +74,15 @@ pub const definitions = [_]Definition{
         .api_key_url = "https://console.cloud.tencent.com/tokenhub/apikey",
         .documentation_url = "https://cloud.tencent.com/document/product/1823/132252",
         .model_ids = &.{ "hy4", "hy4-preview", "hy3" },
+    },
+    .{
+        .id = .glm,
+        .display_name = "智谱 GLM",
+        .protocol = .openai_chat_completions,
+        .default_base_url = "https://open.bigmodel.cn/api/paas/v4",
+        .api_key_url = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+        .documentation_url = "https://docs.bigmodel.cn/cn/api/introduction",
+        .model_ids = &.{ "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.2", "glm-5.1" },
     },
 };
 

@@ -870,15 +870,19 @@ test("Add model uses the Host recipe and saves the first model with its official
     within(dialog).getByRole("combobox", { name: "Model vendor" }),
   );
   await screen.findByRole("option", { name: "DeepSeek", exact: true });
-  for (const [label, vendor] of [
+  const expectedOptions = [
     ["DeepSeek", "deepseek"],
     ["Kimi", "kimi"],
     ["MiniMax", "minimax"],
-    ["智谱 GLM", "glm"],
     ["腾讯混元", "hunyuan"],
+    ["智谱 GLM", "glm"],
     ["Custom / other service", "custom"],
-  ]) {
-    const option = screen.getByRole("option", { name: label, exact: true });
+  ];
+  const options = screen.getAllByRole("option");
+  assert.equal(options.length, expectedOptions.length);
+  for (const [index, [label, vendor]] of expectedOptions.entries()) {
+    const option = options[index];
+    assert.equal(option.textContent, label);
     assert.equal(
       option.querySelector(".model-vendor-icon")?.dataset.vendor,
       vendor,
