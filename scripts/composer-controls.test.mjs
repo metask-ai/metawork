@@ -870,14 +870,19 @@ test("Add model uses the Host recipe and saves the first model with its official
     within(dialog).getByRole("combobox", { name: "Model vendor" }),
   );
   await screen.findByRole("option", { name: "DeepSeek", exact: true });
-  for (const [label, vendor] of [
+  const expectedOptions = [
     ["DeepSeek", "deepseek"],
     ["Kimi", "kimi"],
     ["MiniMax", "minimax"],
+    ["腾讯混元", "hunyuan"],
     ["智谱 GLM", "glm"],
     ["Custom / other service", "custom"],
-  ]) {
-    const option = screen.getByRole("option", { name: label, exact: true });
+  ];
+  const options = screen.getAllByRole("option");
+  assert.equal(options.length, expectedOptions.length);
+  for (const [index, [label, vendor]] of expectedOptions.entries()) {
+    const option = options[index];
+    assert.equal(option.textContent, label);
     assert.equal(
       option.querySelector(".model-vendor-icon")?.dataset.vendor,
       vendor,
@@ -888,13 +893,13 @@ test("Add model uses the Host recipe and saves the first model with its official
     );
   }
   await user.click(
-    screen.getByRole("option", { name: "DeepSeek", exact: true }),
+    screen.getByRole("option", { name: "腾讯混元", exact: true }),
   );
   assert.equal(
     within(dialog)
       .getByRole("combobox", { name: "Model vendor" })
       .querySelector(".model-vendor-icon")?.dataset.vendor,
-    "deepseek",
+    "hunyuan",
   );
   assert.equal(within(dialog).queryByText("Connection settings"), null);
   assert.equal(
@@ -905,22 +910,28 @@ test("Add model uses the Host recipe and saves the first model with its official
     within(dialog).queryByRole("combobox", { name: "Protocol" }),
     null,
   );
-  assert.ok(within(dialog).getByRole("link", { name: "Get an API key" }));
+  assert.equal(
+    within(dialog).getByRole("link", { name: "Get an API key" }).href,
+    "https://console.cloud.tencent.com/tokenhub/apikey",
+  );
 
   await user.type(within(dialog).getByLabelText("API key"), "official-secret");
   await user.click(within(dialog).getByRole("combobox", { name: "Model ID" }));
-  await user.click(
-    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
+  await screen.findByRole("option", { name: "hy4", exact: true });
+  assert.deepEqual(
+    screen.getAllByRole("option").map((option) => option.textContent),
+    ["hy4", "hy4-preview", "hy3"],
   );
+  await user.click(screen.getByRole("option", { name: "hy4", exact: true }));
   await user.click(
     within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
   assert.deepEqual(submitted, [
     {
-      providerId: "deepseek",
-      baseUrl: "https://api.deepseek.com",
+      providerId: "hunyuan",
+      baseUrl: "https://tokenhub.tencentmaas.com/v1",
       apiKey: "official-secret",
-      model: { id: "deepseek-flash" },
+      model: { id: "hy4" },
     },
   ]);
   assert.equal(within(dialog).getByLabelText("API key").value, "");

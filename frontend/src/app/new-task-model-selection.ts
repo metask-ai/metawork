@@ -35,7 +35,11 @@ function catalogModelVendor(modelId: string): Brand {
     case "glm":
     case "kimi":
     case "minimax":
+    case "hunyuan":
       return family;
+    case "hy3":
+    case "hy4":
+      return "hunyuan";
     default:
       return "custom";
   }
