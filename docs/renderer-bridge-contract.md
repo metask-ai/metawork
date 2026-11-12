@@ -299,7 +299,9 @@ Run snapshot 的 `input` 对 multimodal 精确发布 `{ kind, text, attachments,
 
 Skill catalog 的每个候选必填 `skillPolicyKey`，来自 Core 的逻辑策略身份；它不是执行授权，也不允许 Renderer 按同名来源猜测替代项。Host 接收显式 Skill 输入时校验 concrete identity 与双 revision 后捕获逻辑选择，后续准备重新核验当前 winner、启用状态和参数。发送 payload 与历史格式保持不变。
 
-`metawork.tasks.sendInput` 是普通 Composer 的唯一发送入口，payload 精确为 `{ operationId, taskId, input }`，input 复用 text、skill 与 multimodal tagged union。Renderer 不提供 binding epoch、idle/Run 目标，也不编排 Skill 准备或恢复。Host 校验当前窗口、连接 generation、Task/Workspace authority、内容、附件 grant 和真实容量；Task 在主线程取得唯一 owned payload 与安全展示预留后接收，执行启动、readiness、停止或收尾阶段不能成为普通有效消息的接收拒绝理由。已有公共 `tasks.run` 保留显式新 Run 语义，不能越过更早待处理输入。
+`metawork.tasks.sendInput` 是普通 Composer 新输入的发送入口，payload 精确为 `{ operationId, taskId, input }`，input 复用 text、skill 与 multimodal tagged union。Renderer 不提供 binding epoch、idle/Run 目标，也不编排 Skill 准备或恢复。Host 校验当前窗口、连接 generation、Task/Workspace authority、内容、附件 grant 和真实容量；Task 在主线程取得唯一 owned payload 与安全展示预留后接收，执行启动、readiness、停止或收尾阶段不能成为普通有效消息的接收拒绝理由。已有公共 `tasks.run` 保留显式新 Run 语义，不能越过更早待处理输入。
+
+`metawork.tasks.retryInput` 精确接收 `{ taskId, originalOperationId, operationId }`。Host 只以该 Task 的未执行失败提交及其进程内保留输入为源，返回普通发送接收结果。原提交已转交时返回已接收的新 `operationId`；响应未知时按操作 ID 查回既有快照回执。`metawork.tasks.discardInputRetry` 精确接收 `{ taskId, originalOperationId }`，返回 `{ discarded }`。这两个命令只接收身份，不接收原文、附件路径或 grant。失败提交可选 `retryAvailable: true` 仅表示 Host 持有可重发输入，重启或淘汰后省略。
 
 operationId 为 1–64 字节可打印 ASCII identity，只关联单次提交，不是重试 key，不得含凭据。result 精确为 `{ taskId, operationId, outcome, reason }`：`accepted` 表示 Task 已取得消息所有权，reason=null；`rejected` 的 reason 非空，不承诺实际 Run identity。接收后投递失败不反向改判未接收。内部 SDK receipt 的 accepted/adopted/unknown 继续保存在执行记录。接收前失败不能部分消费附件；接收后的断连不取消 Task 意图。
 

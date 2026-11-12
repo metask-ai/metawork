@@ -325,6 +325,7 @@ type LocalTaskSubmission = {
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
   blockingTaskId?: string;
+  reusableDraft?: boolean;
 };
 import {
   ArchiveNotice,
@@ -333,6 +334,7 @@ import {
 
 export default function App() {
   const { t } = useI18n();
+  const inputRetryActions = useRef(new Set<string>());
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
@@ -3019,6 +3021,7 @@ export default function App() {
       ...entries.filter(
         (entry) =>
           entry.scope !== scope ||
+          entry.reusableDraft ||
           entry.state === "submitting" ||
           entry.state === "accepted" ||
           entry.state === "unknown",
@@ -3056,6 +3059,8 @@ export default function App() {
       },
     );
     if (bridgeGenerationRef.current !== generation) return;
+    const reusableDraft =
+      result.kind === "create_rejected" || result.kind === "rejected";
     if (
       result.kind === "create_rejected" &&
       session.canReleaseAfterCreationRejection &&
@@ -3076,6 +3081,7 @@ export default function App() {
           ? {
               ...entry,
               state,
+              reusableDraft,
               reason: "reason" in result ? result.reason : undefined,
               blockingTaskId:
                 "blockingTaskId" in result ? result.blockingTaskId : undefined,
@@ -3084,6 +3090,64 @@ export default function App() {
       ),
     );
     await refreshSnapshot().catch(() => undefined);
+  }
+
+  async function actOnFailedInput(
+    taskId: string,
+    original: string,
+    discard: boolean,
+  ) {
+    const key = `${taskId}:${original}`;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    inputRetryActions.current.add(key);
+    const audience = { scope: "task" as const, taskId };
+    const feedback = beginOperationFeedback(`input-retry:${key}`, audience);
+    const operationId = newComposerOperationId();
+    try {
+      if (discard) {
+        await client.discardInputRetry(taskId, original);
+        settleOperationFeedback(feedback, null);
+      } else {
+        const result = await client.retryInput(taskId, original, operationId);
+        settleOperationFeedback(
+          feedback,
+          result.outcome === "accepted"
+            ? null
+            : attentionStatus(mutationReasonMessageId(result.reason), audience),
+        );
+      }
+    } catch {
+      const observed = discard
+        ? false
+        : await client
+            .fetchSnapshot({
+              taskId,
+              beforeRunId: null,
+              runLimit: 1,
+              management: "none",
+              search: false,
+              searchQuery: "",
+              searchCursor: null,
+              receipts: [{ taskId, operationId }],
+            })
+            .then(
+              (snapshot) =>
+                snapshot.receipts.some(
+                  (receipt) =>
+                    receipt.taskId === taskId &&
+                    receipt.operationId === operationId &&
+                    receipt.observed,
+                ),
+              () => false,
+            );
+      settleOperationFeedback(
+        feedback,
+        observed ? null : attentionStatus("feedback.unconfirmed", audience),
+      );
+    } finally {
+      inputRetryActions.current.delete(key);
+      await refreshSnapshot().catch(() => undefined);
+    }
   }
   async function addAttachments(
     source: AddSource = { kind: "picker" },
@@ -4173,17 +4237,15 @@ export default function App() {
                 })}
               </p>
             )}
-            {(entry.state === "failed" ||
-              entry.state === "unknown" ||
-              entry.state === "cancelled") && (
+            {(entry.state === "failed" || entry.state === "cancelled") && (
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  if (!composerDraftHasContent(composerDraftRef.current))
+                  if (!composerDraftHasContent(composerDraftRef.current)) {
                     updateComposerDraft(
-                      entry.draft.kind === "multimodal"
+                      entry.draft.kind === "multimodal" && !entry.reusableDraft
                         ? {
                             kind: "text",
                             text: entry.draft.text,
@@ -4191,6 +4253,13 @@ export default function App() {
                           }
                         : entry.draft,
                     );
+                    if (entry.reusableDraft)
+                      setLocalSubmissions((items) =>
+                        items.filter(
+                          (item) => item.operationId !== entry.operationId,
+                        ),
+                      );
+                  }
                 }}
               >
                 {t("run.prepare_retry")}
@@ -5602,6 +5671,12 @@ export default function App() {
                     : undefined
                 }
                 onPrepareRetry={prepareRetry}
+                onRetryInput={(taskId, operationId) =>
+                  void actOnFailedInput(taskId, operationId, false)
+                }
+                onDiscardInputRetry={(taskId, operationId) =>
+                  void actOnFailedInput(taskId, operationId, true)
+                }
                 onOpenSettings={openSettings}
                 onPreviewFile={openFilePreview}
                 workspaceRoot={

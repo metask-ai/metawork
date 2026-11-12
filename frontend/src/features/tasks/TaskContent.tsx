@@ -307,6 +307,8 @@ export function TaskContent({
   onPrepareOutputEdit,
   webLink,
   onPrepareRetry,
+  onRetryInput,
+  onDiscardInputRetry,
   onOpenSettings,
   onPreviewFile,
   workspaceRoot = null,
@@ -345,6 +347,8 @@ export function TaskContent({
   onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView, taskId: string, runId: string) => void;
+  onRetryInput?: (taskId: string, operationId: string) => void;
+  onDiscardInputRetry?: (taskId: string, operationId: string) => void;
   onOpenSettings?: (target: "account" | "models") => void;
   loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
@@ -462,6 +466,38 @@ export function TaskContent({
                 })}
               </p>
             )}
+            {task &&
+              record.retryAvailable &&
+              onRetryInput &&
+              onDiscardInputRetry && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={!synchronized}
+                    onClick={() =>
+                      onRetryInput(task.id, record.submission.operationId)
+                    }
+                  >
+                    {t("input.retry_original")}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={!synchronized}
+                    onClick={() =>
+                      onDiscardInputRetry(
+                        task.id,
+                        record.submission.operationId,
+                      )
+                    }
+                  >
+                    {t("input.discard_retry")}
+                  </Button>
+                </>
+              )}
           </>
         }
       >

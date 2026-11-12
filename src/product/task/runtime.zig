@@ -670,6 +670,7 @@ pub const ReleaseEffects = struct {
     prepare_credential_release_fn: *const fn (*anyopaque, []const u8) bool,
     redact_all_fn: *const fn (*anyopaque, []const u8) void,
     release_projection_bytes_fn: *const fn (*anyopaque, usize) void,
+    discard_retry_attachment_fn: ?*const fn (*anyopaque, u64, u64) void = null,
 
     fn redactAll(self: ReleaseEffects, credential: []const u8) void {
         self.redact_all_fn(self.context, credential);
@@ -1256,6 +1257,7 @@ pub const Runtime = struct {
     search_revision: u64 = 1,
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
+    retry_input_bytes: usize = 0,
     advancing_inputs: bool = false,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
@@ -2409,6 +2411,10 @@ pub const Runtime = struct {
 
     /// Message acceptance is Task-local and independent of execution readiness.
     pub fn receiveInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects) RunError!Submission {
+        return self.receiveInputReplacingRetry(task_id, operation_id, input, effects, null);
+    }
+
+    pub fn receiveInputReplacingRetry(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects, original: ?[]const u8) RunError!Submission {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
         if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
@@ -2423,6 +2429,7 @@ pub const Runtime = struct {
         var retired: ?usize = null;
         if (task.input_submissions.items.len >= effects.limits.max_pending_inputs_per_task) {
             for (task.input_submissions.items, 0..) |record, index| if (record.state != .waiting) {
+                if (original) |id| if (std.mem.eql(u8, id, record.submission.operationId())) continue;
                 retired = index;
                 break;
             };
@@ -2464,6 +2471,7 @@ pub const Runtime = struct {
         if (retired) |index| {
             var previous = task.input_submissions.orderedRemove(index);
             self.releaseSubmissionPayload(&previous);
+            self.releaseRetryInput(task_id, &previous, effects.release);
             deinitRunInput(self, effects.release, &previous.input);
             effects.release.releaseProjectionBytes(task_state.additional_input_projection_bytes);
         }
@@ -2473,7 +2481,7 @@ pub const Runtime = struct {
         // continuation work so additional messages cannot restart its query.
         if (!hasWaitingInputs(task) and self.inputContinuation(task_id) == null)
             task.skill_preparation = null;
-        task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload });
+        task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload, .force_new_run = original != null });
         if (task.initial_personal_catalog) |catalog| self.allocator.free(catalog.revision);
         task.initial_personal_catalog = null;
         self.pending_input_bytes += payload.bytes.len;
@@ -2501,6 +2509,7 @@ pub const Runtime = struct {
                 return .{ .start = index };
             },
             .run => |id| {
+                if (task.input_submissions.items[index].force_new_run) return .wait;
                 if (task.input_submissions.items[index].payload.?.input != .text) return .wait;
                 const run = task_state.findRun(task.durable.runs, id) orelse return .wait;
                 if (run.input == .skill or task_state.terminalPayload(run) != null or
@@ -2670,22 +2679,24 @@ pub const Runtime = struct {
 
     /// Task decides when an original is cancelled or handed to a real Run;
     /// composition executes that resource action in the attachment owner.
-    pub fn settleInputResources(self: *Runtime, context: *anyopaque, settle: *const fn (*anyopaque, u64, u64, bool) void) void {
+    pub const InputResourceDisposition = union(enum) { discard, keep_original, retain_for_retry: u64 };
+
+    pub fn settleInputResources(self: *Runtime, context: *anyopaque, settle: *const fn (*anyopaque, u64, u64, InputResourceDisposition) void) void {
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
             while (self.takeInputResourceAction(id)) |action|
-                settle(context, id, action.resource_id, action.keep_original);
+                settle(context, id, action.resource_id, action.disposition);
         };
     }
 
-    fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
+    fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, disposition: InputResourceDisposition } {
         const task = self.find(task_id) orelse return null;
         for (task.input_submissions.items) |*record| {
             if (record.state == .waiting or record.input != .multimodal) continue;
             for (record.input.multimodal.attachments) |*item| if (item.resource_id != 0) {
                 const id = item.resource_id;
                 item.resource_id = 0;
-                return .{ .resource_id = id, .keep_original = false };
+                return .{ .resource_id = id, .disposition = if (record.retry_payload) |retry| .{ .retain_for_retry = retry.attachments[0].resource_id } else .discard };
             };
         }
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
@@ -2693,7 +2704,7 @@ pub const Runtime = struct {
             for (run.input.multimodal.attachments) |*item| if (item.resource_id != 0) {
                 const id = item.resource_id;
                 item.resource_id = 0;
-                return .{ .resource_id = id, .keep_original = true };
+                return .{ .resource_id = id, .disposition = .keep_original };
             };
         };
         return null;
@@ -2706,6 +2717,73 @@ pub const Runtime = struct {
             payload.deinit(self.allocator);
             record.payload = null;
         }
+    }
+
+    fn retainRetryInput(self: *Runtime, record: *InputSubmission) void {
+        const original = record.payload orelse return;
+        var input = original.input;
+        var attachments: [agent.multimodal_input_limits.max_parts]task_state.MultimodalAttachment = undefined;
+        if (input == .multimodal) {
+            for (input.multimodal.attachments, attachments[0..input.multimodal.attachments.len]) |part, *target| {
+                if (part.resource_id == 0) return;
+                target.* = part;
+                target.bytes = &.{};
+                target.reference = &.{};
+            }
+            input.multimodal.attachments = attachments[0..input.multimodal.attachments.len];
+        }
+        const budget = 4 * 1024 * 1024;
+        const retry = task_state.OwnedRunInput.cloneSelected(self.allocator, input, budget - self.retry_input_bytes, original.skill_selection) catch return;
+        self.retry_input_bytes += retry.bytes.len;
+        record.retry_payload = retry;
+    }
+
+    fn releaseRetryInput(self: *Runtime, task_id: u64, record: *InputSubmission, discard: ?ReleaseEffects) void {
+        if (record.retry_payload) |*retry| {
+            if (discard) |effects| if (effects.discard_retry_attachment_fn) |release| {
+                for (retry.attachments) |part| release(effects.context, task_id, part.resource_id);
+            };
+            self.retry_input_bytes -= retry.bytes.len;
+            retry.deinit(self.allocator);
+            record.retry_payload = null;
+        }
+    }
+
+    pub fn retrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8) ?*InputSubmission {
+        const task = self.find(task_id) orelse return null;
+        for (task.input_submissions.items) |*record| {
+            if (record.state == .failed and std.mem.eql(u8, record.submission.operationId(), operation_id)) return record;
+        }
+        return null;
+    }
+
+    pub fn finishRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, submission: Submission) void {
+        const record = self.retrySubmission(task_id, operation_id).?;
+        record.retried_as = submission;
+        self.releaseRetryInput(task_id, record, null);
+    }
+
+    pub fn discardRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, effects: ReleaseEffects) bool {
+        const record = self.retrySubmission(task_id, operation_id) orelse return false;
+        if (record.retry_payload == null) return false;
+        self.releaseRetryInput(task_id, record, effects);
+        return true;
+    }
+
+    pub fn pruneRetryInputs(self: *Runtime, effects: ReleaseEffects, available: *const fn (*anyopaque, u64, u64) bool) bool {
+        var changed = false;
+        for (self.tasks) |entry| if (entry) |task| {
+            for (task.input_submissions.items) |*record| {
+                const retry = record.retry_payload orelse continue;
+                for (retry.attachments) |part| {
+                    if (available(effects.context, task.durable.id, part.resource_id)) continue;
+                    self.releaseRetryInput(task.durable.id, record, effects);
+                    changed = true;
+                    break;
+                }
+            }
+        };
+        return changed;
     }
 
     pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
@@ -2749,6 +2827,7 @@ pub const Runtime = struct {
         record.state = .failed;
         record.reason = reason;
         record.blocking_task_id = blocking_task_id;
+        if (reason != .shutting_down and reason != .continuation_cancelled) self.retainRetryInput(record);
         self.releaseSubmissionPayload(record);
     }
 
@@ -10773,6 +10852,7 @@ fn deinitTask(
     }
     for (task.input_submissions.items) |*record| {
         self.releaseSubmissionPayload(record);
+        self.releaseRetryInput(task.durable.id, record, effects);
         deinitRunInput(self, effects, &record.input);
         effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
     }
@@ -11618,6 +11698,7 @@ const InputTestProjection = struct {
         const task = runtime.find(1).?;
         for (task.input_submissions.items) |*record| {
             runtime.releaseSubmissionPayload(record);
+            runtime.releaseRetryInput(task.durable.id, record, null);
             deinitRunInput(runtime, self.effects().release, &record.input);
             self.charged -= task_state.additional_input_projection_bytes;
         }

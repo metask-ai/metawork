@@ -1126,6 +1126,7 @@ export type WaitingInputView = {
   state: "waiting" | "failed" | "cancelled" | "interrupted";
   reason: SendInputReason | null;
   blockingTaskId?: string;
+  retryAvailable?: true;
 };
 export type AdditionalInputView = {
   submission: InputSubmission | null;

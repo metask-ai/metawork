@@ -408,6 +408,8 @@ pub const TaskRun = struct {
 };
 pub const TaskStop = struct { taskId: []const u8 };
 pub const TaskSendInput = struct { operationId: []const u8, taskId: []const u8, input: std.json.Value };
+pub const TaskRetryInput = struct { operationId: []const u8, originalOperationId: []const u8, taskId: []const u8 };
+pub const TaskDiscardInputRetry = struct { originalOperationId: []const u8, taskId: []const u8 };
 pub fn validateInputOperationId(value: []const u8) !void {
     if (value.len == 0 or value.len > 64) return error.InvalidBridgePayload;
     for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidBridgePayload;

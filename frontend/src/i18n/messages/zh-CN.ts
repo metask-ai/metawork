@@ -791,6 +791,8 @@ export const zhCN: Record<MessageId, string> = {
   "input.waiting": "等待处理",
   "input.cancelled": "已停止",
   "input.unexecuted": "未执行",
+  "input.retry_original": "重发原消息",
+  "input.discard_retry": "放弃重发",
   "input.submitted": "消息已发送。",
   "input.unknown": "发送结果尚未确认，请核对本轮记录；系统不会自动重发。",
   "input.local_capacity":

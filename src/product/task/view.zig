@@ -422,6 +422,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try writeInput(writer, input.text, record.input, null);
         writer.print(",\"state\":\"{s}\",\"reason\":", .{@tagName(record.state)}) catch return error.SnapshotTooLarge;
         if (record.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (record.retry_payload != null and !task.durable.archived and task.read_only_history == null and task.deletion == .idle and !input.shutting_down)
+            writer.writeAll(",\"retryAvailable\":true") catch return error.SnapshotTooLarge;
         if (record.blocking_task_id) |id| {
             std.debug.assert(record.state == .failed and record.reason == .session_close_failed and id != 0);
             writer.print(",\"blockingTaskId\":\"{d}\"", .{id}) catch return error.SnapshotTooLarge;

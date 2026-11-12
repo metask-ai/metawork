@@ -982,7 +982,7 @@ test("App send rejection keeps the created Task identity for a later send", asyn
   );
 });
 
-test("App rejected creation restores attachment text without reusing staged tokens", async (ctx) => {
+test("App rejected creation restores the attachment grant with its draft", async (ctx) => {
   const fixture = await renderPendingPasteApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
   await user.type(fixture.textarea, "Instruction with attachment");
@@ -995,15 +995,16 @@ test("App rejected creation restores attachment text without reusing staged toke
   await screen.findByRole("combobox", { name: "Model" });
   await user.click(screen.getByRole("button", { name: "Copy to input box" }));
   assert.equal(fixture.textarea.value, "Instruction with attachment");
-  assert.ok(screen.getByText(/Add them again before sending/));
+  assert.ok(screen.getByText(fixture.attachment.displayName));
   assert.equal(fixture.additions(), 1);
   await user.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => assert.equal(fixture.creations(), 2));
   await fixture.created(fixture.task, 1);
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
   assert.deepEqual(fixture.inputs[0][2], {
-    kind: "text",
+    kind: "multimodal",
     text: "Instruction with attachment",
+    attachmentTokens: [fixture.attachment.token],
   });
   await fixture.settle();
 });

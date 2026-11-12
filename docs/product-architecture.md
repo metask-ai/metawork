@@ -182,6 +182,8 @@ Task 使用有界待处理列表和现有 lifecycle wake。队首文本可在已
 
 接收 metadata 随所有权移入根输入或 additional input，保留 operationId、原接收时间与展示位置且只投影一次。原文复用共享内存预算；附件接收时由 Control 协调一次性 grant 与原件移交 Task，等待期间不得保存栈上 callback 或 grant。未交付资源在取消时由原 owner 清理，已交付原件沿 Task 生命周期保留，清理失败保留原 owner 的有界 cleanup debt。安全历史保存展示记录、执行关联和已确认失败的稳定原因类别。重启时仍在等待的提交转为中断，原始输入不从历史重建。
 
+确认未进入 Run 的失败提交可在独立有界额度内保留重建输入所需的数据；在途 payload 和预览随失败结算释放。保留原件移回启动可清理的暂存目录，逻辑上归原 Task 和失败提交独占；保留项继续计入物理容量，正常暂存需要容量时优先整条淘汰。Task 记录挤出、放弃和删除调用同一资源清理，实际删除后才释放额度。显式重发保护来源记录，重新校验 authority 并准备新 payload；新提交接收、原件移交和进程内关联在同一主线程事务完成。新提交进入新 Run 的正常顺序，原历史保留失败原因。失败或结果未知的命令不会自行再次执行。
+
 Task 在调用前预留有界 identity、安全消息投影及独立的原文 owned copy；Agent 调用仍只同步借用输入。原文预留失败必须先于 Core 效果拒绝，拒绝释放候选，接受保留 receipt sequence，合同失败保留 unknown。安全投影归属于原 Run，只供历史展示、对账和权限上下文使用，不能成为执行来源。原文仅在 Host 内存中按 Runtime 共享预算持有，单条遵守普通输入容量，数量与累计字节不得超过 Agent 发布的 Core 上限；Runtime 原文缓存总量不超过累计字节上限，合并临时缓冲另限为一个普通输入。原文不进入日志、Snapshot 或历史，收口和销毁必须清零释放，释放不重置 Core 已接受的累计额度。事件 input_adopted 提供真实 turn 与活动顺序；终态在 event-drain barrier 后以 Agent 权威计数收口接受前缀为 adopted/unadopted，计数无效时剩余记录为 unknown，已知采纳事实保留。仅由计数确认的采纳不伪造活动位置。
 
 自动评审的转人工原因归 Task 的当前请求运行时状态所有，第一次有效结算同时保存原因及已投影的有界理由，后续 worker 清理不得覆盖；身份失效时清理，迟到结果不得创建人工提醒。Control 只报告它实际观察的容量、支持边界、启动或调用失败，不把技术故障当作模型存疑；watchdog 使用取消令牌结束调用仍须保留其 timeout 事实，取消后的模型建议不得生效。原因不新增持久化字段、审计 occurrence 或日志系统；wire shape 由 [Renderer Bridge 合同](renderer-bridge-contract.md) 定义。

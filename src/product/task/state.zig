@@ -577,6 +577,9 @@ pub const InputSubmission = struct {
     submission: Submission,
     input: RunInputRecord,
     payload: ?OwnedRunInput,
+    retry_payload: ?OwnedRunInput = null,
+    retried_as: ?Submission = null,
+    force_new_run: bool = false,
     state: enum { waiting, failed, cancelled, interrupted } = .waiting,
     /// Only the stable reason of a failed submission is written to history.
     reason: ?SendInputReason = null,

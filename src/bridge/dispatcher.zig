@@ -468,6 +468,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.send_input, .function = sendInput },
+            .{ .name = commands.retry_input, .function = retryInput },
+            .{ .name = commands.discard_input_retry, .function = discardInputRetry },
             .{ .name = commands.stop, .function = stopTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
             .{ .name = commands.begin_attachment_receive, .function = beginAttachmentReceive },
@@ -3674,6 +3676,44 @@ pub const Dispatcher = struct {
         };
         self.notifyCommitted();
         return encodeSendInputResult(output, control, result);
+    }
+
+    fn retryInput(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskRetryInput, invocation.request.payload);
+        defer parsed.deinit();
+        const request = parsed.value;
+        const task_id = try handlers.parseWireId(request.taskId);
+        if (task_id == 0) return error.InvalidBridgePayload;
+        try handlers.validateInputOperationId(request.operationId);
+        try handlers.validateInputOperationId(request.originalOperationId);
+        const control = try self.requireProductControl();
+        const result = control.retryTaskInput(task_id, request.originalOperationId, request.operationId) catch |err| switch (err) {
+            error.InvalidInput => return error.InvalidBridgePayload,
+            else => return err,
+        };
+        self.notifyCommitted();
+        return encodeSendInputResult(output, control, result);
+    }
+
+    fn discardInputRetry(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskDiscardInputRetry, invocation.request.payload);
+        defer parsed.deinit();
+        const request = parsed.value;
+        const task_id = try handlers.parseWireId(request.taskId);
+        if (task_id == 0) return error.InvalidBridgePayload;
+        try handlers.validateInputOperationId(request.originalOperationId);
+        const control = try self.requireProductControl();
+        const discarded = control.discardTaskInputRetry(task_id, request.originalOperationId);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"discarded\":{}}}", .{discarded});
     }
 
     fn acceptAttachmentGrants(context: ?*anyopaque) void {

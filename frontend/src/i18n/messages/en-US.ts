@@ -917,6 +917,8 @@ export const enUS = {
   "input.waiting": "Waiting",
   "input.cancelled": "Stopped",
   "input.unexecuted": "Not executed",
+  "input.retry_original": "Resend original message",
+  "input.discard_retry": "Discard saved input",
   "input.submitted": "Message sent.",
   "input.unknown":
     "Submission is unconfirmed. Check the run history; the message will not be resent automatically.",

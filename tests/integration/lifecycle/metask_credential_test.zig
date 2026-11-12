@@ -326,6 +326,14 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     if (scenario == .reviewer or scenario == .title_rotation) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    const attachment_root = try std.fs.path.join(std.testing.allocator, &.{ home, "retry-attachments" });
+    defer std.testing.allocator.free(attachment_root);
+    var attachments = if (scenario == .catalog_failure) try control_api.AttachmentFileStore.init(std.testing.io, std.testing.allocator, attachment_root) else null;
+    defer if (attachments) |*store| store.deinit();
+    if (attachments) |*store| {
+        configuration.attachment_store = store;
+        configuration.attachment_images = .{ .prepare_fn = copyTestImage };
+    }
     configuration.directories.canonical_user_home = home;
     if (corrupt_schedule) configuration.schedule_persistence = .{ .enabled = true, .restored_bytes = "not-json" };
     var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
@@ -689,6 +697,26 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
             try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[0].credential_digest);
             try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+            var descriptors: [1]control_api.AttachmentDescriptor = undefined;
+            const staged = try control.stageAttachments(&.{.{ .display_name = "test.png", .bytes = "\x89PNG\r\n\x1a\nimage" }}, &descriptors);
+            const id = staged[0].id;
+            const image = try control.sendInput("image-before-retry", old_id, .{ .multimodal = .{ .text = "Check this image", .attachment_ids = &.{id} } });
+            try std.testing.expectEqual(.accepted, image.outcome);
+            const failed = control.task_runtime.retrySubmission(old_id, "image-before-retry").?;
+            try std.testing.expect(failed.payload == null);
+            try std.testing.expectEqual(@as(usize, 0), failed.retry_payload.?.attachments[0].bytes.len);
+            try std.testing.expect(!control.releaseAttachment(id));
+            network.fail_catalog = false;
+            try std.testing.expect(coordinator.refreshCatalog().accepted);
+            try drainCatalog(&coordinator);
+            const retried = try control.retryTaskInput(old_id, "image-before-retry", "new-image-operation");
+            try std.testing.expectEqual(.accepted, retried.outcome);
+            const duplicate = try control.retryTaskInput(old_id, "image-before-retry", "duplicate-image-operation");
+            try std.testing.expectEqual(.accepted, duplicate.outcome);
+            try std.testing.expectEqualStrings("new-image-operation", duplicate.operationId());
+            try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "new-image-operation"));
+            try std.testing.expect(!control.task_runtime.hasInputReceipt(old_id, "duplicate-image-operation"));
+            try std.testing.expect(control.task_runtime.retrySubmission(old_id, "image-before-retry").?.retry_payload == null);
             return;
         }
         try std.testing.expectEqual(@as(usize, 1), network.refresh_calls.load(.acquire));
@@ -884,6 +912,10 @@ fn expectBlocked(control: *control_api.Runtime, task_id: u64, operation: []const
     try std.testing.expectEqual(.failed, record.state);
     try std.testing.expectEqual(before, runCalls());
     try std.testing.expectEqual(.none, task.runtime.active_operation);
+}
+
+fn copyTestImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
+    return allocator.dupe(u8, bytes);
 }
 
 fn relogin(runtime: *account.Runtime) !void {

@@ -94,6 +94,8 @@ pub const account_logout = "metawork.account.logout";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
 pub const send_input = "metawork.tasks.sendInput";
+pub const retry_input = "metawork.tasks.retryInput";
+pub const discard_input_retry = "metawork.tasks.discardInputRetry";
 pub const stop = "metawork.tasks.stop";
 pub const set_approval_mode = "metawork.tasks.setApprovalMode";
 pub const select_task_model = "metawork.tasks.selectModel";
@@ -207,6 +209,8 @@ pub const product = [_][]const u8{
     create_task,
     run,
     send_input,
+    retry_input,
+    discard_input_retry,
     stop,
     set_approval_mode,
     select_task_model,
