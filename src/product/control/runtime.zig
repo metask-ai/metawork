@@ -10011,6 +10011,8 @@ test "updates Control publishes committed facts through the canonical live conte
 }
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub const viewFixture = testRuntime;
+
     pub fn findTask(control: *Runtime, task_id: u64) ?*TestTask {
         return task_testing.findTask(&control.task_runtime, task_id);
     }
@@ -21814,41 +21816,6 @@ test "Product view credential matcher preserves UTF-8 and clears its owned scan 
     var short: [1]u8 = undefined;
     try std.testing.expectError(error.SnapshotTooLarge, control.writeViewFixture(&short, .{}));
     try std.testing.expect(control.view_credentials == null);
-}
-
-test "Product view frozen read survives business updates and rejects replaced revoked and shutdown handles" {
-    var control = try testRuntime();
-    defer control.deinit();
-    var expected_storage: [96 * 1024]u8 = undefined;
-    const expected = try control.writeViewFixture(&expected_storage, .{ .task_id = 3 });
-    var output: [96 * 1024]u8 = undefined;
-    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
-    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
-    try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 1, 1));
-    try control.writeSnapshotRange(read.id, &output, 0, 64);
-    var unrelated_storage: [96 * 1024]u8 = undefined;
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &unrelated_storage, 64, 64));
-    var first: [64]u8 = undefined;
-    @memcpy(&first, output[0..64]);
-    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.title, "new committed title", control.limits.max_task_title_bytes);
-    control.bumpRevision();
-    try control.writeSnapshotRange(read.id, &output, 0, 64);
-    try std.testing.expectEqualSlices(u8, &first, output[0..64]);
-    try std.testing.expectEqual(@as(usize, 64), control.view_read.produced);
-    var offset: usize = 64;
-    while (offset < read.bytes) : (offset += 64) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 64), read.bytes - offset));
-    try std.testing.expectEqualStrings(expected, output[0..read.bytes]);
-    const next = try control.writeSnapshot(&output, .{ .task_id = 3 });
-    try std.testing.expect(next.id != read.id);
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 1));
-    control.learnProjectionCredential("newly-learned-secret");
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 1));
-    const last = try control.writeSnapshot(&output, .{});
-    control.beginShutdown();
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(last.id, &output, 0, 1));
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.skeleton.len);
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.text.items.len);
 }
 
 test "Product view duplicate credential ownership preserves reads while exact new values revoke and wake" {
