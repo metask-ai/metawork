@@ -960,6 +960,13 @@ export const enUS = {
   "attachment.add": "Add files",
   "composer.add": "Add to message",
   "composer.add_skill": "Add Skill",
+  "composer.reference_workspace_file": "Reference workspace file",
+  "composer.workspace_parent_folder": "Up one folder",
+  "composer.reference_workspace_type":
+    "Choose a non-empty UTF-8 text file or a PNG, JPEG, or WebP image.",
+  "composer.reference_workspace_size":
+    "Workspace file references support text files up to 32 KB.",
+  "composer.workspace_file": "Workspace reference",
   "composer.add_skill_with_attachments":
     "Remove attachments before adding a Skill.",
   "attachment.removing": "Removing file…",

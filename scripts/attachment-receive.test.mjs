@@ -194,6 +194,28 @@ for (const connect of [oldWire.connect, wire.nativePathsConnect])
         true,
       );
     });
+test("client emits the Native-tested workspace reference as a single begin command", async () => {
+  const begin = wire.beginWorkspaceReference;
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: {
+      on: () => () => {},
+      invoke: async (command, payload) => {
+        if (command === "metawork.events.connect")
+          return { ...wire.nativePathsConnect, generation: begin.generation };
+        calls.push([command, payload]);
+        return ready;
+      },
+    },
+  });
+  await client.connect();
+  for (let batch = 1; batch < Number(begin.batchId); batch++)
+    client.createAttachmentAdd(async () => {});
+  const op = client.createAttachmentAdd(async () => {}, begin.remainingFiles);
+  assert.deepEqual(await op.run(begin.source), ready);
+  assert.deepEqual(calls, [["metawork.attachments.beginAdd", begin]]);
+});
+
 test("DOM reads start after reservation and each write acknowledgement bounds the next chunk", async () => {
   const begin = deferred(),
     write = deferred(),

@@ -3763,6 +3763,10 @@ test("Composer Add menu selects an enabled Skill and preserves the message", asy
   });
   await user.click(screen.getByRole("button", { name: "Add to message" }));
   assert.ok(await screen.findByRole("menuitem", { name: "Add files" }));
+  assert.equal(
+    screen.queryByRole("menuitem", { name: "Reference workspace file" }),
+    null,
+  );
   assert.equal(picks, 0);
   await user.click(screen.getByRole("menuitem", { name: "Add Skill" }));
   const option = await screen.findByRole("menuitem", { name: "Review code" });
@@ -3777,6 +3781,57 @@ test("Composer Add menu selects an enabled Skill and preserves the message", asy
   assert.equal(composer.submissions(), 0);
   assert.equal(draftChanges.at(-1).skillId, "review-id");
   assert.deepEqual(draftChanges.at(-1).argumentValues, ["请检查当前实现"]);
+});
+
+test("Composer references a file from the new task's selected workspace", async () => {
+  const user = userEvent.setup({ document });
+  const browsed = [];
+  const chosen = [];
+  const target = { taskId: null, workspaceId: "2", workspaceEpoch: "4" };
+  renderComposer({
+    attachmentsEnabled: true,
+    workspaceFiles: {
+      scope: "new-task:2",
+      target,
+      load: async (taskId, workspaceId, workspaceEpoch, path) => {
+        browsed.push({ taskId, workspaceId, workspaceEpoch, path });
+        return {
+          state: "ready",
+          entries:
+            path === ""
+              ? [{ name: "docs", kind: "directory" }]
+              : [{ name: "requirements.md", kind: "file" }],
+          redacted: false,
+          truncated: false,
+        };
+      },
+      choose: (reference) => chosen.push(reference),
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  assert.deepEqual(
+    (await screen.findAllByRole("menuitem")).map((item) => item.textContent),
+    ["Add files", "Reference workspace file", "Add Skill"],
+  );
+  await user.click(
+    screen.getByRole("menuitem", { name: "Reference workspace file" }),
+  );
+  const submenu = await screen.findByRole("menu", {
+    name: "Reference workspace file",
+  });
+  const files = within(submenu);
+  assert.equal(screen.queryByRole("dialog"), null);
+  await user.click(await files.findByRole("menuitem", { name: "docs" }));
+  await files.findByRole("menuitem", { name: "requirements.md" });
+  await user.click(files.getByRole("menuitem", { name: "Up one folder" }));
+  await user.click(files.getByRole("menuitem", { name: "docs" }));
+  assert.equal(document.activeElement?.textContent, "Up one folder");
+  await user.keyboard("{ArrowDown}{Enter}");
+  assert.deepEqual(browsed, [
+    { ...target, path: "" },
+    { ...target, path: "docs" },
+  ]);
+  assert.deepEqual(chosen, [{ ...target, path: "docs/requirements.md" }]);
 });
 
 test("removing the last attachment returns keyboard focus to the Add menu", async () => {

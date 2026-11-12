@@ -71,5 +71,19 @@
       ]
     },
     "remainingFiles": 1
+  },
+  "beginWorkspaceReference": {
+    "generation": "2",
+    "batchId": "98",
+    "remainingFiles": 1,
+    "source": {
+      "kind": "workspace_reference",
+      "reference": {
+        "taskId": null,
+        "workspaceId": "1",
+        "workspaceEpoch": "1",
+        "path": "docs/brief.md"
+      }
+    }
   }
 }

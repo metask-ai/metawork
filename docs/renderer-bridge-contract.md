@@ -187,11 +187,11 @@ Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPat
 
 ## Workspace file browsing commands
 
-`metawork.files.listDirectory` 与 `metawork.files.previewWorkspace` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string，`previewId` 与原 File Preview command 共享连接内单调递增空间；`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。仅列根目录可使用空 `path`。这些 command 不接受 Run/reference identity、物理根路径或 URI；不改变原引用预览 command 的 request。
+`metawork.files.listDirectory` 与 `metawork.files.previewWorkspace` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string。新任务列目录时 `listDirectory` 接受 `taskId: null`，以当前可见且获授权的 Manual Workspace 的 id/epoch 校验。`previewWorkspace` 始终需要 Task identity。`previewId` 与原 File Preview command 共享连接内单调递增空间；`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。仅列根目录可使用空 `path`。这些 command 不接受 Run/reference identity、物理根路径或 URI；不改变原引用预览 command 的 request。
 
-Host 先校验 Task 仍属于该 Workspace、工作区 epoch 与当前授权，再向同一 File Preview lane 提交 owned 输入。目录与工作区路径逐段拒绝 symlink/reparse 跳转；目录只列一层普通文件与目录，不返回链接或其他特殊文件。worker 在最多观察 4096 个条目、保留 512 项或累计 64 KiB 文件名时停止，达到边界以 `truncated` 说明，不能声称列出全部文件。
+Host 校验当前工作区 epoch 与授权。带 Task identity 时还校验其所属工作区。校验通过后向同一 File Preview lane 提交 owned 输入。目录与工作区路径逐段拒绝 symlink/reparse 跳转；目录只列一层普通文件与目录，不返回链接或其他特殊文件。worker 在最多观察 4096 个条目、保留 512 项或累计 64 KiB 文件名时停止，达到边界以 `truncated` 说明，不能声称列出全部文件。
 
-目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前重新验证当前 Task 与 Workspace 授权，失效时整份结果清空。工作区文件预览返回与原引用预览相同的文本/图片结果，复用其分块、release、连接绑定、安全检查、超时及资源额度；每次刷新独立重新授权。
+目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前重新验证相同的 Workspace 授权及适用的 Task 归属，失效时整份结果清空。工作区文件预览返回与原引用预览相同的文本/图片结果，复用其分块、release、连接绑定、安全检查、超时及资源额度；每次刷新独立重新授权。
 
 Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安全代次；关闭 Task、工作区失效或换代后旧结果不可显示。隐藏视图可保留同一有效 Task 的目录数据，不自动轮询。每个 Task 会话最多缓存 64 个目录，超限明确提示用户刷新；刷新清空缓存及展开状态。目录与打开文件的请求共享准备并发和取消链路，不新增持久读取授权。
 
@@ -285,9 +285,11 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 cancel 释放本批 Product 接收资源或本批已发布但未消费的 grant；未知批次返回 released=false，并阻止同 ID 的迟到 begin。它不能撤销已接纳 Run，也不能释放其他 generation 的批次。begin/append/finish 不自动重试；客户端超时、读取错误或用户取消都定向 cancel，无法确认清理则替换现有 connection，清除旧附件并提示重新选择。断连、document replacement、关闭和 shutdown 必须释放全部接收资源。Host 不新增 TTL 或定时重试；冻结 Renderer 最多保留一个配额内批次直到显式或生命周期清理。完成响应迟到不得在已取消 UI 操作中插入 chip；移交草稿后则由既有 attachment release/consume 负责。
 
+`beginAdd` 另接受单个工作区引用来源 `{ kind: "workspace_reference", reference: { taskId, workspaceId, workspaceEpoch, path } }`。身份与路径遵守工作区目录命令的规则，`path` 必须非空。`taskId: null` 只用于已选定 Manual Workspace 的新任务。Host 通过既有异步 staging、取消和 grant 流程处理引用。Renderer 不接收文件正文和物理路径，发送时仍通过 `attachmentTokens` 提交，由 Host 重新校验目标 Task 的工作区归属和 epoch。
+
 `metawork.attachments.release` 是同步 revision 1 command，payload 精确为 `{ token }`，返回 `{ released }`。它只撤销当前 connection 拥有且尚未 borrowed/consumed 的 grant；未知、stale 或已经释放的 token 返回 released=false，不泄露其他 connection 的存在性。disconnect、document generation replacement 与 shutdown 必须等价释放该 connection 全部 grant。
 
-`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。任一 token 指向 `kind=file` 时，去除首尾空白后的 `text` 必须非空，否则 Run 返回 `reason=missing_instruction` 且保留全部 ready grant；接纳后 Product 将原件保存在 Task 本地存储，非图片文件作为独立有界原件引用 text part 发送，图片为有界 PNG 加原件引用；历史 metadata 仍描述用户原文件。Run 接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
+`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。任一 token 指向普通 `kind=file` 附件时，去除首尾空白后的 `text` 必须非空，否则 Run 返回 `reason=missing_instruction` 且保留全部 ready grant；接纳后 Product 将原件保存在 Task 本地存储，非图片文件作为独立有界原件引用 text part 发送，图片为有界 PNG 加原件引用；历史 metadata 仍描述用户原文件。Run 接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
 
 Run snapshot 的 `input` 对 multimodal 精确发布 `{ kind, text, attachments, redacted }`。`text` 为 nullable string；`attachments[]` 是严格 tagged union：图片精确为 `{ kind: "image", format, displayName, sizeBytes, redacted }`，非图片文件精确为 `{ kind: "file", displayName, sizeBytes, redacted }`。顺序与已接纳 input 一致。附件输入的 Snapshot 与 persistence 不含 token、路径、文件原件正文、raw bytes、Base64、digest 或 provider wire；按需读取产生的 Tool 记录遵守既有有界投影与脱敏合同。旧 history record 没有 attachment 字段时只解释为 text/skill 旧 Run，不从正文或文件引用猜测附件。
 

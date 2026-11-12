@@ -821,6 +821,13 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.add": "添加文件",
   "composer.add": "添加内容",
   "composer.add_skill": "添加技能",
+  "composer.reference_workspace_file": "引用工作区文件",
+  "composer.workspace_parent_folder": "返回上一级",
+  "composer.reference_workspace_type":
+    "请选择非空的 UTF-8 文本文件，或 PNG、JPEG、WebP 图片。",
+  "composer.reference_workspace_size":
+    "工作区引用支持不超过 32 KB 的文本文件。",
+  "composer.workspace_file": "工作区引用",
   "composer.add_skill_with_attachments": "请先移除附件，再添加技能。",
   "attachment.removing": "正在移除文件…",
   "attachment.error.release_unconfirmed":
