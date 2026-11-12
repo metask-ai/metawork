@@ -270,7 +270,7 @@ export async function probeWindowChromeUi({
       );
       await businessClick(
         "workbench-settings-open",
-        ".account-menu-item:has(.lucide-settings)",
+        '.account-menu [role="menuitem"]:has(.lucide-settings)',
         "Boolean(document.querySelector('.settings-page'))",
       );
       await check(
