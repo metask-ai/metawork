@@ -4343,6 +4343,7 @@ pub const Runtime = struct {
     pub fn stopTask(self: *Runtime, task_id: u64) Error!void {
         _ = self.syncLifecycleFacts();
         try self.task_runtime.checkStopInputs(task_id);
+        defer self.reconcileMcpInstallation(null);
         _ = self.task_runtime.stopInputs(task_id);
         try self.task_runtime.stopOperation(task_id, self.taskRuntimeOperationEffects());
         self.reapTaskInputResources();
@@ -4999,6 +5000,7 @@ pub const Runtime = struct {
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        defer self.reconcileMcpInstallation(null);
         const requested = switch (try self.task_runtime.beginDeletion(task_id, self.taskRuntimeOperationEffects())) {
             .unchanged => false,
             .requested => true,
@@ -5675,35 +5677,46 @@ pub const Runtime = struct {
         return self.redactWithKnownCredentialsNoFail(value);
     }
 
-    fn mcpInstallationValueSensitive(self: *const Runtime, value: std.json.Value) bool {
+    fn mcpInstallationTextSensitive(self: *const Runtime, text: []const u8, learned: ?[]const u8) bool {
+        if (learned) |credential| if (std.mem.indexOf(u8, text, credential) != null) return true;
+        return self.containsKnownCredential(text);
+    }
+
+    fn mcpInstallationValueSensitive(self: *const Runtime, value: std.json.Value, learned: ?[]const u8) bool {
         return switch (value) {
-            .string => |text| self.containsKnownCredential(text),
+            .string => |text| self.mcpInstallationTextSensitive(text, learned),
             .array => |items| for (items.items) |item| {
-                if (self.mcpInstallationValueSensitive(item)) break true;
+                if (self.mcpInstallationValueSensitive(item, learned)) break true;
             } else false,
             .object => |fields| result: {
                 var iterator = fields.iterator();
                 while (iterator.next()) |entry| {
-                    if (self.containsKnownCredential(entry.key_ptr.*) or self.mcpInstallationValueSensitive(entry.value_ptr.*)) break :result true;
+                    if (self.mcpInstallationTextSensitive(entry.key_ptr.*, learned) or
+                        self.mcpInstallationValueSensitive(entry.value_ptr.*, learned)) break :result true;
                 }
                 break :result false;
             },
             else => false,
         };
     }
-    fn sanitizeMcpInstallation(self: *Runtime) bool {
+    fn sanitizeMcpInstallation(self: *Runtime, learned: ?[]const u8) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         const proposal = runtime.pendingInstallation() orelse return false;
         if (!self.task_runtime.mcpInstallationSourceAvailable(proposal.task_id, proposal.run_id)) return runtime.dismissInstallation(self.io, proposal.id, false);
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, proposal.json, .{}) catch return runtime.dismissInstallation(self.io, proposal.id, true);
         defer parsed.deinit();
-        if (self.mcpInstallationValueSensitive(parsed.value)) return runtime.dismissInstallation(self.io, proposal.id, true);
+        if (self.mcpInstallationValueSensitive(parsed.value, learned)) return runtime.dismissInstallation(self.io, proposal.id, true);
         return false;
     }
+
+    fn reconcileMcpInstallation(self: *Runtime, learned: ?[]const u8) void {
+        if (self.sanitizeMcpInstallation(learned)) self.publishMcpRuntimeChanges();
+    }
+
     fn syncMcpHealthNoFail(self: *Runtime) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         var changed = runtime.takeInstallation(self.io);
-        changed = self.sanitizeMcpInstallation() or changed;
+        changed = self.sanitizeMcpInstallation(null) or changed;
         return runtime.syncInitialHealth() or changed;
     }
     fn publishMcpRuntimeChanges(self: *Runtime) void {
@@ -5712,12 +5725,14 @@ pub const Runtime = struct {
     }
 
     pub fn pendingMcpInstallation(self: *Runtime) ?control_ports.McpInstallIngress {
+        self.reconcileMcpInstallation(null);
         const runtime = if (self.mcp) |*value| value else return null;
         const pending = runtime.pendingInstallation() orelse return null;
         return .{ .id = pending.id, .task_id = pending.task_id, .run_id = pending.run_id, .json = pending.json };
     }
 
     pub fn startMcpInstallation(self: *Runtime, id: u64, existing: ?[]const u8) Error!mcp_configuration.CreateResult {
+        self.reconcileMcpInstallation(null);
         const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         if (runtime.hasRefreshJob()) return error.McpManagementBusy;
         const pending = runtime.pendingInstallation() orelse return .{ .outcome = .rejected };
@@ -6441,7 +6456,6 @@ pub const Runtime = struct {
     }
 
     pub fn writeSnapshot(self: *Runtime, output: []u8, request_input: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
-        if (self.sanitizeMcpInstallation()) self.publishMcpRuntimeChanges();
         if (builtin.is_test) self.view_step_timing = .{};
         self.cancelSnapshot();
         errdefer self.cancelSnapshot();
@@ -8936,6 +8950,7 @@ pub const Runtime = struct {
         if (generation == self.account_credential_generation) return;
         self.account_credential_generation = generation;
         self.invalidateProjectionSecurity();
+        self.reconcileMcpInstallation(null);
         source.visit(self, scrubAccountCredential) catch unreachable;
         self.syncHistoryCredentials(null, null);
     }
@@ -8989,6 +9004,7 @@ pub const Runtime = struct {
     fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
         if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        self.reconcileMcpInstallation(credential);
         self.redactAllProductProjectionsNoFail(credential);
         self.syncHistoryCredentials(credential, null);
     }
@@ -20667,6 +20683,63 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         @as(usize, 0),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
     );
+}
+
+test "MCP pending installation rejects newly known credentials and stale sources without snapshot reads" {
+    const Submit = struct {
+        fn proposal(control: *Runtime, task_id: u64, json: []const u8) !u64 {
+            const mcp = &control.mcp.?;
+            const input = mcp.installation_mailbox.input(control.io);
+            var draft: lifecycle.McpInstallationRequest = .{
+                .allocator = control.allocator,
+                .json = try control.allocator.dupe(u8, json),
+            };
+            const result = input.try_put_fn(input.context, task_id, 7, 1, draft);
+            if (result != .submitted) {
+                draft.deinit();
+                return error.InstallationSlotUnavailable;
+            }
+            try std.testing.expect(mcp.takeInstallation(control.io));
+            return result.submitted;
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.mcp = mcp_testing.init(control.allocator, productMcpPorts(
+        control.executor,
+        mcpCatalogPort(control.agent_runtime),
+        .{},
+        .{},
+        control.run_clock,
+    ), .{
+        .preparation = try mcp_configuration.prepare(control.allocator, null, true, false, .{}, .{
+            .max_servers = 8,
+            .max_tools_per_server = 32,
+            .max_namespace_bytes = 128,
+            .max_credential_locators = 64,
+            .max_runtime_secrets_per_server = 128,
+            .max_runtime_secret_bytes_per_server = 16 * 1024,
+        }),
+        .activation = null,
+        .activation_failed = false,
+        .management = null,
+        .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+        .host_capabilities = .{},
+    });
+
+    const learned = try Submit.proposal(&control, 3, "{\"name\":\"\\u006cate-credential\"}");
+    try std.testing.expectEqual(learned, control.pendingMcpInstallation().?.id);
+    try std.testing.expect(!control.containsKnownCredential("late-credential"));
+    control.learnProjectionCredential("late-credential");
+    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
+    try std.testing.expectEqual(.rejected, (try control.startMcpInstallation(learned, null)).outcome);
+
+    _ = try Submit.proposal(&control, 3, "{\"name\":\"SECRET-KEY\"}");
+    try std.testing.expect(control.pendingMcpInstallation() == null);
+    _ = try Submit.proposal(&control, 99, "{}");
+    try std.testing.expect(control.pendingMcpInstallation() == null);
+    _ = try Submit.proposal(&control, 3, "{}");
+    try std.testing.expect(control.pendingMcpInstallation() != null);
 }
 
 test "empty MCP startup commits a proven manageable runtime" {
