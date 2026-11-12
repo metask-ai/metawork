@@ -314,6 +314,49 @@ async function renderApp(
   };
 }
 
+test("the collapsed sidebar exposes New task after Search and focuses the new draft", async (ctx) => {
+  const initialWidth = window.innerWidth;
+  const matchMedia = window.matchMedia;
+  const narrow = new window.EventTarget();
+  narrow.matches = false;
+  ctx.mock.method(window, "matchMedia", (query) =>
+    query === "(max-width: 819px)" ? narrow : matchMedia(query),
+  );
+  ctx.after(() => {
+    window.innerWidth = initialWidth;
+  });
+  const { user } = await renderApp(ctx);
+  const leading = within(document.querySelector(".commandbar-leading-actions"));
+  const sidebar = leading.getByRole("button", { name: "Toggle task sidebar" });
+  const newTask = { name: "New task", exact: true };
+
+  assert.equal(leading.queryByRole("button", newTask), null);
+  await user.click(taskRows("3")[0]);
+  await user.click(sidebar);
+  const launcher = leading.getByRole("button", newTask);
+  assert.equal(
+    launcher.previousElementSibling.getAttribute("aria-label"),
+    "Search",
+  );
+  await user.click(launcher);
+  const draft = document.querySelector('[data-view="new-task"]');
+  assert.ok(draft);
+  await waitFor(() => assertFocused(draft.querySelector("textarea")));
+  assert.equal(sidebar.getAttribute("aria-expanded"), "false");
+
+  await user.click(sidebar);
+  assert.equal(leading.queryByRole("button", newTask), null);
+
+  await act(async () => {
+    window.innerWidth = 390;
+    narrow.matches = true;
+    narrow.dispatchEvent(new window.Event("change"));
+    window.dispatchEvent(new window.Event("resize"));
+  });
+  assert.ok(leading.getByRole("button", newTask));
+  assert.equal(sidebar.getAttribute("aria-expanded"), "false");
+});
+
 test("Global search restores the opener on cancellation and focuses an accepted Task", async (ctx) => {
   const { user, snapshot } = await renderApp(ctx);
   snapshot.searchIndex = {

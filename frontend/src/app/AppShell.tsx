@@ -16,7 +16,7 @@ import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
 import { bindWindowTitlebar } from "../bridge/window-chrome.ts";
 import { shouldDismissSidePanelForEscape } from "./side-panel-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
-import { isInputMethodKey } from "../platform/keyboard.ts";
+import { desktopPlatform, isInputMethodKey } from "../platform/keyboard.ts";
 import {
   readLocalPreference,
   writeLocalPreference,
@@ -166,6 +166,8 @@ export function AppShell({
   attentionBusy = false,
   attentionAnnouncement,
   onSearch,
+  onNewTask,
+  newTaskDisabled,
   searchButtonRef,
   taskStageRef,
   taskStageLabel,
@@ -187,6 +189,8 @@ export function AppShell({
   attentionBusy?: boolean;
   attentionAnnouncement?: { key: number; text: string } | null;
   onSearch: (opener: HTMLButtonElement) => void;
+  onNewTask: () => void;
+  newTaskDisabled: boolean;
   searchButtonRef?: RefObject<HTMLButtonElement | null>;
   taskStageRef?: Ref<HTMLElement>;
   taskStageLabel?: string;
@@ -214,6 +218,7 @@ export function AppShell({
   const workbenchElement = useRef<HTMLElement>(null);
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
+  const newTaskShortcut = desktopPlatform() === "macos" ? "⌘N" : "Ctrl+N";
   const effectiveRightPanelOpen = rightPanelOpen;
   const columns = resolveWorkbenchColumns({
     containerWidth: workbenchWidth,
@@ -458,6 +463,18 @@ export function AppShell({
             >
               <Icon name="search" />
             </button>
+            {leftAvailable && !effectiveLeftOpen && (
+              <button
+                type="button"
+                className="icon-button focus-ring"
+                aria-label={t("task.new")}
+                title={`${t("task.new")} (${newTaskShortcut})`}
+                disabled={newTaskDisabled}
+                onClick={onNewTask}
+              >
+                <Icon name="new-task" />
+              </button>
+            )}
           </div>
         </div>
         <div

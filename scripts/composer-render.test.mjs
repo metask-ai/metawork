@@ -195,6 +195,8 @@ function renderShell(
           contextVisible,
           status: "Connected",
           onSearch() {},
+          onNewTask() {},
+          newTaskDisabled: false,
           left:
             left === undefined ? createElement("p", null, "Navigation") : left,
           rightPanel,
