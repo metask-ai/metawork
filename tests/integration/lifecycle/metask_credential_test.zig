@@ -822,6 +822,14 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "new-image-operation"));
             try std.testing.expect(!control.task_runtime.hasInputReceipt(old_id, "duplicate-image-operation"));
             try std.testing.expect(control.task_runtime.retrySubmission(old_id, "image-before-retry").?.retry_payload == null);
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.ImageRetryDidNotFinish;
+            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old.durable.runs).?;
+            try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(run).?.outcome);
+            try std.testing.expectEqualStrings("new-image-operation", run.submission.?.operationId());
             return;
         }
         try std.testing.expectEqual(@as(usize, 1), network.refresh_calls.load(.acquire));

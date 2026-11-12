@@ -1714,10 +1714,11 @@ export default function App() {
   // Unknown results still own their local record, including in other Tasks.
   const localSubmissionCount = localSubmissions.filter(
     (entry) =>
-      entry.scope !== composerDraftScope ||
-      entry.state === "submitting" ||
-      entry.state === "accepted" ||
-      entry.state === "unknown",
+      !entry.reusableDraft &&
+      (entry.scope !== composerDraftScope ||
+        entry.state === "submitting" ||
+        entry.state === "accepted" ||
+        entry.state === "unknown"),
   ).length;
   const taskIdentityPending =
     newTaskDraftActive &&
@@ -3017,14 +3018,23 @@ export default function App() {
         null,
       ++localSubmissionSequence.current,
     );
+    const retained = localSubmissionsRef.current.filter(
+      (entry) => entry.reusableDraft,
+    );
+    const retired = retained.slice(
+      0,
+      Math.max(0, retained.length - maxLocalTaskSubmissions + 1),
+    );
+    const retiredIds = new Set(retired.map((entry) => entry.operationId));
     setLocalSubmissions((entries) => [
       ...entries.filter(
         (entry) =>
-          entry.scope !== scope ||
-          entry.reusableDraft ||
-          entry.state === "submitting" ||
-          entry.state === "accepted" ||
-          entry.state === "unknown",
+          !retiredIds.has(entry.operationId) &&
+          (entry.scope !== scope ||
+            entry.reusableDraft ||
+            entry.state === "submitting" ||
+            entry.state === "accepted" ||
+            entry.state === "unknown"),
       ),
       {
         operationId,
@@ -3036,6 +3046,7 @@ export default function App() {
         state: "submitting",
       },
     ]);
+    void releaseRejectedDraftAttachments(retired, generation);
     const result = await session.submit(
       operationId,
       input,
@@ -3174,6 +3185,22 @@ export default function App() {
     }
   }
 
+  async function releaseRejectedDraftAttachments(
+    entries: readonly LocalTaskSubmission[],
+    generation: string,
+  ) {
+    const attachments = entries.flatMap((entry) =>
+      entry.generation === generation && entry.draft.kind === "multimodal"
+        ? entry.draft.attachments
+        : [],
+    );
+    await Promise.all(
+      attachments.map((attachment) =>
+        client.releaseAttachment(attachment.token).catch(() => undefined),
+      ),
+    );
+  }
+
   async function addAttachments(
     source: AddSource = { kind: "picker" },
     referenceScope?: string,
@@ -3245,6 +3272,35 @@ export default function App() {
       referenceCurrent() &&
       !operation.cancelled;
     try {
+      // Ready grants from rejected sends yield when the user adds new files.
+      const rejectedDrafts = localSubmissionsRef.current.filter(
+        (entry) =>
+          entry.reusableDraft &&
+          entry.generation === requestedGeneration &&
+          entry.draft.kind === "multimodal",
+      );
+      if (rejectedDrafts.length > 0) {
+        const ids = new Set(rejectedDrafts.map((entry) => entry.operationId));
+        setLocalSubmissions((entries) =>
+          entries.map((entry) =>
+            ids.has(entry.operationId) && entry.draft.kind === "multimodal"
+              ? {
+                  ...entry,
+                  draft: {
+                    kind: "text",
+                    text: entry.draft.text,
+                    attachmentsReloadRequired: true,
+                  },
+                }
+              : entry,
+          ),
+        );
+        await releaseRejectedDraftAttachments(
+          rejectedDrafts,
+          requestedGeneration,
+        );
+        if (!currentOperation()) return;
+      }
       const result = await add.run(source, (view) => {
         if (attachmentOperation.current === operation) setAttachmentView(view);
       });
