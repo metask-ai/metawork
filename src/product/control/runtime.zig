@@ -2848,10 +2848,12 @@ pub const Runtime = struct {
         principal_ref: []const u8,
         authorization_generation: u64,
     ) models_contract.CatalogRefreshPrepareResult {
-        return self.custom_providers.prepareMetaskCatalogRefresh(
+        const result = self.custom_providers.prepareMetaskCatalogRefresh(
             principal_ref,
             authorization_generation,
         );
+        if (result == .ready) self.bumpRevision();
+        return result;
     }
 
     pub fn completeMetaskCatalogRefresh(
@@ -4330,8 +4332,8 @@ pub const Runtime = struct {
                 break :blk .{ .multimodal = .{ .text = media.text, .attachment_ids = ids[0..media.attachments.len] } };
             },
         };
-        self.validateTaskMetaskAuthorization(task_id) catch |err| {
-            result.reason = sendInputRejection(err);
+        if (self.taskMetaskInputBlocker(task_id)) |reason| if (reason != .models_catalog_loading) {
+            result.reason = reason;
             return result;
         };
         self.receiveTaskInput(task_id, operation_id, input, original) catch |err| {
@@ -5464,6 +5466,7 @@ pub const Runtime = struct {
             .rejection_reason_fn = sendInputRejection,
             .changed_fn = publishWaitingInputChange,
         });
+        if (self.task_runtime.takeInputFailureChanges()) self.approval_history_dirty = true;
     }
 
     fn waitingInputHistoryBlocked(context: *anyopaque) bool {
@@ -5484,7 +5487,6 @@ pub const Runtime = struct {
 
     fn publishWaitingInputChange(context: *anyopaque) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.approval_history_dirty = true;
         self.bumpRevision();
     }
 
@@ -7211,6 +7213,7 @@ pub const Runtime = struct {
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
             .model_rebind_required = model_rebind_required,
+            .model_input_blocker = self.taskMetaskInputBlocker(query.task_id),
         };
     }
 
@@ -9391,6 +9394,25 @@ pub const Runtime = struct {
         const scope = try self.metaskAuthorizationScope(models_contract.metask_source_id);
         if (facts.metask_scope != 0 and facts.metask_scope != scope)
             return error.ExecutionUnavailable;
+    }
+
+    fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
+        const facts = self.task_runtime.modelFacts(task_id) orelse return null;
+        const uses_metask = if (facts.intent) |intent|
+            std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
+        else if (facts.installed) |installed| installed.is_metask else false;
+        if (!uses_metask) return null;
+        const check = self.metask_authorization_check orelse return if (builtin.is_test) null else .metask_authorization_required;
+        const current = check.current() orelse return .metask_authorization_required;
+        if (current.scope == 0 or current.generation == 0) return .metask_authorization_required;
+        if (facts.metask_scope != 0 and facts.metask_scope != current.scope) return .metask_authorization_changed;
+        return switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
+            .ready => null,
+            .loading => .models_catalog_loading,
+            .failed => .models_catalog_failed,
+            .needs_authentication => .metask_authorization_required,
+            else => .binding_unavailable,
+        };
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {

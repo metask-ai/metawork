@@ -1150,6 +1150,7 @@ pub const ProjectionAuthority = struct {
     authority_stable: bool,
     model_selection_availability: task_view.ModelSelectionAvailability,
     model_rebind_required: bool = false,
+    model_input_blocker: ?SendInputReason = null,
 };
 
 /// Command admission uses its own typed observation port. It deliberately
@@ -1258,6 +1259,7 @@ pub const Runtime = struct {
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
     retry_input_bytes: usize = 0,
+    input_failure_changed: bool = false,
     advancing_inputs: bool = false,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
@@ -2634,6 +2636,15 @@ pub const Runtime = struct {
         if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked_fn(effects.context)) return false;
         const authority = projection.authority(projectionAuthorityQuery(task));
         const continuation = self.recoveryProjectionWithAuthority(task, authority).continuation;
+        if (!authority.shutting_down and task_policy.taskLifecycle(task) == .open and
+            (continuation == .available or continuation.unavailable == .execution_rebind_required))
+        {
+            if (authority.model_input_blocker) |reason| {
+                if (reason == .models_catalog_loading) return false;
+                self.failWaitingInput(task_id, index, reason, null);
+                return true;
+            }
+        }
         if (authority.shutting_down or task_policy.taskLifecycle(task) != .open or
             !task_policy.continuationAvailable(continuation))
         {
@@ -2647,7 +2658,14 @@ pub const Runtime = struct {
                 },
                 else => {},
             };
-            self.failWaitingInput(task_id, index, .binding_unavailable, null);
+            const reason: SendInputReason = if (continuation == .unavailable) switch (continuation.unavailable) {
+                .session_poisoned => .session_poisoned,
+                .checkpoint_unavailable => .checkpoint_unavailable,
+                .execution_rebind_required => .execution_rebind_required,
+                .workspace_unavailable => .workspace_unavailable,
+                else => .binding_unavailable,
+            } else .binding_unavailable;
+            self.failWaitingInput(task_id, index, reason, null);
             return true;
         }
 
@@ -2825,10 +2843,17 @@ pub const Runtime = struct {
         if (record.state != .waiting) return;
         self.find(task_id).?.skill_preparation = null;
         record.state = .failed;
+        self.input_failure_changed = true;
         record.reason = reason;
         record.blocking_task_id = blocking_task_id;
         if (reason != .shutting_down and reason != .continuation_cancelled) self.retainRetryInput(record);
         self.releaseSubmissionPayload(record);
+    }
+
+    pub fn takeInputFailureChanges(self: *Runtime) bool {
+        const changed = self.input_failure_changed;
+        self.input_failure_changed = false;
+        return changed;
     }
 
     /// Admission has already installed the real Run; only move correlation here.
@@ -6198,6 +6223,7 @@ pub const Runtime = struct {
                 .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
                 .input_acceptance_reason = acceptance_reason,
+                .model_input_blocker = external.model_input_blocker,
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .catalog = effects.catalog,
@@ -6398,6 +6424,7 @@ pub const Runtime = struct {
             .available_approval_modes = self.availableApprovalModes(task, external, &available_modes),
             .shutting_down = external.shutting_down,
             .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
+            .model_input_blocker = external.model_input_blocker,
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .catalog = effects.catalog,

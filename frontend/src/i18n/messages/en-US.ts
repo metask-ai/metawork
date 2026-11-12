@@ -1706,6 +1706,21 @@ export const enUS = {
     "This task's execution setup changed. Review it before continuing.",
   "mutation.reason.binding_unavailable":
     "This task's execution setup is no longer available.",
+  "mutation.reason.models_catalog_loading":
+    "Waiting for the Metask model catalog to refresh.",
+  "mutation.reason.models_catalog_failed":
+    "The Metask model catalog failed to refresh.",
+  "mutation.reason.metask_authorization_required":
+    "Sign in to Metask to use this model.",
+  "mutation.reason.metask_authorization_changed":
+    "This task's Metask authorization changed.",
+  "mutation.reason.session_poisoned":
+    "The current session can no longer continue.",
+  "mutation.reason.checkpoint_unavailable":
+    "The saved checkpoint is unavailable.",
+  "mutation.reason.execution_rebind_required":
+    "The saved conversation needs a valid execution setup.",
+  "input.retry_models_catalog": "Retry model refresh",
   "mutation.reason.model_changed":
     "This task's model changed elsewhere. Refresh and choose again.",
   "task.model.updated": "Task model updated.",

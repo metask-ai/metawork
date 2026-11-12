@@ -1072,6 +1072,33 @@ test("App empty catalog after creation rejection keeps input and exposes catalog
   assert.equal(fixture.inputs.length, 0);
 });
 
+test("An existing Task offers model catalog retry while preserving its draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const refresh = ctx.mock.method(
+    BridgeClient.prototype,
+    "refreshModelsCatalog",
+    async () => ({ accepted: true, reason: null }),
+  );
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Keep this input");
+  fixture.task.modelInputBlocker = "models_catalog_loading";
+  await fixture.publish();
+  await screen.findByText("Waiting for the Metask model catalog to refresh.");
+  assert.equal(
+    screen.queryByRole("button", { name: "Retry model refresh" }),
+    null,
+  );
+  fixture.task.modelInputBlocker = "models_catalog_failed";
+  await fixture.publish();
+  await user.click(
+    await screen.findByRole("button", { name: "Retry model refresh" }),
+  );
+  await waitFor(() => assert.equal(refresh.mock.callCount(), 1));
+  assert.equal(fixture.textarea.value, "Keep this input");
+  assert.equal(fixture.inputs.length, 0);
+});
+
 test("App previous-generation rejection cannot disturb a new connection's creation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });

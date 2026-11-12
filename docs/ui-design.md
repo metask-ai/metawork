@@ -682,6 +682,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 ### 7.5 当前状态、请求与结果
 
 - 已确认未执行的消息在原条目显示 Host 的失败原因。有保留输入时在同一条目提供「重发原消息」与次要的「放弃重发」。重发进入正常阅读顺序并保留原失败条目。接收前拒绝可恢复原草稿及仍有效的附件；目标已有新内容时保留原提交的恢复入口。
+- 已有 Task 的 Composer 按 Host 提供的原因显示 Metask 目录等待、目录刷新失败或授权变化。目录失败时可从当前 Task 重试刷新；历史失败条目仍说明当时的结果。
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。工具数量、单工具分类与未知状态的文案遵守 [Activity 与 Tool presentation](#activity-与-tool-presentation)，不在主状态中暴露原始 Tool 名称、参数或命令；
 - Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；既没有 Tool 也没有已自动允许记录时整个 surface 卸载，有任一类记录时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；

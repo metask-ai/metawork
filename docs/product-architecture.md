@@ -115,6 +115,8 @@ Metask 的凭据续期与新执行接纳分开：Account 刷新后，Application
 
 scope 由 Host Task 生命周期持有，Session detach 不删除连续性约束；退出、重新登录或身份替换后不跨 scope 续期，也不伪造已接纳 Run 的热撤权。hard expiry、clock 不可用、目录失败或候选失去授权仍阻止新的执行。实际 provider、protocol、endpoint 或 capability 改变继续走既有 checkpoint 与 binding 事务；仅模型改变且来源一致时使用 setModel。排队和未采用的追加输入保留精确一次语义，失败或取消明确收口，不能重放已采用输入或复活已取消批次。
 
+普通 Task 已接收的队首消息在当前连续授权与代次有效、且匹配代次的 Metask 目录刷新仍在运行时等待新 Run 准入或恢复。目录完成事件经 Application 的常规生命周期唤醒推进队列。目录失败或授权失效按当时事实结算。Application 对网络、超时和 5xx 的目录失败在同授权代次最多延迟重试一次，重试重新取得当次 lease；旧 timer 和 completion 不得跨代次采纳。目录重试只恢复目录资格，失败的用户提交由用户显式重发。
+
 Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权能否产生 lease 或无 secret 的执行接纳证明，Models 只回答 provider/source 能否解析，Product Control 只回答具体 Task/Schedule 目标是否满足安装与执行接纳。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion。Renderer Account command 只涉及登录、取消和退出；Models command 使用 source-qualified identifier 与对应 expected revision。除用户显式提交 Custom Provider create/replace 或 MCP captureSecret 时一次性转交手动凭据外，Renderer 不参与 prepare、commit、authorization lease 或 credential transfer；该表单值不属于可恢复 UI 状态。

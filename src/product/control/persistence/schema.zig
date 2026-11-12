@@ -8,6 +8,7 @@ pub const migrations: []const sql.Migration = &.{
     .{ .version = 3, .name = "workspace_project_removal", .sql = @embedFile("migrations/0003_workspace_project_removal.sql") },
     .{ .version = 4, .name = "generated_video_references", .sql = @embedFile("migrations/0004_generated_video_references.sql") },
     .{ .version = 5, .name = "input_submission_failure", .sql = @embedFile("migrations/0005_input_submission_failure.sql") },
+    .{ .version = 6, .name = "input_admission_failure_categories", .sql = @embedFile("migrations/0006_input_admission_failure_categories.sql") },
 };
 
 pub const codec = @import("codec.zig");

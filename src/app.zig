@@ -307,6 +307,12 @@ const App = struct {
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
         });
+        const model_timers = self.platform.dispatcherPlatform();
+        models_management.setRetryTimer(.{
+            .context = model_timers.context,
+            .start_fn = model_timers.start_timer_fn,
+            .cancel_fn = model_timers.cancel_timer_fn,
+        });
         if (self.automation.active()) {
             const vault = self.automation_models_vault orelse
                 @panic("automation Models vault is not composed");
@@ -503,6 +509,12 @@ const App = struct {
                 if (self.account_coordinator) |coordinator|
                     if (coordinator.onTimer(timer.id))
                         return;
+                if (self.models_coordinator) |coordinator| {
+                    if (coordinator.onCatalogRetryTimer(timer.id)) {
+                        if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
+                        return;
+                    }
+                }
                 if (timer.id == app_platform.scheduled_task_timer_id) {
                     if (self.control) |control| {
                         control.onScheduledTaskTimer();

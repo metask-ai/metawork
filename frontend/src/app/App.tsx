@@ -4349,6 +4349,24 @@ export default function App() {
       : undefined;
   const composerFooter = (
     <>
+      {activeTask?.lifecycle === "open" && activeTask.modelInputBlocker && (
+        <div>
+          <p className="projection-note" role="status">
+            {t(mutationReasonMessageId(activeTask.modelInputBlocker))}
+          </p>
+          {activeTask.modelInputBlocker === "models_catalog_failed" && (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={bridgeUnavailable}
+              onClick={() => runModelSetupAction("refresh")}
+            >
+              {t("input.retry_models_catalog")}
+            </Button>
+          )}
+        </div>
+      )}
       {[
         ...taskOperationFeedback,
         composerCatalogFeedback,
@@ -4420,6 +4438,7 @@ export default function App() {
         unavailable={Boolean(
           activeTask &&
           activeTask.lifecycle === "open" &&
+          !activeTask.modelInputBlocker &&
           !activeTask.continuationAvailable &&
           (activeTask.continuationUnavailableReason !== "runtime_unavailable" ||
             !activeTask.inputAcceptance.available),

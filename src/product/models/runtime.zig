@@ -192,6 +192,7 @@ pub const Runtime = struct {
     preference_error: contract.ModelsError = .none,
     metask_catalog_generation: u64 = 0,
     metask_catalog_authorization_generation: u64 = 0,
+    metask_catalog_attempt_generation: u64 = 0,
     metask_error: contract.ModelsError = .none,
     metask_safe_diagnostic: FixedText(contract.Limits.safe_diagnostic_bytes) = .{},
     provider_views: [1]contract.ProviderView = undefined,
@@ -403,6 +404,16 @@ pub const Runtime = struct {
         return generation != 0 and generation == self.metask_catalog_authorization_generation and self.metask_catalog_state == .ready;
     }
 
+    pub fn metaskInputCatalogState(self: *Runtime, generation: u64) contract.CatalogState {
+        if (self.acceptsMetaskAuthorization(generation)) return .ready;
+        if (generation == 0 or self.metask_catalog_attempt_generation != generation) return .unavailable;
+        return switch (self.metask_catalog_state) {
+            .loading => if (self.catalog_attempt != null) .loading else .unavailable,
+            .failed, .needs_authentication => self.metask_catalog_state,
+            else => .unavailable,
+        };
+    }
+
     /// Resolve the preferred model or the first eligible catalog entry using
     /// the current authorization lease. No user selection is persisted.
     pub fn prepareMediaCandidate(self: *Runtime, input: contract.MediaPreparationInput) contract.MediaPreparation {
@@ -454,6 +465,7 @@ pub const Runtime = struct {
             .principal_ref = principal,
             .authorization_generation = authorization_generation,
         };
+        self.metask_catalog_attempt_generation = authorization_generation;
         self.metask_catalog_state = .loading;
         self.metask_error = .none;
         self.metask_safe_diagnostic.len = 0;
@@ -1069,6 +1081,7 @@ pub const Runtime = struct {
         if (self.metask_public_catalog) |public_catalog| public_catalog.clear();
         self.metask_catalog_generation = 0;
         self.metask_catalog_authorization_generation = 0;
+        self.metask_catalog_attempt_generation = 0;
         self.metask_catalog_state = state;
         self.metask_error = error_code;
         self.metask_safe_diagnostic.len = 0;

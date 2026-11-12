@@ -144,6 +144,7 @@ const CatalogJob = struct {
     cancellation: metask_transport.Cancellation,
     completion: ?models_metask.OwnedCatalogCompletion = null,
     error_code: models_contract.ModelsError = .none,
+    retryable_failure: bool = false,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
@@ -200,6 +201,7 @@ const CatalogJob = struct {
             control,
         ) catch |err| {
             self.error_code = models_metask.errorCode(err);
+            self.retryable_failure = err == error.ServiceUnavailable or err == error.DeadlineExceeded;
             return;
         };
         self.completion = models_metask.OwnedCatalogCompletion.init(&session);
@@ -229,6 +231,12 @@ const CatalogJob = struct {
 /// Product Control owns consumer scope and registry/default-selection policy;
 /// credential delivery uses a separate port before catalog work.
 pub const Coordinator = struct {
+    pub const RetryTimer = struct {
+        context: ?*anyopaque,
+        start_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
+        cancel_fn: *const fn (?*anyopaque, u64) anyerror!void,
+    };
+
     io: std.Io,
     account: *account_api.Runtime,
     metask_transport: metask_transport.Transport,
@@ -239,6 +247,10 @@ pub const Coordinator = struct {
     probe_job: ?*ProbeJob = null,
     catalog_job: ?*CatalogJob = null,
     observed_authorization_generation: u64 = 0,
+    retry_timer: ?RetryTimer = null,
+    catalog_retry: ?struct { id: u64, generation: u64 } = null,
+    next_retry_timer_id: u64 = 0x4d57_4d44_0000_0001,
+    retry_used_generation: u64 = 0,
     credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
 
     pub fn init(
@@ -259,6 +271,10 @@ pub const Coordinator = struct {
 
     pub fn setProbeNotifier(self: *Coordinator, notifier: ?ProbeNotifier) void {
         self.probe_notifier = notifier;
+    }
+
+    pub fn setRetryTimer(self: *Coordinator, timer: RetryTimer) void {
+        self.retry_timer = timer;
     }
 
     pub fn setCompletionTransport(
@@ -472,6 +488,7 @@ pub const Coordinator = struct {
         // Existing executions renew before any catalog work, using Account
         // authority alone. Catalog failure cannot roll this handoff back.
         var lease = (self.account.authorizationLease() catch {
+            self.cancelCatalogRetry();
             if (self.account.authorizationState()) |state| if (self.credential_renewal) |renewal| {
                 renewal.renew(.{ .scope = state.scope, .generation = state.generation }, null);
             };
@@ -480,6 +497,7 @@ pub const Coordinator = struct {
             self.observed_authorization_generation = 0;
             return;
         }) orelse {
+            self.cancelCatalogRetry();
             self.cancelCatalog();
             if (self.observed_authorization_generation != 0)
                 self.management.setMetaskAuthorizationUnavailable();
@@ -488,6 +506,7 @@ pub const Coordinator = struct {
         };
         defer lease.deinit();
         if (lease.authorization_generation == self.observed_authorization_generation) return;
+        self.cancelCatalogRetry();
         if (self.account.authorizationState()) |state| if (self.credential_renewal) |renewal| {
             if (state.generation == lease.authorization_generation)
                 renewal.renew(.{ .scope = state.scope, .generation = state.generation }, lease.access_token);
@@ -501,6 +520,7 @@ pub const Coordinator = struct {
         self.assertMainThread();
         if (self.catalog_job != null)
             return .rejected(.operation_in_progress);
+        self.cancelCatalogRetry();
         var lease = (self.account.authorizationLease() catch
             return .rejected(.local_resource_exhausted)) orelse {
             self.management.setMetaskAuthorizationUnavailable();
@@ -525,6 +545,7 @@ pub const Coordinator = struct {
             return .rejected(.operation_in_progress);
         const result = self.management.resetModelStore(expected_revision);
         if (!result.accepted) return result;
+        self.cancelCatalogRetry();
         self.observed_authorization_generation = 0;
         self.authorizationChanged();
         return result;
@@ -600,6 +621,7 @@ pub const Coordinator = struct {
                             job.error_code,
                             "",
                         );
+                        if (job.retryable_failure) self.armCatalogRetry(job.authorization_generation);
                     }
                 } else {
                     self.management.setMetaskAuthorizationUnavailable();
@@ -622,6 +644,7 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
+        self.cancelCatalogRetry();
         if (self.catalog_job) |job| {
             job.cancel();
             job.join();
@@ -634,6 +657,33 @@ pub const Coordinator = struct {
             self.drain();
         }
         self.management.stopCustomProviders();
+    }
+
+    fn armCatalogRetry(self: *Coordinator, generation: u64) void {
+        const timer = self.retry_timer orelse return;
+        if (self.retry_used_generation == generation or self.catalog_retry != null) return;
+        const id = self.next_retry_timer_id;
+        self.next_retry_timer_id += 1;
+        timer.start_fn(timer.context, id, 2 * std.time.ns_per_s, false) catch return;
+        self.retry_used_generation = generation;
+        self.catalog_retry = .{ .id = id, .generation = generation };
+    }
+
+    fn cancelCatalogRetry(self: *Coordinator) void {
+        const pending = self.catalog_retry orelse return;
+        self.catalog_retry = null;
+        const timer = self.retry_timer.?;
+        timer.cancel_fn(timer.context, pending.id) catch {};
+    }
+
+    pub fn onCatalogRetryTimer(self: *Coordinator, id: u64) bool {
+        self.assertMainThread();
+        const pending = self.catalog_retry orelse return false;
+        if (pending.id != id) return false;
+        self.catalog_retry = null;
+        if (self.catalog_job != null or !self.account.acceptsAuthorizationGeneration(pending.generation)) return true;
+        _ = self.refreshCatalog();
+        return true;
     }
 
     fn assertMainThread(self: *const Coordinator) void {

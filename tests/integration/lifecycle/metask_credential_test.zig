@@ -179,6 +179,14 @@ test "Metask catalog refresh failure never falls back to an old credential" {
     try characterizeCredentialExpiry(.catalog_failure);
 }
 
+test "Metask catalog loading defers an attached Task until refresh completes" {
+    try characterizeCredentialExpiry(.catalog_loading_attached);
+}
+
+test "Metask catalog loading defers a detached Task until refresh completes" {
+    try characterizeCredentialExpiry(.catalog_loading_detached);
+}
+
 test "Metask rejected credential update does not replay a Run and permits one explicit retry" {
     try characterizeCredentialExpiry(.update_rejected);
 }
@@ -288,7 +296,24 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
 }
 
-const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_loading_attached, catalog_loading_detached, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+
+const CatalogRetryTimer = struct {
+    id: ?u64 = null,
+    count: usize = 0,
+
+    fn start(context: ?*anyopaque, id: u64, interval: u64, repeats: bool) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        try std.testing.expect(self.id == null and !repeats and interval != 0);
+        self.id = id;
+        self.count += 1;
+    }
+
+    fn cancel(context: ?*anyopaque, id: u64) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.id == id) self.id = null;
+    }
+};
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     try characterizeCredentialExpiryWithSchedule(scenario, false);
@@ -356,7 +381,13 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     control.commitAccountFactNoFail(account_runtime.preparedFact(&authenticated));
 
     var coordinator = coordinator_api.Coordinator.init(&account_runtime, .{ .context = &network, .perform_fn = Network.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
-    coordinator.setProbeNotifier(.{ .context = &network, .notify_fn = Network.wake });
+    var catalog_timer: CatalogRetryTimer = .{};
+    if (scenario == .catalog_failure) coordinator.setRetryTimer(.{ .context = &catalog_timer, .start_fn = CatalogRetryTimer.start, .cancel_fn = CatalogRetryTimer.cancel });
+    coordinator.setProbeNotifier(.{ .context = &wake_loop, .notify_fn = struct {
+        fn notify(context: *anyopaque) void {
+            _ = fixture.LifecycleWakeLoop.wake(context);
+        }
+    }.notify });
     coordinator.start(home, .{ .context = &network, .generate_slot_fn = Network.generate, .store_fn = Network.store, .get_fn = Network.get, .delete_fn = Network.delete });
     defer coordinator.shutdown();
     // Product may consult the admission port while settling recovery at shutdown.
@@ -419,6 +450,35 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     fake_core.setRestoreHistory(1, 0);
     fake_core.setRestoredModel(model_id);
     const default_revision = control.modelsView().selection_revision;
+    if (scenario == .catalog_loading_attached or scenario == .catalog_loading_detached) {
+        if (scenario == .catalog_loading_detached) {
+            try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (old.runtime.attachment == .detached and old.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.DetachDidNotSettle;
+        }
+        platform.now_unix_seconds = 150;
+        try commitRefresh(&account_runtime, &control);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try std.testing.expectEqual(.loading, control.modelsView().providers[0].catalog_state);
+        const accepted = try control.sendInput("wait-for-model-catalog", old_id, .{ .text = "Send after the catalog is ready." });
+        try std.testing.expectEqual(.accepted, accepted.outcome);
+        try std.testing.expectEqual(.waiting, old.input_submissions.items[0].state);
+        try std.testing.expectEqual(@as(usize, 1), runCalls());
+        try drainCatalog(&coordinator);
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CatalogWaitDidNotFinish;
+        try std.testing.expectEqual(@as(usize, 0), old.input_submissions.items.len);
+        try std.testing.expectEqual(@as(usize, 2), runCalls());
+        try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "wait-for-model-catalog"));
+        return;
+    }
     if (scenario == .detached) {
         try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
         for (0..5000) |_| {
@@ -703,12 +763,17 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             const image = try control.sendInput("image-before-retry", old_id, .{ .multimodal = .{ .text = "Check this image", .attachment_ids = &.{id} } });
             try std.testing.expectEqual(.accepted, image.outcome);
             const failed = control.task_runtime.retrySubmission(old_id, "image-before-retry").?;
+            try std.testing.expectEqual(.models_catalog_failed, failed.reason.?);
             try std.testing.expect(failed.payload == null);
             try std.testing.expectEqual(@as(usize, 0), failed.retry_payload.?.attachments[0].bytes.len);
             try std.testing.expect(!control.releaseAttachment(id));
             network.fail_catalog = false;
-            try std.testing.expect(coordinator.refreshCatalog().accepted);
+            const timer_id = catalog_timer.id orelse return error.CatalogRetryNotScheduled;
+            catalog_timer.id = null;
+            try std.testing.expect(coordinator.onCatalogRetryTimer(timer_id));
             try drainCatalog(&coordinator);
+            try std.testing.expectEqual(@as(usize, 1), catalog_timer.count);
+            try std.testing.expect(!coordinator.onCatalogRetryTimer(timer_id));
             const retried = try control.retryTaskInput(old_id, "image-before-retry", "new-image-operation");
             try std.testing.expectEqual(.accepted, retried.outcome);
             const duplicate = try control.retryTaskInput(old_id, "image-before-retry", "duplicate-image-operation");

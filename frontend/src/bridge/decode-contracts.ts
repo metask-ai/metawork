@@ -39,6 +39,7 @@ import {
 } from "./contracts.ts";
 import {
   sendInputReasons,
+  modelInputBlockers,
   type SendInputResult,
   type InputSubmission,
   type WaitingInputView,
@@ -3575,6 +3576,9 @@ function decodeTask(
   manifest: RunManifest[],
 ): TaskView {
   const item = object(value, path, [
+    ...(Object.hasOwn(record(value, path), "modelInputBlocker")
+      ? ["modelInputBlocker"]
+      : []),
     "inputReady",
     "signal",
     "compactBlocker",
@@ -4162,6 +4166,15 @@ function decodeTask(
     fail(path, "continuation and recovery cannot both be available");
   return {
     inputReady: booleanValue(item.inputReady, `${path}.inputReady`),
+    ...(Object.hasOwn(item, "modelInputBlocker")
+      ? {
+          modelInputBlocker: enumValue(
+            item.modelInputBlocker,
+            `${path}.modelInputBlocker`,
+            modelInputBlockers,
+          ),
+        }
+      : {}),
     inputAcceptance,
     inputSubmissions,
     id: positiveWireId(item.id, `${path}.id`),
