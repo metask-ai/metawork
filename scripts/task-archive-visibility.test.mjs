@@ -782,7 +782,7 @@ test("legacy timeout synchronization failure belongs only to connection feedback
     () =>
       assert.match(
         document.querySelector(".commandbar-alert summary")?.textContent ?? "",
-        /not synced/,
+        /Sync failed/,
       ),
     { timeout: 7000 },
   );
@@ -1114,7 +1114,7 @@ test("deleting another Task in settings preserves the selected conversation", as
   );
   await screen.findByText("Archived tasks will appear here.");
   await app.user.click(
-    screen.getByRole("button", { name: "Back to workbench" }),
+    screen.getByRole("button", { name: "Back to main view" }),
   );
   await waitFor(() =>
     assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page"),

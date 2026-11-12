@@ -247,4 +247,4 @@ owner 在 `destroy` 前必须停止并 join 全部其他使用者，包括 gate 
 
 本合同的验证责任、标准入口、平台矩阵与未闭合证据统一由[验证规范的 Storage 基础层验证](validation.md#storage-基础层验证)定义。测试必须观察本合同中的权限隔离、持久化身份、事务结果与连接健康、借用生命周期和恢复不变量；测试数量或单次全绿不能替代这些证据。
 
-当前基础层仍不创建 production `app.db`，不改变任何 Workbench store、Account persistence、Application startup/shutdown 或 Product mutation path。
+当前基础层仍不创建 production `app.db`，不改变任何 Product store、Account persistence、Application startup/shutdown 或 Product mutation path。

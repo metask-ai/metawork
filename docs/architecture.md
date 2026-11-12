@@ -189,7 +189,7 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 本节适用于 Account 与 Product Control 持有的全部 Product persistence，不属于 §3.6 的 Storage backend 合同。持久化的逻辑权威与物理载体必须分开：owner 已接受并确认提交的当前格式数据才是跨重启真相；进程内 state 只是在当前进程中已经接纳的产品真相；无法识别、损坏或事务结果未确定的磁盘内容只是待分类证据，不能自行取得 active authority。当前代码与合同决定新写入接受的格式；无法识别的既有数据不得被冒充为当前数据或声称已经迁移，是否保留或清理由数据所属 Product owner 的现有合同决定。精确的格式识别、迁移、恢复、effect gate 和清理规则同样由该 owner 定义，Application 只执行受限 I/O，Renderer 不参与文件策略。
 
-`fail closed` 只表示在缺少可靠 authority 时拒绝相应的危险 effect、无人值守执行或权限扩大，不等同于冻结整个 Workbench，也不自动推出“禁止保存任何新状态”。decode 拒绝、数据证据保留、运行时可用性、mutation admission、commit certainty 和恢复可用性是不同事实，必须由 owner 分别建模；一个事实不能代替另一个事实。
+`fail closed` 只表示在缺少可靠 authority 时拒绝相应的危险 effect、无人值守执行或权限扩大，不等同于冻结整个应用，也不自动推出“禁止保存任何新状态”。decode 拒绝、数据证据保留、运行时可用性、mutation admission、commit certainty 和恢复可用性是不同事实，必须由 owner 分别建模；一个事实不能代替另一个事实。
 
 ## 4. 跨模块合同
 

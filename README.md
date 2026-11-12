@@ -1,6 +1,6 @@
 # MetaWork
 
-MetaWork 是一款面向本地工作区的桌面 Agent Workbench。用户可以围绕 Workspace 和 Task 配置执行环境、运行 Agent、观察工具活动、处理必要决策并保留结果；产品不把终端模拟器或 IDE 作为主要交互模型。
+MetaWork 是一款面向本地工作区的桌面 Agent 应用。用户可以围绕 Workspace 和 Task 配置执行环境、运行 Agent、观察工具活动、处理必要决策并保留结果；产品不把终端模拟器或 IDE 作为主要交互模型。
 
 ## 当前状态
 
