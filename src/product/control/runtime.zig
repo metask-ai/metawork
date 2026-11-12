@@ -12360,7 +12360,7 @@ test "Workspace upsert unknown outcome stays usable and heals on retry" {
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
-test "Project removal and re-addition preserve empty Workspace identity and existing authorization" {
+test "Project removal frees a slot and re-addition preserves Workspace identity and authorization" {
     test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -12383,7 +12383,7 @@ test "Project removal and re-addition preserve empty Workspace identity and exis
     try std.testing.expect(!restored.project_removed);
     try std.testing.expectEqual(@as(u64, 1), restored.epoch);
     try std.testing.expectEqualStrings(root, restored.trust.temporary);
-    try std.testing.expectEqual(@as(usize, 1), control.workspace.count(.manual));
+    try std.testing.expectEqual(@as(usize, 2), control.workspace.count(.manual));
 }
 
 test "Project removal survives Host restart while Workspace authority remains available" {
@@ -12414,7 +12414,11 @@ test "Project removal survives Host restart while Workspace authority remains av
 
 test "Project removal retains running Task state, Workspace epoch and durable Task authority" {
     const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    try tmp.dir.createDir(std.testing.io, "another", .default_dir);
+    const another = try tmp.dir.realPathFileAlloc(std.testing.io, "another", std.testing.allocator);
+    defer std.testing.allocator.free(another);
     defer std.testing.allocator.free(storage);
+    try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = another, .trust = .explicitly_trusted }));
     var persistence = TestTaskPersistence{ .storage = storage };
     var control = try testRuntimeWith(.{ .task_persistence = persistence.capability(null) });
     defer control.deinit();
@@ -12424,6 +12428,10 @@ test "Project removal retains running Task state, Workspace epoch and durable Ta
     const before = try std.json.Stringify.valueAlloc(std.testing.allocator, before_wire.state.tasks, .{});
     defer std.testing.allocator.free(before);
     const epoch = try control.workspaceEpoch(1);
+    const another_id = try control.openWorkspace(.{ .workspace_root = another, .trust = .explicitly_trusted });
+    try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    try std.testing.expect(control.workspace.facts(id).?.project_removed);
+    try control.removeProjectAtEpoch(another_id, 1);
     try control.removeProjectAtEpoch(1, epoch);
     const workspace = control.workspace.facts(1).?;
     try std.testing.expect(workspace.project_removed);

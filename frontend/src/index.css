@@ -8217,6 +8217,39 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-action-primary);
 }
 
+.composer-workspace-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-top: 8px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.composer-workspace-notice > p {
+  margin: 0;
+}
+
+.composer-workspace-notice > details[open] {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.composer-workspace-notice summary {
+  cursor: pointer;
+  color: var(--ui-action-primary);
+}
+
+.composer-workspace-notice pre {
+  max-height: 12rem;
+  margin: 4px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .model-setup-dialog {
   width: min(440px, calc(100vw - 32px));
   gap: 12px;

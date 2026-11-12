@@ -318,6 +318,8 @@ export const enUS = {
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed":
     "The workspace could not be opened. Choose it again.",
+  "workspace.selection_capacity":
+    "The workspace limit has been reached. Remove a project from the sidebar to add another folder.",
   "workspace.grant_confirmed": "Workspace selected.",
   "workspace.access_required":
     "This workspace is unavailable. Select the folder again.",

@@ -130,6 +130,7 @@ export function ComposerFooter({
   workspaceSelectionPending = false,
   modelLabel,
   modelTriggerRef,
+  workspaceNotice,
   modelOptions,
   selectedModelId,
   modelEditable,
@@ -188,6 +189,7 @@ export function ComposerFooter({
     authorization: "available" | "removing" | "reauthorization_required";
     disabled?: boolean;
   }[];
+  workspaceNotice?: ReactNode;
   selectedWorkspaceOptionId: string;
   workspaceEditable: boolean;
   workspaceSelectionPending?: boolean;
@@ -998,3 +1000,4 @@ export function ComposerFooter({
     </footer>
   );
 }
+      {workspaceNotice}

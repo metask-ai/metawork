@@ -2813,11 +2813,11 @@ export default function App() {
       settleOperationFeedback(
         token,
         attentionStatus(
-          "workspace.selection_failed",
+          diagnostic === "WorkspaceCapacity"
+            ? "workspace.selection_capacity"
+            : "workspace.selection_failed",
           { scope: "workspace", workspaceId: null },
-          {
-            diagnostic: errorText(error),
-          },
+          { diagnostic },
         ),
         snapshot.securityEpoch,
       );
@@ -2833,6 +2833,7 @@ export default function App() {
     if (workspaceId === automaticWorkspaceOptionId) {
       if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
         newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
+      const diagnostic = errorText(error);
       dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
       window.requestAnimationFrame(() => composer.current?.focus());
       return;
@@ -4257,18 +4258,6 @@ export default function App() {
           />
         ) : null,
       )}
-      {workspaceSelectionFeedback?.tone === "attention" &&
-        !workspaceSelectionFeedback.dismissed && (
-          <p
-            className="projection-note workspace-selection-feedback"
-            role="status"
-          >
-            {t(
-              workspaceSelectionFeedback.id,
-              workspaceSelectionFeedback.values,
-            )}
-          </p>
-        )}
       {currentStopFeedback &&
         !(
           stopRequestPending &&
@@ -4353,13 +4342,30 @@ export default function App() {
         )}
         workspaceLabel={composerWorkspaceLabel}
         workspaceTitle={composerWorkspaceLabel}
-        workspaceDiagnostic={
-          [
-            workspaceSelectionFeedback?.diagnostic,
-            composerCatalogFeedback?.diagnostic,
-          ]
-            .filter(Boolean)
-            .join("\n\n") || undefined
+        workspaceDiagnostic={composerCatalogFeedback?.diagnostic}
+        workspaceNotice={
+          workspaceSelectionFeedback?.tone === "attention" &&
+          !workspaceSelectionFeedback.dismissed ? (
+            <div
+              className="composer-workspace-notice"
+              key={workspaceSelectionFeedback.cycle}
+            >
+              <p>
+                {t(
+                  workspaceSelectionFeedback.id,
+                  workspaceSelectionFeedback.values,
+                )}
+              </p>
+              {workspaceSelectionFeedback.id !==
+                "workspace.selection_capacity" &&
+                workspaceSelectionFeedback.diagnostic && (
+                  <details>
+                    <summary>{t("feedback.details")}</summary>
+                    <pre>{workspaceSelectionFeedback.diagnostic}</pre>
+                  </details>
+                )}
+            </div>
+          ) : undefined
         }
         workspaceOptions={[
           {

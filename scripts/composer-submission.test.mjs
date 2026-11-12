@@ -1470,6 +1470,53 @@ test("Task information shows the directory name and opens the bound Workspace by
   assert.ok(!screen.queryByText(/Could not open the project folder/));
 });
 
+test("App explains Workspace selection failures below the Composer and preserves the draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const user = userEvent.setup({ document });
+  const pick = ctx.mock.method(
+    BridgeClient.prototype,
+    "chooseWorkspace",
+    async () => {
+      throw new Error("WorkspaceCapacity");
+    },
+  );
+  const selector = screen.getByRole("combobox", {
+    name: "Choose working directory",
+  });
+  const chooseFolder = async () => {
+    await user.click(selector);
+    await user.click(
+      await screen.findByRole("option", { name: "Open local folder" }),
+    );
+  };
+  await user.type(fixture.textarea, "Keep my draft");
+  await chooseFolder();
+  const capacity = await screen.findByText(
+    /The workspace limit has been reached/,
+    { selector: ".composer-workspace-notice > p" },
+  );
+  assert.ok(capacity.closest(".composer-workspace-notice"));
+  assert.equal(capacity.closest(".ai-composer-toolbar"), null);
+  assert.equal(capacity.parentElement.querySelector("details"), null);
+  assert.equal(fixture.textarea.value, "Keep my draft");
+
+  pick.mock.mockImplementation(async () => {
+    throw new Error("DialogFailed");
+  });
+  await chooseFolder();
+  const failure = await screen.findByText(
+    "The workspace could not be opened. Choose it again.",
+    { selector: ".composer-workspace-notice > p" },
+  );
+  const details = failure.parentElement.querySelector("details");
+  assert.equal(details.open, false);
+  await user.click(details.querySelector("summary"));
+  assert.equal(details.open, true);
+  assert.equal(details.querySelector("pre").textContent, "DialogFailed");
+  assert.equal(fixture.textarea.value, "Keep my draft");
+});
+
 test("App keeps Workspace selection in the draft toolbar and hides the automatic path after creation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
