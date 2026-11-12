@@ -235,7 +235,7 @@ pub const InputAction = union(enum) {
     continuation: u64,
     submit: struct { index: usize, run_id: u64 },
     start: usize,
-    fail: struct { index: usize, reason: SendInputReason },
+    fail: struct { index: usize, reason: SendInputReason, blocking_task_id: ?u64 = null },
 };
 
 pub const RunAcceptanceEffect = struct {
@@ -2492,7 +2492,7 @@ pub const Runtime = struct {
             break;
         };
         const index = next orelse return .none;
-        if (task.runtime.close_failed) return .{ .fail = .{ .index = index, .reason = .binding_unavailable } };
+        if (task.runtime.close_failed) return .{ .fail = .{ .index = index, .reason = .session_close_failed, .blocking_task_id = task_id } };
         if (task.approval_change != null or task.runtime.cancel_requested or task.runtime.close_requested) return .wait;
         switch (task.runtime.active_operation) {
             .compact, .restore => return .wait,
@@ -2584,7 +2584,7 @@ pub const Runtime = struct {
                 switch (self.inputAction(id)) {
                     .none, .wait => break,
                     .fail => |action| {
-                        self.failWaitingInput(id, action.index, action.reason, null);
+                        self.failWaitingInput(id, action.index, action.reason, action.blocking_task_id);
                         effects.changed_fn(context);
                     },
                     .continuation => if (!effects.continue_fn(context, id)) break,
@@ -11830,8 +11830,9 @@ test "Task known Session close failure ends the message instead of waiting forev
     try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
     task.runtime.close_failed = true;
     const failure = runtime.inputAction(1).fail;
-    try std.testing.expectEqual(.binding_unavailable, failure.reason);
-    runtime.failWaitingInput(1, failure.index, failure.reason, null);
+    try std.testing.expectEqual(.session_close_failed, failure.reason);
+    try std.testing.expectEqual(@as(?u64, 1), failure.blocking_task_id);
+    runtime.failWaitingInput(1, failure.index, failure.reason, failure.blocking_task_id);
     try std.testing.expectEqual(.failed, task.input_submissions.items[0].state);
     try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
     try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);

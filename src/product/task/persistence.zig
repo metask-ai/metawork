@@ -953,6 +953,8 @@ pub const InputSubmissionWire = struct {
     submission: SubmissionWire,
     input: RunInputWire,
     state: []const u8,
+    failure_reason: ?task_state.SendInputReason = null,
+    blocking_task_id: ?u64 = null,
 };
 
 pub const AdditionalInputWire = struct {
@@ -1306,7 +1308,13 @@ pub fn projectTask(
     errdefer for (submissions[0..submission_index]) |record| freeInputWire(allocator, record.input);
     for (task.input_submissions.items) |*record| {
         if (task_state.submissionHasExecution(task, record.submission.operationId())) continue;
-        submissions[submission_index] = .{ .submission = submissionWire(&record.submission), .input = try projectInput(allocator, record.input), .state = @tagName(record.state) };
+        submissions[submission_index] = .{
+            .submission = submissionWire(&record.submission),
+            .input = try projectInput(allocator, record.input),
+            .state = @tagName(record.state),
+            .failure_reason = if (record.state == .failed) record.reason else null,
+            .blocking_task_id = record.blocking_task_id,
+        };
         submission_index += 1;
     }
 
@@ -1927,7 +1935,14 @@ pub fn restoreTask(
         errdefer projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
         const State = @FieldType(task_state.InputSubmission, "state");
         const state: State = if (std.mem.eql(u8, record.state, "waiting")) .interrupted else parseEnum(State, record.state) orelse return error.TaskStoreCorrupt;
-        try submissions.append(projection.allocator, .{ .submission = metadata, .input = input, .payload = null, .state = state });
+        try submissions.append(projection.allocator, .{
+            .submission = metadata,
+            .input = input,
+            .payload = null,
+            .state = state,
+            .reason = record.failure_reason,
+            .blocking_task_id = record.blocking_task_id,
+        });
     }
     return .{
         .durable = .{
@@ -3666,6 +3681,9 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         _ = restoreSubmission(record.submission) catch return error.Invalid;
         if (record.submission.after_output_count > limits.max_commentary_segments_per_run + 1 or
             !oneOf(record.state, &.{ "waiting", "failed", "cancelled", "interrupted" })) return error.Invalid;
+        if (record.failure_reason != null and !std.mem.eql(u8, record.state, "failed")) return error.Invalid;
+        if ((record.failure_reason == .session_close_failed) != (record.blocking_task_id != null) or
+            record.blocking_task_id == 0) return error.Invalid;
         try validateRunInput(record.input, limits);
         for (task.input_submissions[0..index]) |previous| if (std.mem.eql(u8, previous.submission.operation_id, record.submission.operation_id)) return error.Invalid;
     }
@@ -5664,6 +5682,29 @@ test "Task model intent survives framed history independently of installed bindi
     try std.testing.expectEqual(@as(u64, 7), restored.model_intent.?.revision);
     try std.testing.expectEqualStrings("m", restored.binding.model);
     try std.testing.expectEqual(@as(u64, 1), restored.binding.epoch);
+}
+
+test "failed input history round trips its reason and validates Session blockers" {
+    var tasks = [_]TaskWire{reviewTestTask()};
+    var submissions = [_]InputSubmissionWire{.{
+        .submission = .{ .operation_id = "rejected-message" },
+        .input = .{ .kind = "text", .text = "A failed message", .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .redacted = false },
+        .state = "failed",
+        .failure_reason = .session_close_failed,
+        .blocking_task_id = 1,
+    }};
+    tasks[0].input_submissions = &submissions;
+    var workspaces = [_]WorkspaceWire{.{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 }};
+    var output: [64 * 1024]u8 = undefined;
+    const bytes = try encode(&output, .{ .next_workspace_id = 2, .next_workspace_recent_order = 2, .next_task_id = 2, .next_task_recent_order = 2, .workspaces = &workspaces, .tasks = &tasks }, testLimits());
+    var parsed = try decode(std.testing.allocator, bytes, testLimits());
+    defer parsed.deinit();
+    try std.testing.expectEqual(.session_close_failed, parsed.value.tasks[0].input_submissions[0].failure_reason.?);
+    try std.testing.expectEqual(@as(?u64, 1), parsed.value.tasks[0].input_submissions[0].blocking_task_id);
+    submissions[0].blocking_task_id = null;
+    try std.testing.expectError(error.Invalid, validateTask(tasks[0], testLimits()));
+    submissions[0].failure_reason = null;
+    try validateTask(tasks[0], testLimits());
 }
 
 test "legacy Task missing model intent preserves unknown source" {

@@ -180,7 +180,7 @@ Task aggregate 独占普通消息的接收、顺序、推进、停止及失败�
 
 Task 使用有界待处理列表和现有 lifecycle wake。队首文本可在已就绪文本 Run 中通过现有 RunControlLease 同步 submitInput；Skill、附件、未就绪或收尾阶段等待。空闲后队首领取和普通 Run admission 在同一主线程事务中完成，自身预留不阻挡自身，显式 run 不得越过队首。必要准备只登记一次，Control 调用对应 owner；明确失败不循环修复。瞬时时序拒绝保留等待，真正的无效输入、依赖/预算失败结束该消息，unknown 保留真实合同失败，不改投。复用 Session 同步控制能力，不建立 submit Executor job 或异步回执归并屏障。
 
-接收 metadata 随所有权移入根输入或 additional input，保留 operationId、原接收时间与展示位置且只投影一次。原文复用共享内存预算；附件接收时由 Control 协调一次性 grant 与原件移交 Task，等待期间不得保存栈上 callback 或 grant。未交付资源在取消时由原 owner 清理，已交付原件沿 Task 生命周期保留，清理失败保留原 owner 的有界 cleanup debt。安全历史保存展示记录与执行关联，具体失败原因只在内存；重启的未执行消息中断且无 raw payload，不从历史重建执行。
+接收 metadata 随所有权移入根输入或 additional input，保留 operationId、原接收时间与展示位置且只投影一次。原文复用共享内存预算；附件接收时由 Control 协调一次性 grant 与原件移交 Task，等待期间不得保存栈上 callback 或 grant。未交付资源在取消时由原 owner 清理，已交付原件沿 Task 生命周期保留，清理失败保留原 owner 的有界 cleanup debt。安全历史保存展示记录、执行关联和已确认失败的稳定原因类别。重启时仍在等待的提交转为中断，原始输入不从历史重建。
 
 Task 在调用前预留有界 identity、安全消息投影及独立的原文 owned copy；Agent 调用仍只同步借用输入。原文预留失败必须先于 Core 效果拒绝，拒绝释放候选，接受保留 receipt sequence，合同失败保留 unknown。安全投影归属于原 Run，只供历史展示、对账和权限上下文使用，不能成为执行来源。原文仅在 Host 内存中按 Runtime 共享预算持有，单条遵守普通输入容量，数量与累计字节不得超过 Agent 发布的 Core 上限；Runtime 原文缓存总量不超过累计字节上限，合并临时缓冲另限为一个普通输入。原文不进入日志、Snapshot 或历史，收口和销毁必须清零释放，释放不重置 Core 已接受的累计额度。事件 input_adopted 提供真实 turn 与活动顺序；终态在 event-drain barrier 后以 Agent 权威计数收口接受前缀为 adopted/unadopted，计数无效时剩余记录为 unknown，已知采纳事实保留。仅由计数确认的采纳不伪造活动位置。
 

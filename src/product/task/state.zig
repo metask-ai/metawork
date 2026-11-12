@@ -578,7 +578,7 @@ pub const InputSubmission = struct {
     input: RunInputRecord,
     payload: ?OwnedRunInput,
     state: enum { waiting, failed, cancelled, interrupted } = .waiting,
-    /// Runtime-only explanation; history only retains the safe terminal state.
+    /// Only the stable reason of a failed submission is written to history.
     reason: ?SendInputReason = null,
     blocking_task_id: ?u64 = null,
     /// A required preparation is attempted once for this accepted message.

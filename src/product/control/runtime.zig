@@ -5301,6 +5301,7 @@ pub const Runtime = struct {
     fn syncLifecycleWithScheduleTimer(self: *Runtime, timer_elapsed: bool) void {
         const mcp_refresh_needed = self.syncLifecycleFactsWithScheduleTimer(timer_elapsed);
         self.advanceTaskInputs();
+        self.flushApprovalProjectionNoFail();
         self.syncPermissionReviews();
         self.retireQuiescentCredentials();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
@@ -5425,6 +5426,7 @@ pub const Runtime = struct {
 
     fn publishWaitingInputChange(context: *anyopaque) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
+        self.approval_history_dirty = true;
         self.bumpRevision();
     }
 
