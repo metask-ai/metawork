@@ -613,7 +613,7 @@ test("configure opens Models for user-added model management and preserves the d
   assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
   assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
   await screen.findByRole("heading", { name: "Models" });
-  await user.click(screen.getByRole("button", { name: "Back to workbench" }));
+  await user.click(screen.getByRole("button", { name: "Back to main view" }));
   await waitFor(() =>
     assert.ok(
       document.activeElement === textarea,

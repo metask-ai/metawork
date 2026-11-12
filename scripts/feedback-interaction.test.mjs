@@ -210,7 +210,7 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
     },
     closeSettings: async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: "Back to workbench" }),
+        screen.getByRole("button", { name: "Back to main view" }),
       );
       await waitFor(() =>
         assert.ok(
@@ -351,7 +351,7 @@ test("an accepted command with failed sync has only connection sync feedback; re
     () =>
       assert.match(
         document.querySelector(".commandbar-alert summary")?.textContent ?? "",
-        /not synced/,
+        /Sync failed/,
       ),
     { timeout: 7000 },
   );
@@ -361,7 +361,7 @@ test("an accepted command with failed sync has only connection sync feedback; re
   );
   assert.doesNotMatch(
     document.querySelector(".settings-page").textContent,
-    /latest state.*loaded|not synced|already succeeded/i,
+    /latest state.*loaded|sync failed|already succeeded/i,
   );
   await app.closeSettings();
   app.controls.failRead = false;

@@ -6,7 +6,7 @@
 
 1. Metask AgentCore bundle SDK 是 AgentCore canonical typed protocol 的唯一来源；
 2. MetaWork 不解析 AgentCore Run 的 Provider SSE；独立 Agent-owned Completion 的封闭 codec 不属于 AgentCore 集成协议；
-3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
+3. MetaWork 不建立平行的 事件体系；
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
@@ -148,7 +148,7 @@ callback admission 只建立 lifetime 与当时的 identity 事实，不保证�
 
 当前锁定 ABI 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。Agent 边界继续使用官方 decoder 完整理解该 ABI，但 MetaWork 固定工具集合不注册或允许 `AskUserQuestion`，正式产品路径只会产生 Permission request。Permission request 是携带 request/session/run/tool/digest/policy generation、`responses[]` 与可选 candidate 的 typed flat object；当前 choice 为 `deny_once | deny_session | allow_once | allow_session`，Session choice 只有在 candidate 存在且 scope 为官方 SDK 认可的 `exact_arguments | file_target` 时才可发布。`exact_arguments` 只覆盖同一工具的相同 canonical arguments；`file_target` 只覆盖同一 built-in Write 或 Edit 对同一 canonical file 的后续调用，内容可变，不跨工具、不跨文件。candidate 的 canonical target 只由 Core 提供，Host 不重新规范化或从参数推断；Product 投影遵守 [Renderer Bridge 合同](renderer-bridge-contract.md)，目标命中敏感过滤时隐藏 candidate 和 Session choices。response 必须回显 request identity 与 generation，Session choice 还必须回显 candidate rule ID。Permission request 与 callback `RunContext` identity 不一致时立即 fatal 并 poison Session；`permission_provenance` 是 control event，不得静默丢弃。
 
-Agent Session 的公开回答入口只有 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。AgentCore 独占 Session grant 匹配与 provenance，Workbench 只保存当前 permission occurrence 和有界审计摘要，不维护平行 grant cache 或规则 compiler。ABI decoder 仍识别 `ask_question`，但 Agent capability gate 在建立 pending UI 状态前返回 callback fatal，因此 Product Control、Bridge 与 Renderer 不拥有 answers 产品路径。
+Agent Session 的公开回答入口只有 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。AgentCore 独占 Session grant 匹配与 provenance，Product Task 只保存当前 permission occurrence 和有界审计摘要，不维护平行 grant cache 或规则 compiler。ABI decoder 仍识别 `ask_question`，但 Agent capability gate 在建立 pending UI 状态前返回 callback fatal，因此 Product Control、Bridge 与 Renderer 不拥有 answers 产品路径。
 
 为解释重复审批，该有界审计摘要可以保留 AgentCore typed request/provenance 已提供的 canonical arguments digest、policy generation 与 candidate/matched rule identity，但不保留原始参数、credential 或可重放 response。这些字段只是观测与解释事实；只有 AgentCore 当次 request 发布的 `responses[]` 与 candidate 决定可提交 choice，MetaWork 不用 digest 本地命中、延长、恢复或生成 grant。
 
@@ -270,7 +270,7 @@ checkpoint restore 的 expectation 必须使用 checkpoint description 的精确
 
 ### Skill catalog ownership
 
-Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界线程运行由 Product Control 决定。输入必须使用 Application 解析并注入的 canonical user home，以及 Product Control canonicalize 并按 Workspace identity、authority 和 epoch 校验的 Workspace root。查询必须显式区分 Workspace 与管理用途。Workspace 查询可以接收 typed additional sources，每项只包含 canonical root、USER/WORKSPACE scope、opaque source instance ID 与 signed source priority；Agent 使用官方 SDK 原样编码，不识别产品品牌、路径模板或勾选状态。Product 负责来源授权、固定根选择及按[产品需求](requirements.md#59-workbench-界面与任务组织)设置来源优先级，默认来源优先级同时传入个人与项目默认来源字段；Agent 在文件系统访问前校验 SDK 数量与总 metadata 预算、文本和绝对路径，再检查传入根的 canonical directory 约束；传入根失效时整个查询失败，不静默丢弃来源。候选解析、范围优先关系、冲突与 winner 由 AgentCore 决定。
+Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界线程运行由 Product Control 决定。输入必须使用 Application 解析并注入的 canonical user home，以及 Product Control canonicalize 并按 Workspace identity、authority 和 epoch 校验的 Workspace root。查询必须显式区分 Workspace 与管理用途。Workspace 查询可以接收 typed additional sources，每项只包含 canonical root、USER/WORKSPACE scope、opaque source instance ID 与 signed source priority；Agent 使用官方 SDK 原样编码，不识别产品品牌、路径模板或勾选状态。Product 负责来源授权、固定根选择及按[产品需求](requirements.md#59-主界面与任务组织)设置来源优先级，默认来源优先级同时传入个人与项目默认来源字段；Agent 在文件系统访问前校验 SDK 数量与总 metadata 预算、文本和绝对路径，再检查传入根的 canonical directory 约束；传入根失效时整个查询失败，不静默丢弃来源。候选解析、范围优先关系、冲突与 winner 由 AgentCore 决定。
 
 顶层管理 catalog 的 root 与 home 都绑定 canonical user home，epoch 为空，只接受 USER additional sources。Core 将 shared root/home 的默认源注册为 WORKSPACE，Agent 因而仅在管理用途内把个人附加源也编码为 SDK WORKSPACE，使个人来源在相同范围内按各自 priority 参与解析；真实 Workspace 查询仍保留 USER/WORKSPACE 编码，priority 在两类查询中保持不变。此适配不创建 Workspace、不改变产品个人归属或文件 authority，不重写 Core provenance、候选解析或冲突决议。Product 结合明确查询用途、已知来源身份及已授权管理目标判断归属，不能用管理查询中的 Core scope 推导项目文件权限。管理 lease 只由 Product Control 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
 
@@ -432,7 +432,7 @@ flowchart LR
 
 默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界和公平调度。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
 
-单事件尺寸超限继续映射为独立的 Product `event_payload_too_large`；事件泵临时饱和采用可取消背压，不再生成 `queue_capacity_failure`。后者仍可表达执行队列等既有准入失败，Renderer 不将这些原因描述为磁盘或工作台存储已满。
+单事件尺寸超限继续映射为独立的 Product `event_payload_too_large`；事件泵临时饱和采用可取消背压，不再生成 `queue_capacity_failure`。后者仍可表达执行队列等既有准入失败，Renderer 不将这些原因描述为磁盘或产品历史存储已满。
 
 ### 过载语义
 
@@ -538,7 +538,7 @@ Workspace 选择、一次性授权和 registry 事务由 [Product 架构](produc
 ### built-in tools
 
 - `src/agent/capabilities.zig` 唯一定义 built-in 产品子集的精确工具名与顺序，`AskUserQuestion` 不开放；Agent 将同一非空集合用于 Runtime 注册和 fresh/restore Session allowlist，公开 Session options 不允许调用方扩大或收窄；
-- Workbench 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力只构成外部上限；
+- Product 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力只构成外部上限；
 - unknown name、未验证名称和空集合使 Agent 初始化失败，不得静默编码为 `allowed_tools = null`；
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；

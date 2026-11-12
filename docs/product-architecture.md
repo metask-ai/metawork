@@ -510,7 +510,7 @@ Run durable record 在 Product 接纳输入时至多一次记录 nullable wall-c
 
 Run 接纳执行时可以保留 runtime-only 单调起点；Product 在完整 terminal event-drain barrier 首次形成正式终态时用同一单调时钟冻结 nullable 最终耗时，并随 Run durable history 持久化。该值包含排队、批准等待和重试，写入后不可修改；时钟不可用、回拨或旧 canonical record 缺少该字段时保持 null，恢复不得用提交/完成 wall-clock、Tool elapsed、加载时间或 Run 顺序推断补写。active Run 的当前耗时只从 runtime-only 起点采样，不进入 durable record。
 
-Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除无需归档，受理不改变原 archived；受理时取消等待输入与接续并失效待决审批，Product Control 通过既有 operation owner 请求停止，禁止新 admission。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除。Task 已回到 open 且安全时，恢复归档或未归档 Task 的显式新消息、归档在接纳同一 mutation 中清除 failed，拒绝不清除；仍 closing 或结果未知不得借此绕过原事务 gate。删除意图不持久化，重启不自动继续；Task 的其他可用操作与整个 Workbench 不得因此冻结。
+Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除无需归档，受理不改变原 archived；受理时取消等待输入与接续并失效待决审批，Product Control 通过既有 operation owner 请求停止，禁止新 admission。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除。Task 已回到 open 且安全时，恢复归档或未归档 Task 的显式新消息、归档在接纳同一 mutation 中清除 failed，拒绝不清除；仍 closing 或结果未知不得借此绕过原事务 gate。删除意图不持久化，重启不自动继续；Task 的其他可用操作与整个应用 不得因此冻结。
 
 ### 4.3 `workbench-history.store`
 

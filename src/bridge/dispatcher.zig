@@ -8799,7 +8799,7 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     }
     const bytes: usize = @intCast(result.get("bytes").?.integer);
     try std.testing.expect(bytes > product_delivery.snapshot_chunk_bytes);
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
+    try std.testing.expectEqual(@as(usize, 0), product_control.TestSupport.snapshotProgress(control).produced);
     const assembled = try std.testing.allocator.alloc(u8, bytes);
     defer std.testing.allocator.free(assembled);
     var request_storage: [256]u8 = undefined;
@@ -8809,7 +8809,7 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
         if (offset == 0) {
             const rejected = native.dispatch(request, .{ .origin = source.origin, .window_id = 99 }, response);
             try std.testing.expect(std.mem.indexOf(u8, rejected, "\"handler_failed\"") != null);
-            try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
+            try std.testing.expectEqual(@as(usize, 0), product_control.TestSupport.snapshotProgress(control).produced);
         }
         var chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(request, source, response), .{});
         defer chunk.deinit();
@@ -8824,9 +8824,9 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     defer decoded.deinit();
     try std.testing.expectEqual(@as(usize, 4), decoded.value.object.get("historyPage").?.object.get("runs").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 50), decoded.value.object.get("taskIndex").?.array.items.len);
-    try std.testing.expectEqual(bytes, control.view_read.produced);
+    try std.testing.expectEqual(bytes, product_control.TestSupport.snapshotProgress(control).produced);
     dispatcher.breakConnection();
-    try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
+    try std.testing.expectEqual(@as(u64, 0), product_control.TestSupport.snapshotProgress(control).id);
 }
 
 test "Output action Bridge binds fixture identities and refuses replay cancellation and disconnected reveal" {

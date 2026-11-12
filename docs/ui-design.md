@@ -1,11 +1,11 @@
 # MetaWork UI 设计规范
 
 > 状态：MetaWork 全部用户界面的唯一设计 source of truth；未通过对应能力验收的界面不得出现
-> 设计基线：MetaWork 自有的“明亮工作台 + 紫色任务流”；外部产品和参考图只用于提炼交互模式，不构成可复制的布局、品牌或组件规范
+> 设计基线：MetaWork 自有的“明亮界面 + 紫色任务流”；外部产品和参考图只用于提炼交互模式，不构成可复制的布局、品牌或组件规范
 
 ## 1. 文档职责
 
-本文档定义 MetaWork 全部用户界面的规范语义。登录、Workbench、设置、全局能力页面、平台窗口呈现与后续 capability-gated 界面都以本文为唯一设计真源；其他文档只能链接或提供不产生新设计语义的摘要。
+本文档定义 MetaWork 全部用户界面的规范语义。登录、主界面、设置、全局能力页面、平台窗口呈现与后续 capability-gated 界面都以本文为唯一设计真源；其他文档只能链接或提供不产生新设计语义的摘要。
 
 本文定义：
 
@@ -31,11 +31,11 @@
 
 ## 2. 产品设计命题
 
-MetaWork 是面向本地工作区的桌面 Agent Workbench，不是终端模拟器、聊天应用、完整 IDE 或通用 Agent 门户。
+MetaWork 是面向本地工作区的桌面 Agent 应用，不是终端模拟器、聊天应用、完整 IDE 或通用 Agent 门户。
 
-Workbench shell 是应用启动后的稳定根界面；可信根 Snapshot 建立前不得开放 mutation。Account 登录只决定内置 Metask provider 能否取得授权，不得替换或遮住 Workbench；New task 是否可以发送仍只服从 Product Control 的 execution admission。
+应用启动后直接显示主界面；可信根 Snapshot 建立前不得开放 mutation。Account 登录只决定内置 Metask provider 能否取得授权，不得替换或遮住主界面；New task 是否可以发送仍只服从 Product Control 的 execution admission。
 
-进入 Workbench 后，界面持续回答六个问题：
+进入主界面后，界面持续回答六个问题：
 
 1. 当前在哪个 Workspace 和 Task；
 2. 新 Task 将使用哪个模型；
@@ -59,7 +59,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - tool permission 同步用户请求；AgentCore ABI 虽保留 Ask question，但 MetaWork Agent 不开放对应 built-in；
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
-- Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Workbench 投影为 Current activity，并按 transition sequence 丢弃过期观察。
+- Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Product 投影为 Current activity，并按 transition sequence 丢弃过期观察。
 
 因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需在所属 Tool 行下方展开，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。成果只在所属 Run 存在可信交付记录时展示紧凑文件列表，不显示空模块；文件名、相对路径和大小描述交付时的记录，不能当作当前文件仍存在或未变更的证明。脱敏时隐藏整条路径，不显示猜测的文件名。文件动作由 Host 重新验证后开放，普通工具文字和文件变化不产生该列表。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
@@ -139,7 +139,7 @@ Workspace
 
 ## 4. 主窗口信息架构
 
-> Capability：**当前**。持续可达的 Workbench、独立 Workspace projection、左栏、New task、Settings overlay、Task 内容与统一 Task Panel 已进入当前 shell；未通过 capability gate 的模块与标签仍必须隐藏。
+> Capability：**当前**。持续可达的主界面、独立 Workspace projection、左栏、New task、Settings overlay、Task 内容与统一 Task Panel 已进入当前 shell；未通过 capability gate 的模块与标签仍必须隐藏。
 
 ### 4.1 总体布局
 
@@ -239,9 +239,9 @@ Workspace
 - New task 默认选择 Automatic Workspace，未手动选择目录时，工具带按钮显示“选择工作目录”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。选定 Manual Workspace 后，按钮显示项目名，悬停可查看完整目录。创建后可在右上角的任务信息查看已选目录。
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
-- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
+- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 主界面内容区的长期 surface 打开，保留窗口壳层和底层内容的挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 历史 Manual 目录经 Host 恢复检查仍可用时可直接点选，不显示“需要访问权限”或要求重复目录选择器；真实失效目录才显示“目录不可用”并提供重新选择。再次打开历史 Task 只保证可浏览记录，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
-- MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
+- MetaWork 重启后，左栏直接使用 Product 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 本身不显示常驻提示；`retainedTaskHistoryCount > 0` 时，左栏 Task 列表以一行静态说明告知有多少已保存 Task 无法在当前版本打开且已原样保留，不提供动作、不阻塞任何操作。`history_read_only` Task 正常出现在列表中，Composer 以 placeholder 说明只能查看，菜单中的重命名、归档与删除不可用。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。Host 只为最新 terminal `completed` Run 发布 nullable 未读 identity；后台完成时显示，用户打开该 Task 后只有中央工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖，且应用页面可见并获得焦点时才确认并隐藏。当前可见 Task 完成后可直接确认，不闪烁自身提示点；遮挡、失焦、Bridge 失败或 stale acknowledgement 不得提前吞掉提醒。Task 再次完成新的 Run 时重新显示；归档等价于明确处理当前完成提醒，恢复时不复活旧提示点。
 - 未归档 Task 的重命名、归档和删除通过左侧 Task 行的右键菜单访问；归档任务由设置管理，当前归档历史工作面提供恢复及返回归档列表入口。停止当前运行仍保留在内容区作为即时运行控制；不存在独立的“结束任务”动作。
@@ -249,7 +249,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。连接器入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore discovery/catalog；定时任务入口依赖 Schedule 持久状态的投影、后台 Host timer/notification 与真实 Task admission。连接器入口与 route 已进入稳定 shell；当前合同由 Product MCP 的 typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
 `新建任务`、`技能`、`连接器` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -269,14 +269,14 @@ Tasks
 - 四个菜单项使用相同行高、左右 padding、图标列、字号、字重、hover 与 focus 样式；`New task` 不再使用独立填充按钮，快捷键只作为 tooltip 或不改变布局的尾部提示；
 - 当前能力 route 使用 `--ui-action-selected-surface` 弱背景、`--ui-action-selected-content` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
 - 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
-- 点击能力入口保留完整 Workbench 左栏和 Task 选择，只替换中央 route；点击 New task 或 Task 回到对应 Workbench route。Settings 覆盖整个 Workbench 内容区，保留窗口壳层和底层 Workbench 挂载，不重复显示或操作 Task 左栏；
+- 点击能力入口保留主界面左栏和 Task 选择，只替换中央 route；点击 New task 或 Task 回到对应页面。Settings 覆盖整个 主界面内容区，保留窗口壳层和底层内容的挂载，不重复显示或操作 Task 左栏；
 - 能力页面打开期间后台 Task 继续运行，左栏的 `Needs your attention`、Running 与失败信号继续更新。
 
 ### 5.3 Skill 中心
 
 > Capability：**当前合同**。页面消费个人 Skill 的 catalog、inventory、管理操作和用户级启用策略。项目 Skill 的发现和调用位于对应任务的 Workspace 上下文。
 
-中央工作面与连接器、定时任务共用 Workbench 内容底色、840 px 有界阅读宽度、标题层级和带细分隔线的单列列表。
+中央工作面与连接器、定时任务共用 主界面内容底色、840 px 有界阅读宽度、标题层级和带细分隔线的单列列表。
 三个页面的主面板负责纵向滚动，滚动条位于主面板右缘，内容列居中。
 
 页面与列表：
@@ -321,7 +321,7 @@ Tasks
 
 ### 5.4 MCP 服务
 
-> Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability、credential submission、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
+> Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Product MCP 的 Desired Registry；Runtime/catalog availability、credential submission、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
 
 侧栏入口与页首标题显示「连接器」（英文为 `Connectors`）。配置和诊断使用 MCP 指明协议。连接器页面沿用定时任务的内容底色、有界阅读宽度、标题和低强调搜索。页面默认展示用户现有服务。服务按状态分组，用细分隔线呈现连续列表。窄窗允许页首动作和服务信息换行，保留需要处理的状态、常用操作和启停开关。详情与 Add/Edit 使用定时任务同款居中模态弹窗，窄窗保留视口边距。弹窗正文独立滚动，标题及添加、编辑的底部动作保持可见。弹窗使用统一遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复。
 
@@ -349,7 +349,7 @@ Tasks
 
 ### 5.5 定时任务
 
-> Capability：**当前**。Workbench 拥有持久计划定义、recurrence、后台 timer admission、missed-run reconciliation、occurrence history 与通知事实；AgentCore 只执行触发后创建的真实 Run。主窗口关闭后 Host 继续在后台运行，重新启动后从 canonical store 恢复。
+> Capability：**当前**。Schedule 拥有持久计划定义、recurrence、后台 timer admission、missed-run reconciliation、occurrence history 与通知事实；AgentCore 只执行触发后创建的真实 Run。主窗口关闭后 Host 继续在后台运行，重新启动后从 canonical store 恢复。
 
 定时任务是与 Skill 中心同级的全局自动化页，不跟随当前 Task 的路径上下文，也不要求先创建交互式 Task。Task 回答“这一次做了什么”，Schedule 回答“何时自动触发”，Skill 回答“可选地如何执行”；页面不把三者做成父子信息架构。
 
@@ -420,7 +420,7 @@ Recent
 
 ### 5.8 左下角账号入口
 
-Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显示头像或首字母与显示名，不重复展示“Metask 已连接”或成功状态点，也不为已删除的第二行保留空白高度；入口仍保持至少 44 px 命中高度。未登录、检查中或授权中仍使用第二行简短状态说明当前需要。它同时是账户与应用轻量菜单的触发器，不显示完整 API Key，也不承担模型快速选择。
+主界面左栏底部固定显示紧凑的 Metask identity：已登录时只显示头像或首字母与显示名，不重复展示“Metask 已连接”或成功状态点，也不为已删除的第二行保留空白高度；入口仍保持至少 44 px 命中高度。未登录、检查中或授权中仍使用第二行简短状态说明当前需要。它同时是账户与应用轻量菜单的触发器，不显示完整 API Key，也不承担模型快速选择。
 
 点击后打开最宽 224 px 的轻量菜单，窄窗口下继续受视口宽度约束，视觉复用 [Foundation 菜单规则](#165-foundation-组件)：
 
@@ -433,15 +433,15 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 退出登录
 ```
 
-- “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、Workbench 一级导航或设置分区。点击后打开紧凑模态窗，展示 canonical Logo、产品名、Metask 开发者归属、从 `app.zon` 构建注入的当前版本和版本更新区域；不渲染宣传文案、占位动作或死链接；
+- “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、主界面一级导航或设置分区。点击后打开紧凑模态窗，展示 canonical Logo、产品名、Metask 开发者归属、从 `app.zon` 构建注入的当前版本和版本更新区域；不渲染宣传文案、占位动作或死链接；
 - 账户行移除下拉箭头，头像与账号名称仍为账户与应用菜单按钮。唯一常驻更新提醒位于同一行右侧：有新版时显示独立“有新版”按钮，无新版时留空；按钮与菜单触发器必须为并列交互元素，不能嵌套。长身份名称省略，更新按钮不被挤出；两者保持 44 px 最小命中高度、可访问名称和键盘焦点。未登录时也提供更新入口，不增加其他菜单标记、横幅、系统通知或自动弹窗；
 - “有新版”打开同一个关于 Dialog，不打开账号菜单或自动下载。关闭后焦点返回原更新按钮；该按钮已经消失时回到账户与应用入口。关于的版本区域呈现未检查、检查中、最新、发现新版、缺本平台包、检查失败及下载交接状态，提供检查/重试、可用时的下载动作，以及始终可见的官网下载。打开 Dialog 本身不触发网络检查；Bridge 不可用时保留静态信息并禁用无法执行的动作，不能虚构最新状态；
 - 下载按钮绑定显示的版本，只在用户点击后请求预检与系统浏览器交接。检查与命令在途防重复提交；交接成功只写“已交给浏览器，请在浏览器中查看下载”，保留角落提醒，不展示虚假的下载进度或完成。失效链接明确提示“下载链接暂不可用，请前往官网下载”，临时失败、缺包与版本漂移使用对应可操作原因；官网仅由用户点击打开。检查失败允许显示上次确认版本并标明本次未刷新，不报最新；
 - 更新状态由 Host 发布，局部 command busy/error 只属于当前 Dialog 和 connection generation；关闭、卸载或连接变化后的迟到回执不得恢复旧反馈。检查/下载结果原位呈现，普通后台失败不抢焦点；状态使用可访问的 live region，错误有可读文字。窄窗操作行可换行，沿用既有深浅主题与 Foundation 组件。领域与下载失败语义以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准；
-- About 不依赖 Account、Models 或登录状态，在 Workbench 的账户与应用菜单中始终可用；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
-- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前 Workbench 上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案说明仅退出本机 Metask 账号、本地 Task 与历史记录会保留，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
+- About 不依赖 Account、Models 或登录状态，在主界面的账户与应用菜单中始终可用；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
+- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前界面上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案说明仅退出本机 Metask 账号、本地 Task 与历史记录会保留，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；
-- 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
+- 未登录时保留本地 Task 历史，并把左栏账号入口切换成登录动作。
 
 ## 6. Task 生命周期
 
@@ -485,7 +485,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 | 条件                                         | English UI              | 中文 UI        | 主要动作                       |
 | -------------------------------------------- | ----------------------- | -------------- | ------------------------------ |
 | draft page                                   | New task                | 新建任务       | 输入并发送                     |
-| view sync = failed                           | Workbench is not synced | 工作台尚未同步 | 重试同步，禁用依赖 Host 的操作 |
+| view sync = failed                           | Sync failed             | 同步失败        | 重试同步，禁用依赖 Host 的操作 |
 | waiting_user + permission review = reviewing | Automatic review        | 自动评审中     | 可直接批准、拒绝或停止         |
 | waiting_user + no active permission review   | Needs your attention    | 需要你处理     | 回答、批准、拒绝或停止         |
 | run phase = stopping                         | Stopping                | 正在停止       | 等待真实结果                   |
@@ -500,7 +500,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 连接失败必须按可恢复边界呈现：只有 bootstrap `connect` 明确返回 Renderer Bridge identity 或 revision 不匹配时，才显示“组件不匹配”并要求关闭后重建或安装；snapshot、revision notification 或 Host signal 的 malformed/unknown payload 仍然 fail closed、禁止 mutation，但显示对应的视图读取失败、技术来源和显式重新连接入口，不能伪装成已经证实的组件版本问题。
 
-启动时收到的数据格式不符合预期，主提示使用“无法加载 MetaWork”等用户能够理解的描述，不把“工作台视图”作为需要用户理解的技术对象。原因说明只陈述已观察到的数据异常；对象路径和有界字段差异收入可折叠技术详情，不在主提示罗列内部字段，也不推断版本错配。该文案不改变既有拒绝与显式恢复边界。
+启动时收到的数据格式不符合预期，主提示使用“无法加载 MetaWork”等用户能够理解的描述。原因说明只陈述已观察到的数据异常；对象路径和有界字段差异收入可折叠技术详情，不在主提示罗列内部字段，也不推断版本错配。该文案不改变既有拒绝与显式恢复边界。
 
 没有 active Run 且 execution binding 为 `rebind_required` 或 `unavailable` 时，左栏仍保留最近一次 Run 的 outcome；Composer 区域另外显示 `需要确认执行配置` 或 `当前无法继续`。不得用 binding 问题把历史结果改标成 Failed，也不得继续显示可发送输入造成错误暗示。
 
@@ -508,11 +508,11 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.4 跨重启 Conversation 恢复与 execution rebind
 
-> Capability：**已接通**。Workbench 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这只覆盖正常 Application 重启，不代表独立 AgentCore Worker crash、in-flight Run 或 suspend/resume 已可恢复。显式模型意图与执行 rebind 遵守 [Product 合同](product-architecture.md#22-workspace-与-task-admission)。
+> Capability：**已接通**。Product 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这只覆盖正常 Application 重启，不代表独立 AgentCore Worker crash、in-flight Run 或 suspend/resume 已可恢复。显式模型意图与执行 rebind 遵守 [Product 合同](product-architecture.md#22-workspace-与-task-admission)。
 
 当前恢复规则：
 
-1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
+1. Host 从 有界的产品历史存储 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
 3. 点击左栏 Task 始终只是导航。满足资格的 detached Task 使用普通 Composer，不显示恢复卡片、恢复按钮、专用 placeholder 或其他 capability continuity 提示；用户发送第一条新消息时，Renderer 才在同一次发送意图内提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
 4. restore 只表现为该次普通发送的 preparing/busy 状态，期间禁用发送、compact 和重复提交，不显示 `Restoring conversation / 正在恢复对话`。左栏只更新该 Task 的运行状态图标与排序位置，不能创建恢复分组、伪造 Agent Run 或 Stop 按钮；
@@ -927,7 +927,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 ### 12.1 文件预览
 
-> Capability：**当前**。可预览目标来自 AgentCore `tool_result.file_refs` 或 Agent 验证的 Host 生成媒体保存凭据，并由 Workbench 持久化为结构化文件引用；对话引用预览是按需读取当前文件内容的只读能力。工作区文件树与对话中未匹配引用的显式本地 Markdown 链接另以当前 Task + Workspace id/epoch + 相对路径经 Host 授权打开文件，复用相同的正文、图片、容量与失败呈现；不要求 Run 或已有引用，也不因此新增 File Changes 或 Output。
+> Capability：**当前**。可预览目标来自 AgentCore `tool_result.file_refs` 或 Agent 验证的 Host 生成媒体保存凭据，并由 Product 持久化为结构化文件引用；对话引用预览是按需读取当前文件内容的只读能力。工作区文件树与对话中未匹配引用的显式本地 Markdown 链接另以当前 Task + Workspace id/epoch + 相对路径经 Host 授权打开文件，复用相同的正文、图片、容量与失败呈现；不要求 Run 或已有引用，也不因此新增 File Changes 或 Output。
 
 - Host 来源标记的生成图片按 §7.2 展示锚点作为所属 Run 的 Assistant 内容提供直接预览，最大宽度不超过正文宽度，缩略图保持比例，不裁切；图片本身是键盘可达的预览入口，点击激活现有右侧文件标签；图片下方不重复展示路径或“打开预览”文字栏，完整 accessible name 仍标识目标文件。可信图片在接近可见区域时读取。加载、失败和显式重试原位呈现；引用/Task/连接失效后不显示旧图或接受迟到响应。历史记录缺少来源标记时不猜测，不把普通工具 JSON、文件后缀或 provisional Markdown 转成自动加载图片；
 - Host 来源标记的生成视频复用生成图片的 Assistant 展示锚点和可见区域加载规则。图片和视频左对齐正文，共用桌面预览宽度上限，窄窗中随正文可用宽度缩放。视频直接显示首帧与原生播放控件，由用户发起播放。播放器周围无路径、标题、文件操作或交付成果卡片。同一 Run 对该视频另有可信交付记录时，在结束后的「执行详情」里提供定位和另存为，沿用交付文件操作的 Host 校验和反馈。离开保留区域、切换 Task 或引用失效时暂停并释放。
@@ -985,7 +985,7 @@ Output 至少显示：
 
 ## 13. 搜索、历史与后台任务
 
-> Capability：**目标**。全局搜索、持久历史与后台通知需要对应 Workbench persistence/index 和平台通知能力；当前实现只保留信息边界，不提前显示假入口。
+> Capability：**目标**。全局搜索、持久历史与后台通知需要对应 产品历史存储和搜索索引 和平台通知能力；当前实现只保留信息边界，不提前显示假入口。
 
 ### 13.1 搜索
 
@@ -1017,13 +1017,13 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 ## 14. 首次启动与设置
 
-> Capability：**混合**。当前 Renderer 合同已提供持续可达的 Workbench、长期 Settings overlay、Models 管理与独立的 Composer 选模；恢复与 execution rebind 按其独立合同验收。
+> Capability：**混合**。当前 Renderer 合同已提供持续可达的主界面、长期 Settings overlay、Models 管理与独立的 Composer 选模；恢复与 execution rebind 按其独立合同验收。
 
 ### 14.1 首次启动
 
-首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
+首次启动不设置独立登录页面。Renderer 直接挂载主界面；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
-Account 状态在 Workbench 账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth 成功后由 Host 把 Account 授权交给独立 Models continuation 加载目录；目录完成不自动选择模型，也不覆盖起始偏好或 Task 意图。任何 live Task 始终可查看和停止。
+Account 状态在主界面的账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换主界面、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth 成功后由 Host 把 Account 授权交给独立 Models continuation 加载目录；目录完成不自动选择模型，也不覆盖起始偏好或 Task 意图。任何 live Task 始终可查看和停止。
 
 新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Models 页的自定义模型管理复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
 
@@ -1061,7 +1061,7 @@ Archived tasks
 
 ```
 
-设置是覆盖整个 Workbench 内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层 Workbench 继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回工作台` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
+设置是覆盖整个 主界面内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层内容继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回主界面` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
 
 “已归档任务”作为设置末尾的平级分区，即使为空仍可访问。列表消费 Host task index 的归档记录，按名称搜索、按 recentOrder 倒序，显示名称、现有安全项目/目录说明和恢复/删除；不显示推断的归档时间、不提供 Workspace 管理或新的全文索引。加载、失败、无归档和搜索无结果分别呈现；historyReadOnly 只允许阅读。恢复/删除中按 Task 禁用动作，失败就地显示和显式重试，不能因目录当前不可执行就丢弃已发布历史。已投影的归档 Task 可在 owning Workspace 不参与活动导航时显式打开只读历史；不因此恢复 Workspace 授权或开放执行。
 
@@ -1110,7 +1110,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 用户模型管理不依赖 Metask 登录；Account 或 Metask 官方目录的加载和失败不得隐藏已保存的用户模型或阻塞其管理；
 - 自定义模型列表始终提供新增入口，每个模型提供独立测试、编辑与带确认的删除动作，只有 ready 模型可在任务输入区选择。新增后续模型不得要求删除或覆盖已有模型；
 
-设置页保留左侧分区导航与右侧内容的双栏布局。桌面双栏直接消费应用左侧导航轨的已保存宽度，使设置内容起点与 Workbench 分界线保持一致；设置页不建立第二份宽度状态或第二个拖动器。它是桌面控制面，不使用营销页式 Hero，也不为视觉饱满度增加无产品语义的卡片、渐变、玻璃材质或装饰性图表。顶部只保留与左侧导航对齐的返回入口，不重复展示全局设置标题和说明；标准窗口下当前分区标题和第一组设置必须在首屏形成紧凑、稳定的阅读起点；窄窗口可把分区导航收成横向行，但不得改变设置 owner 或复制页面状态。
+设置页保留左侧分区导航与右侧内容的双栏布局。桌面双栏直接消费应用左侧导航轨的已保存宽度，使设置内容起点与主界面的导航分界线保持一致；设置页不建立第二份宽度状态或第二个拖动器。它是桌面控制面，不使用营销页式 Hero，也不为视觉饱满度增加无产品语义的卡片、渐变、玻璃材质或装饰性图表。顶部只保留与左侧导航对齐的返回入口，不重复展示全局设置标题和说明；标准窗口下当前分区标题和第一组设置必须在首屏形成紧凑、稳定的阅读起点；窄窗口可把分区导航收成横向行，但不得改变设置 owner 或复制页面状态。
 
 设置视觉与控件遵循以下规则：
 
@@ -1145,7 +1145,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 - 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；
 - 编辑和删除不因来源正被 Task/Session/Run 使用而禁用，也不查询 consumer usage。若 mutation 使 desired default 不可解析，Product Control 独立关闭新 admission 并进入 reconciliation；既有消费者保持 owned binding，历史不改写。该分组不扩展到 Workspace、权限策略或 AgentCore 内部状态。
 
-Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 Workbench 一级能力导航；MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
+Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 主界面一级能力导航；MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 
@@ -1186,7 +1186,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 
 ### 16.1 视觉方向
 
-MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。视觉个性来自克制的紫色交互信号、信息密度转换和本地执行语义，而不是暗色全局背景、暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
+MetaWork 采用“明亮界面 + 紫色任务流”的桌面工具方向。视觉个性来自克制的紫色交互信号、信息密度转换和本地执行语义，而不是暗色全局背景、暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
 
 智能紫只表达品牌、关键操作、当前选择、键盘焦点与正在活动的真实路径。普通正文、图标、边框和面板使用中性色；成功、等待与失败使用独立语义色并同时提供文字、图标或形状。应用背景、普通卡片和完整首屏不得铺设大面积紫色渐变、发光、玻璃拟态或装饰性粒子；正常完成不使用庆祝动画。
 
@@ -1272,11 +1272,11 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 ## 17. 空状态与异常状态
 
-> Capability：**混合**。错误表达、Host/Core 中断、持续可达的 Workbench、独立 Workspace 和无伪 Resume 属于当前约束；execution rebind 与完整历史恢复按各自目标 capability 显示。
+> Capability：**混合**。错误表达、Host/Core 中断、持续可达的主界面、独立 Workspace 和无伪 Resume 属于当前约束；execution rebind 与完整历史恢复按各自目标 capability 显示。
 
 ### 17.1 未登录
 
-未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史，左下角账号入口提供统一登录动作；新任务模型准备引导、等待浏览器授权与取消遵守 [首次启动](#141-首次启动)，复用账号动作。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
+未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。主界面继续显示本地能力与历史，左下角账号入口提供统一登录动作；新任务模型准备引导、等待浏览器授权与取消遵守 [首次启动](#141-首次启动)，复用账号动作。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
 
 ### 17.2 New task
 
@@ -1359,15 +1359,15 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 
 ### 19.4 Account 与首次启动
 
-- cold restore 保持稳定的 Workbench shell，可信 Snapshot 到达前不开放 mutation，也不闪现独立登录页；
-- 首次 signed out 且没有可用模型：保持 Workbench，按 §14.1 展示可跳过的开始弹层与输入区恢复提示；不得制造 saved account、上一次登录或 mismatch 分支；
+- cold restore 保持稳定的主界面，可信 Snapshot 到达前不开放 mutation，也不闪现独立登录页；
+- 首次 signed out 且没有可用模型：保持主界面，按 §14.1 展示可跳过的开始弹层与输入区恢复提示；不得制造 saved account、上一次登录或 mismatch 分支；
 - OAuth 正常完成、浏览器未回调、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；
 - catalog timeout/有限重试、OAuth exchange 失败、持久化确定失败与结果不确定；
 - Metask 无可用模型、目录加载失败以及 Host 未提供管理入口时的可理解恢复文案；
 - Bridge invoke timeout 后释放 busy、snapshot resync 后恢复 Host 动作；
-- ready 后进入 Workbench，左下角显示 identity；重认证、设置和退出只按 Account busy/error scope 收口，Product execution/Schedule recovery 使用独立 scope；Account ready + Execution unavailable 时 recovery action 可见且不会被账号设置 redirect 遮挡。
+- ready 后进入主界面，左下角显示 identity；重认证、设置和退出只按 Account busy/error scope 收口，Product execution/Schedule recovery 使用独立 scope；Account ready + Execution unavailable 时 recovery action 可见且不会被账号设置 redirect 遮挡。
 
 ### 19.5 Workspace、模型与设置
 
@@ -1423,7 +1423,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，关闭最后一个标签同步隐藏面板并回到该标签的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭标签或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；隐藏右栏保留当前 Task 会话，切换 Task 清空会话；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终为中央工作面与 Task Panel 各保留至少 360 px，两者都不设置固定最大宽度；扣除左栏后的空间少于 720 px 时切换 overlay，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。验证样本至少覆盖 1440/左栏 320 的约 746+374、1200/左栏 320 的 520+360、1200/左栏 480 的 360+360、960/左栏关闭的 600+360、960/左栏打开的 overlay，以及超宽窗口右栏仍可继续扩大。
-- Windows Renderer 窗口按钮在根启动/连接失败表面与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
+- Windows Renderer 窗口按钮在根启动/连接失败表面与主界面均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
 
 ### 19.9 视觉与 Foundation
 

@@ -330,6 +330,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-task-view", .root_module = test_modules.product_task_view },
     };
     const schedule_tests = b.step("test-product-schedule", "Run Schedule state, persistence and timer authority tests");
+    const product_control_step = b.step("test-product-control", "Run the complete Product Control test root");
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
@@ -347,7 +348,7 @@ pub fn build(b: *std.Build) void {
         if (spec.root_module == test_modules.product_task_execution)
             b.step("test-product-task-execution", "Run Product Task executor and terminal publication tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_control_runtime)
-            b.step("test-product-control", "Run the complete Product Control test root").dependOn(&b.addRunArtifact(tests).step);
+            product_control_step.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.oauth_loopback_transport)
@@ -389,6 +390,19 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_control_runtime }) |module|
         attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{ "attachment", "Attachment", "unified add", "add debt" } })).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
+    const control_view_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/product/control_view_test.zig"),
+            .target = modules.product_control.resolved_target.?,
+            .optimize = modules.product_control.optimize.?,
+            .link_libc = bundle.link_libc,
+            .imports = &.{.{ .name = "metawork_product_control", .module = modules.product_control }},
+        }),
+    });
+    const run_control_view_tests = b.addRunArtifact(control_view_tests);
+    product_views_step.dependOn(&run_control_view_tests.step);
+    product_control_step.dependOn(&run_control_view_tests.step);
+    artifacts.tests.step.dependOn(&run_control_view_tests.step);
     const file_preview_step = b.step("test-file-preview", "Run image container, preview lane and Product resource tests");
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.bridge, .filters = &.{"file preview"} })).step);

@@ -50,8 +50,9 @@ const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
 const view_cache = @import("view_cache.zig");
 const view_plan = @import("view_plan.zig");
+const view_read = @import("view_read.zig");
 pub const projection_step_bytes = view_plan.max_step_bytes;
-pub const SnapshotRead = struct { id: u64, bytes: usize, scratch_bytes: usize = 0 };
+pub const SnapshotRead = view_read.Status;
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
@@ -1203,36 +1204,7 @@ const CatalogSnapshot = catalog_snapshot.Snapshot;
 
 const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
 
-// Exists only for one Host read preparation. No credential or borrowed
-// execution pointer enters encoded caches, Bridge storage or worker work items.
-const ProjectionCredentials = struct {
-    allocator: std.mem.Allocator,
-    values: std.ArrayList([]const u8) = .empty,
-
-    fn add(self: *ProjectionCredentials, value: []const u8) std.mem.Allocator.Error!void {
-        if (value.len == 0) return;
-        for (self.values.items) |known| if (std.mem.eql(u8, known, value)) return;
-        const owned = try self.allocator.dupe(u8, value);
-        errdefer {
-            std.crypto.secureZero(u8, owned);
-            self.allocator.free(owned);
-        }
-        try self.values.append(self.allocator, owned);
-    }
-
-    fn visit(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
-        const self: *ProjectionCredentials = @ptrCast(@alignCast(context));
-        try self.add(value);
-    }
-
-    fn deinit(self: *ProjectionCredentials) void {
-        for (self.values.items) |value| {
-            std.crypto.secureZero(u8, @constCast(value));
-            self.allocator.free(value);
-        }
-        self.values.deinit(self.allocator);
-    }
-};
+const ProjectionCredentials = view_read.Credentials;
 
 test "Task model credential collection carries more than 128 known values and reports incomplete allocation" {
     const Harness = struct {
@@ -1278,34 +1250,6 @@ test "Task model credential collection carries more than 128 known values and re
     control.allocator = std.testing.allocator;
     try std.testing.expect(!harness.complete);
 }
-
-const ViewPreparation = struct {
-    const Block = struct { key: view_cache.Key, start: usize, end: usize, known: u64, version: u64 = 0, current: bool = true };
-    const Tool = struct { source: ?product_task.OwnedToolProjection, child: *view_plan.Plan, state: product_task.OwnedToolProjection.State = .{} };
-    credentials: ?ProjectionCredentials = null,
-    tools: std.ArrayList(Tool) = .empty,
-    raw_bytes: usize = 0,
-    search_query: [task_runtime.search_query_bytes]u8 = @splat(0),
-    tool_limit: usize = 0,
-    next_tool: usize = 0,
-    blocks: [7]Block = undefined,
-    next_block: usize = 0,
-    versions: view_cache.Versions = .{},
-    reused: [7]bool = @splat(false),
-    known_epoch: u64 = 0,
-    scratch_bytes: usize = 0,
-    tail: view_plan.Plan = .{},
-    ready: bool = false,
-
-    fn clear(self: *ViewPreparation, allocator: std.mem.Allocator) void {
-        for (self.tools.items) |*tool| if (tool.source) |*source| source.deinit(allocator);
-        self.tools.deinit(allocator);
-        std.crypto.secureZero(u8, &self.search_query);
-        if (self.credentials) |*credentials| credentials.deinit();
-        self.tail.clear(allocator);
-        self.* = .{};
-    }
-};
 
 pub const Runtime = struct {
     pub const testTask = if (builtin.is_test) TestSupport.findTask else struct {};
@@ -1368,15 +1312,9 @@ pub const Runtime = struct {
     revision: u64 = 0,
     projection_security_epoch: u64 = 1,
     encoded_views: view_cache.Cache = .{},
-    view_read: view_plan.Plan = .{},
-    view_preparation: ViewPreparation = .{},
-    capture_view: ?*view_plan.Plan = null,
-    view_step_timing: if (builtin.is_test) struct { encode_ns: i96 = 0, cache_copy_ns: i96 = 0 } else void = if (builtin.is_test) .{} else {},
-    next_view_read_id: u64 = 0,
-    view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize, encoding: ?[]u8 = null } = @splat(null),
-    view_cached_blocks: [7]?struct { key: view_cache.Key, version: u64, child: *view_plan.Plan } = @splat(null),
+    snapshot: view_read.Read = .{},
+    assembling_snapshot: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
     projection_history_epoch: u64 = 1,
-    view_credentials: ?[]const []const u8 = null,
     account_credentials: ?account_contract.AccessTokenProjection = null,
     account_credential_generation: u64 = 0,
     learned_renewal: ?control_ports.MetaskAuthorization = null,
@@ -3391,7 +3329,7 @@ pub const Runtime = struct {
         if ((workspace.kind == .manual and !workspace.visible) or workspace.authorization != .available)
             return error.WorkspaceUnavailable;
         if (workspace.kind == .automatic and (self.task_runtime.taskPermissionInteraction(workspace.automatic_task_id) != .interactive or
-            !self.task_runtime.continuationAvailable(workspace.automatic_task_id, self.taskRuntimeProjectionEffects())))
+            !self.task_runtime.continuationAvailable(workspace.automatic_task_id, self.taskRuntimeProjectionEffects(&self.liveViewText()))))
             return error.WorkspaceUnavailable;
         try self.skill.refreshWorkspace(workspace.id, workspace.epoch);
         self.bumpRevision();
@@ -3537,10 +3475,12 @@ pub const Runtime = struct {
         self: *const Runtime,
         output: []WorkspaceProjection,
     ) Error![]const WorkspaceProjection {
+        const text = self.liveViewText();
+        const context: WorkspaceViewContext = .{ .runtime = self, .text = &text };
         return product_workspace.copyProjections(
             &self.workspace,
             output,
-            self.workspaceViewProvider(),
+            workspaceViewProvider(&context),
         );
     }
 
@@ -4381,6 +4321,7 @@ pub const Runtime = struct {
     pub fn stopTask(self: *Runtime, task_id: u64) Error!void {
         _ = self.syncLifecycleFacts();
         try self.task_runtime.checkStopInputs(task_id);
+        defer self.reconcileMcpInstallation(null);
         _ = self.task_runtime.stopInputs(task_id);
         try self.task_runtime.stopOperation(task_id, self.taskRuntimeOperationEffects());
         self.reapTaskInputResources();
@@ -4408,7 +4349,8 @@ pub const Runtime = struct {
     }
 
     pub fn writeSendInputResult(self: *const Runtime, writer: *std.Io.Writer, result: SendInputResult) Error!void {
-        try product_task.writeInputAcceptance(writer, self.taskTextProjection(), result);
+        const text = self.liveViewText();
+        try product_task.writeInputAcceptance(writer, text.task(), result);
     }
 
     fn admitInput(self: *Runtime, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!void {
@@ -4656,7 +4598,7 @@ pub const Runtime = struct {
                 return error.RestoreBusy;
             }
         }
-        if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) return error.TaskClosing;
+        if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects(&self.liveViewText()))) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
             return error.UnknownTask;
         const task_workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse
@@ -4779,7 +4721,7 @@ pub const Runtime = struct {
             return error.BindingEpochMismatch;
         if (!self.task_runtime.continuationAvailable(
             task_id,
-            self.taskRuntimeProjectionEffects(),
+            self.taskRuntimeProjectionEffects(&self.liveViewText()),
         )) return error.TaskClosing;
         var prepared = try self.task_runtime.startCompact(
             task_id,
@@ -5045,6 +4987,7 @@ pub const Runtime = struct {
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        defer self.reconcileMcpInstallation(null);
         const requested = switch (try self.task_runtime.beginDeletion(task_id, self.taskRuntimeOperationEffects())) {
             .unchanged => false,
             .requested => true,
@@ -5445,6 +5388,7 @@ pub const Runtime = struct {
     }
 
     fn advanceTaskInputs(self: *Runtime) void {
+        const text = self.liveViewText();
         defer self.reapTaskInputResources();
         self.task_runtime.advanceInputQueue(self.shutting_down, .{
             .waiting = .{
@@ -5454,7 +5398,7 @@ pub const Runtime = struct {
                 .history_blocked_fn = waitingInputHistoryBlocked,
                 .release = self.taskRuntimeReleaseEffects(),
             },
-            .projection = self.taskRuntimeProjectionEffects(),
+            .projection = self.taskRuntimeProjectionEffects(&text),
             .operation = self.taskRuntimeOperationEffects(),
             .check_workspace_fn = checkWaitingInputWorkspace,
             .continue_fn = advanceWaitingInputContinuation,
@@ -5670,18 +5614,7 @@ pub const Runtime = struct {
             .applied => |application| {
                 if (application.durable_boundary) self.commitTaskStateNoFail();
                 self.encoded_views.invalidateEvent(application.task_id, envelope.run_id);
-                if (!self.view_preparation.ready and self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
-                    switch (block.key.kind) {
-                        .workspaces, .taskIndex => block.current = false,
-                        .taskPage => if (block.key.task_id == application.task_id) {
-                            block.current = false;
-                        },
-                        .historyPage => if (block.key.task_id == application.task_id and envelope.run_id < block.key.cursor) {
-                            block.current = false;
-                        },
-                        else => {},
-                    }
-                };
+                self.snapshot.markEvent(application.task_id, envelope.run_id);
                 if (self.revision != std.math.maxInt(u64)) self.revision += 1;
             },
         }
@@ -5721,35 +5654,46 @@ pub const Runtime = struct {
         return self.redactWithKnownCredentialsNoFail(value);
     }
 
-    fn mcpInstallationValueSensitive(self: *const Runtime, value: std.json.Value) bool {
+    fn mcpInstallationTextSensitive(self: *const Runtime, text: []const u8, learned: ?[]const u8) bool {
+        if (learned) |credential| if (std.mem.indexOf(u8, text, credential) != null) return true;
+        return self.containsKnownCredential(text);
+    }
+
+    fn mcpInstallationValueSensitive(self: *const Runtime, value: std.json.Value, learned: ?[]const u8) bool {
         return switch (value) {
-            .string => |text| self.containsKnownCredential(text),
+            .string => |text| self.mcpInstallationTextSensitive(text, learned),
             .array => |items| for (items.items) |item| {
-                if (self.mcpInstallationValueSensitive(item)) break true;
+                if (self.mcpInstallationValueSensitive(item, learned)) break true;
             } else false,
             .object => |fields| result: {
                 var iterator = fields.iterator();
                 while (iterator.next()) |entry| {
-                    if (self.containsKnownCredential(entry.key_ptr.*) or self.mcpInstallationValueSensitive(entry.value_ptr.*)) break :result true;
+                    if (self.mcpInstallationTextSensitive(entry.key_ptr.*, learned) or
+                        self.mcpInstallationValueSensitive(entry.value_ptr.*, learned)) break :result true;
                 }
                 break :result false;
             },
             else => false,
         };
     }
-    fn sanitizeMcpInstallation(self: *Runtime) bool {
+    fn sanitizeMcpInstallation(self: *Runtime, learned: ?[]const u8) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         const proposal = runtime.pendingInstallation() orelse return false;
         if (!self.task_runtime.mcpInstallationSourceAvailable(proposal.task_id, proposal.run_id)) return runtime.dismissInstallation(self.io, proposal.id, false);
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, proposal.json, .{}) catch return runtime.dismissInstallation(self.io, proposal.id, true);
         defer parsed.deinit();
-        if (self.mcpInstallationValueSensitive(parsed.value)) return runtime.dismissInstallation(self.io, proposal.id, true);
+        if (self.mcpInstallationValueSensitive(parsed.value, learned)) return runtime.dismissInstallation(self.io, proposal.id, true);
         return false;
     }
+
+    fn reconcileMcpInstallation(self: *Runtime, learned: ?[]const u8) void {
+        if (self.sanitizeMcpInstallation(learned)) self.publishMcpRuntimeChanges();
+    }
+
     fn syncMcpHealthNoFail(self: *Runtime) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         var changed = runtime.takeInstallation(self.io);
-        changed = self.sanitizeMcpInstallation() or changed;
+        changed = self.sanitizeMcpInstallation(null) or changed;
         return runtime.syncInitialHealth() or changed;
     }
     fn publishMcpRuntimeChanges(self: *Runtime) void {
@@ -5758,12 +5702,14 @@ pub const Runtime = struct {
     }
 
     pub fn pendingMcpInstallation(self: *Runtime) ?control_ports.McpInstallIngress {
+        self.reconcileMcpInstallation(null);
         const runtime = if (self.mcp) |*value| value else return null;
         const pending = runtime.pendingInstallation() orelse return null;
         return .{ .id = pending.id, .task_id = pending.task_id, .run_id = pending.run_id, .json = pending.json };
     }
 
     pub fn startMcpInstallation(self: *Runtime, id: u64, existing: ?[]const u8) Error!mcp_configuration.CreateResult {
+        self.reconcileMcpInstallation(null);
         const runtime = if (self.mcp) |*value| value else return .{ .outcome = .rejected };
         if (runtime.hasRefreshJob()) return error.McpManagementBusy;
         const pending = runtime.pendingInstallation() orelse return .{ .outcome = .rejected };
@@ -6340,32 +6286,18 @@ pub const Runtime = struct {
         if (self.mcp) |*runtime| runtime.rearmRefreshTimer();
     }
 
-    fn mcpViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        return self.containsKnownCredential(value);
-    }
-
-    fn writeMcpViewJson(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        value: []const u8,
-    ) mcp_runtime.ViewError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        self.projectedJsonValueWithKnownCredentials(writer, value) catch
-            return error.SnapshotTooLarge;
-    }
-
     fn writeMcpProjection(
         self: *Runtime,
         writer: *std.Io.Writer,
+        text: *const view_read.Text,
     ) Error!void {
         mcp_runtime.writeProjection(
             if (self.mcp) |*runtime| runtime else null,
             writer,
             .{
-                .context = self,
-                .contains_sensitive_fn = mcpViewContainsSensitive,
-                .write_json_fn = writeMcpViewJson,
+                .context = text,
+                .contains_sensitive_fn = view_read.Text.containsCallback,
+                .write_json_fn = view_read.Text.writeCallback,
             },
         ) catch return error.SnapshotTooLarge;
     }
@@ -6414,7 +6346,7 @@ pub const Runtime = struct {
     pub const writeAggregateFixture = if (builtin.is_test) TestSupport.writeAggregateFixture else {};
     pub const writeViewFixture = if (builtin.is_test) TestSupport.writeViewFixture else {};
 
-    fn writeLiveContextFields(self: *Runtime, writer: *std.Io.Writer, include_revision: bool) Error!void {
+    fn writeLiveContextFields(self: *Runtime, writer: *std.Io.Writer, include_revision: bool, text: *const view_read.Text) Error!void {
         const schedule_persistence_ready =
             self.schedule.persistenceHealth() == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
@@ -6465,53 +6397,44 @@ pub const Runtime = struct {
             @tagName(self.default_approval_mode.profile()),
             @tagName(self.default_approval_mode),
         }) catch return error.SnapshotTooLarge;
-        try self.writeAccount(writer);
+        try self.writeAccount(writer, text);
         writer.writeAll(",\"updates\":") catch return error.SnapshotTooLarge;
         std.json.Stringify.value(self.updates.view(), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
-        try self.writeModels(writer);
+        try self.writeModels(writer, text);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
             return error.SnapshotTooLarge;
-        try self.writeAutomaticWorkspaceRootConfiguration(writer);
+        try self.writeAutomaticWorkspaceRootConfiguration(writer, text);
         writer.writeAll(",\"mcpInstallation\":") catch return error.SnapshotTooLarge;
-        if (self.mcp) |*runtime| try runtime.writeInstallation(writer, .{ .context = self, .contains_sensitive_fn = mcpViewContainsSensitive, .write_json_fn = writeMcpViewJson }) else writer.writeAll("{\"operations\":[],\"notice\":null}") catch return error.SnapshotTooLarge;
+        if (self.mcp) |*runtime| try runtime.writeInstallation(writer, .{ .context = text, .contains_sensitive_fn = view_read.Text.containsCallback, .write_json_fn = view_read.Text.writeCallback }) else writer.writeAll("{\"operations\":[],\"notice\":null}") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
             writer,
-            self.skillTextProjection(),
+            skillTextProjection(text),
             self.skill.personalCatalogProjection(),
         );
     }
 
     pub fn writeSnapshot(self: *Runtime, output: []u8, request_input: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
-        if (self.sanitizeMcpInstallation()) self.publishMcpRuntimeChanges();
-        if (builtin.is_test) self.view_step_timing = .{};
         self.cancelSnapshot();
         errdefer self.cancelSnapshot();
         try request_input.validate();
-        var request = request_input;
-        @memcpy(self.view_preparation.search_query[0..request.search_query.len], request.search_query);
-        request.search_query = self.view_preparation.search_query[0..request.search_query.len];
         if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.task_runtime.searchRevision() == 0) return error.InvalidViewRequest;
-        std.debug.assert(self.view_credentials == null and self.capture_view == null);
-        self.next_view_read_id = std.math.add(u64, self.next_view_read_id, 1) catch return error.ViewVersionExhausted;
-        self.view_read.id = self.next_view_read_id;
-        self.view_read.security_epoch = self.projection_security_epoch;
-        self.capture_view = &self.view_read;
-        defer self.capture_view = null;
-        self.view_preparation.credentials = .{ .allocator = self.allocator };
-        const credentials = &self.view_preparation.credentials.?;
+        const storage = self.snapshotStorage();
+        const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch, self.limits.max_tools_per_run);
+        const credentials = self.snapshot.credentialCollector();
         if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
-        self.view_credentials = credentials.values.items;
-        defer self.view_credentials = null;
-        self.view_preparation.known_epoch = request.known_epoch;
-        self.view_preparation.tool_limit = self.limits.max_tools_per_run * request.run_limit * @as(usize, if (request.before_run_id == null) 1 else 2);
-        for (request.receipts) |query| if (self.containsKnownCredential(query.operation_id)) return error.InvalidViewRequest;
-        if (self.containsKnownCredential(request.search_query)) return error.InvalidViewRequest;
+        const text = self.snapshot.rootText(storage);
+        if (builtin.is_test) self.assembling_snapshot = true;
+        defer if (builtin.is_test) {
+            self.assembling_snapshot = false;
+        };
+        for (request.receipts) |query| if (text.contains(query.operation_id)) return error.InvalidViewRequest;
+        if (text.contains(request.search_query)) return error.InvalidViewRequest;
         var writer = std.Io.Writer.fixed(output);
         writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"historyEpoch\":\"{d}\",\"scope\":{{\"taskId\":", .{ self.revision, self.projection_security_epoch, self.projection_history_epoch }) catch return error.SnapshotTooLarge;
         if (request.task_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -6520,11 +6443,11 @@ pub const Runtime = struct {
         writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{}", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
         // Query is bounded and copied into this frozen scope; no Bridge borrow survives.
         writer.writeAll(",\"searchQuery\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(&writer, request.search_query);
+        try text.writeJson(&writer, request.search_query);
         writer.writeAll(",\"searchCursor\":") catch return error.SnapshotTooLarge;
         try product_task.writeSearchCursor(&writer, request.search_cursor);
         writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
-        try self.writeViewReceipts(&writer, request.receipts, false);
+        try self.writeViewReceipts(&writer, request.receipts, false, &text);
         writer.writeByte('}') catch return error.SnapshotTooLarge;
         // Time-dependent execution fields are sampled even without a new CoreEvent.
         if (request.task_id) |id| if (self.task_runtime.taskHasActiveOperation(id)) {
@@ -6532,314 +6455,80 @@ pub const Runtime = struct {
         };
         if (request.management == .mcp) if (self.mcp) |*mcp|
             if (mcp.admissionExpired() or mcp.catalogObservationExpired()) self.encoded_views.invalidate(.management);
-        inline for (std.meta.fields(view_cache.Kind)) |field| {
-            const kind: view_cache.Kind = @enumFromInt(field.value);
-            const key = viewKey(request, kind);
-            writer.writeAll(",\"" ++ field.name ++ "\":") catch return error.SnapshotTooLarge;
-            const start = writer.end;
-            var version: u64 = 0;
-            if (self.encoded_views.get(key)) |entry| {
-                version = entry.version;
-                if (request.known_epoch == self.projection_security_epoch and @field(request.known_versions, field.name) == version) {
-                    writer.writeAll("null") catch return error.SnapshotTooLarge;
-                    self.view_preparation.reused[field.value] = true;
-                } else {
-                    const child = try self.view_read.appendChild(self.allocator, &writer);
-                    try self.takeCachedViewBlock(field.value, key, version, child);
-                }
-            } else try self.writeViewBlock(&writer, request, kind);
-            self.view_preparation.blocks[field.value] = .{ .key = key, .start = start, .end = writer.end, .known = @field(request.known_versions, field.name), .version = version };
-            @field(self.view_preparation.versions, field.name) = version;
-        }
-        try self.view_read.capture(self.allocator, writer.buffered());
-        self.view_preparation.scratch_bytes = writer.end;
-        // Freeze receipt observations now too; only version/reuse metadata is
-        // appended later, without consulting mutable Product facts again.
+        try self.snapshot.captureBlocks(storage, &writer, request, &text, self, writeViewBlock);
         var tail_storage: [16 * 1024]u8 = undefined;
         var tail_writer = std.Io.Writer.fixed(&tail_storage);
-        self.view_preparation.tail.id = self.view_read.id;
-        self.view_preparation.tail.security_epoch = self.projection_security_epoch;
-        self.capture_view = &self.view_preparation.tail;
+        const tail_text = self.snapshot.tailText(storage);
         tail_writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
-        try self.writeViewReceipts(&tail_writer, request.receipts, true);
+        try self.writeViewReceipts(&tail_writer, request.receipts, true, &tail_text);
         tail_writer.writeByte('}') catch return error.SnapshotTooLarge;
-        try self.view_preparation.tail.seal(self.allocator, self.limits.max_snapshot_bytes, tail_writer.buffered());
-        // Pure cache hits have no preparation work and preserve the fast path.
-        const all_cached = for (self.view_preparation.blocks) |block| {
-            if (block.version == 0) break false;
-        } else true;
-        if (all_cached) {
-            try self.finishSnapshotPreparation();
-        }
-        return self.snapshotReadStatus();
+        try self.snapshot.sealTail(storage, tail_writer.buffered());
+        return self.snapshot.status();
     }
 
-    fn snapshotReadStatus(self: *const Runtime) SnapshotRead {
-        return .{ .id = self.view_read.id, .bytes = if (self.view_preparation.ready) self.view_read.total else 0, .scratch_bytes = self.view_preparation.scratch_bytes };
+    fn snapshotStorage(self: *Runtime) view_read.Storage {
+        return .{ .allocator = self.allocator, .max_bytes = self.limits.max_snapshot_bytes, .cache = &self.encoded_views };
     }
 
-    /// Each continuation performs bounded formatter stages, one block comparison,
-    /// or final metadata assembly. It never advances execution or samples new facts.
     pub fn continueSnapshot(self: *Runtime, read_id: u64, output: []u8) Error!SnapshotRead {
-        if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
-        if (self.view_preparation.ready) return self.snapshotReadStatus();
-        errdefer self.cancelSnapshot();
-        std.debug.assert(self.capture_view == null and self.view_credentials == null);
-        self.view_credentials = self.view_preparation.credentials.?.values.items;
-        defer self.view_credentials = null;
-        if (self.view_preparation.next_tool < self.view_preparation.tools.items.len) {
-            var stages: usize = 0;
-            var charged: usize = 0;
-            var finished: usize = 0;
-            while (self.view_preparation.next_tool < self.view_preparation.tools.items.len and finished < 4) {
-                const work = &self.view_preparation.tools.items[self.view_preparation.next_tool];
-                self.capture_view = work.child;
-                defer self.capture_view = null;
-                const size = work.source.?.ownedBytes();
-                if (stages != 0 and size > 32 * 1024 -| charged) break;
-                const first_string = work.child.strings.items.len;
-                var writer = std.Io.Writer.fixed(output);
-                try work.source.?.writeStage(&writer, self.taskTextProjection(), &work.state);
-                for (work.child.strings.items[first_string..]) |*item| item.at += work.child.skeleton.len;
-                try work.child.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
-                self.view_preparation.scratch_bytes = @max(self.view_preparation.scratch_bytes, writer.end);
-                if (work.state.stage == .done) {
-                    try work.child.finalize(self.limits.max_snapshot_bytes);
-                    work.source.?.deinit(self.allocator);
-                    work.source = null;
-                    self.view_preparation.raw_bytes -= size;
-                    self.view_preparation.next_tool += 1;
-                    finished += 1;
-                }
-                stages += 1;
-                charged += size;
-            }
-            return self.snapshotReadStatus();
-        }
-        // Cached metadata is already frozen. Skip these constant-size slots;
-        // each invoke is reserved for actual preparation rather than empty turns.
-        while (self.view_preparation.next_block < self.view_preparation.blocks.len and self.view_preparation.blocks[self.view_preparation.next_block].version != 0) self.view_preparation.next_block += 1;
-        if (self.view_preparation.next_block < self.view_preparation.blocks.len) {
-            const index = self.view_preparation.next_block;
-            const block = &self.view_preparation.blocks[index];
-            if (block.version == 0) {
-                if ((try self.view_read.encodedPosition(block.end)) - (try self.view_read.encodedPosition(block.start)) > view_cache.blockByteLimit(block.key.kind)) return error.SnapshotTooLarge;
-                const source = try self.view_read.sourceRange(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end);
-                block.version = try self.encoded_views.frozenSource(self.allocator, self.limits.max_snapshot_bytes, block.key, source, block.current);
-                var replacement: ?[]const u8 = null;
-                var cached = false;
-                if (self.view_preparation.known_epoch == self.projection_security_epoch and block.known == block.version) {
-                    replacement = "null";
-                    self.view_preparation.reused[index] = true;
-                } else if (self.encoded_views.get(block.key)) |entry| {
-                    if (entry.version == block.version) {
-                        replacement = "[]";
-                        cached = true;
-                    }
-                }
-                if (replacement) |value| {
-                    const delta = try self.view_read.replaceSpan(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end, value);
-                    block.end = block.start + value.len;
-                    if (cached) {
-                        const child = try self.view_read.insertChild(self.allocator, block.start);
-                        try self.takeCachedViewBlock(index, block.key, block.version, child);
-                    }
-                    for (self.view_preparation.blocks[index + 1 ..]) |*later| {
-                        later.start = @intCast(@as(isize, @intCast(later.start)) + delta);
-                        later.end = @intCast(@as(isize, @intCast(later.end)) + delta);
-                    }
-                } else if (block.current) {
-                    self.view_blocks[index] = .{ .key = block.key, .version = block.version, .start = try self.view_read.encodedPosition(block.start), .end = try self.view_read.encodedPosition(block.end) };
-                }
-            }
-            inline for (std.meta.fields(view_cache.Kind)) |field| if (index == field.value) {
-                @field(self.view_preparation.versions, field.name) = block.version;
-            };
-            self.view_preparation.next_block += 1;
-            return self.snapshotReadStatus();
-        }
-        try self.finishSnapshotPreparation();
-        return self.snapshotReadStatus();
-    }
-
-    fn finishSnapshotPreparation(self: *Runtime) Error!void {
-        var metadata: [2048]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&metadata);
-        writer.writeAll(",\"blockVersions\":{") catch return error.SnapshotTooLarge;
-        inline for (std.meta.fields(view_cache.Versions), 0..) |field, index| {
-            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            writer.print("\"" ++ field.name ++ "\":\"{d}\"", .{@field(self.view_preparation.versions, field.name)}) catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("},\"reusedBlocks\":[") catch return error.SnapshotTooLarge;
-        var first = true;
-        inline for (std.meta.fields(view_cache.Kind)) |field| if (self.view_preparation.reused[field.value]) {
-            if (!first) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            writer.writeAll("\"" ++ field.name ++ "\"") catch return error.SnapshotTooLarge;
-            first = false;
-        };
-        writer.writeByte(']') catch return error.SnapshotTooLarge;
-        const child = try self.view_read.appendChild(self.allocator, &writer);
-        self.view_read.strings.items[self.view_read.strings.items.len - 1].at += self.view_read.skeleton.len;
-        child.* = self.view_preparation.tail;
-        self.view_preparation.tail = .{};
-        try self.view_read.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
-        try self.view_read.finalize(self.limits.max_snapshot_bytes);
-        var block_bytes: usize = 0;
-        for (self.view_preparation.blocks) |block| {
-            const bytes = (try self.view_read.encodedPosition(block.end)) - (try self.view_read.encodedPosition(block.start));
-            if (bytes > view_cache.blockByteLimit(block.key.kind)) return error.SnapshotTooLarge;
-            block_bytes += bytes;
-        }
-        if (self.view_read.total - block_bytes > 768 * 1024) return error.SnapshotTooLarge;
-        if (self.view_preparation.credentials) |*credentials| credentials.deinit();
-        self.view_preparation.credentials = null;
-        self.view_preparation.tools.deinit(self.allocator);
-        self.view_preparation.tools = .empty;
-        self.view_preparation.ready = true;
-    }
-
-    fn captureToolProjection(context: *const anyopaque, writer: *std.Io.Writer, tool: *const product_task.ToolProjection) product_task.ProjectionError!void {
-        const self: *Runtime = @ptrCast(@alignCast(@constCast(context)));
-        if (self.view_preparation.tools.items.len >= self.view_preparation.tool_limit) return error.SnapshotTooLarge;
-        const owned = self.view_read.ownedBytes() + self.view_preparation.raw_bytes;
-        var source = try product_task.OwnedToolProjection.capture(self.allocator, tool, self.limits.max_snapshot_bytes -| owned);
-        errdefer source.deinit(self.allocator);
-        const child = self.view_read.appendChild(self.allocator, writer) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.SnapshotTooLarge,
-        };
-        const size = source.ownedBytes();
-        try self.view_preparation.tools.append(self.allocator, .{ .source = source, .child = child });
-        self.view_preparation.raw_bytes += size;
-    }
-
-    fn takeCachedViewBlock(self: *Runtime, index: usize, key: view_cache.Key, version: u64, child: *view_plan.Plan) Error!void {
-        const owned = self.encoded_views.takeEncoded(key, version) orelse return error.StaleSnapshot;
-        child.adoptEncoded(owned);
-        self.view_cached_blocks[index] = .{ .key = key, .version = version, .child = child };
-    }
-
-    fn returnCachedViewBlocks(self: *Runtime) void {
-        for (&self.view_cached_blocks) |*slot| if (slot.*) |block| {
-            const owned = block.child.takeEncoded();
-            slot.* = null;
-            self.encoded_views.returnEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, owned);
-        };
+        return self.snapshot.prepareNext(self.snapshotStorage(), self.projection_security_epoch, read_id, output);
     }
 
     pub fn cancelSnapshotRead(self: *Runtime, read_id: u64) void {
-        if (read_id != 0 and self.view_read.id == read_id) self.cancelSnapshot();
+        self.snapshot.cancelId(self.snapshotStorage(), read_id);
     }
 
     pub fn cancelSnapshot(self: *Runtime) void {
-        self.returnCachedViewBlocks();
-        self.view_preparation.clear(self.allocator);
-        self.view_read.clear(self.allocator);
-        for (&self.view_blocks) |*slot| if (slot.*) |block| {
-            if (block.encoding) |owned| {
-                std.crypto.secureZero(u8, owned);
-                self.allocator.free(owned);
-            }
-            slot.* = null;
-        };
+        self.snapshot.cancel(self.snapshotStorage());
     }
 
     pub fn writeSnapshotRange(self: *Runtime, read_id: u64, output: []u8, offset: usize, length: usize) Error!void {
-        if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
-        if (!self.view_preparation.ready or length == 0 or length > projection_step_bytes or offset > self.view_read.produced or offset > self.view_read.total or length > self.view_read.total - offset or output.len < self.view_read.total) return error.InvalidOffset;
-        errdefer self.cancelSnapshot();
-        const encode_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
-        const before = self.view_read.produced;
-        const end = offset + length;
-        if (end > self.view_read.produced) _ = try self.view_read.writeNext(output[self.view_read.produced..end]);
-        const cache_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
-        if (builtin.is_test) self.view_step_timing.encode_ns = encode_start.durationTo(cache_start).nanoseconds;
-        for (&self.view_blocks) |*maybe| if (maybe.*) |*block| {
-            if (!self.encoded_views.needsEncoded(self.limits.max_snapshot_bytes, block.key, block.version, block.end - block.start)) {
-                if (block.encoding) |owned| {
-                    std.crypto.secureZero(u8, owned);
-                    self.allocator.free(owned);
-                }
-                maybe.* = null;
-                continue;
-            }
-            const first = @max(before, block.start);
-            const last = @min(self.view_read.produced, block.end);
-            if (last <= first) continue;
-            if (block.encoding == null) block.encoding = try self.allocator.alloc(u8, block.end - block.start);
-            // The disjoint block intersections total at most this encoding
-            // quantum. Partial bytes are owned by this read, never cache hits.
-            @memcpy(block.encoding.?[first - block.start .. last - block.start], output[first..last]);
-            if (last == block.end) {
-                const owned = block.encoding.?;
-                block.encoding = null;
-                try self.encoded_views.installOwnedEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, owned);
-                maybe.* = null;
-            }
-        };
-        if (self.view_read.produced == self.view_read.total and self.view_read.skeleton.len != 0) {
-            self.returnCachedViewBlocks();
-            self.view_read.releasePayload(self.allocator);
-        }
-        if (builtin.is_test) self.view_step_timing.cache_copy_ns = cache_start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
+        return self.snapshot.writeRange(self.snapshotStorage(), self.io, self.projection_security_epoch, read_id, output, offset, length);
     }
 
-    fn viewKey(request: ViewRequest, kind: view_cache.Kind) view_cache.Key {
-        return switch (kind) {
-            .taskPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .limit = request.run_limit },
-            .historyPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .cursor = request.before_run_id orelse 0, .limit = request.run_limit },
-            .management => .{ .kind = kind, .management = @intFromEnum(request.management) },
-            .searchIndex => key: {
-                var key: view_cache.Key = .{ .kind = kind, .limit = @intFromBool(request.search), .search_query = request.search_query };
-                if (request.search_cursor) |cursor| key.search_cursor = .{ cursor.revision, cursor.security_epoch, cursor.task, cursor.run, cursor.part, cursor.offset };
-                break :key key;
-            },
-            else => .{ .kind = kind },
-        };
-    }
-
-    fn writeViewBlock(self: *Runtime, writer: *std.Io.Writer, request: ViewRequest, kind: view_cache.Kind) (Error || error{InvalidViewRequest})!void {
+    fn writeViewBlock(self: *Runtime, writer: *std.Io.Writer, request: ViewRequest, kind: view_cache.Kind, text: *const view_read.Text) (Error || error{InvalidViewRequest})!void {
+        const workspace_context: WorkspaceViewContext = .{ .runtime = self, .text = text };
         switch (kind) {
             .context => {
-                try self.writeLiveContextFields(writer, false);
+                try self.writeLiveContextFields(writer, false, text);
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             },
-            .workspaces => product_workspace.writeProjectionList(writer, &self.workspace, self.workspaceViewProvider()) catch return error.SnapshotTooLarge,
+            .workspaces => product_workspace.writeProjectionList(writer, &self.workspace, workspaceViewProvider(&workspace_context)) catch return error.SnapshotTooLarge,
             .taskIndex => {
                 writer.writeByte('[') catch return error.SnapshotTooLarge;
-                try self.task_runtime.writeSummaryList(writer, self.taskRuntimeProjectionEffects().text);
+                try self.task_runtime.writeSummaryList(writer, self.taskRuntimeProjectionEffects(text).text);
                 writer.writeByte(']') catch return error.SnapshotTooLarge;
             },
             .taskPage => {
-                if (request.task_id) |id| try self.task_runtime.writeProjectionPage(writer, self.taskRuntimeProjectionEffects(), id, null, request.run_limit) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+                if (request.task_id) |id| try self.task_runtime.writeProjectionPage(writer, self.taskRuntimeProjectionEffects(text), id, null, request.run_limit) else writer.writeAll("null") catch return error.SnapshotTooLarge;
             },
             .historyPage => {
-                if (request.before_run_id) |cursor| try self.task_runtime.writeHistoryPage(writer, self.taskRuntimeProjectionEffects(), request.task_id.?, cursor, request.run_limit) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+                if (request.before_run_id) |cursor| try self.task_runtime.writeHistoryPage(writer, self.taskRuntimeProjectionEffects(text), request.task_id.?, cursor, request.run_limit) else writer.writeAll("null") catch return error.SnapshotTooLarge;
             },
             .management => {
                 writer.print("{{\"kind\":\"{s}\",\"value\":", .{@tagName(request.management)}) catch return error.SnapshotTooLarge;
                 switch (request.management) {
                     .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
-                    .skills => try self.writeSkillManagement(writer),
-                    .mcp => try self.writeMcpProjection(writer),
-                    .schedules => self.schedule.writeProjection(writer, .{ .context = self, .write_json_fn = writeScheduleViewJson }) catch return error.SnapshotTooLarge,
+                    .skills => try self.writeSkillManagement(writer, text),
+                    .mcp => try self.writeMcpProjection(writer, text),
+                    .schedules => self.schedule.writeProjection(writer, .{ .context = text, .write_json_fn = view_read.Text.writeCallback }) catch return error.SnapshotTooLarge,
                 }
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             },
             .searchIndex => {
                 if (request.search) {
-                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text, request.search_query, request.search_cursor, self.task_runtime.searchRevision(), self.projection_security_epoch);
+                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects(text).text, request.search_query, request.search_cursor, self.task_runtime.searchRevision(), self.projection_security_epoch);
                 } else writer.writeAll("null") catch return error.SnapshotTooLarge;
             },
         }
     }
 
-    fn writeViewReceipts(self: *const Runtime, writer: *std.Io.Writer, queries: []const ViewReceiptQuery, results: bool) Error!void {
+    fn writeViewReceipts(self: *const Runtime, writer: *std.Io.Writer, queries: []const ViewReceiptQuery, results: bool, text: *const view_read.Text) Error!void {
         writer.writeByte('[') catch return error.SnapshotTooLarge;
         for (queries, 0..) |query, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             writer.print("{{\"taskId\":\"{d}\",\"operationId\":", .{query.task_id}) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, query.operation_id);
+            try text.writeJson(writer, query.operation_id);
             if (results) writer.print(",\"observed\":{}", .{self.task_runtime.hasInputReceipt(query.task_id, query.operation_id)}) catch return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
@@ -6849,10 +6538,11 @@ pub const Runtime = struct {
     fn writeAutomaticWorkspaceRootConfiguration(
         self: *const Runtime,
         writer: *std.Io.Writer,
+        text: *const view_read.Text,
     ) Error!void {
         const view = self.automaticWorkspaceRootConfiguration();
         const redacted = if (view.canonical_root) |root|
-            self.containsKnownCredential(root)
+            text.contains(root)
         else
             false;
         writer.print(
@@ -6867,7 +6557,7 @@ pub const Runtime = struct {
         writer.writeAll(",\"canonicalRoot\":") catch
             return error.SnapshotTooLarge;
         if (view.canonical_root) |root|
-            try self.projectedJsonValueWithKnownCredentials(writer, root)
+            try text.writeJson(writer, root)
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"health\":\"{s}\",\"redacted\":{},\"canChoose\":{},\"canReset\":{},\"canRetry\":{}}}", .{
@@ -6877,16 +6567,6 @@ pub const Runtime = struct {
             view.can_reset,
             view.can_retry,
         }) catch return error.SnapshotTooLarge;
-    }
-
-    fn writeScheduleViewJson(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        value: []const u8,
-    ) product_schedule.ViewError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        self.projectedJsonValueWithKnownCredentials(writer, value) catch
-            return error.SnapshotTooLarge;
     }
 
     fn writeModelMetadata(writer: *std.Io.Writer, metadata: models_contract.ModelMetadata) Error!void {
@@ -6930,6 +6610,7 @@ pub const Runtime = struct {
     fn writeAccount(
         self: *Runtime,
         writer: *std.Io.Writer,
+        text: *const view_read.Text,
     ) Error!void {
         const view = self.accountView();
         writer.print(
@@ -6939,16 +6620,16 @@ pub const Runtime = struct {
                 view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.account_id);
+        try text.writeJson(writer, view.account_id);
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.display_name);
+        try text.writeJson(writer, view.display_name);
         writer.writeAll(",\"emailHint\":") catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.email_hint);
+        try text.writeJson(writer, view.email_hint);
         writer.writeAll(",\"phoneHint\":") catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.phone_hint);
+        try text.writeJson(writer, view.phone_hint);
         writer.writeAll(",\"concurrencyLimit\":") catch
             return error.SnapshotTooLarge;
         if (view.concurrency_limit) |limit|
@@ -6958,94 +6639,94 @@ pub const Runtime = struct {
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.safe_diagnostic);
+        try text.writeJson(writer, view.safe_diagnostic);
         const summary = view.summary;
         writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"wallet\":{{\"availability\":\"{s}\",\"balanceU\":", .{
             @tagName(summary.operation),
             @tagName(summary.usage_eligibility),
             @tagName(summary.wallet.availability),
         }) catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(self, writer, summary.wallet.balance_u);
+        try writeNullableProjectedJsonValue(writer, summary.wallet.balance_u, text);
         writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(self, writer, summary.wallet.synced_at_unix_ms);
+        try writeNullableProjectedJsonValue(writer, summary.wallet.synced_at_unix_ms, text);
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.wallet.error_code)}) catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, summary.wallet.safe_diagnostic);
+        try text.writeJson(writer, summary.wallet.safe_diagnostic);
         writer.print("}},\"usage\":{{\"availability\":\"{s}\",\"today\":", .{@tagName(summary.usage.availability)}) catch
             return error.SnapshotTooLarge;
         if (summary.usage.today) |today| {
             writer.writeAll("{\"inputTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, today.input_tokens);
+            try text.writeJson(writer, today.input_tokens);
             writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, today.output_tokens);
+            try text.writeJson(writer, today.output_tokens);
             writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, today.cache_creation_tokens);
+            try text.writeJson(writer, today.cache_creation_tokens);
             writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, today.cache_read_tokens);
+            try text.writeJson(writer, today.cache_read_tokens);
             writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, today.total_tokens);
+            try text.writeJson(writer, today.total_tokens);
             writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, today.actual_cost_u);
+            try text.writeJson(writer, today.actual_cost_u);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"total\":") catch return error.SnapshotTooLarge;
         if (summary.usage.total) |total| {
             writer.writeAll("{\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, total.total_tokens);
+            try text.writeJson(writer, total.total_tokens);
             writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, total.actual_cost_u);
+            try text.writeJson(writer, total.actual_cost_u);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(self, writer, summary.usage.synced_at_unix_ms);
+        try writeNullableProjectedJsonValue(writer, summary.usage.synced_at_unix_ms, text);
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.usage.error_code)}) catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, summary.usage.safe_diagnostic);
+        try text.writeJson(writer, summary.usage.safe_diagnostic);
         writer.print("}},\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{@tagName(summary.history.availability)}) catch
             return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(self, writer, summary.history.start_date);
+        try writeNullableProjectedJsonValue(writer, summary.history.start_date, text);
         writer.writeAll(",\"endDate\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(self, writer, summary.history.end_date);
+        try writeNullableProjectedJsonValue(writer, summary.history.end_date, text);
         writer.writeAll(",\"days\":[") catch return error.SnapshotTooLarge;
         for (summary.history.days, 0..) |day, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             writer.writeAll("{\"date\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.date);
+            try text.writeJson(writer, day.date);
             writer.writeAll(",\"inputTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.input_tokens);
+            try text.writeJson(writer, day.input_tokens);
             writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.output_tokens);
+            try text.writeJson(writer, day.output_tokens);
             writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.cache_creation_tokens);
+            try text.writeJson(writer, day.cache_creation_tokens);
             writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.cache_read_tokens);
+            try text.writeJson(writer, day.cache_read_tokens);
             writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.total_tokens);
+            try text.writeJson(writer, day.total_tokens);
             writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, day.actual_cost_u);
+            try text.writeJson(writer, day.actual_cost_u);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(self, writer, summary.history.synced_at_unix_ms);
+        try writeNullableProjectedJsonValue(writer, summary.history.synced_at_unix_ms, text);
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.history.error_code)}) catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, summary.history.safe_diagnostic);
+        try text.writeJson(writer, summary.history.safe_diagnostic);
         writer.writeAll("}}}") catch return error.SnapshotTooLarge;
     }
 
     fn writeNullableProjectedJsonValue(
-        self: *Runtime,
         writer: *std.Io.Writer,
         value: []const u8,
+        text: *const view_read.Text,
     ) Error!void {
         if (value.len == 0) {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
         } else {
-            try self.projectedJsonValue(writer, value);
+            try text.writeJson(writer, value);
         }
     }
 
-    fn writeModels(self: *Runtime, writer: *std.Io.Writer) Error!void {
+    fn writeModels(self: *Runtime, writer: *std.Io.Writer, text: *const view_read.Text) Error!void {
         const view = self.modelsView();
         writer.print(
             "{{\"availability\":\"{s}\",\"persistenceHealth\":\"{s}\",\"providers\":[",
@@ -7055,29 +6736,29 @@ pub const Runtime = struct {
             if (provider_index != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.id);
+            try text.writeJson(writer, provider.id);
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.display_name);
+            try text.writeJson(writer, provider.display_name);
             writer.print(",\"recommended\":{},\"catalogState\":\"{s}\",\"principalRef\":", .{
                 provider.recommended,
                 @tagName(provider.catalog_state),
             }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.principal_ref);
+            try text.writeJson(writer, provider.principal_ref);
             writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
-            try self.writeCatalogModels(writer, provider.models);
+            try writeCatalogModels(writer, provider.models, text);
             writer.print(",\"catalogGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
                 provider.catalog_generation,
                 provider.source_generation,
                 @tagName(provider.error_code),
             }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.safe_diagnostic);
+            try text.writeJson(writer, provider.safe_diagnostic);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"defaultSelection\":") catch return error.SnapshotTooLarge;
-        try self.writeOptionalModelRef(writer, view.default_selection);
+        try writeOptionalModelRef(writer, view.default_selection, text);
         writer.writeAll(",\"defaultSelectionDisplayName\":") catch return error.SnapshotTooLarge;
         if (view.default_selection_display_name) |name| {
-            try self.projectedJsonValue(writer, name);
+            try text.writeJson(writer, name);
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"builtinProviderPresets\":[", .{
             view.selection_revision,
@@ -7089,49 +6770,49 @@ pub const Runtime = struct {
                 return error.SnapshotTooLarge;
             writer.print("{{\"id\":\"{s}\",\"displayName\":", .{@tagName(preset.id)}) catch
                 return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, preset.display_name);
+            try text.writeJson(writer, preset.display_name);
             writer.print(",\"protocol\":\"{s}\",\"defaultBaseUrl\":", .{@tagName(preset.protocol)}) catch
                 return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, preset.default_base_url);
+            try text.writeJson(writer, preset.default_base_url);
             writer.writeAll(",\"apiKeyUrl\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, preset.api_key_url);
+            try text.writeJson(writer, preset.api_key_url);
             writer.writeAll(",\"documentationUrl\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, preset.documentation_url);
+            try text.writeJson(writer, preset.documentation_url);
             writer.writeAll(",\"modelIds\":[") catch return error.SnapshotTooLarge;
             for (preset.model_ids, 0..) |model_id, model_index| {
                 if (model_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model_id);
+                try text.writeJson(writer, model_id);
             }
             writer.writeByte(']') catch return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"customProviders\":[") catch return error.SnapshotTooLarge;
-        try self.writeCustomProviders(writer, view.custom_providers);
+        try writeCustomProviders(writer, view.custom_providers, text);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
     fn writeOptionalModelRef(
-        self: *Runtime,
         writer: *std.Io.Writer,
         value: ?models_contract.ModelRef,
+        text: *const view_read.Text,
     ) Error!void {
         if (value) |model_ref| {
             writer.writeAll("{\"sourceId\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, model_ref.source_id);
+            try text.writeJson(writer, model_ref.source_id);
             writer.writeAll(",\"modelId\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, model_ref.model_id);
+            try text.writeJson(writer, model_ref.model_id);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     }
 
-    fn writeCatalogModels(self: *Runtime, writer: *std.Io.Writer, models: []const models_contract.ModelView) Error!void {
+    fn writeCatalogModels(writer: *std.Io.Writer, models: []const models_contract.ModelView, text: *const view_read.Text) Error!void {
         writer.writeByte('[') catch return error.SnapshotTooLarge;
         for (models, 0..) |model, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, model.id);
+            try text.writeJson(writer, model.id);
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, model.display_name);
+            try text.writeJson(writer, model.display_name);
             writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
             try writeModelMetadata(writer, model.metadata);
             writer.print(",\"metadataProvenance\":\"{s}\"}}", .{@tagName(model.metadata_provenance)}) catch return error.SnapshotTooLarge;
@@ -7140,14 +6821,14 @@ pub const Runtime = struct {
     }
 
     fn writeCustomProviders(
-        self: *Runtime,
         writer: *std.Io.Writer,
         providers: []const models_contract.CustomProviderView,
+        text: *const view_read.Text,
     ) Error!void {
         for (providers, 0..) |provider, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.id);
+            try text.writeJson(writer, provider.id);
             writer.writeAll(",\"builtinProviderId\":") catch return error.SnapshotTooLarge;
             if (provider.builtin_provider_id) |provider_id|
                 writer.print("\"{s}\"", .{@tagName(provider_id)}) catch
@@ -7155,10 +6836,10 @@ pub const Runtime = struct {
             else
                 writer.writeAll("null") catch return error.SnapshotTooLarge;
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.display_name);
+            try text.writeJson(writer, provider.display_name);
             writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{@tagName(provider.protocol)}) catch
                 return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.normalized_base_url);
+            try text.writeJson(writer, provider.normalized_base_url);
             writer.print(",\"state\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"providerRevision\":\"{d}\",\"sourceGeneration\":\"{d}\",\"catalogGeneration\":\"{d}\",\"models\":[", .{
                 @tagName(provider.state),
                 @tagName(provider.credential_status),
@@ -7170,9 +6851,9 @@ pub const Runtime = struct {
             for (provider.models, 0..) |model, model_index| {
                 if (model_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                 writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model.id);
+                try text.writeJson(writer, model.id);
                 writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model.display_name);
+                try text.writeJson(writer, model.display_name);
                 writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
                 try writeModelMetadata(writer, model.metadata);
                 writer.print(",\"metadataProvenance\":\"{s}\",\"testStatus\":\"{s}\",\"ready\":{}", .{
@@ -7191,12 +6872,17 @@ pub const Runtime = struct {
         writer.print("{{\"available\":{},\"reason\":\"{s}\"}}", .{ value.available, @tagName(value.reason) }) catch return error.SnapshotTooLarge;
     }
 
+    const WorkspaceViewContext = struct {
+        runtime: *const Runtime,
+        text: *const view_read.Text,
+    };
+
     fn workspaceViewSignals(
         context: *const anyopaque,
         workspace_id: u64,
     ) WorkspaceSignals {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        const facts = self.task_runtime.workspaceSignals(workspace_id);
+        const view: *const WorkspaceViewContext = @ptrCast(@alignCast(context));
+        const facts = view.runtime.task_runtime.workspaceSignals(workspace_id);
         return .{
             .running = facts.running,
             .attention = facts.attention,
@@ -7208,8 +6894,8 @@ pub const Runtime = struct {
         context: *const anyopaque,
         value: []const u8,
     ) bool {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        return self.containsKnownCredential(value);
+        const view: *const WorkspaceViewContext = @ptrCast(@alignCast(context));
+        return view.text.contains(value);
     }
 
     fn workspaceViewWriteJson(
@@ -7217,8 +6903,8 @@ pub const Runtime = struct {
         writer: *std.Io.Writer,
         value: []const u8,
     ) product_workspace.ViewError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        self.projectedJsonValueWithKnownCredentials(writer, value) catch
+        const view: *const WorkspaceViewContext = @ptrCast(@alignCast(context));
+        view.text.writeJson(writer, value) catch
             return error.SnapshotTooLarge;
     }
 
@@ -7228,20 +6914,20 @@ pub const Runtime = struct {
         workspace_id: u64,
         workspace_epoch: u64,
     ) product_workspace.ViewError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspace.facts(workspace_id) orelse unreachable;
+        const view: *const WorkspaceViewContext = @ptrCast(@alignCast(context));
+        const workspace = view.runtime.workspace.facts(workspace_id) orelse unreachable;
         std.debug.assert(workspace.epoch == workspace_epoch);
-        const projection = self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch unreachable;
+        const projection = view.runtime.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch unreachable;
         skill_runtime.Runtime.writeCatalogProjection(
             writer,
-            self.skillTextProjection(),
+            skillTextProjection(view.text),
             projection,
         ) catch return error.SnapshotTooLarge;
     }
 
-    fn workspaceViewProvider(self: *const Runtime) product_workspace.ViewProvider {
+    fn workspaceViewProvider(context: *const WorkspaceViewContext) product_workspace.ViewProvider {
         return .{
-            .context = self,
+            .context = context,
             .signals_fn = workspaceViewSignals,
             .contains_sensitive_fn = workspaceViewContainsSensitive,
             .write_json_fn = workspaceViewWriteJson,
@@ -7251,8 +6937,8 @@ pub const Runtime = struct {
     }
 
     fn workspaceViewWriteSourceDiscovery(context: *const anyopaque, writer: *std.Io.Writer, id: u64, epoch: u64) product_workspace.ViewError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        return self.skill.writeWorkspaceSourceDiscovery(writer, id, epoch);
+        const view: *const WorkspaceViewContext = @ptrCast(@alignCast(context));
+        return view.runtime.skill.writeWorkspaceSourceDiscovery(writer, id, epoch);
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -7386,150 +7072,6 @@ pub const Runtime = struct {
 
     fn settleCheckpointTransactionsForShutdown(self: *Runtime) void {
         self.task_runtime.settleCheckpointTransactionsForShutdown();
-    }
-
-    fn taskViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        return self.containsKnownCredential(value);
-    }
-
-    fn writeTaskViewJson(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        value: []const u8,
-    ) product_task.ProjectionError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        self.projectedJsonValueWithKnownCredentials(writer, value) catch
-            return error.SnapshotTooLarge;
-    }
-
-    fn writeTaskViewJsonParts(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        first: []const u8,
-        second: []const u8,
-    ) product_task.ProjectionError!bool {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        const total = std.math.add(usize, first.len, second.len) catch
-            return error.SnapshotTooLarge;
-        const joined = self.allocator.alloc(u8, total) catch
-            return error.OutOfMemory;
-        defer {
-            std.crypto.secureZero(u8, joined);
-            self.allocator.free(joined);
-        }
-        @memcpy(joined[0..first.len], first);
-        @memcpy(joined[first.len..], second);
-        const redacted = self.containsKnownCredential(joined);
-        self.projectedJsonValueWithKnownCredentials(writer, joined) catch
-            return error.SnapshotTooLarge;
-        return redacted;
-    }
-
-    fn writeTaskViewJsonOutput(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        value: []const u8,
-        commentary_ends: []const u64,
-    ) product_task.ProjectionError!bool {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        // A clean output already is the sanitized source. Preserve its segment
-        // boundaries directly instead of allocating and copying the whole Run.
-        if (!self.containsKnownCredential(value)) {
-            writer.writeByte('[') catch return error.SnapshotTooLarge;
-            var previous: usize = 0;
-            for (commentary_ends, 0..) |raw, index| {
-                const boundary = std.math.cast(usize, raw) orelse return error.SnapshotTooLarge;
-                if (boundary < previous or boundary > value.len or (boundary < value.len and (value[boundary] & 0xc0) == 0x80)) return error.SnapshotTooLarge;
-                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                self.projectedJsonValueWithKnownCredentials(writer, value[previous..boundary]) catch return error.SnapshotTooLarge;
-                previous = boundary;
-            }
-            writer.writeAll("],\"response\":") catch return error.SnapshotTooLarge;
-            self.projectedJsonValueWithKnownCredentials(writer, value[previous..]) catch return error.SnapshotTooLarge;
-            return false;
-        }
-        const projected = self.allocator.alloc(u8, value.len) catch
-            return error.OutOfMemory;
-        defer {
-            std.crypto.secureZero(u8, projected);
-            self.allocator.free(projected);
-        }
-        const projected_ends = self.allocator.alloc(usize, commentary_ends.len) catch
-            return error.OutOfMemory;
-        defer self.allocator.free(projected_ends);
-        var read: usize = 0;
-        var write: usize = 0;
-        var boundary_index: usize = 0;
-        var redacted = false;
-        while (read < value.len) {
-            while (boundary_index < commentary_ends.len) {
-                const boundary = std.math.cast(usize, commentary_ends[boundary_index]) orelse
-                    return error.SnapshotTooLarge;
-                if (boundary != read) break;
-                projected_ends[boundary_index] = write;
-                boundary_index += 1;
-            }
-            if (self.knownCredentialEndAtCodepoint(value, read)) |redaction_end| {
-                const marker_len = @min(redaction_end - read, 3);
-                @memset(projected[write..][0..marker_len], '*');
-                write += marker_len;
-                while (boundary_index < commentary_ends.len) {
-                    const boundary = std.math.cast(usize, commentary_ends[boundary_index]) orelse
-                        return error.SnapshotTooLarge;
-                    if (boundary > redaction_end) break;
-                    if (boundary <= read) return error.SnapshotTooLarge;
-                    projected_ends[boundary_index] = write;
-                    boundary_index += 1;
-                }
-                read = redaction_end;
-                redacted = true;
-                continue;
-            }
-            const codepoint_len = credential_match.codepointLen(value, read);
-            @memcpy(
-                projected[write..][0..codepoint_len],
-                value[read..][0..codepoint_len],
-            );
-            write += codepoint_len;
-            read += codepoint_len;
-        }
-        while (boundary_index < commentary_ends.len) {
-            const boundary = std.math.cast(usize, commentary_ends[boundary_index]) orelse
-                return error.SnapshotTooLarge;
-            if (boundary != read) return error.SnapshotTooLarge;
-            projected_ends[boundary_index] = write;
-            boundary_index += 1;
-        }
-        writer.writeByte('[') catch return error.SnapshotTooLarge;
-        var previous: usize = 0;
-        for (projected_ends, 0..) |boundary, index| {
-            if (boundary < previous or boundary > write)
-                return error.SnapshotTooLarge;
-            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            self.projectedJsonValueWithKnownCredentials(
-                writer,
-                projected[previous..boundary],
-            ) catch return error.SnapshotTooLarge;
-            previous = boundary;
-        }
-        writer.writeAll("],\"response\":") catch return error.SnapshotTooLarge;
-        self.projectedJsonValueWithKnownCredentials(
-            writer,
-            projected[previous..write],
-        ) catch return error.SnapshotTooLarge;
-        return redacted;
-    }
-
-    fn taskTextProjection(self: *const Runtime) product_task.ProjectionText {
-        return .{
-            .context = self,
-            .contains_sensitive_fn = taskViewContainsSensitive,
-            .write_json_fn = writeTaskViewJson,
-            .write_json_output_fn = writeTaskViewJsonOutput,
-            .capture_tool_fn = if (self.capture_view == &self.view_read) captureToolProjection else null,
-            .write_json_parts_fn = writeTaskViewJsonParts,
-        };
     }
 
     fn taskProjectionAuthority(
@@ -7704,24 +7246,24 @@ pub const Runtime = struct {
         writer: *std.Io.Writer,
         catalog: CatalogProjection,
     ) product_task.ProjectionError!void {
-        const self: *Runtime = @ptrCast(@alignCast(@constCast(context)));
+        const text: *const view_read.Text = @ptrCast(@alignCast(context));
         skill_runtime.Runtime.writeCatalogProjection(
             writer,
-            self.skillTextProjection(),
+            skillTextProjection(text),
             catalog,
         ) catch return error.SnapshotTooLarge;
     }
 
-    fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
+    fn taskRuntimeProjectionEffects(self: *Runtime, text: *const view_read.Text) task_runtime.ProjectionEffects {
         return .{
             .now_ms = self.run_clock.now(),
             .checkpoint_health = self.checkpoint_store_health.load(.acquire),
             .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
             .context = self,
             .authority_fn = taskProjectionAuthority,
-            .text = self.taskTextProjection(),
+            .text = text.task(),
             .catalog = .{
-                .context = self,
+                .context = text,
                 .write_fn = writeTaskCatalogProjection,
             },
             .max_pending_ui_json_bytes = self.limits.max_pending_ui_json_bytes,
@@ -7743,29 +7285,11 @@ pub const Runtime = struct {
         return null;
     }
 
-    fn skillViewContainsSensitive(
-        context: *const anyopaque,
-        value: []const u8,
-    ) bool {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        return self.containsKnownCredential(value);
-    }
-
-    fn writeSkillViewJson(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        value: []const u8,
-    ) skill_runtime.ViewError!void {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        self.projectedJsonValueWithKnownCredentials(writer, value) catch
-            return error.SnapshotTooLarge;
-    }
-
-    fn skillTextProjection(self: *const Runtime) skill_runtime.TextProjection {
+    fn skillTextProjection(text: *const view_read.Text) skill_runtime.TextProjection {
         return .{
-            .context = self,
-            .contains_sensitive_fn = skillViewContainsSensitive,
-            .write_json_fn = writeSkillViewJson,
+            .context = text,
+            .contains_sensitive_fn = view_read.Text.containsCallback,
+            .write_json_fn = view_read.Text.writeCallback,
         };
     }
 
@@ -7782,10 +7306,11 @@ pub const Runtime = struct {
     fn writeSkillManagement(
         self: *Runtime,
         writer: *std.Io.Writer,
+        text: *const view_read.Text,
     ) Error!void {
         self.skill.writeManagementProjection(
             writer,
-            self.skillTextProjection(),
+            skillTextProjection(text),
             .{
                 .context = self,
                 .slot_count = self.workspace.slotCount(),
@@ -8986,6 +8511,7 @@ pub const Runtime = struct {
         if (generation == self.account_credential_generation) return;
         self.account_credential_generation = generation;
         self.invalidateProjectionSecurity();
+        self.reconcileMcpInstallation(null);
         source.visit(self, scrubAccountCredential) catch unreachable;
         self.syncHistoryCredentials(null, null);
     }
@@ -9039,6 +8565,7 @@ pub const Runtime = struct {
     fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
         if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        self.reconcileMcpInstallation(credential);
         self.redactAllProductProjectionsNoFail(credential);
         self.syncHistoryCredentials(credential, null);
     }
@@ -9456,15 +8983,29 @@ pub const Runtime = struct {
         return redacted;
     }
 
-    fn projectedJsonValue(self: *Runtime, writer: *std.Io.Writer, value: []const u8) Error!void {
-        return self.projectedJsonValueWithKnownCredentials(writer, value);
+    fn liveViewText(self: *const Runtime) view_read.Text {
+        return .{
+            .allocator = self.allocator,
+            .source = .{ .live = .{
+                .context = self,
+                .contains_fn = liveViewContains,
+                .match_end_fn = liveViewMatchEnd,
+            } },
+        };
+    }
+
+    fn liveViewContains(context: *const anyopaque, value: []const u8) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(value);
+    }
+
+    fn liveViewMatchEnd(context: *const anyopaque, value: []const u8, start: usize) ?usize {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.knownCredentialEndAtCodepoint(value, start);
     }
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
-        if (self.view_credentials) |credentials| {
-            for (credentials) |known| if (std.mem.indexOf(u8, value, known) != null) return true;
-            return false;
-        }
+        if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
         if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
@@ -9505,81 +9046,10 @@ pub const Runtime = struct {
         value: []const u8,
     ) usize {
         var longest: usize = 0;
-        if (self.view_credentials) |credentials| {
-            for (credentials) |known| if (known.len > longest and std.mem.startsWith(u8, value, known)) {
-                longest = known.len;
-            };
-            return longest;
-        }
+        if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
         longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
-    }
-
-    fn projectedJsonValueWithKnownCredentials(
-        self: *const Runtime,
-        writer: *std.Io.Writer,
-        value: []const u8,
-    ) Error!void {
-        if (self.capture_view) |plan| {
-            const start = plan.text.items.len;
-            const contains = for (self.view_credentials.?) |known| {
-                if (std.mem.indexOf(u8, value, known) != null) break true;
-            } else false;
-            if (!contains) try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value) else {
-                var index: usize = 0;
-                var copied: usize = 0;
-                while (index < value.len) {
-                    if (self.knownCredentialEndAtCodepoint(value, index)) |end| {
-                        try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..index]);
-                        try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, "***"[0..@min(end - index, 3)]);
-                        index = end;
-                        copied = end;
-                    } else index += credential_match.codepointLen(value, index);
-                }
-                try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..]);
-            }
-            try plan.commitString(self.allocator, writer, start);
-            return;
-        }
-        if (self.view_credentials) |credentials| {
-            const contains = for (credentials) |known| {
-                if (std.mem.indexOf(u8, value, known) != null) break true;
-            } else false;
-            if (!contains) {
-                std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
-                return;
-            }
-        }
-        const hex = "0123456789abcdef";
-        writer.writeByte('"') catch return error.SnapshotTooLarge;
-        var index: usize = 0;
-        while (index < value.len) {
-            if (self.knownCredentialEndAtCodepoint(value, index)) |redaction_end| {
-                _ = writer.splatByte('*', @min(redaction_end - index, 3)) catch
-                    return error.SnapshotTooLarge;
-                index = redaction_end;
-                continue;
-            }
-            const byte = value[index];
-            switch (byte) {
-                '"' => writer.writeAll("\\\"") catch return error.SnapshotTooLarge,
-                '\\' => writer.writeAll("\\\\") catch return error.SnapshotTooLarge,
-                0x08 => writer.writeAll("\\b") catch return error.SnapshotTooLarge,
-                0x0c => writer.writeAll("\\f") catch return error.SnapshotTooLarge,
-                '\n' => writer.writeAll("\\n") catch return error.SnapshotTooLarge,
-                '\r' => writer.writeAll("\\r") catch return error.SnapshotTooLarge,
-                '\t' => writer.writeAll("\\t") catch return error.SnapshotTooLarge,
-                0x00...0x07, 0x0b, 0x0e...0x1f => {
-                    writer.writeAll("\\u00") catch return error.SnapshotTooLarge;
-                    writer.writeByte(hex[byte >> 4]) catch return error.SnapshotTooLarge;
-                    writer.writeByte(hex[byte & 0x0f]) catch return error.SnapshotTooLarge;
-                },
-                else => writer.writeByte(byte) catch return error.SnapshotTooLarge,
-            }
-            index += 1;
-        }
-        writer.writeByte('"') catch return error.SnapshotTooLarge;
     }
 
     fn knownCredentialEndAtCodepoint(
@@ -10019,9 +9489,7 @@ pub const Runtime = struct {
 
     fn bumpRevision(self: *Runtime) void {
         self.encoded_views.invalidateAll();
-        if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
-            block.current = false;
-        };
+        self.snapshot.markChanged();
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
 
@@ -10061,6 +9529,16 @@ test "updates Control publishes committed facts through the canonical live conte
 }
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub const viewFixture = testRuntime;
+
+    pub fn snapshotProgress(control: *const Runtime) struct { id: u64, produced: usize } {
+        return .{ .id = control.snapshot.plan.id, .produced = control.snapshot.plan.produced };
+    }
+
+    pub fn snapshotStepTiming(control: *const Runtime) @FieldType(view_read.Read, "step_timing") {
+        return control.snapshot.step_timing;
+    }
+
     pub fn findTask(control: *Runtime, task_id: u64) ?*TestTask {
         return task_testing.findTask(&control.task_runtime, task_id);
     }
@@ -10211,29 +9689,31 @@ pub const TestSupport = if (builtin.is_test) struct {
         return output[0..read.bytes];
     }
     pub fn writeAggregateFixture(self: *Runtime, output: []u8) Error![]const u8 {
+        const text = self.liveViewText();
+        const context: Runtime.WorkspaceViewContext = .{ .runtime = self, .text = &text };
         var writer = std.Io.Writer.fixed(output);
-        try self.writeLiveContextFields(&writer, true);
+        try self.writeLiveContextFields(&writer, true, &text);
         writer.writeAll(",\"skillManagement\":") catch
             return error.SnapshotTooLarge;
-        try self.writeSkillManagement(&writer);
+        try self.writeSkillManagement(&writer, &text);
         writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
-        try self.writeMcpProjection(&writer);
+        try self.writeMcpProjection(&writer, &text);
         writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
         product_workspace.writeProjectionList(
             &writer,
             &self.workspace,
-            self.workspaceViewProvider(),
+            Runtime.workspaceViewProvider(&context),
         ) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
         self.schedule.writeProjection(&writer, .{
-            .context = self,
-            .write_json_fn = Runtime.writeScheduleViewJson,
+            .context = &text,
+            .write_json_fn = view_read.Text.writeCallback,
         }) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
         self.task_runtime.writeProjectionList(
             &writer,
-            self.taskRuntimeProjectionEffects(),
+            self.taskRuntimeProjectionEffects(&text),
         ) catch |err| return @errorCast(err);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
         return writer.buffered();
@@ -12572,7 +12052,7 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
 
     control.testTaskSlots()[0].?.durable.runs[0].?.active_phase = .waiting_ui;
-    const attention = Runtime.workspaceViewSignals(&control, 1);
+    const attention = (try control.copyWorkspaceProjections(&storage))[0].signals;
     try std.testing.expectEqual(@as(u32, 0), attention.running);
     try std.testing.expectEqual(@as(u32, 1), attention.attention);
 
@@ -12642,8 +12122,8 @@ test "Schedule blocker projection matches the shared Renderer fixture" {
     var storage: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
     try control.schedule.writeProjection(&writer, .{
-        .context = &control,
-        .write_json_fn = Runtime.writeScheduleViewJson,
+        .context = &control.liveViewText(),
+        .write_json_fn = view_read.Text.writeCallback,
     });
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
@@ -13178,7 +12658,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
             task.durable.id,
-            restored.taskRuntimeProjectionEffects(),
+            restored.taskRuntimeProjectionEffects(&restored.liveViewText()),
         ).?.unavailable,
     );
     try std.testing.expectError(
@@ -13366,7 +12846,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
         ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
             task.durable.id,
-            restored.taskRuntimeProjectionEffects(),
+            restored.taskRuntimeProjectionEffects(&restored.liveViewText()),
         ).?.unavailable,
     );
 
@@ -13854,7 +13334,7 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
 
     var models_storage: [4096]u8 = undefined;
     var models_writer = std.Io.Writer.fixed(&models_storage);
-    try control.writeModels(&models_writer);
+    try control.writeModels(&models_writer, &control.liveViewText());
     const models_fixture = std.mem.trimEnd(
         u8,
         contract_fixture.models_unavailable,
@@ -14206,7 +13686,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     }};
     var storage: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try skill_runtime.Runtime.writeCatalogProjection(&writer, control.skillTextProjection(), .{
+    try skill_runtime.Runtime.writeCatalogProjection(&writer, Runtime.skillTextProjection(&control.liveViewText()), .{
         .availability = .ready,
         .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         .selection_revision = 1,
@@ -14309,7 +13789,7 @@ test "Skill logical policy key projection matches the Renderer wire fixture" {
     }};
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try skill_runtime.Runtime.writeCatalogProjection(&writer, control.skillTextProjection(), .{
+    try skill_runtime.Runtime.writeCatalogProjection(&writer, Runtime.skillTextProjection(&control.liveViewText()), .{
         .availability = .ready,
         .revision = "catalog-revision",
         .selection_revision = 5,
@@ -14330,7 +13810,7 @@ test "Skill recovery phase changes publish without a health change and match the
     try std.testing.expectEqual(before + 1, control.revision);
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try control.writeSkillManagement(&writer);
+    try control.writeSkillManagement(&writer, &control.liveViewText());
     var projection = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer projection.deinit();
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, projection.value.object.get("assets").?.array.items[0], .{});
@@ -14338,7 +13818,7 @@ test "Skill recovery phase changes publish without a health change and match the
     try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.skill_recovery_required, "\r\n"), encoded);
 }
 
-fn installTestCommittedSkillAuthorities(control: *Runtime) !void {
+fn testCommittedSkillCatalog(control: *Runtime) !CatalogSnapshot {
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -14353,7 +13833,7 @@ fn installTestCommittedSkillAuthorities(control: *Runtime) !void {
         .argument_names = &.{"target"},
         .max_values = 1,
     }};
-    var personal_catalog = try CatalogSnapshot.init(
+    return CatalogSnapshot.init(
         control.allocator,
         .{
             .revision = "catalog-1",
@@ -14367,6 +13847,10 @@ fn installTestCommittedSkillAuthorities(control: *Runtime) !void {
         catalogSnapshotLimits(control.limits),
         control.limits.max_projection_bytes - control.projection_bytes,
     );
+}
+
+fn installTestCommittedSkillAuthorities(control: *Runtime) !void {
+    var personal_catalog = try testCommittedSkillCatalog(control);
     errdefer personal_catalog.deinit();
     var workspace_catalog = try personal_catalog.clone(
         control.allocator,
@@ -14703,7 +14187,7 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
 
     var management_storage: [8192]u8 = undefined;
     var management_writer = std.Io.Writer.fixed(&management_storage);
-    try control.writeSkillManagement(&management_writer);
+    try control.writeSkillManagement(&management_writer, &control.liveViewText());
     const management_projection = management_writer.buffered();
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15979,7 +15463,7 @@ test "opaque credential redaction preserves UTF-8 projection validity" {
 
     var output: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
-    try control.projectedJsonValueWithKnownCredentials(&writer, "café");
+    try control.liveViewText().writeJson(&writer, "café");
     try std.testing.expectEqualStrings("\"caf**\"", writer.buffered());
     try std.testing.expect(std.unicode.utf8ValidateSlice(writer.buffered()));
 
@@ -16023,7 +15507,7 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
     try task_test_view.writePendingUi(
         &pending_writer,
-        control.taskTextProjection(),
+        control.liveViewText().task(),
         9,
         7,
         1,
@@ -17286,7 +16770,7 @@ test "event projection failure routes by Agent Session identity not product Task
     try std.testing.expect(task.durable.runs[0].?.event_projection_failure == null);
     try std.testing.expect(control.task_runtime.continuationAvailable(
         task.durable.id,
-        control.taskRuntimeProjectionEffects(),
+        control.taskRuntimeProjectionEffects(&control.liveViewText()),
     ));
 
     control.recordEventProjectionFailure(task.runtime.routeId(), 7);
@@ -17298,7 +16782,7 @@ test "event projection failure routes by Agent Session identity not product Task
     // owned by the Session disposition and stays available.
     try std.testing.expect(control.task_runtime.continuationAvailable(
         task.durable.id,
-        control.taskRuntimeProjectionEffects(),
+        control.taskRuntimeProjectionEffects(&control.liveViewText()),
     ));
 }
 
@@ -17419,7 +16903,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
         ContinuationUnavailableReason.session_poisoned,
         control.task_runtime.continuationProjection(
             task.durable.id,
-            control.taskRuntimeProjectionEffects(),
+            control.taskRuntimeProjectionEffects(&control.liveViewText()),
         ).?.unavailable,
     );
 
@@ -17430,7 +16914,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
         ContinuationUnavailableReason.closing,
         control.task_runtime.continuationProjection(
             task.durable.id,
-            control.taskRuntimeProjectionEffects(),
+            control.taskRuntimeProjectionEffects(&control.liveViewText()),
         ).?.unavailable,
     );
 }
@@ -18234,7 +17718,7 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     defer control.deinit();
     try task_test_view.writePendingUi(
         &writer,
-        control.taskTextProjection(),
+        control.liveViewText().task(),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
@@ -18249,19 +17733,17 @@ test "Product view permission presentation preserves deferred string positions a
     const request = testPermissionRequest("Bash", "{\"command\":\"echo \\\"中文\\\" \\u0053ECRET-KEY\",\"description\":\"查看输出\"}");
     var expected_storage: [8192]u8 = undefined;
     var expected = std.Io.Writer.fixed(&expected_storage);
-    try task_test_view.writePendingUi(&expected, control.taskTextProjection(), 1, 1, 1, request);
+    try task_test_view.writePendingUi(&expected, control.liveViewText().task(), 1, 1, 1, request);
     for (1..18) |chunk_size| {
         var plan: view_plan.Plan = .{ .id = 1 };
         defer plan.clear(std.testing.allocator);
         var skeleton: [8192]u8 = undefined;
         var writer = std.Io.Writer.fixed(&skeleton);
-        control.capture_view = &plan;
-        control.view_credentials = &.{"SECRET-KEY"};
-        {
-            defer control.capture_view = null;
-            defer control.view_credentials = null;
-            try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
-        }
+        const text: view_read.Text = .{
+            .allocator = std.testing.allocator,
+            .source = .{ .frozen = .{ .plan = &plan, .credentials = &.{"SECRET-KEY"}, .max_bytes = 96 * 1024 } },
+        };
+        try task_test_view.writePendingUi(&writer, text.task(), 1, 1, 1, request);
         try plan.seal(std.testing.allocator, 96 * 1024, writer.buffered());
         @memset(&skeleton, 0);
         var output: [8192]u8 = undefined;
@@ -18296,7 +17778,7 @@ test "permission presentation keeps large file targets readable and bounds a leg
         const storage = try std.testing.allocator.alloc(u8, allowance);
         defer std.testing.allocator.free(storage);
         var writer = std.Io.Writer.fixed(storage);
-        try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        try task_test_view.writePendingUi(&writer, control.liveViewText().task(), 1, 1, 1, request);
         try std.testing.expect(writer.end <= allowance);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
         defer parsed.deinit();
@@ -18317,7 +17799,7 @@ test "permission oversized presentation still hides an escaped credential in raw
     defer std.testing.allocator.free(arguments);
     var storage: [32 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, testPermissionRequest("Bash", arguments));
+    try task_test_view.writePendingUi(&writer, control.liveViewText().task(), 1, 1, 1, testPermissionRequest("Bash", arguments));
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
     try std.testing.expect(parsed.value.object.get("presentation").? == .null);
@@ -18339,7 +17821,7 @@ test "permission pending presentation stays bound to built-in arguments and hide
         if (case == 3) request.tool.namespace = .mcp;
         var buffer: [8192]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        try task_test_view.writePendingUi(&writer, control.liveViewText().task(), 1, 1, 1, request);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
         defer parsed.deinit();
         const value = parsed.value.object;
@@ -18392,7 +17874,7 @@ test "permission pending projection follows responses and candidate scope" {
     var candidate_writer = std.Io.Writer.fixed(&candidate_storage);
     try task_test_view.writePendingUi(
         &candidate_writer,
-        control.taskTextProjection(),
+        control.liveViewText().task(),
         1,
         1,
         1,
@@ -18433,7 +17915,7 @@ test "permission pending projection follows responses and candidate scope" {
     file_request.candidate.?.target = "C:/work/output.txt";
     var file_storage: [4096]u8 = undefined;
     var file_writer = std.Io.Writer.fixed(&file_storage);
-    try task_test_view.writePendingUi(&file_writer, control.taskTextProjection(), 1, 7, 1, file_request);
+    try task_test_view.writePendingUi(&file_writer, control.liveViewText().task(), 1, 7, 1, file_request);
     try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.permission_file_target, "\r\n"), file_writer.buffered());
     try std.testing.expect(std.mem.indexOf(u8, file_writer.buffered(), "\"scope\":\"file_target\",\"target\":\"C:/work/output.txt\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, file_writer.buffered(), "allow_session") != null);
@@ -18441,7 +17923,7 @@ test "permission pending projection follows responses and candidate scope" {
     file_request.candidate.?.target = "C:/work/SECRET-KEY/output.txt";
     var private_storage: [4096]u8 = undefined;
     var private_writer = std.Io.Writer.fixed(&private_storage);
-    try task_test_view.writePendingUi(&private_writer, control.taskTextProjection(), 1, 1, 1, file_request);
+    try task_test_view.writePendingUi(&private_writer, control.liveViewText().task(), 1, 1, 1, file_request);
     const private_json = private_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, private_json, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, private_json, "allow_session") == null);
@@ -18454,7 +17936,7 @@ test "permission pending projection follows responses and candidate scope" {
     var once_writer = std.Io.Writer.fixed(&once_storage);
     try task_test_view.writePendingUi(
         &once_writer,
-        control.taskTextProjection(),
+        control.liveViewText().task(),
         1,
         1,
         1,
@@ -19845,7 +19327,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
     try task_test_view.writePendingUi(
         &pending_writer,
-        control.taskTextProjection(),
+        control.liveViewText().task(),
         9,
         7,
         1,
@@ -20027,7 +19509,7 @@ test "projection gap preserves completion, continuation and completion-seen pers
     // a Run-level product fact only.
     try std.testing.expect(control.task_runtime.continuationAvailable(
         control.testTaskSlots()[0].?.durable.id,
-        control.taskRuntimeProjectionEffects(),
+        control.taskRuntimeProjectionEffects(&control.liveViewText()),
     ));
 
     try std.testing.expect(control.task_runtime.markCompletionSeen(3, run.id));
@@ -20311,7 +19793,7 @@ test "streaming projection escaping is allocation-free JSON with redaction" {
     defer control.deinit();
     var storage: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try control.projectedJsonValue(&writer, "quote\" slash\\ control\x01 line\n 界 SECRET-KEY");
+    try control.liveViewText().writeJson(&writer, "quote\" slash\\ control\x01 line\n 界 SECRET-KEY");
     try std.testing.expectEqualStrings(
         "\"quote\\\" slash\\\\ control\\u0001 line\\n 界 ***\"",
         writer.buffered(),
@@ -20726,6 +20208,63 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
 }
 
+test "MCP pending installation rejects newly known credentials and stale sources without snapshot reads" {
+    const Submit = struct {
+        fn proposal(control: *Runtime, task_id: u64, json: []const u8) !u64 {
+            const mcp = &control.mcp.?;
+            const input = mcp.installation_mailbox.input(control.io);
+            var draft: lifecycle.McpInstallationRequest = .{
+                .allocator = control.allocator,
+                .json = try control.allocator.dupe(u8, json),
+            };
+            const result = input.try_put_fn(input.context, task_id, 7, 1, draft);
+            if (result != .submitted) {
+                draft.deinit();
+                return error.InstallationSlotUnavailable;
+            }
+            try std.testing.expect(mcp.takeInstallation(control.io));
+            return result.submitted;
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.mcp = mcp_testing.init(control.allocator, productMcpPorts(
+        control.executor,
+        mcpCatalogPort(control.agent_runtime),
+        .{},
+        .{},
+        control.run_clock,
+    ), .{
+        .preparation = try mcp_configuration.prepare(control.allocator, null, true, false, .{}, .{
+            .max_servers = 8,
+            .max_tools_per_server = 32,
+            .max_namespace_bytes = 128,
+            .max_credential_locators = 64,
+            .max_runtime_secrets_per_server = 128,
+            .max_runtime_secret_bytes_per_server = 16 * 1024,
+        }),
+        .activation = null,
+        .activation_failed = false,
+        .management = null,
+        .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+        .host_capabilities = .{},
+    });
+
+    const learned = try Submit.proposal(&control, 3, "{\"name\":\"\\u006cate-credential\"}");
+    try std.testing.expectEqual(learned, control.pendingMcpInstallation().?.id);
+    try std.testing.expect(!control.containsKnownCredential("late-credential"));
+    control.learnProjectionCredential("late-credential");
+    try std.testing.expect(control.mcp.?.pendingInstallation() == null);
+    try std.testing.expectEqual(.rejected, (try control.startMcpInstallation(learned, null)).outcome);
+
+    _ = try Submit.proposal(&control, 3, "{\"name\":\"SECRET-KEY\"}");
+    try std.testing.expect(control.pendingMcpInstallation() == null);
+    _ = try Submit.proposal(&control, 99, "{}");
+    try std.testing.expect(control.pendingMcpInstallation() == null);
+    _ = try Submit.proposal(&control, 3, "{}");
+    try std.testing.expect(control.pendingMcpInstallation() != null);
+}
+
 test "empty MCP startup commits a proven manageable runtime" {
     const ManagementEffects = struct {
         fn journal(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
@@ -20822,7 +20361,16 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"0\",\"runtimeAlignment\":\"current\",\"redacted\":false,\"servers\":[]",
     ) != null);
     // The same Host-known credential predicate protects every write path.
-    control.view_credentials = &.{"SYNTHETIC-MCP-CREDENTIAL"};
+    const Credential = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            try callback(context, "SYNTHETIC-MCP-CREDENTIAL");
+        }
+    };
+    const credentials: account_contract.AccessTokenProjection = .{ .context = &control, .generation_fn = Credential.generation, .visit_fn = Credential.visit };
+    control.account_credentials = credentials;
     const leaking_http = try control.createMcpHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL" });
     try std.testing.expectEqual(.rejected, leaking_http.outcome);
     try std.testing.expect(leaking_http.server_id == null);
@@ -20839,16 +20387,16 @@ test "empty MCP startup commits a proven manageable runtime" {
     try std.testing.expectEqual(.rejected, (try control.createMcpStdioServer(0, .{ .display_name = "Bad", .command = "node", .arguments = &.{"SYNTHETIC-MCP-CREDENTIAL"} })).outcome);
     try std.testing.expectEqual(.rejected, (try control.createMcpOauthHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/mcp", .client = .{ .pre_registered = .{ .client_id = "SYNTHETIC-MCP-CREDENTIAL" } } })).outcome);
     try std.testing.expectEqual(@as(?u64, null), control.inspectMcpDesiredConfiguration().?.desired_generation);
-    control.view_credentials = null;
+    control.account_credentials = null;
     const created = try control.createMcpHttpServer(0, .{ .display_name = "Remote", .url = "https://mcp.example.test/rpc" });
     try std.testing.expectEqual(.saved, created.outcome);
     const created_id = created.server_id.?;
-    control.view_credentials = &.{"SYNTHETIC-MCP-CREDENTIAL"};
+    control.account_credentials = credentials;
     try std.testing.expectEqual(.rejected, try control.updateMcpHttpConnection(1, .{ .server_id = &created_id, .display_name = "Bad", .negotiation = "automatic", .timeout_ms = 30000, .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL", .auth_mode = .none }));
     try std.testing.expectEqual(.rejected, try control.updateMcpStdioConnection(1, .{ .server_id = &created_id, .display_name = "Bad", .negotiation = "automatic", .timeout_ms = 30000, .command = "node", .arguments = &.{"SYNTHETIC-MCP-CREDENTIAL"}, .auth_mode = .none }));
     try std.testing.expectEqual(.rejected, try control.updateMcpOauthHttpConnection(1, .{ .server_id = &created_id, .display_name = "Bad", .negotiation = "automatic", .timeout_ms = 30000, .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL", .client = .dynamic_registration }));
     try std.testing.expectEqualStrings("https://mcp.example.test/rpc", mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].transport.url.?);
-    control.view_credentials = null;
+    control.account_credentials = null;
     const inspection = control.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 1), inspection.desired_generation);
     try std.testing.expectEqual(
@@ -21829,6 +21377,41 @@ test "catalog capability refresh leaves Task execution frozen until explicit pre
     try std.testing.expect(!pinned.target.image_capabilities[0].supported);
 }
 
+test "Product view cold assembly uses the frozen writer through nested catalogs and management scopes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try installTestCommittedSkillAuthorities(&control);
+    const pinned = try testCommittedSkillCatalog(&control);
+    control.projection_bytes += pinned.projected_bytes;
+    const task = control.testTask(3).?;
+    task.runtime.attached().?.pinned_catalog = pinned;
+    try control.replaceTracked(&task.durable.title, "title SECRET-KEY", control.limits.max_task_title_bytes);
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"prepared\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"result\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    try control.replaceTracked(&task.durable.runs[0].?.tools[0].?.progress, "progress SECRET-KEY", control.limits.max_tool_field_bytes);
+    var output: [96 * 1024]u8 = undefined;
+    for ([_]@FieldType(ViewRequest, "management"){ .skills, .mcp, .schedules }) |management| {
+        control.invalidateProjectionSecurity();
+        const snapshot = try control.writeViewFixture(&output, .{
+            .task_id = 3,
+            .before_run_id = 7,
+            .management = management,
+            .search = true,
+            .search_query = "inspect",
+            .receipts = &.{.{ .task_id = 3, .operation_id = "fixture-operation" }},
+        });
+        var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer decoded.deinit();
+        const root = decoded.value.object;
+        try std.testing.expectEqualStrings(@tagName(management), root.get("management").?.object.get("kind").?.string);
+        try std.testing.expect(std.mem.count(u8, snapshot, "builtin.review") >= 3);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "title ***") != null);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "progress ***") != null);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    }
+}
+
 test "Product view cached delivery confirms versions without rebuilding stable blocks" {
     var control = try testRuntime();
     defer control.deinit();
@@ -21869,45 +21452,10 @@ test "Product view credential matcher preserves UTF-8 and clears its owned scan 
     try std.testing.expect(std.unicode.utf8ValidateSlice(bytes));
     try std.testing.expect(std.mem.indexOf(u8, bytes, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "caf** ***") != null);
-    try std.testing.expect(control.view_credentials == null);
+    try std.testing.expect(control.snapshot.preparation.credentials == null);
     var short: [1]u8 = undefined;
     try std.testing.expectError(error.SnapshotTooLarge, control.writeViewFixture(&short, .{}));
-    try std.testing.expect(control.view_credentials == null);
-}
-
-test "Product view frozen read survives business updates and rejects replaced revoked and shutdown handles" {
-    var control = try testRuntime();
-    defer control.deinit();
-    var expected_storage: [96 * 1024]u8 = undefined;
-    const expected = try control.writeViewFixture(&expected_storage, .{ .task_id = 3 });
-    var output: [96 * 1024]u8 = undefined;
-    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
-    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
-    try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 1, 1));
-    try control.writeSnapshotRange(read.id, &output, 0, 64);
-    var unrelated_storage: [96 * 1024]u8 = undefined;
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &unrelated_storage, 64, 64));
-    var first: [64]u8 = undefined;
-    @memcpy(&first, output[0..64]);
-    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.title, "new committed title", control.limits.max_task_title_bytes);
-    control.bumpRevision();
-    try control.writeSnapshotRange(read.id, &output, 0, 64);
-    try std.testing.expectEqualSlices(u8, &first, output[0..64]);
-    try std.testing.expectEqual(@as(usize, 64), control.view_read.produced);
-    var offset: usize = 64;
-    while (offset < read.bytes) : (offset += 64) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 64), read.bytes - offset));
-    try std.testing.expectEqualStrings(expected, output[0..read.bytes]);
-    const next = try control.writeSnapshot(&output, .{ .task_id = 3 });
-    try std.testing.expect(next.id != read.id);
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 1));
-    control.learnProjectionCredential("newly-learned-secret");
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 1));
-    const last = try control.writeSnapshot(&output, .{});
-    control.beginShutdown();
-    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(last.id, &output, 0, 1));
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.skeleton.len);
-    try std.testing.expectEqual(@as(usize, 0), control.view_read.text.items.len);
+    try std.testing.expect(control.snapshot.preparation.credentials == null);
 }
 
 test "Product view duplicate credential ownership preserves reads while exact new values revoke and wake" {
@@ -21989,20 +21537,20 @@ test "Product view preparation owns frozen tools and cannot clean a changed cach
     var output: [96 * 1024]u8 = undefined;
     var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
-    try std.testing.expectEqual(@as(usize, 1), control.view_preparation.tools.items.len);
-    try std.testing.expect(control.view_preparation.credentials != null);
+    try std.testing.expectEqual(@as(usize, 1), control.snapshot.preparation.tools.items.len);
+    try std.testing.expect(control.snapshot.preparation.credentials != null);
     try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 0, 1));
     const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
     try control.replaceTracked(&tool.content, "new result", control.limits.max_tool_field_bytes);
     control.bumpRevision();
     while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
-    try std.testing.expect(control.view_preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+    try std.testing.expect(control.snapshot.preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
     var offset: usize = 0;
     while (offset < read.bytes) : (offset += 31) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 31), read.bytes - offset));
     try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") != null);
     try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "new result") == null);
-    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 3 }, .taskPage)) == null);
+    try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .task_id = 3 }, .taskPage)) == null);
     const current = try control.writeViewFixture(&output, .{ .task_id = 3 });
     try std.testing.expect(std.mem.indexOf(u8, current, "new result") != null);
     control.encoded_views.invalidateAll();
@@ -22010,8 +21558,8 @@ test "Product view preparation owns frozen tools and cannot clean a changed cach
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
     control.learnProjectionCredential("new preparation boundary");
     try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
-    try std.testing.expect(control.view_preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+    try std.testing.expect(control.snapshot.preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
 }
 
 test "Product view failed formatter stage releases partially prepared source and credentials" {
@@ -22030,16 +21578,16 @@ test "Product view failed formatter stage releases partially prepared source and
     var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     read = try control.continueSnapshot(read.id, &output);
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
-    try std.testing.expect(control.view_preparation.tools.items[0].state.stage == .bash_input);
+    try std.testing.expect(control.snapshot.preparation.tools.items[0].state.stage == .bash_input);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const original_allocator = control.allocator;
     control.allocator = failing.allocator();
     defer control.allocator = original_allocator;
     try std.testing.expectError(error.SnapshotTooLarge, control.continueSnapshot(read.id, &output));
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
-    try std.testing.expect(control.view_preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+    try std.testing.expectEqual(@as(u64, 0), control.snapshot.plan.id);
+    try std.testing.expect(control.snapshot.preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
 }
 
 test "Account image token protects Task views between Runs and rotation revokes reads" {
@@ -22088,7 +21636,7 @@ test "Account image token protects Task views between Runs and rotation revokes 
     var raw = "account-image-token".*;
     try std.testing.expect(control.redactWithKnownCredentialsNoFail(&raw));
     var writer = std.Io.Writer.fixed(&output);
-    try control.projectedJsonValueWithKnownCredentials(&writer, "account-image-token");
+    try control.liveViewText().writeJson(&writer, "account-image-token");
     try std.testing.expectEqualStrings("\"***\"", writer.buffered());
     account.token = "rotated-account-image-token";
     account.epoch += 1;
@@ -22180,17 +21728,17 @@ test "Product view cached large body moves into frozen read without a body-sized
     while (first_offset < first_read.bytes) {
         const length = @min(projection_step_bytes, first_read.bytes - first_offset);
         try control.writeSnapshotRange(first_read.id, output, first_offset, length);
-        if (control.view_blocks[task_slot]) |block| if (block.encoding) |candidate| {
+        if (control.snapshot.blocks[task_slot]) |block| if (block.encoding) |candidate| {
             if (cache_candidate) |pointer| try std.testing.expectEqual(pointer, candidate.ptr) else cache_candidate = candidate.ptr;
-            try std.testing.expect(control.encoded_views.get(Runtime.viewKey(request, .taskPage)) == null);
+            try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(request, .taskPage)) == null);
         };
         first_offset += length;
     }
     try std.testing.expect(cache_candidate != null);
-    try std.testing.expectEqual(cache_candidate.?, control.encoded_views.get(Runtime.viewKey(request, .taskPage)).?.bytes.ptr);
+    try std.testing.expectEqual(cache_candidate.?, control.encoded_views.get(view_read.Read.keyFor(request, .taskPage)).?.bytes.ptr);
     const expected = try std.testing.allocator.dupe(u8, output[0..first_read.bytes]);
     defer std.testing.allocator.free(expected);
-    const key = Runtime.viewKey(request, .taskPage);
+    const key = view_read.Read.keyFor(request, .taskPage);
     const version = control.encoded_views.get(key).?.version;
     const pointer = control.encoded_views.get(key).?.bytes.ptr;
     try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 4 * 1024 * 1024);
@@ -22201,8 +21749,8 @@ test "Product view cached large body moves into frozen read without a body-sized
         var read = try control.writeSnapshot(output, request);
         while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
         try std.testing.expect(read.scratch_bytes < projection_step_bytes);
-        try std.testing.expect(control.view_read.skeleton.len < projection_step_bytes);
-        const cached = control.view_cached_blocks[@intFromEnum(view_cache.Kind.taskPage)].?;
+        try std.testing.expect(control.snapshot.plan.skeleton.len < projection_step_bytes);
+        const cached = control.snapshot.cached_blocks[@intFromEnum(view_cache.Kind.taskPage)].?;
         try std.testing.expectEqual(pointer, cached.child.skeleton.ptr);
         try std.testing.expectEqual(version, cached.version);
         try std.testing.expect(control.encoded_views.get(key) == null);
@@ -22237,7 +21785,7 @@ test "Product view cached ownership returns through allocation failures and secu
         var output: [96 * 1024]u8 = undefined;
         const request: ViewRequest = .{};
         _ = try control.writeViewFixture(&output, request);
-        const key = Runtime.viewKey(request, .context);
+        const key = view_read.Read.keyFor(request, .context);
         const pointer = control.encoded_views.get(key).?.bytes.ptr;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         control.allocator = failing.allocator();
@@ -22253,7 +21801,7 @@ test "Product view cached ownership returns through allocation failures and secu
         control.learnProjectionCredential("new-cache-transfer-secret");
         try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 16));
         try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
-        for (control.view_cached_blocks) |slot| try std.testing.expect(slot == null);
+        for (control.snapshot.cached_blocks) |slot| try std.testing.expect(slot == null);
         if (succeeded) break;
     }
     try std.testing.expect(succeeded);
@@ -22276,7 +21824,7 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
         } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
         control.cancelSnapshot();
         control.allocator = std.testing.allocator;
-        for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+        for (control.snapshot.blocks) |slot| try std.testing.expect(slot == null);
         // Any committed entry must be a complete independently valid JSON value;
         // failed allocations cannot expose an incompletely filled candidate.
         for (control.encoded_views.entries) |slot| if (slot) |entry| if (entry.bytes.len != 0) {
@@ -22300,12 +21848,12 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
         var read = try control.writeSnapshot(output, .{ .task_id = 1 });
         while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
         var offset: usize = 0;
-        while (control.view_blocks[task_slot].?.encoding == null) {
+        while (control.snapshot.blocks[task_slot].?.encoding == null) {
             const length = @min(projection_step_bytes, read.bytes - offset);
             try control.writeSnapshotRange(read.id, output, offset, length);
             offset += length;
         }
-        try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
+        try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .task_id = 1 }, .taskPage)) == null);
         if (invalidate) {
             control.encoded_views.invalidate(.taskPage);
             while (offset < read.bytes) {
@@ -22316,8 +21864,8 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
             const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
             defer parsed.deinit();
         } else control.cancelSnapshot();
-        try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
-        for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+        try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .task_id = 1 }, .taskPage)) == null);
+        for (control.snapshot.blocks) |slot| try std.testing.expect(slot == null);
     }
 }
 
@@ -22414,7 +21962,7 @@ test "trusted delivery and image metadata survive full Tool and display capacity
         _ = task_test_state.recordEventProjectionFailure(run);
         var snapshot: [96 * 1024]u8 = undefined;
         _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id });
-        const key = Runtime.viewKey(.{ .task_id = task.durable.id }, .taskPage);
+        const key = view_read.Read.keyFor(.{ .task_id = task.durable.id }, .taskPage);
         try std.testing.expect(control.encoded_views.get(key) != null);
         const commits = history.commits;
         const revision = control.revision;
@@ -23073,8 +22621,8 @@ test "Product view bounded Host search matches the independent Renderer fixture 
     var writer = std.Io.Writer.fixed(&output);
     try std.json.Stringify.value(parsed.value.object.get("searchIndex").?, .{}, &writer);
     try std.testing.expectEqualStrings(expected, writer.buffered());
-    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "inspect" }, .searchIndex)) != null);
-    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "another" }, .searchIndex)) == null);
+    try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .search = true, .search_query = "inspect" }, .searchIndex)) != null);
+    try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .search = true, .search_query = "another" }, .searchIndex)) == null);
 }
 
 test "Product view search continues across unrelated Product revisions and expires on content edits" {
