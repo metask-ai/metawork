@@ -39,7 +39,7 @@ Windows 窗口按钮执行前读取 SDK 当前窗口事实：connect/refresh 要
 
 ## 2. ProductDelivery 与 Snapshot transport
 
-ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、实时上下文、当前 Task、有界历史和已挂载管理视图。范围是闭合的 typed 产品请求，不允许任意字段选择、raw CoreEvent、通用 JSON patch 或第二套 transport。工作台摘要不携带所有 Task 的 Run、Tool 和正文；读取当前 Task 不处理其他 Task 的历史。历史按稳定 Run identity 有界读取，范围和页大小不得缩小产品实际可访问容量。
+ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、实时上下文、当前 Task、有界历史和已挂载管理视图。范围是闭合的 typed 产品请求，不允许任意字段选择、raw CoreEvent、通用 JSON patch 或第二套 transport。产品摘要不携带所有 Task 的 Run、Tool 和正文；读取当前 Task 不处理其他 Task 的历史。历史按稳定 Run identity 有界读取，范围和页大小不得缩小产品实际可访问容量。
 
 实时上下文必须覆盖当前消费者所需的 Account、capabilities、permissions、Models、updates、new-task admission 以及相关 command CAS 事实。Task Composer、TaskInformation、模型选择、Slash 和附件能力在 Task 页面保持实时；Models、Skills、MCP 与 Schedule 的异步管理结果在对应页面挂载期间继续更新，不能仅在进入页面时读取一次。
 

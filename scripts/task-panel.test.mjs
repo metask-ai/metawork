@@ -8957,7 +8957,7 @@ test("bootstrap retry retains the root failure screen until fresh data and ping 
     },
   );
   await screen.findByRole("heading", {
-    name: "Workbench connection unavailable",
+    name: "Connection unavailable",
   });
   fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
   await waitFor(() => assert.ok(release));

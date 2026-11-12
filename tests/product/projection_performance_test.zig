@@ -181,8 +181,8 @@ fn measureFixture(comptime fixture: Fixture) !void {
                     const elapsed = step_start.durationTo(end).nanoseconds;
                     duration.* = @max(duration.*, elapsed);
                     worst.observe("chunk", elapsed, step_thread);
-                    encode_times[sample_index] = @max(encode_times[sample_index], runtime.view_step_timing.encode_ns);
-                    cache_times[sample_index] = @max(cache_times[sample_index], runtime.view_step_timing.cache_copy_ns);
+                    encode_times[sample_index] = @max(encode_times[sample_index], control.TestSupport.snapshotStepTiming(runtime).encode_ns);
+                    cache_times[sample_index] = @max(cache_times[sample_index], control.TestSupport.snapshotStepTiming(runtime).cache_copy_ns);
                     transport_times[sample_index] = @max(transport_times[sample_index], transport_start.durationTo(end).nanoseconds);
                 }
                 // Outside the timed steps: prove legal JSON exercised the real
