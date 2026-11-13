@@ -1,3 +1,5 @@
+* text=auto eol=lf
+
 /src/product/control/persistence/migrations/*.sql text eol=lf
 # Office locks and resource bytes must survive checkout settings unchanged.
 # The resource producer explicitly emits CRLF for cmd and LF for sh.
