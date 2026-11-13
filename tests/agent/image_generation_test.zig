@@ -212,7 +212,7 @@ fn successful(mode: []const u8, expected: usize) !void {
     defer std.testing.allocator.free(trace_path);
     var fixture = try Fixture.start(trace_path, mode);
     defer fixture.deinit();
-    var engine: @import("app_http_transport").Engine = undefined;
+    var engine: @import("metawork_http_transport").Engine = undefined;
     engine.init(std.testing.allocator, std.testing.io);
     defer engine.deinit();
     var network: backend.Backend = .{ .http = &engine };
@@ -257,7 +257,7 @@ const Harness = struct {
     tmp: std.testing.TmpDir,
     root: [:0]u8,
     fixture: Fixture,
-    engine: @import("app_http_transport").Engine,
+    engine: @import("metawork_http_transport").Engine,
     network: backend.Backend,
     runtime: *agent.Runtime,
     sink: Sink,
@@ -710,7 +710,7 @@ test "GenerateImage captured output root refuses an ancestor retargeted to a jun
     defer std.testing.allocator.free(trace_path);
     var fixture = try Fixture.start(trace_path, "output-root-junction");
     defer fixture.deinit();
-    var engine: @import("app_http_transport").Engine = undefined;
+    var engine: @import("metawork_http_transport").Engine = undefined;
     engine.init(std.testing.allocator, std.testing.io);
     defer engine.deinit();
     var network: backend.Backend = .{ .http = &engine };

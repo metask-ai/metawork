@@ -1,11 +1,11 @@
 const std = @import("std");
-const http = @import("app_http_transport");
+const http = @import("metawork_http_transport");
 const oauth = @import("account_oauth");
 const account_metask = @import("metask_client");
 const metask_transport = @import("metask_transport");
 const models_metask = @import("product_models_metask");
 
-/// Application-owned HTTP execution shared by Account's narrow transport port
+/// Foundation HTTP execution shared by Account's narrow transport port
 /// and the Models Metask provider transport leaf. Account owns OAuth and
 /// identity request policy; Models owns catalog request policy. This adapter
 /// only maps their request kinds to network effects.

@@ -2377,11 +2377,11 @@ test("Product Account owns Metask protocol without a concrete HTTP client", () =
     .map(read)
     .join("\n");
   const adapter = read("src/app/metask_http_transport.zig");
-  const http = read("src/app/http_transport.zig");
+  const http = read("src/foundation/http_transport.zig");
   const app = read("src/app.zig");
 
   assert.doesNotMatch(accountSource, /std\.http\.Client|StdHttpTransport/);
-  assert.match(adapter, /@import\("app_http_transport"\)/);
+  assert.match(adapter, /@import\("metawork_http_transport"\)/);
   assert.match(http, /std\.http\.Client/);
   assert.doesNotMatch(adapter, /std\.http\.Client/);
   assert.match(adapter, /pub const Adapter = struct/);

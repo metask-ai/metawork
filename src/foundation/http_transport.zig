@@ -1,7 +1,7 @@
-//! Application-owned HTTP execution. Business owners retain retry, response and
+//! Foundation-owned HTTP execution. Business owners retain retry, response and
 //! shutdown policy. A returned result always means all borrowed inputs are idle.
 const std = @import("std");
-const memory = @import("app_http_memory");
+const memory = @import("metawork_http_memory");
 const idle_probe = @import("http_idle_probe.zig");
 const Io = std.Io;
 const Client = std.http.Client;

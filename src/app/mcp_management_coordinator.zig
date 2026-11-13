@@ -4,7 +4,7 @@
 //! connection-test Runtimes around the Product Control transaction seams.
 
 const std = @import("std");
-const http_execution = @import("app_http_transport");
+const http_execution = @import("metawork_http_transport");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const control_ports = @import("metawork_product_control_ports");

@@ -1,6 +1,6 @@
 //! Application-owned update policy over the shared HTTP execution layer.
 const std = @import("std");
-const http = @import("app_http_transport");
+const http = @import("metawork_http_transport");
 const update = @import("metawork_product_update");
 
 pub const Cancellation = struct {

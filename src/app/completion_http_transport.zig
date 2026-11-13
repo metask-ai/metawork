@@ -1,6 +1,6 @@
 //! Application-owned Completion and streamed download HTTP adapter.
 const std = @import("std");
-const http = @import("app_http_transport");
+const http = @import("metawork_http_transport");
 const agent = @import("metawork_agent");
 
 pub const Backend = struct {

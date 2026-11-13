@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var trace: @import("permission_review_network_trace").Trace = undefined;
     try trace.init(init.io);
     defer trace.deinit();
-    var engine: @import("app_http_transport").Engine = undefined;
+    var engine: @import("metawork_http_transport").Engine = undefined;
     engine.init(init.gpa, trace.io());
     defer engine.deinit();
     var backend: http.Backend = .{ .http = &engine };
