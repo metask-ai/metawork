@@ -969,6 +969,7 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
     .map(([name]) => name)
     .sort();
   assert.deepEqual(members, [
+    "metawork_http_contract",
     "metawork_http_memory",
     "metawork_http_transport",
   ]);
@@ -1002,7 +1003,12 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
     for (const [, name] of read(file).matchAll(/@import\("([^"]+)"\)/g))
       assert.ok(
         name.endsWith(".zig") ||
-          ["std", "builtin", "metawork_http_memory"].includes(name),
+          [
+            "std",
+            "builtin",
+            "metawork_http_memory",
+            "metawork_http_contract",
+          ].includes(name),
         `${file} imports unexpected module ${name}`,
       );
 });
@@ -1027,7 +1033,7 @@ test("the Foundation import rule rejects owner modules and escaping relative imp
   assert.deepEqual(
     foundationImportViolations(
       member,
-      'const std = @import("std");\nconst memory = @import("metawork_http_memory");\nconst probe = @import("http_idle_probe.zig");',
+      'const std = @import("std");\nconst memory = @import("metawork_http_contract");\nconst probe = @import("http_idle_probe.zig");',
     ),
     [],
   );

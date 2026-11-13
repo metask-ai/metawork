@@ -1610,12 +1610,18 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const metawork_http_contract = b.createModule(.{
+        .root_source_file = b.path("src/foundation/http_contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const metawork_http_transport = b.createModule(.{
         .root_source_file = b.path("src/foundation/http_transport.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     metawork_http_transport.addImport("metawork_http_memory", metawork_http_memory);
+    metawork_http_transport.addImport("metawork_http_contract", metawork_http_contract);
     oauth_loopback_transport.addImport("app_select_start", app_select_start);
     oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
     const metask_transport = b.createModule(.{
