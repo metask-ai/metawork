@@ -516,7 +516,8 @@ fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: 
         run.file_changes_known_loss = true;
         run.file_change_observation = .incomplete;
     }
-    const decision = policy.classifyAgentTerminal(result);
+    var decision = policy.classifyAgentTerminal(result);
+    decision.cause = policy.productCancelCause(run, decision.cause);
     var safe_diagnostic: [1024]u8 = undefined;
     var diagnostic = result.diagnostic();
     var truncated = result.diagnostic_truncated;

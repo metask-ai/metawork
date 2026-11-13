@@ -4065,7 +4065,7 @@ pub const Runtime = struct {
         const revision = try self.task_runtime.beginApprovalChange(task_id, expected_binding_epoch, expected_revision, target, self.taskRuntimeRecoveryAdmissionEffects());
         const change = self.task_runtime.approvalChangeRun(task_id) orelse return revision;
         if (change.cancel_run) |run_id| {
-            _ = self.task_runtime.cancelRun(task_id, run_id, self.taskRuntimeOperationEffects()) catch {
+            _ = self.task_runtime.cancelRun(task_id, run_id, .approval_mode_change, self.taskRuntimeOperationEffects()) catch {
                 self.task_runtime.rejectApprovalChange(self.approvalEffects(), task_id, .cancelled, false);
                 self.bumpRevision();
                 return revision;
@@ -4868,6 +4868,7 @@ pub const Runtime = struct {
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
+            .user_cancel,
             self.taskRuntimeOperationEffects(),
         )) {
             self.commitTaskStateNoFail();

@@ -121,6 +121,7 @@ pub const ActiveOperation = task_attachment.ActiveOperation;
 /// Task-owned durable product cause.
 pub const RunCause = enum {
     user_cancel,
+    approval_mode_change,
     timeout,
     session_close,
     app_shutdown,
@@ -387,6 +388,9 @@ pub const PendingInterruption = enum(u8) {
     timeout,
     session_close,
     app_shutdown,
+    /// A Run stopped because an approval change crossed the Core profile
+    /// boundary. Core still observes a user cancellation.
+    approval_mode_change,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.
@@ -1422,6 +1426,7 @@ pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservati
         => true,
         .resource_limit => terminal.phase == .stopped,
         .user_cancel,
+        .approval_mode_change,
         .timeout,
         .session_close,
         .app_shutdown,

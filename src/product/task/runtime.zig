@@ -3555,7 +3555,7 @@ pub const Runtime = struct {
     pub fn stopOperation(self: *Runtime, task_id: u64, effects: OperationEffects) ControlError!void {
         const task = self.find(task_id) orelse return error.UnknownTask;
         switch (task.runtime.active_operation) {
-            .run => |id| _ = try self.cancelRun(task_id, id, effects),
+            .run => |id| _ = try self.cancelRun(task_id, id, .user_cancel, effects),
             .compact => |id| _ = try self.cancelCompact(task_id, id, .user_cancel, effects),
             .restore => self.cancelInputPreparation(task_id, effects),
             .none => {},
@@ -3592,6 +3592,7 @@ pub const Runtime = struct {
         self: *Runtime,
         task_id: u64,
         run_id: u64,
+        origin: task_state.PendingInterruption,
         effects: OperationEffects,
     ) ControlError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
@@ -3610,7 +3611,7 @@ pub const Runtime = struct {
         );
         try ensureCancellationHistory(self.allocator, task, record);
         var identity_collision = false;
-        const dispatch = requestRunTermination(run_record, .user_cancel);
+        const dispatch = requestRunTermination(run_record, origin);
         if (effects.executor.cancel(run_record)) {
             task.runtime.permission_review.invalidate();
             run_record.terminal_observed = true;
@@ -9941,9 +9942,8 @@ fn acknowledgeLatestCompletion(task: *task_state.Task) void {
 
 fn requestRunTermination(
     run: *task_state.RunRecord,
-    interruption: agent.ExternalInterruption,
+    pending: task_state.PendingInterruption,
 ) task_state.RunTerminationDispatch {
-    const pending = task_policy.pendingInterruption(interruption);
     _ = run.pending_termination.cmpxchgStrong(
         .none,
         pending,

@@ -204,20 +204,25 @@ pub fn pendingInterruption(
 pub fn pendingTerminationSignal(
     run: *const task_state.RunRecord,
 ) agent.TerminationSignal {
-    return .{ .interrupted = switch (run.pending_termination.load(.acquire)) {
-        .none => unreachable,
-        .user_cancel => .user_cancel,
-        .timeout => .timeout,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-    } };
+    return .{
+        .interrupted = switch (run.pending_termination.load(.acquire)) {
+            .none => unreachable,
+            // Core has no approval-change interruption; it sees a cancellation.
+            .user_cancel, .approval_mode_change => .user_cancel,
+            .timeout => .timeout,
+            .session_close => .session_close,
+            .app_shutdown => .app_shutdown,
+        },
+    };
 }
 
 pub fn pendingExternalInterruption(
     compact: *const task_state.CompactRecord,
 ) agent.ExternalInterruption {
     return switch (compact.pending_interruption.load(.acquire)) {
-        .none => unreachable,
+        // An approval change never interrupts a Compact: neither mutation is
+        // admitted while the other is running.
+        .none, .approval_mode_change => unreachable,
         .user_cancel => .user_cancel,
         .timeout => .timeout,
         .session_close => .session_close,
@@ -252,6 +257,19 @@ pub fn phaseForOutcome(outcome: task_state.RunOutcome) task_state.RunPhase {
         .cancelled => .cancelled,
         .interrupted => .interrupted,
         .failed, .dependency_contract_failure => .failed,
+    };
+}
+
+/// Keeps the most specific stable reason Product knows for a cancellation.
+/// Core reports every Product stop as a user cancellation.
+pub fn productCancelCause(
+    run: *const task_state.RunRecord,
+    cause: ?task_state.RunCause,
+) ?task_state.RunCause {
+    if (cause != .user_cancel) return cause;
+    return switch (run.pending_termination.load(.acquire)) {
+        .approval_mode_change => .approval_mode_change,
+        else => cause,
     };
 }
 

@@ -11219,6 +11219,68 @@ test "an approval mode change acts on its declared impact in every Run state" {
     }
 }
 
+test "a stop for an approval mode change is distinguishable from a user stop in history" {
+    const Stop = enum { user, approval_mode_change };
+    for (std.enums.values(Stop)) |stop| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var history: TaskPersistenceProbe = .{ .storage = bytes };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.testTask(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        const epoch = task.durable.binding_epoch;
+        switch (stop) {
+            .user => try scenario.control.cancel(scenario.task_id, source.id),
+            .approval_mode_change => _ = try scenario.control.setApprovalMode(scenario.task_id, .full_access, epoch, task.durable.approval_revision),
+        }
+        try settleApprovalChange(scenario);
+        fake_core.releaseControlled();
+        try settleApprovalScenario(scenario);
+        const terminal = task_state.productTerminalFacts(source).?;
+        try std.testing.expectEqual(task_state.RunPhase.cancelled, terminal.phase);
+        try std.testing.expectEqual(task_state.RunOutcome.cancelled, terminal.outcome);
+        const expected: task_state.RunCause = switch (stop) {
+            .user => .user_cancel,
+            .approval_mode_change => .approval_mode_change,
+        };
+        try std.testing.expectEqual(expected, terminal.cause.?);
+        // The reason survives a restart: history keeps the Product cause, not
+        // the cancellation Core observed.
+        var canonical = try product_task.history.decode(std.testing.allocator, bytes[0..history.len], .{
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 8,
+            .max_compacts_per_task = 8,
+            .max_tools_per_run = 8,
+            .max_file_changes_per_run = 8,
+            .max_commentary_segments_per_run = 64,
+            .max_file_refs_per_tool = 8,
+            .max_ui_history_per_task = 8,
+            .max_workspace_bytes = 4096,
+            .max_task_title_bytes = 512,
+            .max_user_message_bytes = 4096,
+            .max_assistant_message_bytes = 4096,
+            .max_tool_field_bytes = 4096,
+            .max_file_ref_field_bytes = 4096,
+            .max_execution_model_bytes = 512,
+            .max_terminal_diagnostic_bytes = 512,
+        });
+        defer canonical.deinit();
+        try std.testing.expectEqualStrings(@tagName(expected), canonical.value.tasks[0].runs[0].cause.?);
+    }
+}
+
 test "an approval mode change across the full access boundary keeps queued input for an explicit resend" {
     for ([_]bool{ true, false }) |resend| {
         var tmp = std.testing.tmpDir(.{});

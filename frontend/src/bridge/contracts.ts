@@ -684,6 +684,7 @@ export type RunInputView =
     };
 export const runCauses = [
   "user_cancel",
+  "approval_mode_change",
   "timeout",
   "session_close",
   "app_shutdown",
