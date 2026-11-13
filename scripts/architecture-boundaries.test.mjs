@@ -283,7 +283,20 @@ test("official update checks require distribution opt-in and stay outside Agent 
   );
   assertNoImports(
     ["src/product/update.zig"],
-    ["native_sdk", "metawork_app", "metawork_agent", "metask_transport"],
+    [
+      "native_sdk",
+      "metawork_app",
+      "metawork_agent",
+      "metask_transport",
+      // Update publishes the engine's returned facts, so it consumes the
+      // Foundation contract and never the engine that performs requests.
+      "metawork_http_transport",
+      "metawork_http_memory",
+    ],
+  );
+  assert.match(
+    read("src/product/update.zig"),
+    /@import\("metawork_http_contract"\)/,
   );
   assert.doesNotMatch(
     read("src/product/update.zig"),
