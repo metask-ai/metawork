@@ -386,22 +386,14 @@ pub const Adapter = struct {
         var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const canonical = try canonicalizeDirectory(self, root, &canonical_storage);
         if (!std.mem.eql(u8, canonical, root)) return error.InvalidPath;
-
-        var path = canonical_storage[0..canonical.len];
-        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
-        if (builtin.os.tag == .windows) {
-            if (std.mem.startsWith(u8, path, "//?/UNC/")) {
-                path = path[6..];
-                path[0] = '/';
-            } else if (std.mem.startsWith(u8, path, "//?/")) path = path[4..];
-        }
         var url_storage: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
-        var url = std.Io.Writer.fixed(&url_storage);
-        try url.writeAll(if (std.mem.startsWith(u8, path, "//")) "file:" else "file://");
-        if (path[0] != '/') try url.writeByte('/');
-        try (std.Uri.Component{ .raw = path }).formatPath(&url);
+        const url = try directoryFileUrl(
+            if (builtin.os.tag == .windows) .windows else .posix,
+            canonical,
+            &url_storage,
+        );
         const services_value = self.platform_services orelse return error.RuntimeUnavailable;
-        try services_value.openExternalUrl(url.buffered());
+        try services_value.openExternalUrl(url);
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) !void {
@@ -637,6 +629,59 @@ pub const Adapter = struct {
     }
 };
 
+const DirectoryUrlStyle = enum { posix, windows };
+
+/// Builds the `file:` URL that the system opener receives for a canonical
+/// directory. Windows decodes percent escapes in file URLs with the ANSI code
+/// page, so non-ASCII UTF-8 stays literal there (the SDK widens it to UTF-16)
+/// and only ASCII outside the RFC 3986 path set is escaped.
+fn directoryFileUrl(style: DirectoryUrlStyle, canonical: []const u8, output: []u8) error{ InvalidPath, WriteFailed }![]const u8 {
+    const Path = struct {
+        fn separator(url_style: DirectoryUrlStyle, byte: u8) bool {
+            return byte == '/' or (url_style == .windows and byte == '\\');
+        }
+        fn prefix(value: []const u8, comptime expected: []const u8) bool {
+            if (value.len < expected.len) return false;
+            for (expected, value[0..expected.len]) |want, byte| {
+                if (if (want == '/') !separator(.windows, byte) else want != byte) return false;
+            }
+            return true;
+        }
+        fn literal(byte: u8) bool {
+            return byte >= 0x80 or std.ascii.isAlphanumeric(byte) or switch (byte) {
+                '-', '.', '_', '~', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/' => true,
+                else => false,
+            };
+        }
+    };
+    var path = canonical;
+    var authority = false;
+    if (style == .windows) {
+        if (Path.prefix(path, "//?/UNC/")) {
+            path = path[8..];
+            authority = true;
+        } else if (Path.prefix(path, "//?/")) path = path[4..];
+    }
+    if (path.len == 0) return error.InvalidPath;
+    var url = std.Io.Writer.fixed(output);
+    if (authority) {
+        try url.writeAll("file://");
+    } else if (path.len >= 2 and Path.separator(style, path[0]) and Path.separator(style, path[1])) {
+        try url.writeAll("file:");
+    } else {
+        try url.writeAll("file://");
+        if (!Path.separator(style, path[0])) try url.writeByte('/');
+    }
+    switch (style) {
+        .posix => try (std.Uri.Component{ .raw = path }).formatPath(&url),
+        .windows => for (path) |raw| {
+            const byte = if (raw == '\\') '/' else raw;
+            if (Path.literal(byte)) try url.writeByte(byte) else try url.print("%{X:0>2}", .{byte});
+        },
+    }
+    return url.buffered();
+}
+
 test "main-loop wake startup rejects a missing service before publication" {
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
@@ -788,6 +833,30 @@ const ExternalUrlTest = struct {
     }
 };
 
+test "directory file URLs keep non-ASCII literal on Windows and escape unsafe ASCII" {
+    var storage: [256]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "C:\\Users\\x\\Desktop\\杂", "file:///C:/Users/x/Desktop/杂" },
+        .{ "\\\\?\\C:\\Users\\x\\Desktop\\杂", "file:///C:/Users/x/Desktop/杂" },
+        .{ "C:\\a b#c%d?e\x01\x7f[]", "file:///C:/a%20b%23c%25d%3Fe%01%7F%5B%5D" },
+        .{ "C:\\it's (1)+;=,@~", "file:///C:/it's%20(1)+;=,@~" },
+        .{ "\\\\?\\UNC\\server\\share\\杂 #", "file://server/share/杂%20%23" },
+        .{ "\\\\server\\share\\杂", "file://server/share/杂" },
+    }) |case| try std.testing.expectEqualStrings(case[1], try directoryFileUrl(.windows, case[0], &storage));
+    try std.testing.expectError(error.InvalidPath, directoryFileUrl(.windows, "\\\\?\\", &storage));
+    try std.testing.expectError(error.WriteFailed, directoryFileUrl(.windows, "C:\\杂", storage[0..10]));
+}
+
+test "directory file URLs keep the POSIX UTF-8 percent encoding" {
+    var storage: [256]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "/Users/x/Desktop/杂", "file:///Users/x/Desktop/%E6%9D%82" },
+        .{ "/Users/x/project 空格 #%?", "file:///Users/x/project%20%E7%A9%BA%E6%A0%BC%20%23%25%3F" },
+        .{ "/Users/x/a\\b", "file:///Users/x/a%5Cb" },
+        .{ "//network/share", "file://network/share" },
+    }) |case| try std.testing.expectEqualStrings(case[1], try directoryFileUrl(.posix, case[0], &storage));
+}
+
 test "SDK consumption project directory opening uses an encoded local URL and preserves navigation policy" {
     const Spy = struct {
         var calls: usize = 0;
@@ -797,7 +866,8 @@ test "SDK consumption project directory opening uses an encoded local URL and pr
             const uri = try std.Uri.parse(value);
             try std.testing.expectEqualStrings("file", uri.scheme);
             try std.testing.expect(uri.user == null and uri.password == null and uri.query == null and uri.fragment == null);
-            try std.testing.expect(std.mem.endsWith(u8, value, "/project%20%E7%A9%BA%E6%A0%BC%20%23%25"));
+            const leaf = if (builtin.os.tag == .windows) "/project%20空格%20%23%25" else "/project%20%E7%A9%BA%E6%A0%BC%20%23%25";
+            try std.testing.expect(std.mem.endsWith(u8, value, leaf));
             if (fail) return error.InjectedOpenFailure;
         }
     };
