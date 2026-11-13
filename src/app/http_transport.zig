@@ -103,6 +103,94 @@ pub fn Result(comptime T: type) type {
     };
 }
 
+pub const ProbeOutcome = idle_probe.Outcome;
+
+/// Durations in buckets bounded above by `bounds_ms`, with one overflow bucket.
+pub const Histogram = struct {
+    pub const bounds_ms = [_]i64{ 50, 100, 250, 500, 1000, 2000, 5000 };
+    buckets: [bounds_ms.len + 1]u64 = @splat(0),
+
+    fn record(self: *Histogram, milliseconds: i64) void {
+        for (bounds_ms, 0..) |bound, index| if (milliseconds <= bound) {
+            self.buckets[index] += 1;
+            return;
+        };
+        self.buckets[bounds_ms.len] += 1;
+    }
+
+    fn add(self: *Histogram, other: *const Histogram) void {
+        for (&self.buckets, other.buckets) |*bucket, value| bucket.* += value;
+    }
+
+    pub fn count(self: *const Histogram) u64 {
+        var total: u64 = 0;
+        for (self.buckets) |value| total += value;
+        return total;
+    }
+};
+
+/// Counts and bucketed durations only: never URLs, hosts, addresses,
+/// headers, bodies, credentials or isolation identities.
+pub const ConsumerStats = struct {
+    /// Requests opened.
+    requests: u64 = 0,
+    /// Requests whose first attempt used a pooled connection.
+    reused: u64 = 0,
+    /// Connections established, including those for retries.
+    new_connections: u64 = 0,
+    /// Pooled-connection attempts that failed before a response head.
+    reuse_failed: u64 = 0,
+    retried: u64 = 0,
+    /// Idle connections closed for their idle limit or lifetime.
+    expired: u64 = 0,
+    /// Idle connections closed for slot reuse or the per-origin limit.
+    evicted: u64 = 0,
+    probe: std.EnumArray(ProbeOutcome, u64) = .initFill(0),
+    /// DNS, TCP and TLS for each established connection.
+    connect_ms: Histogram = .{},
+    /// From opening the request to its response head.
+    head_ms_new: Histogram = .{},
+    head_ms_reused: Histogram = .{},
+
+    fn add(self: *ConsumerStats, other: *const ConsumerStats) void {
+        inline for (.{ "requests", "reused", "new_connections", "reuse_failed", "retried", "expired", "evicted" }) |name|
+            @field(self, name) += @field(other, name);
+        for (std.enums.values(ProbeOutcome)) |outcome| self.probe.getPtr(outcome).* += other.probe.get(outcome);
+        self.connect_ms.add(&other.connect_ms);
+        self.head_ms_new.add(&other.head_ms_new);
+        self.head_ms_reused.add(&other.head_ms_reused);
+    }
+};
+
+pub const Stats = struct {
+    consumers: std.EnumArray(Consumer, ConsumerStats) = .initFill(.{}),
+    /// Connections closed because their owner retired the isolation.
+    retired: u64 = 0,
+};
+
+/// One line per active consumer, then the retire count. Histogram buckets are
+/// written as `upper_bound_ms:count`, `inf` for the overflow bucket.
+pub fn writeSummary(writer: *Io.Writer, stats: *const Stats) Io.Writer.Error!void {
+    for (std.enums.values(Consumer)) |consumer| {
+        const value = stats.consumers.getPtrConst(consumer);
+        if (value.requests == 0) continue;
+        try writer.print("http stats consumer={s} requests={d} reused={d} retried={d} reuse_failed={d} new_connections={d} expired={d} evicted={d}", .{
+            @tagName(consumer), value.requests, value.reused, value.retried, value.reuse_failed, value.new_connections, value.expired, value.evicted,
+        });
+        for (std.enums.values(ProbeOutcome)) |outcome| try writer.print(" probe_{s}={d}", .{ @tagName(outcome), value.probe.get(outcome) });
+        inline for (.{ "connect_ms", "head_ms_new", "head_ms_reused" }) |name| {
+            try writer.print(" {s}=", .{name});
+            const histogram = @field(value, name);
+            for (histogram.buckets, 0..) |bucket, index| {
+                if (index != 0) try writer.writeByte(',');
+                if (index < Histogram.bounds_ms.len) try writer.print("{d}:{d}", .{ Histogram.bounds_ms[index], bucket }) else try writer.print("inf:{d}", .{bucket});
+            }
+        }
+        try writer.writeByte('\n');
+    }
+    try writer.print("http stats retired={d}\n", .{stats.retired});
+}
+
 /// Fixed capacity, with no waiting request queue. Each held MCP parent can admit
 /// one continuation even when ordinary capacity is full. Slots also bound TLS
 /// buffers, CA bundles and idle connections; only one connection is retained per
@@ -119,6 +207,9 @@ pub const Engine = struct {
     /// after reading the response, later than the server's, and a request
     /// needs about half a round trip to arrive. Covers RTT up to about 1 s.
     const keep_alive_margin_seconds = 1;
+    /// Summaries go to the log at most this often while there is new activity,
+    /// and once at deinit.
+    const summary_seconds = 3600;
     /// Idle connections kept per origin across isolations. Two covers the usual
     /// concurrency per origin (for example Account with Models on Metask, or a
     /// title with a permission review) without one origin filling every slot.
@@ -134,6 +225,9 @@ pub const Engine = struct {
     resolving: usize = 0,
     next_id: u64 = 1,
     slots: [slot_count]Slot = undefined,
+    statistics: Stats = .{},
+    reported: Io.Clock.Timestamp = undefined,
+    unreported: bool = false,
 
     const Slot = struct {
         client: Client,
@@ -176,7 +270,7 @@ pub const Engine = struct {
 
     /// The engine must stay at this address until deinit, after its callers join.
     pub fn init(self: *Engine, allocator: std.mem.Allocator, io: Io) void {
-        self.* = .{ .io = io, .memory = .{ .backing = allocator } };
+        self.* = .{ .io = io, .memory = .{ .backing = allocator }, .reported = .now(io, .awake) };
         for (&self.slots) |*slot| slot.* = .{ .client = .{
             .io = io,
             .allocator = self.memory.allocator(),
@@ -186,6 +280,7 @@ pub const Engine = struct {
 
     pub fn deinit(self: *Engine) void {
         std.debug.assert(self.active[0] == 0 and self.active[1] == 0 and self.resolving == 0);
+        self.report(true);
         for (&self.slots) |*slot| {
             std.debug.assert(!slot.busy);
             slot.client.deinit();
@@ -229,6 +324,7 @@ pub const Engine = struct {
             self.active[lane] -= 1;
             var surplus: ?*Slot = null;
             var retired: ?*Slot = null;
+            defer self.report(false);
             if (operation.slot) |slot| {
                 std.debug.assert(slot.client.connection_pool.used.first == null);
                 slot.idle = .now(self.io, .awake);
@@ -239,6 +335,12 @@ pub const Engine = struct {
                 } else if (slot.idleConnection() != null) surplus = self.originSurplus(slot);
                 // A retired slot stays busy until evict closes its connection.
                 if (retired == null) slot.busy = false;
+            }
+            if (surplus != null) operation.stats.evicted += 1;
+            if (retired != null) self.statistics.retired += 1;
+            if (operation.stats.requests != 0) {
+                self.statistics.consumers.getPtr(control.consumer).add(&operation.stats);
+                self.unreported = true;
             }
             self.mutex.unlock(self.io);
             if (retired) |slot| self.evict(slot);
@@ -320,6 +422,30 @@ pub const Engine = struct {
         return chosen;
     }
 
+    /// A copy of the counters since init.
+    pub fn stats(self: *Engine) Stats {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.statistics;
+    }
+
+    fn report(self: *Engine, final: bool) void {
+        const snapshot = snapshot: {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            if (!self.unreported) return;
+            if (!final and self.reported.untilNow(self.io).raw.toSeconds() < summary_seconds) return;
+            self.reported = .now(self.io, .awake);
+            self.unreported = false;
+            break :snapshot self.statistics;
+        };
+        var buffer: [4096]u8 = undefined;
+        var writer: Io.Writer = .fixed(&buffer);
+        writeSummary(&writer, &snapshot) catch {};
+        var lines = std.mem.tokenizeScalar(u8, writer.buffered(), '\n');
+        while (lines.next()) |line| std.log.info("{s}", .{line});
+    }
+
     /// Closes idle connections of this isolation now; one in use closes when
     /// its request ends. Owners call this when the identity stops being valid.
     pub fn retire(self: *Engine, isolation: Isolation) void {
@@ -336,6 +462,7 @@ pub const Engine = struct {
                     slot.busy = true;
                     idle[count] = slot;
                     count += 1;
+                    self.statistics.retired += 1;
                 }
             }
         }
@@ -388,6 +515,9 @@ pub const Operation = struct {
     retried: bool = false,
     /// Idle limit for the connection after this response.
     idle_limit: Io.Duration = .fromSeconds(Engine.idle_seconds),
+    /// Merged into the engine's statistics when the call ends.
+    stats: ConsumerStats = .{},
+    opened: Io.Clock.Timestamp = undefined,
     /// End of DNS, TCP and TLS: the deadline, or admission plus the connect budget.
     connect_end: Io.Clock.Timestamp,
     /// 0 establishing, 1 established in time, 2 connect budget expired first.
@@ -505,8 +635,11 @@ pub const Operation = struct {
             .override => |bytes| if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return self.fail(error.InvalidRequest),
         };
         const criteria: Client.ConnectionPool.Criteria = .{ .host = host, .port = uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), .protocol = protocol };
+        self.stats.requests += 1;
+        self.opened = .now(self.io(), .awake);
         const lease = self.engine.lease(criteria, self.control.isolation);
         for (lease.expired[0..lease.expired_count]) |stale| self.engine.evict(stale);
+        self.stats.expired += lease.expired_count;
         const slot = lease.slot;
         self.slot = slot;
         const client = &slot.client;
@@ -514,11 +647,19 @@ pub const Operation = struct {
         if (lease.reuse) {
             const candidate = slot.idleConnection().?;
             client.connection_pool.acquire(self.io(), candidate);
-            if (idle_probe.probe(self.io(), candidate) == .idle) {
+            const outcome = idle_probe.probe(self.io(), candidate);
+            self.stats.probe.getPtr(outcome).* += 1;
+            if (outcome == .idle) {
                 connection = candidate;
                 self.reused = true;
+                self.stats.reused += 1;
             } else dispose(candidate);
-        } else Engine.discardIdle(slot);
+        } else {
+            if (slot.idleConnection() != null) {
+                if (slot.expired(self.opened)) self.stats.expired += 1 else self.stats.evicted += 1;
+            }
+            Engine.discardIdle(slot);
+        }
         if (connection == null) {
             if (protocol == .tls) try self.refreshTls(slot);
             connection = try self.connect(client, criteria);
@@ -622,6 +763,14 @@ pub const Operation = struct {
     /// A retry has its own establishment window. Under a connect budget the
     /// budget waiter has already let go, so every attempt is capped instead.
     fn connect(self: *Operation, client: *Client, criteria: Client.ConnectionPool.Criteria) Error!*Client.Connection {
+        const started: Io.Clock.Timestamp = .now(self.io(), .awake);
+        const connection = try self.establish(client, criteria);
+        self.stats.new_connections += 1;
+        self.stats.connect_ms.record(started.untilNow(self.io()).raw.toMilliseconds());
+        return connection;
+    }
+
+    fn establish(self: *Operation, client: *Client, criteria: Client.ConnectionPool.Criteria) Error!*Client.Connection {
         var addresses: [16]Io.net.IpAddress = undefined;
         const count = try self.resolve(criteria.host, criteria.port, &addresses);
         self.phase = .connect;
@@ -812,6 +961,7 @@ pub const Request = struct {
         try self.operation.admitSend();
         self.body = body;
         self.write() catch {
+            self.noteFailure();
             if (!self.retryAllowed(.send, error.WriteFailed)) return self.operation.fail(error.WriteFailed);
             try self.retry();
             self.write() catch return self.operation.fail(error.WriteFailed);
@@ -853,10 +1003,16 @@ pub const Request = struct {
         return self.replayable and connection.reader().bufferedLen() == 0;
     }
 
+    /// A failure before the head on the first, pooled attempt.
+    fn noteFailure(self: *Request) void {
+        if (self.operation.reused and !self.operation.retried) self.operation.stats.reuse_failed += 1;
+    }
+
     fn retry(self: *Request) Error!void {
         const operation = self.operation;
         try operation.check();
         operation.retried = true;
+        operation.stats.retried += 1;
         const slot = operation.slot.?;
         const failed = self.raw.connection.?;
         self.raw.connection = null;
@@ -882,6 +1038,7 @@ pub const Request = struct {
     pub fn receiveHead(self: *Request) Error!Client.Response {
         self.operation.phase = .head;
         const response = self.raw.receiveHead(&.{}) catch |err| response: {
+            self.noteFailure();
             if (!self.retryAllowed(.head, err)) return self.operation.fail(headError(err));
             try self.retry();
             self.write() catch return self.operation.fail(error.WriteFailed);
@@ -889,6 +1046,9 @@ pub const Request = struct {
             break :response self.raw.receiveHead(&.{}) catch |again| return self.operation.fail(headError(again));
         };
         self.received = true;
+        const operation = self.operation;
+        const elapsed = operation.opened.untilNow(operation.io()).raw.toMilliseconds();
+        if (operation.reused and !operation.retried) operation.stats.head_ms_reused.record(elapsed) else operation.stats.head_ms_new.record(elapsed);
         self.operation.idle_limit = idleLimit(&response.head);
         self.operation.phase = .body;
         return response;

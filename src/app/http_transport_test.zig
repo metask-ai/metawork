@@ -1029,6 +1029,49 @@ test "HTTP keeps no connection for a one second Keep-Alive and none past its lif
     }
 }
 
+test "HTTP statistics count reuse per consumer and summaries carry no request data" {
+    const pool = try Pool.create(.{ .connections = 3, .action = dropSecond });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    // New, then pooled but dropped and retried, then pooled again.
+    _ = try runMethod(&engine, url, .GET).outcome.completed;
+    _ = try runMethod(&engine, url, .GET).outcome.completed;
+    _ = try runMethod(&engine, url, .GET).outcome.completed;
+    // Another owner on the same origin, then retire it.
+    try std.testing.expect(!try runScoped(&engine, url, "secret-principal"));
+    engine.retire(.of(.mcp_server, "secret-principal"));
+    const stats = engine.stats();
+    const mcp = stats.consumers.get(.mcp);
+    try std.testing.expectEqual(@as(u64, 4), mcp.requests);
+    try std.testing.expectEqual(@as(u64, 2), mcp.reused);
+    try std.testing.expectEqual(@as(u64, 1), mcp.reuse_failed);
+    try std.testing.expectEqual(@as(u64, 1), mcp.retried);
+    try std.testing.expectEqual(@as(u64, 3), mcp.new_connections);
+    try std.testing.expectEqual(@as(u64, 2), mcp.probe.get(.idle));
+    try std.testing.expectEqual(@as(u64, 3), mcp.connect_ms.count());
+    try std.testing.expectEqual(@as(u64, 1), mcp.head_ms_reused.count());
+    try std.testing.expectEqual(@as(u64, 3), mcp.head_ms_new.count());
+    try std.testing.expectEqual(@as(u64, 1), stats.retired);
+    try std.testing.expectEqual(@as(u64, 0), stats.consumers.get(.metask).requests);
+
+    var buffer: [2048]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    try http.writeSummary(&writer, &stats);
+    const summary = writer.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, summary, "http stats consumer=mcp requests=4 reused=2 retried=1 reuse_failed=1 new_connections=3 "));
+    try std.testing.expect(std.mem.indexOf(u8, summary, "probe_idle=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\nhttp stats retired=1\n") != null);
+    var port: [8]u8 = undefined;
+    for ([_][]const u8{ url, "127.0.0.1", "/fixture", "secret-principal", try std.fmt.bufPrint(&port, ":{d}", .{pool.listener.socket.address.getPort()}) }) |forbidden|
+        try std.testing.expect(std.mem.indexOf(u8, summary, forbidden) == null);
+    // Only the active consumer gets a line.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, summary, "\n"));
+}
+
 test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" {
     const Held = struct {
         engine: *http.Engine,
