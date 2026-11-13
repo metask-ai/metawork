@@ -2,6 +2,7 @@
 //! shutdown policy. A returned result always means all borrowed inputs are idle.
 const std = @import("std");
 const memory = @import("app_http_memory");
+const idle_probe = @import("http_idle_probe.zig");
 const Io = std.Io;
 const Client = std.http.Client;
 
@@ -306,7 +307,7 @@ pub const Operation = struct {
         slot.scope = scope;
         var connection: ?*Client.Connection = client.connection_pool.findConnection(self.io(), criteria);
         if (connection) |candidate| {
-            if (idleHealthy(candidate)) self.reused = true else {
+            if (idle_probe.probe(self.io(), candidate) == .idle) self.reused = true else {
                 dispose(candidate);
                 connection = null;
             }
@@ -560,17 +561,7 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
     hash.update(bytes);
 }
 
-fn idleHealthy(connection: *Client.Connection) bool {
-    if (connection.reader().bufferedLen() != 0) return false;
-    var messages: [1]Io.net.IncomingMessage = .{.init};
-    var byte: [1]u8 = undefined;
-    const err, _ = connection.stream_reader.stream.socket.receiveManyTimeout(connection.client.io, &messages, &byte, .{ .peek = true }, .{ .duration = .{ .raw = .zero, .clock = .awake } });
-    // Pending bytes, EOF or error are not a clean idle HTTP connection. A race
-    // after this probe is a normal failure, never an implicit request replay.
-    if (err) |failure| return failure == error.Timeout;
-    return false;
-}
-
 test {
     _ = @import("http_transport_test.zig");
+    _ = @import("http_idle_probe.zig");
 }
