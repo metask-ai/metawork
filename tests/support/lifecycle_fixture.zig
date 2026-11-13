@@ -2870,6 +2870,10 @@ pub fn sessionUpdatePermissionMode(handle: ?*wire.SessionHandle, code: u32, out_
     return wire.STATUS_OK;
 }
 
+fn sessionRewindToUserMessage(_: ?*wire.SessionHandle, _: u64, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork does not call AgentCore rewind");
+}
+
 const fake_session_control_api = wire.SessionControlApiV1{
     .struct_size = @sizeOf(wire.SessionControlApiV1),
     .reserved0 = 0,
@@ -2882,6 +2886,7 @@ const fake_session_control_api = wire.SessionControlApiV1{
     .export_checkpoint = sessionExportCheckpoint,
     .set_prompt_profile = sessionSetPromptProfile,
     .update_permission_mode = sessionUpdatePermissionMode,
+    .rewind_to_user_message = sessionRewindToUserMessage,
 };
 
 const fake_skill_api = wire.SkillApiV1{
@@ -3427,11 +3432,14 @@ pub fn installProductControlExecutionGeneration(
 }
 
 pub fn productControlTaskInput() product_control.TaskCreateInput {
-    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
-    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    const options = @import("lifecycle_fixture_options");
+    const workspace_root = if (std.fs.path.isAbsolute(options.workspace_root))
+        options.workspace_root
+    else
+        options.repository_root ++ std.fs.path.sep_str ++ options.workspace_root;
     return .{
         .workspace_root = workspace_root,
-        .trust = .{ .temporary = temporary_root },
+        .trust = .{ .temporary = workspace_root },
     };
 }
 

@@ -1240,7 +1240,7 @@ const image_product = struct {
     const History = @import("lifecycle_fixture").TypedHistory;
 
     fn rotateCredential(account: *account_api.Runtime, control: *control_api.Runtime, coordinator: *coordinator_api.Coordinator) !void {
-        const scope = account.authorizationState().?.scope;
+        const generation = account.authorizationGeneration().?;
         var refresh = switch (account.prepareTokenRefresh()) {
             .prepared => |value| value,
             else => return error.TestUnexpectedResult,
@@ -1265,7 +1265,7 @@ const image_product = struct {
             if (coordinator.catalog_job == null) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.TestUnexpectedResult;
-        try std.testing.expectEqual(scope, account.authorizationState().?.scope);
+        try std.testing.expect(account.authorizationGeneration().? != generation);
     }
 
     fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8, image_input: bool) !void {

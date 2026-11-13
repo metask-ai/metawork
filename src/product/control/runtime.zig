@@ -3724,10 +3724,10 @@ pub const Runtime = struct {
             if (mcp_admission.selection == null) .ready_without_selection else .ready_with_selection
         else
             .unavailable;
+        try self.checkMetaskAuthorization(execution_input.target.provider_id);
         var task_input: task_runtime.CreateTaskInput = .{
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
-            .metask_authorization_scope = try self.metaskAuthorizationScope(execution_input.target.provider_id),
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
             .model_ref = model_selection.target,
@@ -3937,13 +3937,14 @@ pub const Runtime = struct {
         return self.prepareTaskRestoreFilters(task_id, original);
     }
 
-    fn modelRestoreMetaskScope(context: *anyopaque, provider_id: []const u8) ?u64 {
+    fn modelRestoreAuthorized(context: *anyopaque, provider_id: []const u8) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        return self.metaskAuthorizationScope(provider_id) catch null;
+        self.checkMetaskAuthorization(provider_id) catch return false;
+        return true;
     }
 
     fn modelRestoreEffects(self: *Runtime) task_runtime.Runtime.RestoreCapabilityEffects {
-        return .{ .context = self, .prepare_fn = prepareModelRestoreFilters, .metask_scope_fn = modelRestoreMetaskScope };
+        return .{ .context = self, .prepare_fn = prepareModelRestoreFilters, .authorized_fn = modelRestoreAuthorized };
     }
 
     fn refreshModelRestoreCapabilities(context: *anyopaque, task_id: u64) bool {
@@ -3998,7 +3999,6 @@ pub const Runtime = struct {
             .source_generation = execution.source_generation,
             .continuation_source_id = continuation_source_id,
             .approval_revision = approval_revision,
-            .metask_authorization_scope = try self.metaskAuthorizationScope(execution.target.provider_id),
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = self.checkpoint_store,
             .checkpoint_store_health = &self.checkpoint_store_health,
@@ -7249,13 +7249,14 @@ pub const Runtime = struct {
     fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
         const facts = self.task_runtime.modelFacts(task_id) orelse return false;
         const intent = facts.intent orelse return false;
-        if (facts.installed == null) return false;
-        if (self.task_runtime.installedIntentCurrent(task_id) and facts.metask_scope == 0) return false;
+        const installed = facts.installed orelse return false;
+        const renews_credential = self.renewsMetaskCredential(installed.is_metask);
+        if (self.task_runtime.installedIntentCurrent(task_id) and !renews_credential) return false;
         const authority = self.taskModelIntentAuthority(task_id) orelse return false;
         const protocol = self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) orelse return false;
         if (!self.task_runtime.installedModelProviderMatches(task_id, intent.target, protocol)) return true;
         if (self.task_runtime.installedModelSourceCurrent(task_id, authority.source_generation)) return false;
-        if (facts.metask_scope == 0) return true;
+        if (!renews_credential) return true;
         var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
         defer candidate.deinit();
         return !self.task_runtime.installedModelMatchesTarget(task_id, candidate.input());
@@ -7264,7 +7265,7 @@ pub const Runtime = struct {
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
         const facts = self.task_runtime.modelFacts(task_id) orelse return null;
         const intent = facts.intent orelse return null;
-        // Account identity replacement revokes new Metask credential use.
+        // Metask use requires a current Account authorization.
         // Independent Custom Providers do not inherit that Account gate.
         if (std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)) {
             self.validateTaskMetaskAuthorization(task_id) catch return null;
@@ -7295,6 +7296,7 @@ pub const Runtime = struct {
             return null;
         };
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
+        const renews_credential = if (facts.installed) |installed| self.renewsMetaskCredential(installed.is_metask) else false;
         if (facts.installed != null)
             if (self.task_runtime.installedIntentCurrent(task_id)) {
                 // Membership is checked against current source authority. A
@@ -7302,7 +7304,7 @@ pub const Runtime = struct {
                 // rather than being rejected for the old owned generation.
                 if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null and
                     !self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
-                if (facts.metask_scope == 0) return null;
+                if (!renews_credential) return null;
                 const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
                 if (self.task_runtime.installedCredentialCurrent(task_id, current.source_generation)) return null;
             };
@@ -7315,10 +7317,10 @@ pub const Runtime = struct {
         errdefer candidate.deinit();
         const input = candidate.input();
         try self.prepareTaskCredential(input.api_key);
-        if (facts.installed != null) if (facts.metask_scope != 0 and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
+        if (renews_credential and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
             const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
             const current = check.current() orelse return error.ExecutionUnavailable;
-            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, input.api_key, input.source_generation) catch |err| {
+            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.generation, input.api_key, input.source_generation) catch |err| {
                 self.task_runtime.failMetaskCredentialUpdate(task_id, current.generation, err, self.taskRuntimeOperationEffects());
                 return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionUnavailable;
             };
@@ -7331,11 +7333,11 @@ pub const Runtime = struct {
                 candidate.deinit();
                 return null;
             }
-        };
-        if (facts.installed != null) if (facts.metask_scope != 0 and self.task_runtime.installedIntentCurrent(task_id)) {
+        }
+        if (renews_credential and self.task_runtime.installedIntentCurrent(task_id)) {
             if (!self.task_runtime.installedModelEndpointMatches(task_id, input.target))
                 return error.ExecutionUnavailable;
-        };
+        }
         return candidate;
     }
 
@@ -7437,7 +7439,7 @@ pub const Runtime = struct {
     fn validateNewTaskModelAdmission(self: *Runtime, selection: NewTaskModelSelectionInput) Error!void {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
         if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
-        _ = try self.metaskAuthorizationScope(selection.target.source_id);
+        try self.checkMetaskAuthorization(selection.target.source_id);
     }
 
     fn scheduleExecutionBinding(self: *Runtime) product_schedule.ExecutionBinding {
@@ -7451,7 +7453,7 @@ pub const Runtime = struct {
 
     fn scheduledModelBinding(self: *Runtime, binding: product_schedule.ModelBinding) models_aggregate.Runtime.BoundModelAvailability {
         const availability = self.custom_providers.boundModelAvailability(binding.model_ref, binding.source_generation, binding.protocol);
-        if (availability == .ready) _ = self.metaskAuthorizationScope(binding.model_ref.source_id) catch return .unavailable;
+        if (availability == .ready) self.checkMetaskAuthorization(binding.model_ref.source_id) catch return .unavailable;
         return availability;
     }
 
@@ -7628,7 +7630,7 @@ pub const Runtime = struct {
         const binding: ScheduledTaskBindingInput = if (input.model_selection) |selection| selected: {
             if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
             const protocol = self.custom_providers.sourceModelProtocol(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) orelse return error.ExecutionUnavailable;
-            _ = try self.metaskAuthorizationScope(selection.target.source_id);
+            try self.checkMetaskAuthorization(selection.target.source_id);
             break :selected .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = protocol };
         } else retained orelse return error.InvalidScheduledTaskInput;
         const title = try product_schedule.Definition.normalizedTitle(input.title, self.limits.max_task_title_bytes);
@@ -8260,14 +8262,6 @@ pub const Runtime = struct {
             break :exact self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == query.protocol and
                 self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects());
         } else if (query.original_restore) self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects()) else false;
-        const authorization_exact = scope: {
-            const expected = self.task_runtime.recoveryAuthorizationScope(query.task_id, query.original_restore) orelse break :scope false;
-            if (expected == 0) break :scope true;
-            const check = self.metask_authorization_check orelse break :scope false;
-            const current = check.current() orelse break :scope false;
-            break :scope current.scope == expected;
-        };
-        const execution_exact = model_intent_exact;
         return .{
             .workspace_root = workspace.canonical_root,
             .workspace_kind = switch (workspace.kind) {
@@ -8278,7 +8272,7 @@ pub const Runtime = struct {
             .shutting_down = self.shutting_down,
             .workspace_authority_exact = workspace.identity_exact,
             .automatic_owner_exact = workspace.automatic_owner_exact,
-            .target_execution_authority_exact = execution_exact and authorization_exact,
+            .target_execution_authority_exact = model_intent_exact,
         };
     }
 
@@ -9344,15 +9338,15 @@ pub const Runtime = struct {
     }
 
     fn currentRenewalAuthority(self: *Runtime, authority: control_ports.MetaskAuthorization) bool {
-        if (self.shutting_down or authority.scope == 0 or authority.generation == 0) return false;
+        if (self.shutting_down or authority.generation == 0) return false;
         const check = self.metask_authorization_check orelse return false;
         const current = check.current() orelse return false;
-        return current.scope == authority.scope and current.generation == authority.generation;
+        return current.generation == authority.generation;
     }
 
     fn needsDeferredMetaskCredential(context: *anyopaque, authority: control_ports.MetaskAuthorization) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        return self.currentRenewalAuthority(authority) and self.task_runtime.needsDeferredMetaskCredential(authority.scope);
+        return self.currentRenewalAuthority(authority) and self.task_runtime.needsDeferredMetaskCredential();
     }
 
     fn renewMetaskExecutionCredentials(context: *anyopaque, authority: control_ports.MetaskAuthorization, credential: ?[]const u8) void {
@@ -9360,16 +9354,16 @@ pub const Runtime = struct {
         if (!self.currentRenewalAuthority(authority)) return;
         if (credential) |value| {
             const previous = self.learned_renewal;
-            if (previous == null or previous.?.scope != authority.scope or previous.?.generation != authority.generation) {
+            if (previous == null or previous.?.generation != authority.generation) {
                 self.prepareTaskCredential(value) catch {
-                    self.task_runtime.deferMetaskCredentialRenewals(authority.scope);
+                    self.task_runtime.deferMetaskCredentialRenewals();
                     self.bumpRevision();
                     return;
                 };
                 self.learned_renewal = authority;
             }
         }
-        const changed = self.task_runtime.renewMetaskExecutions(authority.scope, authority.generation, credential, self.taskRuntimeOperationEffects());
+        const changed = self.task_runtime.renewMetaskExecutions(authority.generation, credential, self.taskRuntimeOperationEffects());
         self.retireQuiescentCredentials();
         if (changed) self.bumpRevision();
     }
@@ -9386,30 +9380,35 @@ pub const Runtime = struct {
         return false;
     }
 
-    fn metaskAuthorizationScope(self: *Runtime, provider_id: []const u8) Error!u64 {
-        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return 0;
+    fn checkMetaskAuthorization(self: *Runtime, provider_id: []const u8) Error!void {
+        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
         if (self.shutting_down) return error.ExecutionUnavailable;
         const check = self.metask_authorization_check orelse {
             // Isolated Product tests have no Account composition. Desktop
             // admission must fail closed if its required capability is absent.
-            if (builtin.is_test) return 0;
+            if (builtin.is_test) return;
             return error.ExecutionUnavailable;
         };
         const current = check.current() orelse return error.ExecutionUnavailable;
-        if (current.scope == 0 or current.generation == 0 or
+        if (current.generation == 0 or
             !self.custom_providers.acceptsMetaskAuthorization(current.generation)) return error.ExecutionUnavailable;
-        return current.scope;
     }
 
+    /// Every installed Metask execution renews from the current Account
+    /// authorization. Isolated Product tests have no Account composition and
+    /// keep the installed credential, matching checkMetaskAuthorization.
+    fn renewsMetaskCredential(self: *const Runtime, is_metask: bool) bool {
+        return is_metask and (!builtin.is_test or self.metask_authorization_check != null);
+    }
+
+    /// A Task is not bound to a login: any current login admits it.
     fn validateTaskMetaskAuthorization(self: *Runtime, task_id: u64) Error!void {
         const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
         const uses_metask = if (facts.intent) |intent|
             std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
         else if (facts.installed) |installed| installed.is_metask else false;
         if (!uses_metask) return;
-        const scope = try self.metaskAuthorizationScope(models_contract.metask_source_id);
-        if (facts.metask_scope != 0 and facts.metask_scope != scope)
-            return error.ExecutionUnavailable;
+        try self.checkMetaskAuthorization(models_contract.metask_source_id);
     }
 
     fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
@@ -9420,8 +9419,7 @@ pub const Runtime = struct {
         if (!uses_metask) return null;
         const check = self.metask_authorization_check orelse return if (builtin.is_test) null else .metask_authorization_required;
         const current = check.current() orelse return .metask_authorization_required;
-        if (current.scope == 0 or current.generation == 0) return .metask_authorization_required;
-        if (facts.metask_scope != 0 and facts.metask_scope != current.scope) return .metask_authorization_changed;
+        if (current.generation == 0) return .metask_authorization_required;
         return switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
             .ready => null,
             .loading => .models_catalog_loading,
@@ -17350,7 +17348,59 @@ test "model error projection matches the shared Renderer fixture after Host cred
     try std.testing.expect(projected.object.get("recovery") == null);
     const feedback = actual.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object.get("feedback").?.object;
     try std.testing.expectEqualStrings("account_settings", feedback.get("guidance").?.string);
+    try std.testing.expect(feedback.get("reason").? == .null);
     try std.testing.expect(feedback.get("offerInputPreparation").?.bool);
+}
+
+test "Metask balance failure projects the first-party reason to the shared Renderer fixture in body and manifest" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.testTask(3).?;
+    const run = &task.durable.runs[0].?;
+    const storage = try control.allocator.create(task_test_state.RunModelError);
+    run.model_error_storage = storage;
+    storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+        .run_id = 77,
+        .category = .payment_required,
+        .message = "可用余额和套餐额度不足，请充值、兑换或订阅后再试",
+        .code = "insufficient_balance",
+        .type = "insufficient_balance",
+        .http_status = 402,
+        .retry = .not_retryable,
+        .attempts = 1,
+    }) };
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    run.terminal_payload.model_error = storage;
+    control.markTerminalRunsBeforeEventDrain();
+    finalizeTestTerminalDrain(&control);
+    detachTaskForTest(&control, task);
+    var bytes: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeViewFixture(&bytes, .{ .task_id = task.durable.id });
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer actual.deinit();
+    const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("model_error_metask_balance.fixture"), .{});
+    defer expected.deinit();
+    const expected_detail = expected.value.object.get("modelError").?.object;
+    const expected_feedback = expected.value.object.get("feedback").?.object;
+    const page = actual.value.object.get("taskPage").?.object;
+    for ([_]std.json.Value{ page.get("task").?.object.get("runs").?.array.items[0], page.get("runManifest").?.array.items[0] }) |entry| {
+        const terminal = entry.object.get("terminal").?.object;
+        const detail = terminal.get("modelError").?.object;
+        inline for (.{ "agentRunId", "category", "message", "code", "type", "retry", "attempts", "source" }) |field|
+            try std.testing.expectEqualStrings(expected_detail.get(field).?.string, detail.get(field).?.string);
+        inline for (.{ "requestId", "retryAfterMs" }) |field| {
+            try std.testing.expect(expected_detail.get(field).? == .null);
+            try std.testing.expect(detail.get(field).? == .null);
+        }
+        inline for (.{ "truncated", "hostRedacted", "hostTruncated" }) |field|
+            try std.testing.expectEqual(expected_detail.get(field).?.bool, detail.get(field).?.bool);
+        try std.testing.expectEqual(expected_detail.get("httpStatus").?.integer, detail.get("httpStatus").?.integer);
+        const feedback = terminal.get("feedback").?.object;
+        try std.testing.expectEqual(@as(usize, 3), feedback.count());
+        inline for (.{ "guidance", "reason" }) |field|
+            try std.testing.expectEqualStrings(expected_feedback.get(field).?.string, feedback.get(field).?.string);
+        try std.testing.expectEqual(expected_feedback.get("offerInputPreparation").?.bool, feedback.get("offerInputPreparation").?.bool);
+    }
 }
 
 test "Renderer transport failures never own Agent Run termination" {
@@ -19649,7 +19699,7 @@ test "projection gap preserves completion, continuation and completion-seen pers
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool, feedback: struct { guidance: []const u8, offerInputPreparation: bool } }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool, feedback: struct { guidance: []const u8, reason: ?[]const u8, offerInputPreparation: bool } }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -19669,6 +19719,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         try std.testing.expectEqualStrings(expected.diagnosticDisposition, terminal.get("diagnosticDisposition").?.string);
         const feedback = terminal.get("feedback").?.object;
         try std.testing.expectEqualStrings(expected.feedback.guidance, feedback.get("guidance").?.string);
+        try std.testing.expect(expected.feedback.reason == null and feedback.get("reason").? == .null);
         try std.testing.expectEqual(expected.feedback.offerInputPreparation, feedback.get("offerInputPreparation").?.bool);
     }
 }
@@ -19722,6 +19773,7 @@ test "Product view shares Run feedback and navigation with the index, manifest a
         for ([_]std.json.Value{ body.get("runs").?.array.items[0], page.get("runManifest").?.array.items[0] }) |entry| {
             const feedback = entry.object.get("terminal").?.object.get("feedback").?.object;
             try std.testing.expectEqualStrings(case.guidance, feedback.get("guidance").?.string);
+            try std.testing.expect(feedback.get("reason").? == .null);
             try std.testing.expectEqual(case.offer, feedback.get("offerInputPreparation").?.bool);
         }
         const workspace = root.get("workspaces").?.array.items[0].object.get("signals").?.object;
@@ -19802,7 +19854,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false,\"feedback\":{\"guidance\":\"none\",\"offerInputPreparation\":true}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false,\"feedback\":{\"guidance\":\"none\",\"reason\":null,\"offerInputPreparation\":true}}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }

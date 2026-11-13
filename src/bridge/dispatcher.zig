@@ -51,6 +51,16 @@ pub const WindowChromeControlAction = enum {
     close,
 };
 
+/// Application outcome of opening a canonical Workspace root. The payload is
+/// the failing step's error, kept only for path-free Host diagnostics.
+pub const DirectoryOpenResult = union(enum) {
+    opened,
+    /// The root no longer canonicalizes to the same existing directory.
+    directory_unavailable: anyerror,
+    /// The system handoff could not be requested.
+    system_open_failed: anyerror,
+};
+
 fn unavailableDialog(_: ?*anyopaque, _: u64, _: u64, _: product_control.NativeDialog.Options, _: *const product_control.NativeDialog.Completion) anyerror!u64 {
     return error.UnsupportedService;
 }
@@ -94,7 +104,7 @@ pub const Platform = struct {
         ?*anyopaque,
         []const u8,
     ) anyerror!void = unavailableExternalUrl,
-    open_directory_fn: *const fn (?*anyopaque, []const u8) anyerror!void = unavailableExternalUrl,
+    open_directory_fn: *const fn (?*anyopaque, []const u8) DirectoryOpenResult = unavailableDirectoryOpen,
     now_fn: *const fn (?*anyopaque) u64,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
@@ -3345,9 +3355,19 @@ pub const Dispatcher = struct {
         const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
         if (workspace_id == 0 or expected_epoch == 0) return error.InvalidBridgeId;
         const workbench = try self.requireProductControl();
-        const directory = workbench.workspaceDirectoryForOpen(workspace_id, expected_epoch) catch return "{\"opened\":false}";
-        self.platform.open_directory_fn(self.platform.context, directory) catch return "{\"opened\":false}";
-        return "{\"opened\":true}";
+        const directory = workbench.workspaceDirectoryForOpen(workspace_id, expected_epoch) catch |err|
+            return workspaceOpenFailed("workspace_unavailable", err);
+        return switch (self.platform.open_directory_fn(self.platform.context, directory)) {
+            .opened => "{\"opened\":true}",
+            .directory_unavailable => |err| workspaceOpenFailed("directory_unavailable", err),
+            .system_open_failed => |err| workspaceOpenFailed("system_open_failed", err),
+        };
+    }
+
+    fn workspaceOpenFailed(comptime reason: []const u8, err: anyerror) []const u8 {
+        // Workspace roots are user paths; the reason and error name are enough.
+        std.log.warn("workspace directory open failed: reason=" ++ reason ++ " error={s}", .{@errorName(err)});
+        return "{\"opened\":false,\"reason\":\"" ++ reason ++ "\"}";
     }
 
     fn removeProject(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -6931,6 +6951,10 @@ fn unavailableExternalUrl(_: ?*anyopaque, _: []const u8) anyerror!void {
     return error.ExternalLinkUnavailable;
 }
 
+fn unavailableDirectoryOpen(_: ?*anyopaque, _: []const u8) DirectoryOpenResult {
+    return .{ .system_open_failed = error.UnsupportedService };
+}
+
 fn validExternalLink(value: []const u8) bool {
     if (value.len == 0 or value.len > max_external_link_url_bytes or
         !std.unicode.utf8ValidateSlice(value)) return false;
@@ -9301,11 +9325,16 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     const Host = struct {
         var expected_root: []const u8 = "";
         var opens: usize = 0;
-        var fail_open = false;
-        fn openDirectory(_: ?*anyopaque, path: []const u8) anyerror!void {
-            try std.testing.expectEqualStrings(expected_root, path);
+        var paths_match = true;
+        var outcome: std.meta.Tag(DirectoryOpenResult) = .opened;
+        fn openDirectory(_: ?*anyopaque, path: []const u8) DirectoryOpenResult {
+            paths_match = paths_match and std.mem.eql(u8, expected_root, path);
             opens += 1;
-            if (fail_open) return error.InjectedOpenFailure;
+            return switch (outcome) {
+                .opened => .opened,
+                .directory_unavailable => .{ .directory_unavailable = error.InjectedMissingDirectory },
+                .system_open_failed => .{ .system_open_failed = error.InjectedHandoffFailure },
+            };
         }
         fn wake(_: ?*anyopaque) anyerror!void {}
         fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
@@ -9331,7 +9360,8 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     const root = root_buffer[0..root_len];
     Host.expected_root = root;
     Host.opens = 0;
-    Host.fail_open = false;
+    Host.paths_match = true;
+    Host.outcome = .opened;
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
@@ -9365,8 +9395,12 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     defer open_wire.deinit();
     const opened = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("opened").?, .{});
     defer std.testing.allocator.free(opened);
-    const not_opened = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("unavailable").?, .{});
-    defer std.testing.allocator.free(not_opened);
+    const workspace_unavailable = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("workspace_unavailable").?, .{});
+    defer std.testing.allocator.free(workspace_unavailable);
+    const directory_unavailable = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("directory_unavailable").?, .{});
+    defer std.testing.allocator.free(directory_unavailable);
+    const system_open_failed = try std.json.Stringify.valueAlloc(std.testing.allocator, open_wire.value.object.get("system_open_failed").?, .{});
+    defer std.testing.allocator.free(system_open_failed);
     const open_request = "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), "handler_failed") != null);
     const request = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
@@ -9382,16 +9416,22 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     for ([_][]const u8{
         "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}",
         "{\"id\":\"open\",\"command\":\"metawork.workspaces.open\",\"payload\":{\"workspaceId\":\"99\",\"expectedWorkspaceEpoch\":\"1\"}}",
-    }) |stale_open| try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale_open, source, &output), not_opened) != null);
+    }) |stale_open| try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale_open, source, &output), workspace_unavailable) != null);
     try std.testing.expectEqual(@as(usize, 0), Host.opens);
     const before_open = workbench.currentRevision();
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), opened) != null);
     try std.testing.expectEqual(before_open, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 1), Host.opens);
-    Host.fail_open = true;
-    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), not_opened) != null);
+    Host.outcome = .directory_unavailable;
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), directory_unavailable) != null);
     try std.testing.expectEqual(@as(usize, 2), Host.opens);
-    Host.fail_open = false;
+    Host.outcome = .system_open_failed;
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), system_open_failed) != null);
+    try std.testing.expectEqual(@as(usize, 3), Host.opens);
+    Host.outcome = .opened;
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), opened) != null);
+    try std.testing.expectEqual(@as(usize, 4), Host.opens);
+    try std.testing.expect(Host.paths_match);
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, .{ .origin = "zero://app", .window_id = 4 }, &output), "handler_failed") != null);
     const invalid = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\",\"path\":\"/tmp/project\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(invalid, source, &output), "handler_failed") != null);
@@ -9418,8 +9458,8 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     const stale = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale, source, &output), changed) != null);
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), accepted) != null);
-    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), not_opened) != null);
-    try std.testing.expectEqual(@as(usize, 2), Host.opens);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(open_request, source, &output), workspace_unavailable) != null);
+    try std.testing.expectEqual(@as(usize, 4), Host.opens);
     _ = try tmp.dir.statFile(std.testing.io, "project/keep.txt", .{});
     var projections: [1]product_control.WorkspaceProjection = undefined;
     try std.testing.expectEqual(@as(usize, 0), (try workbench.copyWorkspaceProjections(&projections)).len);

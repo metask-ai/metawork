@@ -556,8 +556,6 @@ pub const Runtime = struct {
     platform: ?ports_impl.Platform = null,
     credentials: credentials_impl.CredentialOwner = .{},
     authorization_generation: u64 = 0,
-    // Process-local continuity, changed by login or credential loss, not refresh.
-    authorization_scope: u64 = 0,
     summary: summary_impl.State = .{},
     summary_job: ?*SummaryJob = null,
     refresh_blocked: bool = false,
@@ -869,10 +867,10 @@ pub const Runtime = struct {
     }
 
     /// Secret-free admission proof; checks the Account-owned hard-expiry clock.
-    pub fn authorizationState(self: *Runtime) ?struct { scope: u64, generation: u64 } {
+    pub fn authorizationGeneration(self: *Runtime) ?u64 {
         self.assertMainThread();
         _ = self.availableAuthorizationIdentity() orelse return null;
-        return if (self.authorization_scope != 0) .{ .scope = self.authorization_scope, .generation = self.authorization_generation } else null;
+        return self.authorization_generation;
     }
 
     pub fn acceptsAuthorizationGeneration(self: *Runtime, generation: u64) bool {
@@ -1097,7 +1095,6 @@ pub const Runtime = struct {
         credential_store.commitRefresh(platform.credentials, &tokens.refresh_token) catch |err|
             return self.prepareFailure(attempt_id, accountStoreError(err));
         self.credentials.replace(tokens);
-        self.bumpAuthorizationScope();
         self.refresh_blocked = false;
         platform.credentials.clearRefreshMarker() catch {};
         self.bumpAuthorizationGeneration();
@@ -1140,7 +1137,6 @@ pub const Runtime = struct {
             &rotation.persistenceInput().refresh_token,
         ) catch |err| return self.prepareFailure(attempt_id, accountStoreError(err));
         self.credentials.replaceRotation(rotation);
-        if (self.authorization_scope == 0) self.bumpAuthorizationScope();
         self.refresh_blocked = false;
         platform.credentials.clearRefreshMarker() catch {};
         self.bumpAuthorizationGeneration();
@@ -1394,13 +1390,7 @@ pub const Runtime = struct {
         // end with them.
         if (self.credentials.principal()) |principal| self.effects.transport.retire(principal);
         self.credentials.clear();
-        self.bumpAuthorizationScope();
         self.bumpAuthorizationGeneration();
-    }
-
-    fn bumpAuthorizationScope(self: *Runtime) void {
-        self.authorization_scope +%= 1;
-        if (self.authorization_scope == 0) self.authorization_scope = 1;
     }
 
     fn bumpAuthorizationGeneration(self: *Runtime) void {
@@ -1681,7 +1671,6 @@ pub const TestSupport = if (builtin.is_test) struct {
             expires_at,
             account_id,
         );
-        runtime.bumpAuthorizationScope();
         runtime.bumpAuthorizationGeneration();
         return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
@@ -1711,7 +1700,6 @@ pub const TestSupport = if (builtin.is_test) struct {
             expires_at,
             credential_account_id,
         );
-        runtime.bumpAuthorizationScope();
         runtime.bumpAuthorizationGeneration();
         return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,

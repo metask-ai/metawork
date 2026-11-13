@@ -264,7 +264,11 @@ function renderCompletedSurface(
               cause: null,
               diagnosticDisposition: "absent",
               recordingIncomplete,
-              feedback: { guidance: "none", offerInputPreparation: false },
+              feedback: {
+                guidance: "none",
+                reason: null,
+                offerInputPreparation: false,
+              },
               modelError: null,
             },
         usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
@@ -632,7 +636,7 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
 test("a completed response with a recording gap shows the Host warning once", () => {
   const markup = renderCompletedSurface("Release is ready", undefined, [], {
     recordingIncomplete: true,
-    feedback: { guidance: "none", offerInputPreparation: false },
+    feedback: { guidance: "none", reason: null, offerInputPreparation: false },
   });
   assert.match(markup, /Release is ready/);
   assert.equal(

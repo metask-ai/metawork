@@ -54,6 +54,8 @@ export const enUS = {
     "This response reached the model's output limit.",
   "run.model_error.category.unknown":
     "The model service could not complete this request.",
+  "run.model_error.reason.metask_insufficient_balance":
+    "Your Metask balance and plan quota are insufficient.",
   "run.guidance.review_context":
     "Shorten your next message or compact the conversation when available.",
   "run.guidance.revise_instruction":
@@ -331,8 +333,14 @@ export const enUS = {
   "workspace.remove": "Remove project",
   "workspace.remove_failed": "Could not remove the project. Please try again.",
   "workspace.open": "Open project folder",
-  "workspace.open_failed":
+  "workspace.open_failed.workspace_unavailable":
+    "Could not open the project folder because the project has changed. Refresh and try again, or choose the project again.",
+  "workspace.open_failed.directory_unavailable":
     "Could not open the project folder. Check that it is still available and try again.",
+  "workspace.open_failed.system_open_failed":
+    "The system file manager could not open the project folder. Please try again.",
+  "workspace.open_failed.request_failed":
+    "Could not open the project folder. Please try again.",
   "workspace.remove_title": "Remove project “{title}”?",
   "workspace.remove_body":
     "Tasks and their history will be kept, and tasks in progress are unaffected. You can add the project again at any time.",
@@ -1712,8 +1720,6 @@ export const enUS = {
     "The Metask model catalog failed to refresh.",
   "mutation.reason.metask_authorization_required":
     "Sign in to Metask to use this model.",
-  "mutation.reason.metask_authorization_changed":
-    "This task's Metask authorization changed.",
   "mutation.reason.session_poisoned":
     "The current session can no longer continue.",
   "mutation.reason.checkpoint_unavailable":

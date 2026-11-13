@@ -111,10 +111,9 @@ pub const ModelsManagement = struct {
 };
 
 /// Main-thread, secret-free proof supplied by the Application Account owner.
-/// A scope survives token refresh and ends on login replacement or credential loss.
+/// The generation changes on every token refresh, login and credential loss.
 pub const MetaskAuthorization = struct {
     generation: u64,
-    scope: u64,
 };
 
 pub const MetaskAuthorizationCheck = struct {

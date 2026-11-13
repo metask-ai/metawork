@@ -4,6 +4,7 @@ import { useI18n } from "../../i18n/context.ts";
 import { Menu } from "../../components/ui/menu.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { modelErrorMessageVisible } from "./run-presentation.ts";
 
 export function RunDiagnostics({
   run,
@@ -72,11 +73,9 @@ export function RunDiagnostics({
                   <p>{t("run.model_error.supplemental")}</p>
                 )}
                 <p className="model-error-message">
-                  {!modelError.message ||
-                  (modelError.hostRedacted &&
-                    /^[*?\s]+$/.test(modelError.message))
-                    ? t("run.model_error.message_hidden")
-                    : modelError.message}
+                  {modelErrorMessageVisible(modelError)
+                    ? modelError.message
+                    : t("run.model_error.message_hidden")}
                 </p>
                 {modelError.truncated && (
                   <p>{t("run.model_error.upstream_truncated")}</p>

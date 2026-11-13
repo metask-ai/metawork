@@ -16,10 +16,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
-import {
-  ComposerAddMenu,
-  type ComposerWorkspaceFiles,
-} from "./ComposerAddMenu.tsx";
+import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
@@ -149,7 +146,8 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
-  workspaceFiles,
+  workspaceReferenceMenu,
+  workspaceReferenceScope,
   onDropFiles,
   onPasteImages,
   onCancelAttachments,
@@ -214,7 +212,8 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
-  workspaceFiles?: ComposerWorkspaceFiles;
+  workspaceReferenceMenu?: ReactNode;
+  workspaceReferenceScope?: string;
   onDropFiles?: (files: File[]) => void;
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
@@ -913,14 +912,14 @@ export function ComposerFooter({
                   </Button>
                 ) : (
                   <ComposerAddMenu
-                    key={workspaceFiles?.scope ?? draftScope}
+                    key={workspaceReferenceScope ?? draftScope}
                     triggerRef={attachmentButtonRef}
                     disabled={composeDisabled || attachmentActionsDisabled}
                     attachmentsEnabled={attachmentsEnabled}
                     skillText={draft.kind === "text" ? draft.text : null}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
-                    workspaceFiles={workspaceFiles}
+                    workspaceReferenceMenu={workspaceReferenceMenu}
                     onRefreshSkills={onRefreshSkillCatalog}
                     onChooseSkill={chooseCandidate}
                   />

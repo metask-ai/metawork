@@ -295,8 +295,7 @@ pub const Coordinator = struct {
     fn currentMetaskAuthorization(context: *anyopaque) ?control_ports.MetaskAuthorization {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        const state = self.account.authorizationState() orelse return null;
-        return .{ .scope = state.scope, .generation = state.generation };
+        return .{ .generation = self.account.authorizationGeneration() orelse return null };
     }
 
     pub fn imageRunPreparation(self: *Coordinator) control_ports.ImageRunPreparation {
@@ -309,16 +308,15 @@ pub const Coordinator = struct {
 
     const PreparedMedia = struct {
         candidate: models_contract.OwnedMediaCandidate,
-        scope: u64,
         generation: u64,
     };
 
     fn prepareMedia(self: *Coordinator, kind: models_contract.MediaKind) ?PreparedMedia {
         self.assertMainThread();
-        const authorization = self.account.authorizationState() orelse return null;
+        const generation = self.account.authorizationGeneration() orelse return null;
         var lease = (self.account.authorizationLease() catch return null) orelse return null;
         defer lease.deinit();
-        if (authorization.generation != lease.authorization_generation) return null;
+        if (generation != lease.authorization_generation) return null;
         const candidate = switch (self.management.prepareMediaCandidate(.{
             .kind = kind,
             .principal_ref = lease.principal_ref,
@@ -328,7 +326,7 @@ pub const Coordinator = struct {
             .ready => |value| value,
             .rejected => return null,
         };
-        return .{ .candidate = candidate, .scope = authorization.scope, .generation = authorization.generation };
+        return .{ .candidate = candidate, .generation = generation };
     }
 
     fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
@@ -349,7 +347,7 @@ pub const Coordinator = struct {
             .output_owner = output,
             .release_output_fn = releaseImageOutput,
         };
-        result.enableCredentialRenewal(allocator, self.io, prepared.scope, prepared.generation) catch {
+        result.enableCredentialRenewal(allocator, self.io, prepared.generation) catch {
             result.deinit();
             return null;
         };
@@ -373,7 +371,7 @@ pub const Coordinator = struct {
             .output = output.port(),
             .release_output_fn = releaseVideoOutput,
         };
-        result.authorization.enable(allocator, self.io, result.candidate.input().bearer, prepared.scope, prepared.generation) catch {
+        result.authorization.enable(allocator, self.io, result.candidate.input().bearer, prepared.generation) catch {
             result.deinit();
             return null;
         };
@@ -462,8 +460,7 @@ pub const Coordinator = struct {
 
     fn renewDeferredCredential(self: *Coordinator) void {
         const renewal = self.credential_renewal orelse return;
-        const state = self.account.authorizationState() orelse return;
-        const authority: control_ports.MetaskAuthorization = .{ .scope = state.scope, .generation = state.generation };
+        const authority: control_ports.MetaskAuthorization = .{ .generation = self.account.authorizationGeneration() orelse return };
         if (!renewal.needs(authority)) return;
         var lease = (self.account.authorizationLease() catch {
             renewal.renew(authority, null);
@@ -489,8 +486,8 @@ pub const Coordinator = struct {
         // authority alone. Catalog failure cannot roll this handoff back.
         var lease = (self.account.authorizationLease() catch {
             self.cancelCatalogRetry();
-            if (self.account.authorizationState()) |state| if (self.credential_renewal) |renewal| {
-                renewal.renew(.{ .scope = state.scope, .generation = state.generation }, null);
+            if (self.account.authorizationGeneration()) |generation| if (self.credential_renewal) |renewal| {
+                renewal.renew(.{ .generation = generation }, null);
             };
             self.cancelCatalog();
             self.management.setMetaskAuthorizationUnavailable();
@@ -507,9 +504,9 @@ pub const Coordinator = struct {
         defer lease.deinit();
         if (lease.authorization_generation == self.observed_authorization_generation) return;
         self.cancelCatalogRetry();
-        if (self.account.authorizationState()) |state| if (self.credential_renewal) |renewal| {
-            if (state.generation == lease.authorization_generation)
-                renewal.renew(.{ .scope = state.scope, .generation = state.generation }, lease.access_token);
+        if (self.account.authorizationGeneration()) |generation| if (self.credential_renewal) |renewal| {
+            if (generation == lease.authorization_generation)
+                renewal.renew(.{ .generation = generation }, lease.access_token);
         };
         self.cancelCatalog();
         self.observed_authorization_generation = lease.authorization_generation;

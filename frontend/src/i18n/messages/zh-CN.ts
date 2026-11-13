@@ -39,6 +39,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.model_error.category.stream_interrupted": "接收模型回复时传输中断。",
   "run.model_error.category.output_limit": "这次回复达到了模型的输出限制。",
   "run.model_error.category.unknown": "模型服务未能完成这次请求。",
+  "run.model_error.reason.metask_insufficient_balance":
+    "Metask 账户余额和套餐额度不足。",
   "run.guidance.review_context": "缩短下一条消息，或在可用时整理对话。",
   "run.guidance.revise_instruction": "调整指令或缩小请求范围后继续。",
   "run.guidance.wait": "请稍后再试。",
@@ -274,7 +276,13 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.remove": "移除项目",
   "workspace.remove_failed": "未能移除项目，请重试。",
   "workspace.open": "打开项目目录",
-  "workspace.open_failed": "无法打开项目目录，请确认目录仍然可用后重试。",
+  "workspace.open_failed.workspace_unavailable":
+    "无法打开项目目录：项目状态已变化，请刷新后重试或重新选择项目。",
+  "workspace.open_failed.directory_unavailable":
+    "无法打开项目目录，请确认目录仍然可用后重试。",
+  "workspace.open_failed.system_open_failed":
+    "系统文件管理器未能打开该目录，请稍后重试。",
+  "workspace.open_failed.request_failed": "无法打开项目目录，请稍后重试。",
   "workspace.remove_title": "移除项目“{title}”？",
   "workspace.remove_body":
     "移除项目后，任务及其历史记录仍会保留，正在执行的任务不受影响。你可以随时重新添加项目。",
@@ -1476,8 +1484,6 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.models_catalog_failed": "Metask 模型目录刷新失败。",
   "mutation.reason.metask_authorization_required":
     "请登录 Metask 后使用此模型。",
-  "mutation.reason.metask_authorization_changed":
-    "此任务的 Metask 授权已变更。",
   "mutation.reason.session_poisoned": "当前会话已无法继续。",
   "mutation.reason.checkpoint_unavailable": "已保存的会话检查点不可用。",
   "mutation.reason.execution_rebind_required": "此会话需要可用的执行配置。",

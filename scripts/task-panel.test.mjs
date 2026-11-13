@@ -108,7 +108,7 @@ const { TaskPanel, taskPanelTabLabels } = await vite.ssrLoadModule(
   "/src/features/task-panel/TaskPanel.tsx",
 );
 const { WorkspaceFileTree, useWorkspaceFileTree } = await vite.ssrLoadModule(
-  "/src/features/task-panel/WorkspaceFileTree.tsx",
+  "/src/features/workspaces/WorkspaceFileTree.tsx",
 );
 const { RunProcess } = await vite.ssrLoadModule(
   "/src/features/tasks/RunProcess.tsx",
@@ -154,6 +154,7 @@ function terminal(
     modelError: null,
     feedback: {
       guidance: "none",
+      reason: null,
       offerInputPreparation: [
         "failed",
         "interrupted",
@@ -3350,7 +3351,7 @@ test("typed Agent failures render accurate recovery guidance", () => {
           phase: "failed",
           terminal: {
             ...terminal("failed", cause),
-            feedback: { guidance, offerInputPreparation: true },
+            feedback: { guidance, reason: null, offerInputPreparation: true },
           },
         }),
       ],
@@ -3484,7 +3485,11 @@ test("tool-loop feedback offers input preparation only while eligible", () => {
     input,
     terminal: {
       ...terminal("stopped", "tool_failure"),
-      feedback: { guidance: "review_changes", offerInputPreparation: true },
+      feedback: {
+        guidance: "review_changes",
+        reason: null,
+        offerInputPreparation: true,
+      },
     },
   });
   const value = task({ runs: [stopped] });
@@ -3523,6 +3528,7 @@ test("tool-loop feedback offers input preparation only while eligible", () => {
               ...stopped.terminal,
               feedback: {
                 guidance: "review_changes",
+                reason: null,
                 offerInputPreparation: false,
               },
             },
@@ -3537,7 +3543,7 @@ test("tool-loop feedback offers input preparation only while eligible", () => {
   assert.equal(prepared.length, 1);
 });
 
-test("model error notices expose safe details and explicit settings without sending a retry", async () => {
+test("model error notices quote cleaned upstream text and keep details and settings explicit without sending a retry", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const detail = JSON.parse(
     await readFile(
@@ -3555,6 +3561,7 @@ test("model error notices expose safe details and explicit settings without send
           modelError: detail,
           feedback: {
             guidance: "account_settings",
+            reason: null,
             offerInputPreparation: true,
           },
         },
@@ -3574,7 +3581,11 @@ test("model error notices expose safe details and explicit settings without send
   assert.ok(
     screen.getByText("The model service could not verify your credentials."),
   );
-  assert.equal(screen.queryByText(detail.message), null);
+  const notice = document.querySelector(".run-terminal-activity");
+  const quote = notice.querySelector(".ai-activity-quote");
+  assert.equal(quote.textContent, detail.message);
+  assert.ok(notice.querySelector("img") === null);
+  assert.ok(notice.querySelector("a") === null);
   await user.click(
     screen.getByRole("button", { name: "Open account settings" }),
   );
@@ -3584,7 +3595,7 @@ test("model error notices expose safe details and explicit settings without send
   await user.click(
     await screen.findByRole("menuitem", { name: "View run details" }),
   );
-  assert.ok(screen.getByText(detail.message));
+  assert.ok(within(screen.getByRole("dialog")).getByText(detail.message));
   assert.equal(screen.getByRole("dialog").querySelector("img"), null);
   assert.ok(screen.getByText("future-code"));
   assert.ok(screen.getByText("18446744073709551615 ms"));
@@ -3593,7 +3604,8 @@ test("model error notices expose safe details and explicit settings without send
   );
   assert.ok(screen.getByText("No additional technical details were provided."));
   await user.click(screen.getByRole("button", { name: "Close" }));
-  assert.equal(screen.queryByText(detail.message), null);
+  assert.ok(screen.queryByRole("dialog") === null);
+  assert.equal(screen.getAllByText(detail.message).length, 1);
   await user.click(screen.getByRole("button", { name: "Run actions" }));
   await user.click(
     await screen.findByRole("menuitem", { name: "Copy to input box" }),
@@ -3601,7 +3613,7 @@ test("model error notices expose safe details and explicit settings without send
   assert.equal(prepared.length, 1);
 });
 
-test("model error categories explain the failure in both locales without exposing raw detail", async () => {
+test("model error categories explain the failure in both locales and quote the cleaned upstream text once", async () => {
   const detail = JSON.parse(
     await readFile(
       new URL("../src/product/control/model_error.fixture", import.meta.url),
@@ -3644,7 +3656,7 @@ test("model error categories explain the failure in both locales without exposin
                 modelError: {
                   ...detail,
                   category,
-                  message: "raw-error-hidden-until-open",
+                  message: "Upstream said: quota <b>1</b>",
                 },
               },
             }),
@@ -3661,10 +3673,10 @@ test("model error categories explain the failure in both locales without exposin
         ),
       );
       assert.equal(notice.querySelectorAll(".ai-activity-copy > p").length, 1);
-      assert.equal(
-        notice.textContent.includes("raw-error-hidden-until-open"),
-        false,
-      );
+      const quotes = notice.querySelectorAll(".ai-activity-quote");
+      assert.equal(quotes.length, 1);
+      assert.equal(quotes[0].textContent, "Upstream said: quota <b>1</b>");
+      assert.equal(notice.querySelector("b"), null);
       assert.equal(
         notice.querySelectorAll(".run-terminal-detail > span").length,
         0,
@@ -3706,7 +3718,11 @@ test("payment guidance matches the source and prioritizes settings without claim
                   category: "payment_required",
                   source,
                 },
-                feedback: { guidance: recovery, offerInputPreparation: true },
+                feedback: {
+                  guidance: recovery,
+                  reason: null,
+                  offerInputPreparation: true,
+                },
               },
             }),
           ],
@@ -3809,6 +3825,7 @@ test("historical settings navigation survives while retry stays current and sync
           modelError: detail,
           feedback: {
             guidance: "account_settings",
+            reason: null,
             offerInputPreparation: true,
           },
         },
@@ -3839,6 +3856,279 @@ test("historical settings navigation survives while retry stays current and sync
   }
 });
 
+async function metaskBalanceSample() {
+  return JSON.parse(
+    await readFile(
+      new URL(
+        "../src/product/control/model_error_metask_balance.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+}
+
+function failedRunWithError(id, modelError, feedback, partial = false) {
+  return run({
+    id,
+    phase: "failed",
+    output: {
+      commentary: [],
+      response: partial ? "Retained partial answer" : "",
+      responseKind: partial ? "partial" : null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    terminal: {
+      ...terminal("failed", "provider_failure"),
+      modelError,
+      feedback,
+    },
+  });
+}
+
+test("Metask balance failures name the first-party reason and recharge only with a live authenticated Account", async () => {
+  const sample = await metaskBalanceSample();
+  for (const locale of ["en-US", "zh-CN"]) {
+    for (const partial of [false, true]) {
+      for (const historical of [false, true]) {
+        for (const available of [true, false]) {
+          const failed = failedRunWithError(
+            "8",
+            sample.modelError,
+            sample.feedback,
+            partial,
+          );
+          const value = task({
+            runs: historical ? [failed, run({ id: "9" })] : [failed],
+          });
+          const opened = [],
+            recharged = [];
+          const view = render(
+            taskContentElement(
+              value,
+              "1",
+              {
+                synchronized: true,
+                retryAvailable: true,
+                onOpenSettings: (target) => opened.push(target),
+                recharge: {
+                  available,
+                  busy: false,
+                  onOpen: () => recharged.push(true),
+                },
+              },
+              locale,
+            ),
+          );
+          const notice = view.container.querySelector(".run-terminal-activity");
+          const reason = translate(
+            locale,
+            "run.model_error.reason.metask_insufficient_balance",
+          );
+          assert.ok(
+            notice.textContent.includes(
+              partial
+                ? translate(locale, "run.terminal.partial_reason", { reason })
+                : reason,
+            ),
+          );
+          assert.ok(
+            !notice.textContent.includes(
+              translate(locale, "run.model_error.category.payment_required"),
+            ),
+          );
+          assert.ok(notice.querySelector(".ai-activity-quote") === null);
+          assert.ok(!notice.textContent.includes(sample.modelError.message));
+          const buttons = [...notice.querySelectorAll("button")];
+          assert.equal(buttons.length, 1);
+          const [action] = buttons;
+          assert.equal(action.dataset.primary, "true");
+          if (available) {
+            assert.equal(
+              action.textContent,
+              translate(locale, "settings.account_recharge"),
+            );
+            assert.equal(
+              action.title,
+              translate(locale, "settings.account_recharge_browser_hint"),
+            );
+            fireEvent.click(action);
+            assert.deepEqual(recharged, [true]);
+            assert.deepEqual(opened, []);
+          } else {
+            assert.equal(
+              action.textContent,
+              translate(locale, "run.model_error.open_account"),
+            );
+            fireEvent.click(action);
+            assert.deepEqual(opened, ["account"]);
+            assert.deepEqual(recharged, []);
+          }
+          view.unmount();
+        }
+      }
+    }
+  }
+});
+
+test("recharge stays unavailable while disconnected or an Account command is in flight", async () => {
+  const sample = await metaskBalanceSample();
+  for (const props of [
+    { synchronized: false },
+    { responseDisabled: true },
+    { recharge: { available: true, busy: true, onOpen() {} } },
+  ]) {
+    const recharged = [];
+    const view = render(
+      taskContentElement(
+        task({
+          runs: [failedRunWithError("9", sample.modelError, sample.feedback)],
+        }),
+        "1",
+        {
+          synchronized: true,
+          recharge: {
+            available: true,
+            busy: false,
+            onOpen: () => recharged.push(true),
+          },
+          ...props,
+        },
+      ),
+    );
+    const action = screen.getByRole("button", { name: "Recharge" });
+    assert.equal(action.disabled, true);
+    fireEvent.click(action);
+    assert.deepEqual(recharged, []);
+    view.unmount();
+  }
+});
+
+test("other sources keep source-matched settings and quote the cleaned upstream text instead of recharge", async () => {
+  const sample = await metaskBalanceSample();
+  for (const source of ["custom_provider", null]) {
+    for (const category of ["payment_required", "authentication"]) {
+      const opened = [],
+        recharged = [];
+      const view = render(
+        taskContentElement(
+          task({
+            runs: [
+              failedRunWithError(
+                "9",
+                { ...sample.modelError, source, category },
+                {
+                  guidance: "model_settings",
+                  reason: null,
+                  offerInputPreparation: true,
+                },
+              ),
+            ],
+          }),
+          "1",
+          {
+            synchronized: true,
+            onOpenSettings: (target) => opened.push(target),
+            recharge: {
+              available: true,
+              busy: false,
+              onOpen: () => recharged.push(true),
+            },
+          },
+        ),
+      );
+      const notice = view.container.querySelector(".run-terminal-activity");
+      assert.ok(
+        notice.textContent.includes(
+          translate("en-US", `run.model_error.category.${category}`),
+        ),
+      );
+      assert.equal(
+        notice.querySelector(".ai-activity-quote").textContent,
+        sample.modelError.message,
+      );
+      assert.ok(screen.queryByRole("button", { name: "Recharge" }) === null);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open model settings" }),
+      );
+      assert.deepEqual(opened, ["models"]);
+      assert.deepEqual(recharged, []);
+      view.unmount();
+    }
+  }
+});
+
+test("upstream quotes are omitted when empty or fully cleaned and stay clamped plain text otherwise", async () => {
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const feedback = {
+    guidance: "wait",
+    reason: null,
+    offerInputPreparation: true,
+  };
+  const quoteOf = (modelError, partial = false) => {
+    const view = render(
+      taskContentElement(
+        task({
+          runs: [
+            failedRunWithError(
+              "9",
+              { ...detail, category: "rate_limited", ...modelError },
+              feedback,
+              partial,
+            ),
+          ],
+        }),
+      ),
+    );
+    const notice = view.container.querySelector(".run-terminal-activity");
+    const quote = notice.querySelector(".ai-activity-quote");
+    const result = {
+      quote: quote ? quote.textContent : null,
+      links: quote ? quote.querySelectorAll("a").length : 0,
+      text: notice.textContent,
+    };
+    view.unmount();
+    return result;
+  };
+  assert.equal(quoteOf({ message: "", hostRedacted: true }).quote, null);
+  assert.equal(
+    quoteOf({ message: "**** ****", hostRedacted: true }).quote,
+    null,
+  );
+  assert.equal(
+    quoteOf({ message: "**** quota", hostRedacted: true }).quote,
+    "**** quota",
+  );
+  const long = "Upstream https://example.test/x ".repeat(32).trim();
+  const clamped = quoteOf({ message: long, truncated: true });
+  assert.equal(clamped.quote, long);
+  assert.equal(clamped.links, 0);
+  const partial = quoteOf({ message: "Busy upstream" }, true);
+  assert.equal(partial.quote, "Busy upstream");
+  assert.ok(
+    partial.text.includes(
+      translate("en-US", "run.terminal.partial_reason", {
+        reason: translate("en-US", "run.model_error.category.rate_limited"),
+      }),
+    ),
+  );
+  assert.ok(partial.text.includes(translate("en-US", "run.guidance.wait")));
+  const css = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+  const rule = css.match(/\.ai-activity-quote \{[^}]*\}/)?.[0] ?? "";
+  assert.match(rule, /-webkit-line-clamp: 2;/);
+  assert.match(rule, /overflow-wrap: anywhere;/);
+});
+
 test("tool records never assert successful effects and only retry advice promotes copying", async () => {
   const detail = JSON.parse(
     await readFile(
@@ -3861,7 +4151,11 @@ test("tool records never assert successful effects and only retry advice promote
                     ...detail,
                     category: recovery === "wait" ? "rate_limited" : "timeout",
                   },
-                  feedback: { guidance: recovery, offerInputPreparation: true },
+                  feedback: {
+                    guidance: recovery,
+                    reason: null,
+                    offerInputPreparation: true,
+                  },
                 },
               }),
             ],
@@ -3916,6 +4210,7 @@ test("supplemental model errors retain the primary failure and do not offer acco
     }),
   );
   assert.ok(screen.getByText("The run did not complete normally."));
+  assert.ok(document.querySelector(".ai-activity-quote") === null);
   assert.equal(
     screen.queryByRole("button", { name: "Open account settings" }),
     null,
@@ -6758,19 +7053,23 @@ test("App Workspace selection failure stays by its draft with source diagnostics
   await user.click(
     await screen.findByRole("option", { name: "Open local folder" }),
   );
-  await waitFor(() =>
-    assert.ok(document.querySelector(".workspace-selection-feedback")),
+  const notice = await screen.findByText(
+    "The workspace could not be opened. Choose it again.",
+    { selector: ".composer-workspace-notice > p" },
   );
   assert.ok(document.querySelector(".commandbar-alert") === null);
-  assert.ok(screen.queryByText("safe-picker-diagnostic <plain text>") === null);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Workspace diagnostics" }),
-  );
-  await screen.findByText("safe-picker-diagnostic <plain text>");
-  assert.ok(document.querySelector(".feedback-notice-details plain") === null);
-  fireEvent.keyDown(document.activeElement, { key: "Escape" });
+  const disclosure = notice.parentElement.querySelector("details");
+  assert.ok(disclosure);
+  assert.equal(disclosure.open, false);
+  const summary = disclosure.querySelector("summary");
+  assert.equal(summary.textContent, "Technical details");
+  await user.click(summary);
+  assert.equal(disclosure.open, true);
+  const diagnostic = disclosure.querySelector("pre");
+  assert.equal(diagnostic.textContent, "safe-picker-diagnostic <plain text>");
+  assert.equal(diagnostic.childElementCount, 0);
   await selectRecentTask(/First task/);
-  assert.ok(document.querySelector(".workspace-selection-feedback") === null);
+  assert.equal(notice.isConnected, false);
 });
 
 test("App compact errors stay local and their diagnostics survive dismissing the explanation", async (ctx) => {
@@ -7325,6 +7624,9 @@ test("App pages through all retained history while keeping the current Run live"
   source.runs = Array.from({ length: 16 }, (_, index) => ({
     ...structuredClone(template),
     id: String(index + 1),
+    phase: "completed",
+    activity: null,
+    terminal: terminal(),
     input: {
       kind: "text",
       text: `History input ${index + 1}`,
@@ -7334,13 +7636,20 @@ test("App pages through all retained history while keeping the current Run live"
       ...structuredClone(template.output),
       commentary: [],
       response: `History response ${index + 1}`,
+      responseKind: "final",
     },
+    tools: [],
+    fileChanges: null,
   }));
   const current = source.runs.at(-1);
   current.phase = "running";
+  current.activity = template.activity;
   current.terminal = null;
-  source.currentRunId = "16";
+  current.output.response = "";
+  current.output.responseKind = null;
+  source.currentRunId = current.id;
   source.currentRunPhase = "running";
+  source.activeOperation = { kind: "run", id: current.id };
   await selectRecentTask(/First task/);
   assert.ok(screen.getByText("History input 16"));
   assert.equal(screen.queryByText("History input 1"), null);
@@ -7381,31 +7690,36 @@ test("App pages through all retained history while keeping the current Run live"
     await screen.findByText(`History input ${id}`);
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
   const fetchSnapshot = BridgeClient.prototype.fetchSnapshot;
-  let releaseOldestPage;
-  const oldestPageReady = new Promise((resolve) => {
-    releaseOldestPage = resolve;
-  });
-  ctx.after(() => releaseOldestPage());
+  const oldestPage = Promise.withResolvers();
+  ctx.after(oldestPage.resolve);
+  const updateRevision = String(BigInt(fixture.snapshot.revision) + 1n);
   let oldestPageRequested = false;
   ctx.mock.method(
     BridgeClient.prototype,
     "fetchSnapshot",
     async function (scope) {
       const snapshot = await fetchSnapshot.call(this, scope);
-      if (scope.beforeRunId === "5") {
+      if (scope.beforeRunId === "5" && snapshot.revision === updateRevision) {
         oldestPageRequested = true;
-        await oldestPageReady;
+        await oldestPage.promise;
       }
       return snapshot;
     },
   );
-  source.runs[5].contentVersion = "2";
-  source.runs[5].input.text = "Updated historical Run 6";
+  const updatedRun = source.runs[5];
+  updatedRun.contentVersion = "2";
+  updatedRun.fileChanges = { observation: "complete", changes: [fileChange()] };
   await publishAppFixture(fixture);
-  await screen.findByText("Updated historical Run 6");
   // Run 6 arrives on an intermediate page; the saved reading goal still
   // requires the oldest page before the full loaded interval is restored.
-  await waitFor(() => assert.equal(oldestPageRequested, true));
+  await waitFor(() => assert.equal(oldestPageRequested, true), {
+    timeout: 5_000,
+  });
+  const updatedRunFileChanges = () =>
+    within(
+      document.querySelector(`[data-run-id="${updatedRun.id}"]`),
+    ).getByRole("button", { name: /File changes.*Review changes/ });
+  assert.ok(updatedRunFileChanges());
   assert.equal(screen.queryByText("History input 1"), null);
   assert.equal(
     document.querySelector(".conversation-history-loading").textContent,
@@ -7415,7 +7729,7 @@ test("App pages through all retained history while keeping the current Run live"
     screen.getByRole("button", { name: "Stop task" }).disabled,
     false,
   );
-  releaseOldestPage();
+  await act(async () => oldestPage.resolve());
   await waitFor(() => {
     assert.deepEqual(
       [...document.querySelectorAll(".ai-exchange")].map(
@@ -7424,7 +7738,7 @@ test("App pages through all retained history while keeping the current Run live"
       Array.from({ length: 16 }, (_, index) => String(index + 1)),
     );
   });
-  assert.ok(screen.getByText("Updated historical Run 6"));
+  assert.ok(updatedRunFileChanges());
   const viewport = document.querySelector(".ai-conversation-viewport");
   Object.defineProperties(viewport, {
     scrollHeight: { configurable: true, value: 2000 },

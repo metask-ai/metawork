@@ -8,7 +8,9 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -75,8 +77,10 @@ test(
   { timeout: 30_000 },
   async () => {
     const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-hmr-"));
-    const frontend = path.join(root, "frontend");
-    await mkdir(frontend);
+    const frontend = path.join(root, "real", "frontend");
+    const checkout = path.join(root, "checkout");
+    await mkdir(frontend, { recursive: true });
+    await symlink(path.dirname(frontend), checkout, "junction");
     const modulePath = path.join(frontend, "main.js");
     await writeFile(
       path.join(frontend, "index.html"),
@@ -92,8 +96,12 @@ test(
     );
     let ownedServer;
     try {
-      await withDevelopmentServer(root, async (server) => {
+      await withDevelopmentServer(checkout, async (server) => {
         ownedServer = server;
+        assert.equal(
+          path.normalize(server.config.root),
+          await realpath(frontend),
+        );
         const url = server.resolvedUrls.local[0];
         const html = await (await fetch(url)).text();
         assert.match(html, /\/@vite\/client/);
@@ -128,7 +136,7 @@ test(
       });
       assert.equal(ownedServer.httpServer.listening, false);
       await assert.rejects(
-        withDevelopmentServer(root, async (server) => {
+        withDevelopmentServer(checkout, async (server) => {
           ownedServer = server;
           throw new Error("Host startup failed");
         }),

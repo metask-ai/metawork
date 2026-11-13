@@ -1539,7 +1539,7 @@ test("Task information shows the directory name and opens the bound Workspace by
   const openWorkspace = ctx.mock.method(
     BridgeClient.prototype,
     "openWorkspace",
-    async () => ({ opened: false }),
+    async () => ({ opened: false, reason: "directory_unavailable" }),
   );
   await user.click(screen.getByRole("button", { name: "Task information" }));
   const directory = screen.getByText("Working directory").parentElement;
@@ -1548,16 +1548,54 @@ test("Task information shows the directory name and opens the bound Workspace by
     workspace.displayName,
   );
   assert.ok(!screen.queryByText(workspace.canonicalRoot));
-  await user.click(screen.getByRole("button", { name: "Open project folder" }));
-  assert.deepEqual(openWorkspace.mock.calls[0].arguments, [
-    workspace.id,
-    workspace.epoch,
-  ]);
-  await screen.findByText(/Could not open the project folder/);
+  const open = screen.getByRole("button", { name: "Open project folder" });
+  for (const [result, message] of [
+    [
+      { opened: false, reason: "directory_unavailable" },
+      "Could not open the project folder. Check that it is still available and try again.",
+    ],
+    [
+      { opened: false, reason: "workspace_unavailable" },
+      "Could not open the project folder because the project has changed. Refresh and try again, or choose the project again.",
+    ],
+    [
+      { opened: false, reason: "system_open_failed" },
+      "The system file manager could not open the project folder. Please try again.",
+    ],
+    [null, "Could not open the project folder. Please try again."],
+  ]) {
+    openWorkspace.mock.mockImplementation(async () => {
+      if (!result) throw new Error("Host unavailable");
+      return result;
+    });
+    await user.click(open);
+    const notice = await within(directory).findByRole("alert");
+    assert.equal(notice.textContent, message);
+    await user.click(
+      within(directory).getByRole("button", { name: "Dismiss this notice" }),
+    );
+    assert.equal(within(directory).queryByRole("alert"), null);
+    assert.ok(document.activeElement === open);
+  }
+  assert.equal(openWorkspace.mock.callCount(), 4);
+  for (const call of openWorkspace.mock.calls)
+    assert.deepEqual(call.arguments, [workspace.id, workspace.epoch]);
+  openWorkspace.mock.mockImplementation(async () => ({
+    opened: false,
+    reason: "system_open_failed",
+  }));
+  await user.click(open);
+  await within(directory).findByRole("alert");
   openWorkspace.mock.mockImplementation(async () => ({ opened: true }));
-  await user.click(screen.getByRole("button", { name: "Open project folder" }));
-  assert.equal(openWorkspace.mock.callCount(), 2);
-  assert.ok(!screen.queryByText(/Could not open the project folder/));
+  await user.click(open);
+  assert.equal(openWorkspace.mock.callCount(), 6);
+  await waitFor(() =>
+    assert.equal(within(directory).queryByRole("alert"), null),
+  );
+  assert.equal(
+    directory.querySelector("dd").textContent,
+    workspace.displayName,
+  );
 });
 
 test("App explains Workspace selection failures below the Composer and preserves the draft", async (ctx) => {
@@ -1784,7 +1822,11 @@ function finishWithPendingContinuation(fixture) {
       cause: null,
       diagnosticDisposition: "absent",
       recordingIncomplete: false,
-      feedback: { guidance: "none", offerInputPreparation: false },
+      feedback: {
+        guidance: "none",
+        reason: null,
+        offerInputPreparation: false,
+      },
       modelError: null,
     },
     additionalInputs: [
@@ -1932,7 +1974,11 @@ test("App uncertain submission is retained as a message and never replays on com
       cause: null,
       diagnosticDisposition: "absent",
       recordingIncomplete: false,
-      feedback: { guidance: "none", offerInputPreparation: false },
+      feedback: {
+        guidance: "none",
+        reason: null,
+        offerInputPreparation: false,
+      },
       modelError: null,
     },
   });
@@ -1994,7 +2040,11 @@ test("App idle follow-up addresses only Task when currentRunId is zero", async (
       cause: null,
       diagnosticDisposition: "absent",
       recordingIncomplete: false,
-      feedback: { guidance: "none", offerInputPreparation: false },
+      feedback: {
+        guidance: "none",
+        reason: null,
+        offerInputPreparation: false,
+      },
       modelError: null,
     },
   });

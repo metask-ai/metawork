@@ -731,6 +731,7 @@ export const modelErrorCategories = [
 export const runGuidances = [
   "account_settings",
   "model_settings",
+  "recharge",
   "review_context",
   "revise_instruction",
   "wait",
@@ -740,8 +741,10 @@ export const runGuidances = [
   "review_image_input",
   "none",
 ] as const;
+export const runProviderReasons = ["metask_insufficient_balance"] as const;
 export type RunFeedback = {
   guidance: (typeof runGuidances)[number];
+  reason: (typeof runProviderReasons)[number] | null;
   offerInputPreparation: boolean;
 };
 export type RunModelError = {
@@ -1073,7 +1076,6 @@ export const sendInputReasons = [
   "models_catalog_loading",
   "models_catalog_failed",
   "metask_authorization_required",
-  "metask_authorization_changed",
   "session_poisoned",
   "checkpoint_unavailable",
   "execution_rebind_required",
@@ -1176,7 +1178,6 @@ export const modelInputBlockers = [
   "models_catalog_loading",
   "models_catalog_failed",
   "metask_authorization_required",
-  "metask_authorization_changed",
 ] as const;
 
 export type TaskView = {
@@ -1496,6 +1497,15 @@ export type WorkbenchSnapshot = {
 export type AutomaticWorkspaceRootMutationResult = {
   outcome: "applied" | "cancelled";
 };
+export const workspaceOpenFailureReasons = [
+  "workspace_unavailable",
+  "directory_unavailable",
+  "system_open_failed",
+] as const;
+export type WorkspaceOpenFailureReason =
+  (typeof workspaceOpenFailureReasons)[number];
+export type WorkspaceOpenResult =
+  { opened: true } | { opened: false; reason: WorkspaceOpenFailureReason };
 export type PersistenceRecoveryOutcome =
   | "recovered"
   | "stale_revision"

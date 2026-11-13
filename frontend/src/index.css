@@ -3084,6 +3084,17 @@ button.run-process-tool:hover {
   margin-top: 2px;
 }
 
+.ai-activity-quote {
+  display: -webkit-box;
+  margin-top: 2px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .run-terminal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3114,6 +3125,12 @@ button.run-process-tool:hover {
 
 .ai-activity-retry {
   border: 0;
+}
+
+.ai-activity-external {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .run-terminal-actions .ai-activity-retry[data-primary="false"] {
@@ -8819,6 +8836,24 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .task-workspace-error {
   color: var(--ui-content-warning);
+}
+
+.workspace-open-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.workspace-open-failure > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.workspace-open-failure > .icon-button {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
 }
 
 .task-permission-fact {

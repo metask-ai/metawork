@@ -11,6 +11,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const agentcore_bundle = @import("build_support/agentcore_bundle.zig");
+const windows_build_spawn = @import("build_support/windows_build_spawn.zig");
 
 const ArtifactOption = enum {
     development,
@@ -19,6 +20,9 @@ const ArtifactOption = enum {
 };
 
 pub fn build(b: *std.Build) void {
+    if (b.graph.host.result.os.tag == .windows)
+        b.graph.io = windows_build_spawn.serialize(b.graph.io, b.allocator);
+
     // The SDK follows Zig's GNU host default on Windows. Supply our canonical
     // ABI only when the caller has not selected a target; explicit GNU fails below.
     if (b.graph.host.result.os.tag == .windows and !b.user_input_options.contains("target")) {
@@ -904,6 +908,12 @@ fn createLifecycleFixture(
         .optimize = modules.app.optimize,
         .link_libc = link_libc,
     });
+    const workspace = b.addWriteFiles();
+    _ = workspace.add("workspace/.fixture", "");
+    const options = b.addOptions();
+    options.addOption([]const u8, "repository_root", b.pathFromRoot("."));
+    options.addOptionPath("workspace_root", workspace.getDirectory().path(b, "workspace"));
+    fixture.addOptions("lifecycle_fixture_options", options);
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_product_control", modules.product_control);
     fixture.addImport("metawork_product_skill", modules.product_skill);

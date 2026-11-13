@@ -68,7 +68,11 @@ function run(id, text, assistant, outcome, toolContent = "", cause = null) {
             cause,
             diagnosticDisposition: "absent",
             recordingIncomplete: false,
-            feedback: { guidance: "none", offerInputPreparation: false },
+            feedback: {
+              guidance: "none",
+              reason: null,
+              offerInputPreparation: false,
+            },
             modelError: null,
           },
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },

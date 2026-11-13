@@ -7,6 +7,7 @@ import {
   maxPreviewVideoBytes,
   modelErrorCategories,
   runGuidances,
+  runProviderReasons,
   taskActionBlockers,
   taskNavigationSignals,
   type RunModelError,
@@ -139,7 +140,9 @@ import {
   type WorkbenchSnapshot,
   type AutomaticWorkspaceRootMutationResult,
   type WorkspaceChoice,
+  type WorkspaceOpenResult,
   type WorkspaceView,
+  workspaceOpenFailureReasons,
 } from "./contracts.ts";
 type JsonObject = Record<string, unknown>;
 export function decodeOutputActionResult(value: unknown) {
@@ -168,9 +171,16 @@ export function decodeExternalLinkOpenResult(value: unknown) {
     ] as const),
   };
 }
-export function decodeWorkspaceOpenResult(value: unknown) {
-  const item = object(value, "$", ["opened"]);
-  return { opened: booleanValue(item.opened, "$.opened") };
+export function decodeWorkspaceOpenResult(value: unknown): WorkspaceOpenResult {
+  if (booleanValue(record(value, "$").opened, "$.opened")) {
+    object(value, "$", ["opened"]);
+    return { opened: true };
+  }
+  const item = object(value, "$", ["opened", "reason"]);
+  return {
+    opened: false,
+    reason: enumValue(item.reason, "$.reason", workspaceOpenFailureReasons),
+  };
 }
 const taskLifecycles = ["open", "closing"] as const;
 const runPhases = [
@@ -2604,6 +2614,7 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
         const feedbackPath = path + ".feedback";
         const feedback = object(terminalItem.feedback, feedbackPath, [
           "guidance",
+          "reason",
           "offerInputPreparation",
         ]);
         const result = {
@@ -2612,6 +2623,11 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
               feedback.guidance,
               feedbackPath + ".guidance",
               runGuidances,
+            ),
+            reason: nullableEnum(
+              feedback.reason,
+              feedbackPath + ".reason",
+              runProviderReasons,
             ),
             offerInputPreparation: booleanValue(
               feedback.offerInputPreparation,
@@ -2638,7 +2654,20 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
             `${path}.modelError`,
           ),
         };
-        const { guidance } = result.feedback;
+        const { guidance, reason } = result.feedback;
+        if (
+          reason !== null &&
+          (result.outcome !== "failed" ||
+            result.cause !== "provider_failure" ||
+            result.modelError?.source !== "metask")
+        )
+          fail(
+            feedbackPath + ".reason",
+            "provider reason requires a primary Metask model error",
+          );
+        // The only current reason maps to recharge; other reasons may not.
+        if ((guidance === "recharge") !== (reason !== null))
+          fail(feedbackPath, "recharge guidance requires its provider reason");
         if (
           (guidance === "account_settings" || guidance === "model_settings") &&
           (result.outcome !== "failed" ||

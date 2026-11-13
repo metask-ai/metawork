@@ -505,7 +505,11 @@ test("a stopped tool loop prepares a local draft and preserves existing edits", 
       diagnosticDisposition: "absent",
       modelError: null,
       recordingIncomplete: false,
-      feedback: { guidance: "review_changes", offerInputPreparation: true },
+      feedback: {
+        guidance: "review_changes",
+        reason: null,
+        offerInputPreparation: true,
+      },
     },
   };
   const { user } = await renderApp(ctx, { historyRuns: [run] });
@@ -534,7 +538,11 @@ test("Composer recalls only the current Task's saved text after remount and page
         cause: null,
         diagnosticDisposition: "absent",
         recordingIncomplete: false,
-        feedback: { guidance: "none", offerInputPreparation: false },
+        feedback: {
+          guidance: "none",
+          reason: null,
+          offerInputPreparation: false,
+        },
         modelError: null,
       },
       input: { kind: "text", text, redacted: false },
@@ -1574,23 +1582,91 @@ test("unavailable project directory cannot be opened but its entry can still be 
   assert.ok(await screen.findByRole("alertdialog"));
 });
 
-for (const failure of ["unavailable", "rejected"])
+const projectOpenFailures = [
+  [
+    "workspace_unavailable",
+    "Could not open the project folder because the project has changed. Refresh and try again, or choose the project again.",
+  ],
+  [
+    "directory_unavailable",
+    "Could not open the project folder. Check that it is still available and try again.",
+  ],
+  [
+    "system_open_failed",
+    "The system file manager could not open the project folder. Please try again.",
+  ],
+  ["rejected", "Could not open the project folder. Please try again."],
+];
+
+for (const [failure, message] of projectOpenFailures)
   test(`project folder opening reports ${failure} without removing its group`, async (ctx) => {
-    const { user } = await renderApp(ctx);
+    const { user, snapshot } = await renderApp(ctx);
+    const before = structuredClone(snapshot);
+    let removals = 0;
+    for (const method of ["removeProject", "removeWorkspace"])
+      ctx.mock.method(BridgeClient.prototype, method, async () => {
+        removals++;
+      });
     ctx.mock.method(BridgeClient.prototype, "openWorkspace", async () => {
       if (failure === "rejected") throw new Error("Host unavailable");
-      return { opened: false };
+      return { opened: false, reason: failure };
     });
     fireEvent.contextMenu(projectHeading());
     await user.click(
       await screen.findByRole("menuitem", { name: "Open project folder" }),
     );
-    assert.match(
-      (await screen.findByRole("alert")).textContent,
-      /Could not open the project folder/,
+    const alert = await screen.findByRole("alert");
+    assert.equal(alert.textContent, message);
+    assert.ok(
+      !alert.textContent.includes(snapshot.workspaces[0].canonicalRoot),
     );
     assert.equal(taskRows("3").length, 2);
+    await user.click(
+      within(alert.parentElement).getByRole("button", {
+        name: "Dismiss this notice",
+      }),
+    );
+    assert.equal(screen.queryByRole("alert"), null);
+    await waitFor(() => assertFocused(projectHeading()));
+    assert.equal(taskRows("3").length, 2);
+    assert.equal(removals, 0);
+    assert.deepEqual(snapshot, before);
   });
+
+test("project folder notice reappears on another failure and clears after a successful retry", async (ctx) => {
+  const { user } = await renderApp(ctx);
+  let result = { opened: false, reason: "system_open_failed" };
+  const open = ctx.mock.method(
+    BridgeClient.prototype,
+    "openWorkspace",
+    async () => result,
+  );
+  async function openFolder() {
+    fireEvent.contextMenu(projectHeading());
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Open project folder" }),
+    );
+  }
+  await openFolder();
+  const first = await screen.findByRole("alert");
+  await user.click(
+    within(first.parentElement).getByRole("button", {
+      name: "Dismiss this notice",
+    }),
+  );
+  assert.equal(screen.queryByRole("alert"), null);
+  result = { opened: false, reason: "directory_unavailable" };
+  await openFolder();
+  assert.equal(
+    (await screen.findByRole("alert")).textContent,
+    "Could not open the project folder. Check that it is still available and try again.",
+  );
+  result = { opened: true };
+  await openFolder();
+  await waitFor(() => assert.equal(open.mock.callCount(), 3));
+  await waitFor(() => assert.equal(screen.queryByRole("alert"), null));
+  assert.equal(taskRows("3").length, 2);
+});
 
 test("project removal requires confirmation and Cancel restores focus without a command", async (ctx) => {
   const { user } = await renderApp(ctx);
