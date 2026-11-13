@@ -1497,6 +1497,15 @@ export type WorkbenchSnapshot = {
 export type AutomaticWorkspaceRootMutationResult = {
   outcome: "applied" | "cancelled";
 };
+export const workspaceOpenFailureReasons = [
+  "workspace_unavailable",
+  "directory_unavailable",
+  "system_open_failed",
+] as const;
+export type WorkspaceOpenFailureReason =
+  (typeof workspaceOpenFailureReasons)[number];
+export type WorkspaceOpenResult =
+  { opened: true } | { opened: false; reason: WorkspaceOpenFailureReason };
 export type PersistenceRecoveryOutcome =
   | "recovered"
   | "stale_revision"

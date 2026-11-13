@@ -1,7 +1,12 @@
-import type { WorkspaceView } from "../../bridge/contracts.ts";
+import { useRef } from "react";
+import type {
+  WorkspaceOpenResult,
+  WorkspaceView,
+} from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { useWorkspaceDirectoryOpen } from "./useWorkspaceDirectoryOpen.ts";
+import { WorkspaceOpenFailureNotice } from "./WorkspaceOpenFailureNotice.tsx";
 
 export function WorkspaceDirectoryFact({
   workspace,
@@ -9,15 +14,13 @@ export function WorkspaceDirectoryFact({
   disabled = false,
 }: {
   workspace?: WorkspaceView;
-  onOpen?: () => Promise<{ opened: boolean }>;
+  onOpen?: () => Promise<WorkspaceOpenResult>;
   disabled?: boolean;
 }) {
   const { t } = useI18n();
-  const { cannotOpen, openDirectory, openFailed } = useWorkspaceDirectoryOpen(
-    workspace,
-    onOpen,
-    disabled,
-  );
+  const openButton = useRef<HTMLButtonElement>(null);
+  const { cannotOpen, openDirectory, openFailure, dismissOpenFailure } =
+    useWorkspaceDirectoryOpen(workspace, onOpen, disabled);
   if (
     workspace?.kind !== "manual" ||
     workspace.redacted ||
@@ -32,6 +35,7 @@ export function WorkspaceDirectoryFact({
         <div className="task-workspace-directory">
           <span>{workspaceName}</span>
           <button
+            ref={openButton}
             type="button"
             className="icon-button focus-ring"
             aria-label={t("workspace.open")}
@@ -42,10 +46,15 @@ export function WorkspaceDirectoryFact({
             <Icon name="folder-open" />
           </button>
         </div>
-        {openFailed && (
-          <small className="task-workspace-error" role="alert">
-            {t("workspace.open_failed")}
-          </small>
+        {openFailure && (
+          <WorkspaceOpenFailureNotice
+            failure={openFailure}
+            className="task-workspace-error"
+            onDismiss={() => {
+              dismissOpenFailure();
+              openButton.current?.focus();
+            }}
+          />
         )}
       </dd>
     </div>

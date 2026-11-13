@@ -140,7 +140,9 @@ import {
   type WorkbenchSnapshot,
   type AutomaticWorkspaceRootMutationResult,
   type WorkspaceChoice,
+  type WorkspaceOpenResult,
   type WorkspaceView,
+  workspaceOpenFailureReasons,
 } from "./contracts.ts";
 type JsonObject = Record<string, unknown>;
 export function decodeOutputActionResult(value: unknown) {
@@ -169,9 +171,16 @@ export function decodeExternalLinkOpenResult(value: unknown) {
     ] as const),
   };
 }
-export function decodeWorkspaceOpenResult(value: unknown) {
-  const item = object(value, "$", ["opened"]);
-  return { opened: booleanValue(item.opened, "$.opened") };
+export function decodeWorkspaceOpenResult(value: unknown): WorkspaceOpenResult {
+  if (booleanValue(record(value, "$").opened, "$.opened")) {
+    object(value, "$", ["opened"]);
+    return { opened: true };
+  }
+  const item = object(value, "$", ["opened", "reason"]);
+  return {
+    opened: false,
+    reason: enumValue(item.reason, "$.reason", workspaceOpenFailureReasons),
+  };
 }
 const taskLifecycles = ["open", "closing"] as const;
 const runPhases = [

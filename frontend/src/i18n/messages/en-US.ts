@@ -333,8 +333,14 @@ export const enUS = {
   "workspace.remove": "Remove project",
   "workspace.remove_failed": "Could not remove the project. Please try again.",
   "workspace.open": "Open project folder",
-  "workspace.open_failed":
+  "workspace.open_failed.workspace_unavailable":
+    "Could not open the project folder because the project has changed. Refresh and try again, or choose the project again.",
+  "workspace.open_failed.directory_unavailable":
     "Could not open the project folder. Check that it is still available and try again.",
+  "workspace.open_failed.system_open_failed":
+    "The system file manager could not open the project folder. Please try again.",
+  "workspace.open_failed.request_failed":
+    "Could not open the project folder. Please try again.",
   "workspace.remove_title": "Remove project “{title}”?",
   "workspace.remove_body":
     "Tasks and their history will be kept, and tasks in progress are unaffected. You can add the project again at any time.",

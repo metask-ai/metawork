@@ -1257,13 +1257,27 @@ test("Workspace opening sends only identity and epoch and decodes shared Host re
       payload: { workspaceId: "1", expectedWorkspaceEpoch: "7" },
     },
   ]);
-  response = fixture.unavailable;
-  assert.deepEqual(await client.openWorkspace("1", "7"), fixture.unavailable);
+  for (const reason of [
+    "workspace_unavailable",
+    "directory_unavailable",
+    "system_open_failed",
+  ]) {
+    response = fixture[reason];
+    assert.deepEqual(await client.openWorkspace("1", "7"), {
+      opened: false,
+      reason,
+    });
+  }
   for (const invalid of [
     { opened: "true" },
     { opened: true, path: "C:/outside" },
     {},
     { outcome: "opened" },
+    { opened: false },
+    { opened: false, reason: null },
+    { opened: false, reason: "unavailable" },
+    { opened: false, reason: "directory_unavailable", path: "C:/outside" },
+    { opened: true, reason: "system_open_failed" },
   ]) {
     response = invalid;
     await assert.rejects(

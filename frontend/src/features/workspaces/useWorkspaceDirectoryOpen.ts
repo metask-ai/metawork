@@ -1,15 +1,26 @@
 import { useState } from "react";
-import type { WorkspaceView } from "../../bridge/contracts.ts";
+import type {
+  WorkspaceOpenFailureReason,
+  WorkspaceOpenResult,
+  WorkspaceView,
+} from "../../bridge/contracts.ts";
+
+/** Host failure reasons, plus a request that produced no Host result. */
+export type WorkspaceOpenFailure =
+  WorkspaceOpenFailureReason | "request_failed";
 
 export function useWorkspaceDirectoryOpen(
   workspace: WorkspaceView | undefined,
-  onOpen: (() => Promise<{ opened: boolean }>) | undefined,
+  onOpen: (() => Promise<WorkspaceOpenResult>) | undefined,
   disabled: boolean,
 ) {
-  const [state, setState] = useState<"idle" | "opening" | "failed">("idle");
+  const [opening, setOpening] = useState(false);
+  const [openFailure, setOpenFailure] = useState<WorkspaceOpenFailure | null>(
+    null,
+  );
   const cannotOpen =
     disabled ||
-    state === "opening" ||
+    opening ||
     !onOpen ||
     workspace?.kind !== "manual" ||
     workspace.projectRemoved ||
@@ -18,13 +29,23 @@ export function useWorkspaceDirectoryOpen(
 
   async function openDirectory() {
     if (cannotOpen || !onOpen) return;
-    setState("opening");
+    setOpening(true);
+    setOpenFailure(null);
     try {
-      setState((await onOpen()).opened ? "idle" : "failed");
+      const result = await onOpen();
+      setOpenFailure(result.opened ? null : result.reason);
     } catch {
-      setState("failed");
+      setOpenFailure("request_failed");
+    } finally {
+      setOpening(false);
     }
   }
 
-  return { cannotOpen, openDirectory, openFailed: state === "failed" };
+  return {
+    cannotOpen,
+    openDirectory,
+    openFailure,
+    // Dismissal only hides the notice; it never touches the project or disk.
+    dismissOpenFailure: () => setOpenFailure(null),
+  };
 }

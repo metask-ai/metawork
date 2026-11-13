@@ -1,1 +1,1 @@
-{"opened":{"opened":true},"unavailable":{"opened":false}}
+{"opened":{"opened":true},"workspace_unavailable":{"opened":false,"reason":"workspace_unavailable"},"directory_unavailable":{"opened":false,"reason":"directory_unavailable"},"system_open_failed":{"opened":false,"reason":"system_open_failed"}}
