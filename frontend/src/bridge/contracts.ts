@@ -1104,6 +1104,7 @@ export const sendInputReasons = [
   "checkpoint_budget_required",
   "admission_failed",
   "continuation_cancelled",
+  "approval_mode_change",
   "combined_input_too_large",
   "checkpoint_failed",
   "schedule_failed",

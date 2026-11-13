@@ -1711,11 +1711,12 @@ pub const Runtime = struct {
             }
             return .detach;
         }
-        if (task.durable.permission_profile == change.target.profile()) {
+        const impact = task_policy.mutationImpact(task_policy.approvalMutation(task).?);
+        if (impact.execution_config == .unchanged) {
             change.phase = .mode_commit;
             return .changed;
         }
-        if (!self.approvalCoreIdle(task_id)) return .wait;
+        if (impact.core_quiescence == .required and !self.approvalCoreIdle(task_id)) return .wait;
         return .{ .checkpoint = change.baseline_confirmed };
     }
 
@@ -1875,8 +1876,9 @@ pub const Runtime = struct {
 
     pub fn approvalChangeRun(self: *const Runtime, task_id: u64) ?struct { cancel_run: ?u64 } {
         const task = self.findConst(task_id) orelse return null;
-        const change = task.approval_change orelse return null;
-        return .{ .cancel_run = if (task.durable.permission_profile != change.target.profile() and task.runtime.active_operation == .run)
+        const mutation = task_policy.approvalMutation(task) orelse return null;
+        return .{ .cancel_run = if (task_policy.mutationImpact(mutation).execution_config == .changed and
+            task.runtime.active_operation == .run)
             task.runtime.active_operation.run
         else
             null };
@@ -6827,10 +6829,14 @@ pub const Runtime = struct {
     }
 
     fn compactAdmission(task: *const task_state.Task, binding_epoch: u64, checkpoint_health: checkpoint_store.Health) error{ TaskBusy, BindingEpochMismatch, ExecutionUnavailable, ExecutionGenerationMismatch, NoSuchRun }!u64 {
-        if (inputContinuationSlot(task) != null) return error.TaskBusy;
+        const impact = task_policy.mutationImpact(.manual_compact);
+        // A mutation that holds queued input cannot start on top of a batch
+        // still waiting to drive the next execution.
+        if (impact.queued_input == .held and inputContinuationSlot(task) != null) return error.TaskBusy;
         if (binding_epoch == 0 or binding_epoch != task.durable.binding_epoch) return error.BindingEpochMismatch;
         _ = try taskExecutionInput(task);
-        if (task_policy.hasActiveOperation(task) or task_state.hasUnfinalizedTerminalEvents(task)) return error.TaskBusy;
+        if (impact.core_quiescence == .required and
+            (task_policy.hasActiveOperation(task) or task_state.hasUnfinalizedTerminalEvents(task))) return error.TaskBusy;
         if (task.runtime.worker_leases.hasLive() and
             (checkpoint_health != .unavailable or findEmptyCompact(task.durable.compacts) == null)) return error.TaskBusy;
         return task_policy.lastConversationRunId(task) orelse error.NoSuchRun;

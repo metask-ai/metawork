@@ -935,6 +935,8 @@ export const enUS = {
   "input.continuation_wait":
     "Processing submitted messages; edit your draft or stop",
   "mutation.reason.continuation_cancelled": "Further processing was cancelled.",
+  "mutation.reason.approval_mode_change":
+    "The approval mode change stopped this run. The message was kept so you can resend it.",
   "mutation.reason.combined_input_too_large":
     "The combined messages exceed the input limit. Send them separately.",
   "mutation.reason.checkpoint_failed":

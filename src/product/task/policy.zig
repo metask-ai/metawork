@@ -120,6 +120,65 @@ fn isAutomaticTitleBoundary(codepoint: []const u8) bool {
         std.mem.eql(u8, codepoint, "、");
 }
 
+/// Every operation that disturbs work in progress declares here, once, what it
+/// actually affects. One executor acts on the declaration; call sites no longer
+/// decide inline what they are allowed to interrupt.
+pub const TaskMutation = union(enum) {
+    /// An approval mode change. `profile_changes` is set when the target mode
+    /// crosses the Core permission profile boundary.
+    approval_mode: struct { profile_changes: bool },
+    /// A manual compaction the user asked for.
+    manual_compact,
+};
+
+pub const MutationImpact = struct {
+    /// Execution configuration Core observes: permission mode, model, and
+    /// Session identity.
+    execution_config: enum { unchanged, changed },
+    /// Whether Core must be quiescent before the mutation starts: no active
+    /// operation, no live worker lease, no unfinalized terminal event.
+    core_quiescence: enum { not_required, required },
+    /// Input already admitted and waiting to drive the next execution.
+    /// `held` keeps the batch intact; `resendable` retires it under the stated
+    /// reason but hands the text to an explicit resend instead of destroying it.
+    queued_input: union(enum) { held, resendable: task_state.SendInputReason },
+    /// Whether the mutation itself calls the model, and therefore requires the
+    /// Task to hold the current login's credential.
+    model_access: enum { none, required },
+};
+
+/// The declaration table. A mutation that does not declare its impact fails to
+/// compile.
+pub fn mutationImpact(mutation: TaskMutation) MutationImpact {
+    return switch (mutation) {
+        .approval_mode => |approval| if (approval.profile_changes) MutationImpact{
+            .execution_config = .changed,
+            .core_quiescence = .required,
+            .queued_input = .{ .resendable = .approval_mode_change },
+            .model_access = .none,
+        } else MutationImpact{
+            .execution_config = .unchanged,
+            .core_quiescence = .not_required,
+            .queued_input = .held,
+            .model_access = .none,
+        },
+        .manual_compact => MutationImpact{
+            .execution_config = .unchanged,
+            .core_quiescence = .required,
+            .queued_input = .held,
+            .model_access = .required,
+        },
+    };
+}
+
+/// The declaration for the approval change a Task is currently running.
+pub fn approvalMutation(task: *const task_state.Task) ?TaskMutation {
+    const change = task.approval_change orelse return null;
+    return .{ .approval_mode = .{
+        .profile_changes = task.durable.permission_profile != change.target.profile(),
+    } };
+}
+
 pub const TerminalDecision = struct {
     phase: task_state.RunPhase,
     outcome: task_state.RunOutcome,

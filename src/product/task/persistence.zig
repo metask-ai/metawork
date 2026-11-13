@@ -990,6 +990,7 @@ pub const InputFailureReason = enum {
             .run_stopping,
             .too_late,
             .continuation_cancelled,
+            .approval_mode_change,
             .combined_input_too_large,
             .checkpoint_failed,
             .schedule_failed,
