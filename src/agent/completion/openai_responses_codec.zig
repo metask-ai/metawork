@@ -102,9 +102,10 @@ test "Responses Completion owns an explicit non-streaming stateless request" {
         .system = "title only",
         .messages = &.{.{ .role = .user, .text = "hello\nworld" }},
         .max_output_tokens = 1234,
+        .connect_timeout_ms = 1_000,
     });
     defer encoded.deinit();
-    try std.testing.expectEqualStrings("https://example.test/custom-endpoint", encoded.view().url);
+    try std.testing.expectEqualStrings("https://example.test/custom-endpoint", encoded.view(1).url);
     var parsed = try codec.parseJson(std.testing.allocator, encoded.body);
     defer parsed.deinit();
     const root = try codec.object(parsed.value);
@@ -116,8 +117,8 @@ test "Responses Completion owns an explicit non-streaming stateless request" {
     const input = root.get("input").?.array.items[0].object;
     try std.testing.expectEqualStrings("user", input.get("role").?.string);
     try std.testing.expectEqualStrings("hello\nworld", input.get("content").?.string);
-    try std.testing.expect(encoded.view().headers[2].sensitive);
-    try std.testing.expectEqualStrings("Bearer fixture-secret", encoded.view().headers[2].value);
+    try std.testing.expect(encoded.view(1).headers[2].sensitive);
+    try std.testing.expectEqualStrings("Bearer fixture-secret", encoded.view(1).headers[2].value);
 }
 
 test "Responses request releases partial allocations on failure" {
@@ -130,6 +131,7 @@ test "Responses request releases partial allocations on failure" {
             }, .{
                 .messages = &.{.{ .role = .user, .text = "hello" }},
                 .max_output_tokens = 1234,
+                .connect_timeout_ms = 1_000,
             });
             defer encoded.deinit();
         }

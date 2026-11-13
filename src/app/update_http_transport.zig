@@ -43,7 +43,7 @@ pub const Adapter = struct {
     fn performAt(self: *Adapter, url: []const u8, head: bool, output: []u8, cancellation: *const Cancellation, timeout: std.Io.Duration) Error!Response {
         const result = self.http.run(.{
             .consumer = .update,
-            .deadline = .fromNow(self.http.io, .{ .raw = timeout, .clock = .boot }),
+            .budget = .{ .deadline = .fromNow(self.http.io, .{ .raw = timeout, .clock = .boot }) },
             .cancellation = .atomic(&cancellation.state),
         }, fetch, .{ url, head, output });
         return switch (result.outcome) {

@@ -165,6 +165,6 @@ test "format probe preserves frozen headers and body fields without copying cred
     var format = FormatTransport{ .allocator = std.testing.allocator, .inner = .{ .perform_fn = Fixture.perform } };
     var cancellation = agent.CompletionCancellation.init(format.transport());
     var output: [1]u8 = undefined;
-    _ = try format.transport().perform(.{ .url = "https://example.com/v1/messages", .headers = &.{.{ .name = "x-api-key", .value = "fixture-secret", .sensitive = true }}, .body = "{\"model\":\"frozen-model\",\"messages\":[]}" }, &cancellation, &output);
+    _ = try format.transport().perform(.{ .url = "https://example.com/v1/messages", .headers = &.{.{ .name = "x-api-key", .value = "fixture-secret", .sensitive = true }}, .body = "{\"model\":\"frozen-model\",\"messages\":[]}", .connect_timeout_ms = 1_000 }, &cancellation, &output);
     try std.testing.expect(format.matches_schema);
 }

@@ -284,6 +284,8 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         .url = binding.endpoint,
         .headers = &.{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "Authorization", .value = bearer, .sensitive = true } },
         .body = request,
+        // DNS, TCP and TLS share at most 15 s of the call budget.
+        .connect_timeout_ms = @min(limits.timeout_ms, 15_000),
     }, &call.cancellation, buffer) catch return .{ .failed = .outcome_unknown };
     if (call.cancellation.isRequested()) return .{ .failed = .outcome_unknown };
     if (response.status < 200 or response.status >= 300) return .{ .failed = .provider_rejected };

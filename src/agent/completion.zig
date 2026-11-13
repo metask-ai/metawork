@@ -110,7 +110,7 @@ pub const Completion = struct {
             self.allocator.free(response_buffer);
         }
         const response = self.transport.perform(
-            encoded.view(),
+            encoded.view(request.connect_timeout_ms),
             cancellation,
             response_buffer,
         ) catch |failure| return .{ .failure = transportFailure(failure) };
@@ -155,6 +155,7 @@ fn validateConfig(binding: ModelBinding) InitError!void {
 
 fn validateRequest(request: Request) error{ InvalidRequest, ResourceLimit }!void {
     if (request.max_output_tokens == 0 or
+        request.connect_timeout_ms == 0 or request.connect_timeout_ms > types.max_connect_timeout_ms or
         request.messages.len == 0 or request.messages.len > types.max_messages or
         !std.unicode.utf8ValidateSlice(request.system))
         return error.InvalidRequest;
@@ -282,13 +283,14 @@ test "invalid config and request fail before Transport" {
     var cancellation = owner.newCancellation();
     try std.testing.expectEqual(
         Failure.invalid_request,
-        owner.complete(.{ .messages = &.{}, .max_output_tokens = 4096 }, &cancellation).failure,
+        owner.complete(.{ .messages = &.{}, .max_output_tokens = 4096, .connect_timeout_ms = 1_000 }, &cancellation).failure,
     );
     try std.testing.expectEqual(
         Failure.invalid_request,
         owner.complete(.{
             .messages = &.{.{ .role = .user, .text = "hello" }},
             .max_output_tokens = 0,
+            .connect_timeout_ms = 1_000,
         }, &cancellation).failure,
     );
     try std.testing.expectEqual(
@@ -296,6 +298,15 @@ test "invalid config and request fail before Transport" {
         owner.complete(.{
             .messages = &.{.{ .role = .user, .text = "hello" }},
             .max_output_tokens = max_output_tokens + 1,
+            .connect_timeout_ms = 1_000,
+        }, &cancellation).failure,
+    );
+    for ([_]u32{ 0, types.max_connect_timeout_ms + 1 }) |connect_timeout_ms| try std.testing.expectEqual(
+        Failure.invalid_request,
+        owner.complete(.{
+            .messages = &.{.{ .role = .user, .text = "hello" }},
+            .max_output_tokens = 1,
+            .connect_timeout_ms = connect_timeout_ms,
         }, &cancellation).failure,
     );
     try std.testing.expectEqual(@as(usize, 0), fake.perform_count);
@@ -354,6 +365,7 @@ test "explicit protocols complete through one non-streaming path" {
                 .text = "hello",
             }},
             .max_output_tokens = 4096,
+            .connect_timeout_ms = 1_000,
         }, &cancellation)) {
             .result => |value| value,
             .failure => return error.TestUnexpectedResult,
@@ -391,6 +403,7 @@ test "service instances share a protocol without sharing identity or sending it 
         var result = switch (owner.complete(.{
             .messages = &.{.{ .role = .user, .text = "hello" }},
             .max_output_tokens = 4096,
+            .connect_timeout_ms = 1_000,
         }, &cancellation)) {
             .result => |value| value,
             .failure => return error.TestUnexpectedResult,
@@ -420,6 +433,7 @@ test "cancellation and provider rejection are explicit outcomes" {
         owner.complete(.{
             .messages = &.{.{ .role = .user, .text = "hi" }},
             .max_output_tokens = 4096,
+            .connect_timeout_ms = 1_000,
         }, &cancellation).failure,
     );
     try std.testing.expectEqual(@as(usize, 0), fake.perform_count);
@@ -428,6 +442,7 @@ test "cancellation and provider rejection are explicit outcomes" {
     const rejected = owner.complete(.{
         .messages = &.{.{ .role = .user, .text = "hi" }},
         .max_output_tokens = 4096,
+        .connect_timeout_ms = 1_000,
     }, &active);
     try std.testing.expectEqual(@as(u16, 429), rejected.failure.provider_rejected.status);
 }
@@ -460,6 +475,7 @@ test "transport resource failures preserve their typed Completion semantics" {
         const outcome = owner.complete(.{
             .messages = &.{.{ .role = .user, .text = "hello" }},
             .max_output_tokens = 4096,
+            .connect_timeout_ms = 1_000,
         }, &cancellation);
         try std.testing.expectEqualDeep(case.expected, outcome.failure);
     }

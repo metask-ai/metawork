@@ -12,6 +12,9 @@ pub const HttpRequest = struct {
     body: []const u8,
     method: enum { post, get } = .post,
     stream: ?ResponseStream = null,
+    /// Bound for DNS, TCP and TLS. The overall request is bounded by the
+    /// caller's own cancellation, so every caller states this explicitly.
+    connect_timeout_ms: u32,
 };
 
 /// A successful response is borrowed only while the transport worker runs

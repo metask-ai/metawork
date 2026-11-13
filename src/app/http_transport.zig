@@ -44,10 +44,19 @@ pub const Cancellation = struct {
     }
 };
 
+/// Every caller bounds connection establishment explicitly.
+pub const Budget = union(enum) {
+    /// Absolute end of the whole call, including DNS, TCP and TLS.
+    deadline: Io.Clock.Timestamp,
+    /// The caller bounds the whole call by cancellation. This bounds only DNS,
+    /// TCP and TLS, measured from admission.
+    connect: Io.Duration,
+};
+
 pub const Control = struct {
     consumer: Consumer,
+    budget: Budget,
     cancellation: ?Cancellation = null,
-    deadline: ?Io.Clock.Timestamp = null,
     /// Only an HTTP response to a server request on an already-held MCP stream.
     continuation: bool = false,
 };
@@ -108,17 +117,24 @@ pub const Engine = struct {
 
     pub fn run(self: *Engine, control: Control, comptime function: anytype, args: anytype) Result(@typeInfo(@TypeOf(function)).@"fn".return_type.?) {
         const T = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
-        const Outcome = union(enum) { completed: T, cancelled: void, deadline: void };
-        var operation: Operation = .{ .engine = self, .control = control };
+        const Outcome = union(enum) { completed: T, cancelled: void, deadline: void, connect_budget: void };
         const started: Io.Clock.Timestamp = .now(self.io, .awake);
+        var operation: Operation = .{ .engine = self, .control = control, .connect_end = switch (control.budget) {
+            .deadline => |deadline| deadline,
+            .connect => |duration| started.addDuration(.{ .raw = duration, .clock = .awake }),
+        } };
         self.mutex.lockUncancelable(self.io);
         const id = self.next_id;
         self.next_id +%= 1;
         self.mutex.unlock(self.io);
         defer if (operation.failure) |err| if (err != error.Cancelled) {
             // Only typed facts. No endpoint, headers, payload or backend message.
-            std.log.warn("http id={d} consumer={s} phase={s} cause={s} send={s} reused={} elapsed_ms={d}", .{
-                id, @tagName(control.consumer), @tagName(operation.phase), @errorName(err), @tagName(operation.sendFact()), operation.reused, started.untilNow(self.io).raw.toMilliseconds(),
+            // Connection attempts are counts only: never addresses or hosts.
+            const attempts = &operation.attempts;
+            std.log.warn("http id={d} consumer={s} phase={s} cause={s} send={s} reused={} elapsed_ms={d} addresses={d} attempted={d} tls={d} connect={d} capped={d}", .{
+                id,                                @tagName(control.consumer),                     @tagName(operation.phase), @errorName(err),                     @tagName(operation.sendFact()),
+                operation.reused,                  started.untilNow(self.io).raw.toMilliseconds(), attempts.addresses,        attempts.attempted.load(.monotonic), attempts.tls.load(.monotonic),
+                attempts.connect.load(.monotonic), attempts.capped.load(.monotonic),
             });
         };
         operation.check() catch |err| return .{ .outcome = .{ .failed = err }, .send = .not_sent };
@@ -145,7 +161,10 @@ pub const Engine = struct {
         const selected: union(enum) { value: Outcome, failed: Error } = selected: {
             // Register controls first: a registration failure must close the send
             // gate before canceling any worker, even if a dependency eats cancel.
-            if (control.deadline != null) selection.concurrent(.deadline, Operation.waitDeadline, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit };
+            switch (control.budget) {
+                .deadline => selection.concurrent(.deadline, Operation.waitDeadline, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit },
+                .connect => selection.concurrent(.connect_budget, Operation.waitConnectBudget, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit },
+            }
             if (control.cancellation != null) selection.concurrent(.cancelled, Operation.waitCancellation, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit };
             selection.concurrent(.completed, function, .{&operation} ++ args) catch break :selected .{ .failed = error.ResourceLimit };
             break :selected .{ .value = selection.await() catch break :selected .{ .failed = error.Cancelled } };
@@ -162,6 +181,8 @@ pub const Engine = struct {
                     .completed => |completed| .{ .completed = completed },
                     .cancelled => .{ .failed = error.Cancelled },
                     .deadline => .{ .failed = error.DeadlineExceeded },
+                    // Read after the join: the worker no longer writes phase.
+                    .connect_budget => .{ .failed = operation.connectExpiry() },
                 },
             },
         };
@@ -207,6 +228,20 @@ pub const Operation = struct {
     phase: Phase = .admission,
     failure: ?Error = null,
     reused: bool = false,
+    /// End of DNS, TCP and TLS: the deadline, or admission plus the connect budget.
+    connect_end: Io.Clock.Timestamp,
+    /// 0 establishing, 1 established in time, 2 connect budget expired first.
+    connect_state: std.atomic.Value(u8) = .init(0),
+    attempts: Attempts = .{},
+
+    /// Written by connection lanes, read after they join.
+    const Attempts = struct {
+        addresses: usize = 0,
+        attempted: std.atomic.Value(usize) = .init(0),
+        tls: std.atomic.Value(usize) = .init(0),
+        connect: std.atomic.Value(usize) = .init(0),
+        capped: std.atomic.Value(usize) = .init(0),
+    };
 
     pub fn io(self: *Operation) Io {
         return self.engine.io;
@@ -230,7 +265,10 @@ pub const Operation = struct {
     }
 
     pub fn check(self: *Operation) Error!void {
-        if (self.control.deadline) |deadline| if (deadline.raw.nanoseconds <= deadline.clock.now(self.io()).nanoseconds) return self.fail(error.DeadlineExceeded);
+        if (self.control.budget == .deadline) {
+            const deadline = self.control.budget.deadline;
+            if (deadline.raw.nanoseconds <= deadline.clock.now(self.io()).nanoseconds) return self.fail(error.DeadlineExceeded);
+        }
         if (self.control.cancellation) |cancellation| if (cancellation.requested_fn(cancellation.context)) return self.fail(error.Cancelled);
         if (self.gate.load(.acquire) & 2 != 0) return self.fail(error.Cancelled);
     }
@@ -244,8 +282,35 @@ pub const Operation = struct {
     }
 
     fn waitDeadline(self: *Operation) void {
-        self.control.deadline.?.wait(self.io()) catch return;
+        self.control.budget.deadline.wait(self.io()) catch return;
         self.stop();
+    }
+
+    /// Ends the call only if DNS, TCP and TLS are still running at the end of
+    /// the connect budget. Once a connection is in hand the waiter parks until
+    /// the call's own selection cancels it.
+    fn waitConnectBudget(self: *Operation) void {
+        self.connect_end.wait(self.io()) catch return;
+        if (self.connect_state.cmpxchgStrong(0, 2, .acq_rel, .acquire) == null) {
+            self.stop();
+            return;
+        }
+        var parked: Io.Event = .unset;
+        parked.wait(self.io()) catch {};
+    }
+
+    /// The most specific connection failure: TLS over TCP over DNS.
+    fn connectExpiry(self: *const Operation) Error {
+        return switch (self.phase) {
+            .resolve => error.DnsFailed,
+            else => if (self.attempts.tls.load(.monotonic) != 0) error.TlsFailed else error.ConnectFailed,
+        };
+    }
+
+    /// Claims the connection for this call unless the connect budget already
+    /// ended it; a late connection never authorizes an HTTP write.
+    fn established(self: *Operation) bool {
+        return self.connect_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null;
     }
 
     fn waitCancellation(self: *Operation) void {
@@ -323,6 +388,7 @@ pub const Operation = struct {
             slot.created = .now(self.io(), .awake);
         }
         errdefer dispose(connection.?);
+        if (!self.established()) return self.fail(error.Cancelled);
         try self.check();
         const raw = client.request(method, uri, .{ .connection = connection, .redirect_behavior = .unhandled, .extra_headers = options.headers, .headers = options.standard_headers }) catch |err| return self.fail(if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRequest);
         return .{ .operation = self, .raw = raw };
@@ -385,109 +451,156 @@ pub const Operation = struct {
         var addresses: [16]Io.net.IpAddress = undefined;
         const count = try self.resolve(criteria.host, criteria.port, &addresses);
         self.phase = .connect;
+        self.attempts.addresses = count;
         var race: ConnectRace = .{ .operation = self, .client = client, .criteria = criteria, .addresses = addresses[0..count] };
-        var storage: [2]ConnectRace.Outcome = undefined;
+        var storage: [ConnectRace.lanes]ConnectRace.Outcome = undefined;
         var selection: Io.Select(ConnectRace.Outcome) = .init(self.io(), &storage);
         defer {
             race.stopped.store(true, .release);
-            while (selection.cancel()) |outcome| {
-                const result = switch (outcome) {
-                    inline else => |value| value,
-                };
-                if (result) |connection| dispose(connection) else |_| {}
+            while (selection.cancel()) |outcome| switch (outcome) {
+                inline else => |lane| if (lane == .connected) dispose(lane.connected),
+            };
+        }
+        const lanes: usize = @min(count, ConnectRace.lanes);
+        selection.concurrent(.first, ConnectRace.run, .{&race}) catch return self.fail(error.ResourceLimit);
+        if (lanes > 1) selection.concurrent(.second, ConnectRace.run, .{&race}) catch return self.fail(error.ResourceLimit);
+        for (0..lanes) |_| {
+            const outcome = selection.await() catch return self.fail(error.Cancelled);
+            switch (switch (outcome) {
+                inline else => |lane| lane,
+            }) {
+                .connected => |connection| return connection,
+                .exhausted => {},
+                .failed => |err| return self.fail(err),
             }
         }
-        selection.concurrent(.first, ConnectRace.run, .{ &race, false }) catch return self.fail(error.ResourceLimit);
-        if (count > 1) selection.concurrent(.second, ConnectRace.run, .{ &race, true }) catch return self.fail(error.ResourceLimit);
-        var last_error: Error = error.ConnectFailed;
-        for (0..@as(usize, if (count > 1) 2 else 1)) |_| {
-            const outcome = selection.await() catch return self.fail(error.Cancelled);
-            const result = switch (outcome) {
-                inline else => |value| value,
-            };
-            if (result) |connection| return connection else |err| last_error = err;
-        }
-        return self.fail(last_error);
+        // Unattempted addresses are not failures; TLS outranks TCP.
+        return self.fail(if (self.attempts.tls.load(.monotonic) != 0) error.TlsFailed else error.ConnectFailed);
     }
 };
 
+/// RFC 8305 style establishment with at most two attempts in flight. The next
+/// address starts once the previous start is at least 250 ms old and a lane is
+/// free. Only an attempt with later addresses behind it is capped, so the last
+/// or only address keeps the whole remaining budget.
 const ConnectRace = struct {
-    const Outcome = union(enum) { first: Error!*Client.Connection, second: Error!*Client.Connection };
+    const lanes = 2;
+    const attempt_delay: Io.Duration = .fromMilliseconds(250);
+    const minimum_attempt: Io.Duration = .fromSeconds(2);
+    const Lane = union(enum) { connected: *Client.Connection, exhausted: void, failed: Error };
+    const Outcome = union(enum) { first: Lane, second: Lane };
+    const Attempt = union(enum) { connected: *Client.Connection, tls: void, connect: void, capped: void, failed: Error };
+
     operation: *Operation,
     client: *Client,
     criteria: Client.ConnectionPool.Criteria,
     addresses: []const Io.net.IpAddress,
-    next: std.atomic.Value(usize) = .init(0),
+    mutex: Io.Mutex = .init,
+    next: usize = 0,
+    last_start: ?Io.Clock.Timestamp = null,
     stopped: std.atomic.Value(bool) = .init(false),
 
-    fn attemptTimeout(io: Io) void {
-        // Later addresses must progress even when both lanes stall. The caller's
-        // absolute deadline remains in force throughout every connection attempt.
-        Io.sleep(io, .fromSeconds(3), .awake) catch {};
+    const Reservation = struct { index: usize, start: Io.Clock.Timestamp };
+
+    fn reserve(self: *ConnectRace, io: Io) ?Reservation {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.next == self.addresses.len) return null;
+        var start: Io.Clock.Timestamp = .now(io, .awake);
+        if (self.last_start) |previous| {
+            const paced = previous.addDuration(.{ .raw = attempt_delay, .clock = .awake });
+            if (paced.raw.nanoseconds > start.raw.nanoseconds) start = paced;
+        }
+        self.last_start = start;
+        defer self.next += 1;
+        return .{ .index = self.next, .start = start };
     }
 
-    fn connectOne(self: *ConnectRace, address: []const u8) Error!*Client.Connection {
-        const OutcomeOne = union(enum) { connected: Client.ConnectTcpError!*Client.Connection, timeout: void };
-        var storage: [2]OutcomeOne = undefined;
-        var selection: Io.Select(OutcomeOne) = .init(self.operation.io(), &storage);
-        defer while (selection.cancel()) |outcome| switch (outcome) {
-            .connected => |result| if (result) |connection| {
-                dispose(connection);
-            } else |_| {},
-            .timeout => {},
-        };
-        selection.concurrent(.timeout, attemptTimeout, .{self.operation.io()}) catch return error.ResourceLimit;
-        selection.concurrent(.connected, Client.connectTcpOptions, .{
-            self.client,
-            @as(Client.ConnectTcpOptions, .{
-                .host = .{ .bytes = address },
-                .port = self.criteria.port,
-                .protocol = self.criteria.protocol,
-                // Public seam: numeric routing, original SNI/certificate identity.
-                .proxied_host = self.criteria.host,
-                .proxied_port = self.criteria.port,
-            }),
-        }) catch return error.ResourceLimit;
-        return switch (selection.await() catch return error.Cancelled) {
-            .timeout => error.ConnectFailed,
-            .connected => |result| result catch |err| switch (err) {
-                error.Canceled => error.Cancelled,
-                error.OutOfMemory => error.OutOfMemory,
-                error.TlsInitializationFailed => error.TlsFailed,
-                else => error.ConnectFailed,
-            },
-        };
+    /// Shares the remaining budget among the addresses not yet started, with a
+    /// two-second floor; never more than what remains.
+    fn cap(self: *const ConnectRace, io: Io, index: usize) ?Io.Duration {
+        if (index + 1 == self.addresses.len) return null;
+        const remaining = self.operation.connect_end.durationFromNow(io).raw.nanoseconds;
+        if (remaining <= 0) return .fromNanoseconds(0);
+        const share = @divTrunc(remaining, @as(i96, @intCast(self.addresses.len - index)));
+        return .fromNanoseconds(@min(remaining, @max(share, minimum_attempt.nanoseconds)));
     }
 
-    fn run(self: *ConnectRace, delayed: bool) Error!*Client.Connection {
+    fn stopping(self: *const ConnectRace) bool {
+        return self.stopped.load(.acquire) or self.operation.gate.load(.acquire) & 2 != 0;
+    }
+
+    fn run(self: *ConnectRace) Lane {
         const io = self.operation.io();
-        if (delayed) Io.sleep(io, .fromMilliseconds(250), .awake) catch return error.Cancelled;
-        var last_error: Error = error.ConnectFailed;
-        while (!self.stopped.load(.acquire)) {
+        while (true) {
             // Workers only read control state; phase/failure belong to the caller.
-            if (self.operation.gate.load(.acquire) & 2 != 0) return error.Cancelled;
-            const index = self.next.fetchAdd(1, .monotonic);
-            if (index >= self.addresses.len) break;
-            var buffer: [128]u8 = undefined;
-            var writer: Io.Writer = .fixed(&buffer);
-            self.addresses[index].formatResolved(io, &writer) catch return error.ConnectFailed;
-            const formatted = writer.buffered();
-            const address = switch (self.addresses[index]) {
+            if (self.stopping()) return .{ .failed = error.Cancelled };
+            const reservation = self.reserve(io) orelse return .exhausted;
+            const wait = reservation.start.durationFromNow(io).raw;
+            if (wait.nanoseconds > 0) Io.sleep(io, wait, .awake) catch return .{ .failed = error.Cancelled };
+            if (self.stopping()) return .{ .failed = error.Cancelled };
+            const attempts = &self.operation.attempts;
+            _ = attempts.attempted.fetchAdd(1, .monotonic);
+            switch (self.attempt(io, reservation.index)) {
+                .connected => |connection| {
+                    if (self.stopping()) {
+                        dispose(connection);
+                        return .{ .failed = error.Cancelled };
+                    }
+                    return .{ .connected = connection };
+                },
+                .tls => _ = attempts.tls.fetchAdd(1, .monotonic),
+                .connect => _ = attempts.connect.fetchAdd(1, .monotonic),
+                .capped => _ = attempts.capped.fetchAdd(1, .monotonic),
+                .failed => |err| return .{ .failed = err },
+            }
+        }
+    }
+
+    fn attempt(self: *ConnectRace, io: Io, index: usize) Attempt {
+        var buffer: [128]u8 = undefined;
+        var writer: Io.Writer = .fixed(&buffer);
+        self.addresses[index].formatResolved(io, &writer) catch return .connect;
+        const formatted = writer.buffered();
+        const options: Client.ConnectTcpOptions = .{
+            .host = .{ .bytes = switch (self.addresses[index]) {
                 .ip4 => formatted[0..std.mem.lastIndexOfScalar(u8, formatted, ':').?],
                 .ip6 => formatted[1..std.mem.lastIndexOfScalar(u8, formatted, ']').?],
-            };
-            const connection = self.connectOne(address) catch |err| {
-                if (err == error.Cancelled or err == error.OutOfMemory or err == error.ResourceLimit) return err;
-                last_error = err;
-                continue;
-            };
-            if (self.stopped.load(.acquire) or self.operation.gate.load(.acquire) & 2 != 0) {
-                dispose(connection);
-                return error.Cancelled;
-            }
-            return connection;
-        }
-        return last_error;
+            } },
+            .port = self.criteria.port,
+            .protocol = self.criteria.protocol,
+            // Public seam: numeric routing, original SNI/certificate identity.
+            .proxied_host = self.criteria.host,
+            .proxied_port = self.criteria.port,
+        };
+        const limit = self.cap(io, index) orelse return classify(Client.connectTcpOptions(self.client, options));
+        const Capped = union(enum) { connected: Client.ConnectTcpError!*Client.Connection, timeout: void };
+        var storage: [2]Capped = undefined;
+        var selection: Io.Select(Capped) = .init(io, &storage);
+        defer while (selection.cancel()) |outcome| switch (outcome) {
+            .connected => |result| if (result) |connection| dispose(connection) else |_| {},
+            .timeout => {},
+        };
+        selection.concurrent(.timeout, sleepFor, .{ io, limit }) catch return .{ .failed = error.ResourceLimit };
+        selection.concurrent(.connected, Client.connectTcpOptions, .{ self.client, options }) catch return .{ .failed = error.ResourceLimit };
+        return switch (selection.await() catch return .{ .failed = error.Cancelled }) {
+            .timeout => .capped,
+            .connected => |result| classify(result),
+        };
+    }
+
+    fn sleepFor(io: Io, duration: Io.Duration) void {
+        Io.sleep(io, duration, .awake) catch {};
+    }
+
+    fn classify(result: Client.ConnectTcpError!*Client.Connection) Attempt {
+        const connection = result catch |err| return switch (err) {
+            error.Canceled => .{ .failed = error.Cancelled },
+            error.OutOfMemory => .{ .failed = error.OutOfMemory },
+            error.TlsInitializationFailed => .tls,
+            else => .connect,
+        };
+        return .{ .connected = connection };
     }
 };
 

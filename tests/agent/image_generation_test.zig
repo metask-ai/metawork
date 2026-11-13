@@ -743,7 +743,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
             _ = self.calls.fetchAdd(1, .monotonic);
             // Test effect only: assert the frozen HTTPS policy target, then
             // route synthetic credentials to the one local fixture listener.
-            return self.network.transport().perform(.{ .url = self.endpoint, .headers = request.headers, .body = request.body }, cancellation, buffer);
+            return self.network.transport().perform(.{ .url = self.endpoint, .headers = request.headers, .body = request.body, .connect_timeout_ms = request.connect_timeout_ms }, cancellation, buffer);
         }
         fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -1183,7 +1183,7 @@ const image_product = struct {
             _ = self.image_calls.fetchAdd(1, .monotonic);
             // This test effect is the only target rewrite. No real credential
             // or formal service is used; production Models supplies the target.
-            return self.network.transport().perform(.{ .url = self.endpoint, .body = request.body, .headers = request.headers }, cancellation, output);
+            return self.network.transport().perform(.{ .url = self.endpoint, .body = request.body, .headers = request.headers, .connect_timeout_ms = request.connect_timeout_ms }, cancellation, output);
         }
         fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
             const self: *@This() = @ptrCast(@alignCast(context.?));

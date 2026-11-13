@@ -216,7 +216,7 @@ pub const StdHttpTransport = struct {
         if (self.cancellation.isCancelled()) return error.CancelledBeforeSend;
         const result = self.http_engine.run(.{
             .consumer = .mcp_oauth,
-            .deadline = self.deadline,
+            .budget = .{ .deadline = self.deadline },
             .cancellation = .atomic(&self.cancellation.state),
         }, fetchOne, .{ request, body_buffer, header_buffer });
         const sent = result.send == .may_have_been_sent;
@@ -3139,7 +3139,7 @@ test "MCP OAuth records the real HTTP write boundary without weakening HTTPS pol
         defer engine.deinit();
         var body: [512]u8 = undefined;
         var headers: [1024]u8 = undefined;
-        const execution = engine.run(.{ .consumer = .mcp_oauth }, StdHttpTransport.fetchHttp, .{ @as(Request, .{ .method = .post, .url = url, .body = "fixture" }), &body, &headers });
+        const execution = engine.run(.{ .consumer = .mcp_oauth, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, StdHttpTransport.fetchHttp, .{ @as(Request, .{ .method = .post, .url = url, .body = "fixture" }), &body, &headers });
         const result = execution.outcome.completed;
         const started = execution.send == .may_have_been_sent;
         thread.join();

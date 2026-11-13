@@ -187,6 +187,7 @@ test "Gemini request is non-streaming and keeps the credential out of the URL" {
     }, .{
         .messages = &.{.{ .role = .user, .text = "hello" }},
         .max_output_tokens = 1234,
+        .connect_timeout_ms = 1_000,
     });
     defer encoded.deinit();
     try std.testing.expect(std.mem.endsWith(u8, encoded.url, ":generateContent"));

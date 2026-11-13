@@ -117,6 +117,7 @@ test "Anthropic codec uses the caller's explicit output budget" {
     }, .{
         .messages = &.{.{ .role = .user, .text = "hello" }},
         .max_output_tokens = 1234,
+        .connect_timeout_ms = 1_000,
     });
     defer encoded.deinit();
     var parsed = try codec.parseJson(std.testing.allocator, encoded.body);

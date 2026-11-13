@@ -15,6 +15,8 @@ pub const max_reason_bytes: usize = max_reason_characters * 4;
 // JSON/reason limits remain independent and no retry is added.
 pub const max_output_tokens: u64 = 4096;
 pub const timeout_ms: u64 = 60_000;
+/// DNS, TCP and TLS share at most 15 s of the review budget.
+const connect_timeout_ms: u32 = @min(timeout_ms, 15_000);
 
 /// Borrowed until review returns. The caller must remove credentials and other
 /// prohibited secrets before admission; this module is not a DLP classifier.
@@ -304,6 +306,7 @@ pub fn review(
         .system = policy,
         .messages = &messages,
         .max_output_tokens = max_output_tokens,
+        .connect_timeout_ms = connect_timeout_ms,
     }, cancellation);
     watchdog.finished.store(true, .release);
     thread.join();

@@ -78,7 +78,7 @@ test "review HTTP deadline joins the old request and isolates later 503 invalid 
     trace.prepare();
     var early_cancellation = owner.newCancellation();
     early_cancellation.request();
-    try std.testing.expect(owner.complete(.{ .messages = &.{.{ .role = .user, .text = "synthetic" }}, .max_output_tokens = 1 }, &early_cancellation).failure == .cancelled);
+    try std.testing.expect(owner.complete(.{ .messages = &.{.{ .role = .user, .text = "synthetic" }}, .max_output_tokens = 1, .connect_timeout_ms = 1_000 }, &early_cancellation).failure == .cancelled);
     try std.testing.expect(trace.report().cancelled_before_transport);
     try std.testing.expect(trace.report().finished == null);
     const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);

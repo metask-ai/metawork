@@ -75,7 +75,7 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const result = self.http.run(.{
             .consumer = .metask,
-            .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout),
+            .budget = .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
             .cancellation = if (request.control) |control| http.Cancellation.atomic(&control.cancellation.state) else null,
         }, fetch, .{ request, response_buffer });
         const send_started = result.send == .may_have_been_sent;
@@ -222,7 +222,7 @@ test "Account DNS failure and connection refusal prove refresh was not sent" {
 
     vtable.netLookup = threaded.io().vtable.netLookup;
     vtable.netConnectIp = Failures.connect;
-    const execution = engine.run(.{ .consumer = .metask }, Adapter.fetchHttp, .{ "http://127.0.0.1:80/token", std.http.Method.POST, &.{}, "test-body", &buffer });
+    const execution = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ "http://127.0.0.1:80/token", std.http.Method.POST, &.{}, "test-body", &buffer });
     const result = execution.outcome.completed;
     const send_started = execution.send == .may_have_been_sent;
     try std.testing.expectError(error.ConnectFailed, result);
@@ -341,7 +341,7 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         engine.init(std.testing.allocator, std.testing.io);
         defer engine.deinit();
         var buffer: [2]u8 = undefined;
-        const execution = engine.run(.{ .consumer = .metask }, Adapter.fetchHttp, .{ endpoint, std.http.Method.POST, &.{}, "test-body", &buffer });
+        const execution = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ endpoint, std.http.Method.POST, &.{}, "test-body", &buffer });
         const result = execution.outcome.completed;
         const send_started = execution.send == .may_have_been_sent;
         thread.join();

@@ -87,6 +87,8 @@ perform(http_request, cancellation, response_buffer)
     -> { status, body } | TransportError
 ```
 
+`http_request` 携带必填的 `connect_timeout_ms`，约束 DNS、TCP 与 TLS 建立；整次请求仍由调用方的取消约束。与输出预算相同，每个消费者显式提供自己的连接预算，不由 codec 或 Application adapter 私设默认值；`Completion.Request` 在 Transport 前拒绝零值或超过 60 秒的预算。
+
 Application 的 Completion adapter 通过共享 HTTP 执行层完成一次请求：
 
 - 响应完整写入有界 caller-owned buffer；
@@ -155,6 +157,7 @@ MetaWork 产品代码不调用或 re-export AgentCore Completion API，也不保
 - credential/header copy 清零；
 - model binding 单字段边界、两种 endpoint policy，以及所有 Session/Completion/Probe 入口在外部调用前的一致拒绝；
 - 四种 codec 精确编码调用方的输出预算，零值与超限在 Transport 前拒绝；
+- 连接预算的零值与超限在 Transport 前拒绝；
 - Transport cancellation、response limit、allocation failure 与 unknown failure 保持各自的 typed 结果；
 - Provider Probe、自动标题与 permission 审核器使用各自对应的冻结模型执行绑定；
 - architecture guard 证明 Completion/Protocol 不导入 AgentCore SDK；

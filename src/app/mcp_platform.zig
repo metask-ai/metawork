@@ -1774,7 +1774,7 @@ const HttpContext = struct {
     fn fetch(self: *HttpContext, request: agent.McpHttpRequest, sink: *const agent.McpHttpResponseSink) FetchFailure!void {
         const result = self.http_engine.run(.{
             .consumer = .mcp,
-            .deadline = .fromNow(self.io, .{ .raw = .fromMilliseconds(request.timeout_ms), .clock = .awake }),
+            .budget = .{ .deadline = .fromNow(self.io, .{ .raw = .fromMilliseconds(request.timeout_ms), .clock = .awake }) },
             .cancellation = .{ .context = &request.cancellation, .requested_fn = requested, .wait_fn = waitCancellation },
         }, fetchOne, .{ self, request, sink });
         return switch (result.outcome) {
