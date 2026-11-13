@@ -5,7 +5,7 @@
     "diagnosticDisposition": "absent",
     "modelError": null,
     "recordingIncomplete": false,
-    "feedback": { "guidance": "none", "offerInputPreparation": true }
+    "feedback": { "guidance": "none", "reason": null, "offerInputPreparation": true }
   },
   {
     "outcome": "failed",
@@ -13,6 +13,6 @@
     "diagnosticDisposition": "absent",
     "modelError": null,
     "recordingIncomplete": false,
-    "feedback": { "guidance": "none", "offerInputPreparation": true }
+    "feedback": { "guidance": "none", "reason": null, "offerInputPreparation": true }
   }
 ]

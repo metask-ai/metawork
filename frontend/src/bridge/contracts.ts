@@ -731,6 +731,7 @@ export const modelErrorCategories = [
 export const runGuidances = [
   "account_settings",
   "model_settings",
+  "recharge",
   "review_context",
   "revise_instruction",
   "wait",
@@ -740,8 +741,10 @@ export const runGuidances = [
   "review_image_input",
   "none",
 ] as const;
+export const runProviderReasons = ["metask_insufficient_balance"] as const;
 export type RunFeedback = {
   guidance: (typeof runGuidances)[number];
+  reason: (typeof runProviderReasons)[number] | null;
   offerInputPreparation: boolean;
 };
 export type RunModelError = {

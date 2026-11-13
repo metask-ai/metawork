@@ -54,6 +54,8 @@ export const enUS = {
     "This response reached the model's output limit.",
   "run.model_error.category.unknown":
     "The model service could not complete this request.",
+  "run.model_error.reason.metask_insufficient_balance":
+    "Your Metask balance and plan quota are insufficient.",
   "run.guidance.review_context":
     "Shorten your next message or compact the conversation when available.",
   "run.guidance.revise_instruction":

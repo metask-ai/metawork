@@ -17350,7 +17350,59 @@ test "model error projection matches the shared Renderer fixture after Host cred
     try std.testing.expect(projected.object.get("recovery") == null);
     const feedback = actual.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object.get("feedback").?.object;
     try std.testing.expectEqualStrings("account_settings", feedback.get("guidance").?.string);
+    try std.testing.expect(feedback.get("reason").? == .null);
     try std.testing.expect(feedback.get("offerInputPreparation").?.bool);
+}
+
+test "Metask balance failure projects the first-party reason to the shared Renderer fixture in body and manifest" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.testTask(3).?;
+    const run = &task.durable.runs[0].?;
+    const storage = try control.allocator.create(task_test_state.RunModelError);
+    run.model_error_storage = storage;
+    storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+        .run_id = 77,
+        .category = .payment_required,
+        .message = "可用余额和套餐额度不足，请充值、兑换或订阅后再试",
+        .code = "insufficient_balance",
+        .type = "insufficient_balance",
+        .http_status = 402,
+        .retry = .not_retryable,
+        .attempts = 1,
+    }) };
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    run.terminal_payload.model_error = storage;
+    control.markTerminalRunsBeforeEventDrain();
+    finalizeTestTerminalDrain(&control);
+    detachTaskForTest(&control, task);
+    var bytes: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeViewFixture(&bytes, .{ .task_id = task.durable.id });
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer actual.deinit();
+    const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("model_error_metask_balance.fixture"), .{});
+    defer expected.deinit();
+    const expected_detail = expected.value.object.get("modelError").?.object;
+    const expected_feedback = expected.value.object.get("feedback").?.object;
+    const page = actual.value.object.get("taskPage").?.object;
+    for ([_]std.json.Value{ page.get("task").?.object.get("runs").?.array.items[0], page.get("runManifest").?.array.items[0] }) |entry| {
+        const terminal = entry.object.get("terminal").?.object;
+        const detail = terminal.get("modelError").?.object;
+        inline for (.{ "agentRunId", "category", "message", "code", "type", "retry", "attempts", "source" }) |field|
+            try std.testing.expectEqualStrings(expected_detail.get(field).?.string, detail.get(field).?.string);
+        inline for (.{ "requestId", "retryAfterMs" }) |field| {
+            try std.testing.expect(expected_detail.get(field).? == .null);
+            try std.testing.expect(detail.get(field).? == .null);
+        }
+        inline for (.{ "truncated", "hostRedacted", "hostTruncated" }) |field|
+            try std.testing.expectEqual(expected_detail.get(field).?.bool, detail.get(field).?.bool);
+        try std.testing.expectEqual(expected_detail.get("httpStatus").?.integer, detail.get("httpStatus").?.integer);
+        const feedback = terminal.get("feedback").?.object;
+        try std.testing.expectEqual(@as(usize, 3), feedback.count());
+        inline for (.{ "guidance", "reason" }) |field|
+            try std.testing.expectEqualStrings(expected_feedback.get(field).?.string, feedback.get(field).?.string);
+        try std.testing.expectEqual(expected_feedback.get("offerInputPreparation").?.bool, feedback.get("offerInputPreparation").?.bool);
+    }
 }
 
 test "Renderer transport failures never own Agent Run termination" {
@@ -19649,7 +19701,7 @@ test "projection gap preserves completion, continuation and completion-seen pers
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool, feedback: struct { guidance: []const u8, offerInputPreparation: bool } }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value, recordingIncomplete: bool, feedback: struct { guidance: []const u8, reason: ?[]const u8, offerInputPreparation: bool } }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -19669,6 +19721,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         try std.testing.expectEqualStrings(expected.diagnosticDisposition, terminal.get("diagnosticDisposition").?.string);
         const feedback = terminal.get("feedback").?.object;
         try std.testing.expectEqualStrings(expected.feedback.guidance, feedback.get("guidance").?.string);
+        try std.testing.expect(expected.feedback.reason == null and feedback.get("reason").? == .null);
         try std.testing.expectEqual(expected.feedback.offerInputPreparation, feedback.get("offerInputPreparation").?.bool);
     }
 }
@@ -19722,6 +19775,7 @@ test "Product view shares Run feedback and navigation with the index, manifest a
         for ([_]std.json.Value{ body.get("runs").?.array.items[0], page.get("runManifest").?.array.items[0] }) |entry| {
             const feedback = entry.object.get("terminal").?.object.get("feedback").?.object;
             try std.testing.expectEqualStrings(case.guidance, feedback.get("guidance").?.string);
+            try std.testing.expect(feedback.get("reason").? == .null);
             try std.testing.expectEqual(case.offer, feedback.get("offerInputPreparation").?.bool);
         }
         const workspace = root.get("workspaces").?.array.items[0].object.get("signals").?.object;
@@ -19802,7 +19856,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false,\"feedback\":{\"guidance\":\"none\",\"offerInputPreparation\":true}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null,\"recordingIncomplete\":false,\"feedback\":{\"guidance\":\"none\",\"reason\":null,\"offerInputPreparation\":true}}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }

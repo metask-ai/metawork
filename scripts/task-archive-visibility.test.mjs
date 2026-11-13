@@ -505,7 +505,11 @@ test("a stopped tool loop prepares a local draft and preserves existing edits", 
       diagnosticDisposition: "absent",
       modelError: null,
       recordingIncomplete: false,
-      feedback: { guidance: "review_changes", offerInputPreparation: true },
+      feedback: {
+        guidance: "review_changes",
+        reason: null,
+        offerInputPreparation: true,
+      },
     },
   };
   const { user } = await renderApp(ctx, { historyRuns: [run] });
@@ -534,7 +538,11 @@ test("Composer recalls only the current Task's saved text after remount and page
         cause: null,
         diagnosticDisposition: "absent",
         recordingIncomplete: false,
-        feedback: { guidance: "none", offerInputPreparation: false },
+        feedback: {
+          guidance: "none",
+          reason: null,
+          offerInputPreparation: false,
+        },
         modelError: null,
       },
       input: { kind: "text", text, redacted: false },

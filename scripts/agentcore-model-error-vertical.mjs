@@ -183,6 +183,7 @@ export async function runModelErrorVertical({
   assert.equal(detail.httpStatus, 401);
   assert.equal(detail.source, "custom_provider");
   assert.equal(run.terminal.feedback.guidance, "model_settings");
+  assert.equal(run.terminal.feedback.reason, null);
   assert.equal(run.terminal.feedback.offerInputPreparation, true);
   assert.equal(
     detail.hostRedacted,

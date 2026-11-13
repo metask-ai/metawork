@@ -5,6 +5,7 @@ import { cn } from "../ui/utils.ts";
 export function Activity({
   state,
   label,
+  quote,
   detail,
   action,
   announce = false,
@@ -13,6 +14,8 @@ export function Activity({
 }: Omit<HTMLAttributes<HTMLElement>, "children"> & {
   state: "live" | "completed" | "stopped" | "failed" | "interrupted";
   label: ReactNode;
+  /** Secondary plain-text quotation of external text, clamped by CSS. */
+  quote?: string;
   detail?: ReactNode;
   action?: ReactNode;
   announce?: boolean;
@@ -29,6 +32,11 @@ export function Activity({
       <span className="ai-activity-mark" aria-hidden="true" />
       <div className="ai-activity-copy">
         <p>{label}</p>
+        {quote && (
+          <q className="ai-activity-quote" dir="auto">
+            {quote}
+          </q>
+        )}
         {detail && <span>{detail}</span>}
       </div>
       {action && <div className="ai-activity-action">{action}</div>}

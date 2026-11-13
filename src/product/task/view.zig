@@ -344,8 +344,12 @@ fn writeTerminal(writer: *std.Io.Writer, text: TextProjection, run: *const task_
     const detail = task_state.terminalPayload(run).?.model_error;
     try writeModelError(writer, text, detail);
     const feedback = task_policy.runFeedback(terminal.outcome, terminal.cause, detail);
-    writer.print(",\"recordingIncomplete\":{},\"feedback\":{{\"guidance\":\"{s}\",\"offerInputPreparation\":{}}}}}", .{
-        run.event_projection_failure != null, @tagName(feedback.guidance), feedback.offer_input_preparation and safeInputForPreparation(text, run.input),
+    writer.print(",\"recordingIncomplete\":{},\"feedback\":{{\"guidance\":\"{s}\",\"reason\":", .{
+        run.event_projection_failure != null, @tagName(feedback.guidance),
+    }) catch return error.SnapshotTooLarge;
+    if (feedback.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"offerInputPreparation\":{}}}}}", .{
+        feedback.offer_input_preparation and safeInputForPreparation(text, run.input),
     }) catch return error.SnapshotTooLarge;
 }
 

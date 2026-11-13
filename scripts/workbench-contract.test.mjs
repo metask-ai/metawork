@@ -516,7 +516,7 @@ function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
     cause,
     diagnosticDisposition,
     recordingIncomplete: false,
-    feedback: { guidance: "none", offerInputPreparation: false },
+    feedback: { guidance: "none", reason: null, offerInputPreparation: false },
     modelError: null,
   };
 }
@@ -550,7 +550,11 @@ test("Run feedback cannot disagree between a visible Run and its manifest", () =
     activity: null,
     terminal: {
       ...terminal("stopped", "tool_failure"),
-      feedback: { guidance: "review_changes", offerInputPreparation: true },
+      feedback: {
+        guidance: "review_changes",
+        reason: null,
+        offerInputPreparation: true,
+      },
     },
   });
   const view = productViewFixture(value);
@@ -558,7 +562,11 @@ test("Run feedback cannot disagree between a visible Run and its manifest", () =
   const manifestRun = view.taskPage.runManifest[0];
   manifestRun.terminal = {
     ...manifestRun.terminal,
-    feedback: { guidance: "review_changes", offerInputPreparation: false },
+    feedback: {
+      guidance: "review_changes",
+      reason: null,
+      offerInputPreparation: false,
+    },
   };
   assert.throws(() => decodeScopedSnapshot(view), /manifest/);
 });
@@ -581,7 +589,11 @@ test("model error details accept the Host fixture and reject malformed or author
   run.terminal = {
     ...terminal("failed", "provider_failure"),
     modelError: detail,
-    feedback: { guidance: "account_settings", offerInputPreparation: true },
+    feedback: {
+      guidance: "account_settings",
+      reason: null,
+      offerInputPreparation: true,
+    },
   };
   assert.deepEqual(
     decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal.modelError,
@@ -610,14 +622,20 @@ test("model error details accept the Host fixture and reject malformed or author
   run.terminal = {
     ...terminal("failed", "agent_failure"),
     modelError: detail,
-    feedback: { guidance: "prepare_retry", offerInputPreparation: true },
+    feedback: {
+      guidance: "prepare_retry",
+      reason: null,
+      offerInputPreparation: true,
+    },
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
   run.terminal.feedback.guidance = "account_settings";
   assert.throws(() => decodeWorkbenchSnapshot(value), /primary model error/);
   for (const feedback of [
-    { guidance: "unknown", offerInputPreparation: false },
-    { guidance: "none", offerInputPreparation: 1 },
+    { guidance: "unknown", reason: null, offerInputPreparation: false },
+    { guidance: "none", reason: null, offerInputPreparation: 1 },
+    { guidance: "none", reason: "future", offerInputPreparation: false },
+    { guidance: "none", offerInputPreparation: false },
     { guidance: "none" },
   ]) {
     run.terminal.feedback = feedback;
@@ -627,6 +645,56 @@ test("model error details accept the Host fixture and reject malformed or author
   assert.throws(() => decodeWorkbenchSnapshot(value), /expected keys/);
   run.terminal = terminal("failed", "provider_failure");
   delete run.terminal.modelError;
+  assert.throws(() => decodeWorkbenchSnapshot(value), /expected keys/);
+});
+
+test("Metask balance reason accepts the Host fixture and stays bound to a primary Metask model error", () => {
+  const sample = JSON.parse(
+    readFileSync(
+      new URL(
+        "../src/product/control/model_error_metask_balance.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  const run = task.runs[0];
+  run.phase = "failed";
+  run.activity = null;
+  run.terminal = {
+    ...terminal("failed", "provider_failure"),
+    modelError: sample.modelError,
+    feedback: sample.feedback,
+  };
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal,
+    run.terminal,
+  );
+  for (const source of ["custom_provider", null]) {
+    run.terminal.modelError = { ...sample.modelError, source };
+    assert.throws(() => decodeWorkbenchSnapshot(value), /provider reason/);
+  }
+  run.terminal.modelError = null;
+  assert.throws(() => decodeWorkbenchSnapshot(value), /provider reason/);
+  run.terminal.modelError = sample.modelError;
+  run.terminal.cause = "agent_failure";
+  assert.throws(() => decodeWorkbenchSnapshot(value), /provider reason/);
+  run.terminal.cause = "provider_failure";
+  for (const feedback of [
+    { ...sample.feedback, reason: null },
+    { ...sample.feedback, guidance: "account_settings" },
+    { ...sample.feedback, guidance: "prepare_retry" },
+    { ...sample.feedback, reason: "future" },
+  ]) {
+    run.terminal.feedback = feedback;
+    assert.throws(() => decodeWorkbenchSnapshot(value), /feedback/);
+  }
+  run.terminal.feedback = { guidance: "recharge", offerInputPreparation: true };
   assert.throws(() => decodeWorkbenchSnapshot(value), /expected keys/);
 });
 

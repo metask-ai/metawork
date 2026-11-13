@@ -201,6 +201,7 @@ export async function runScheduledTasksVertical({
   assert.equal(stopped.task.runs.at(-1).terminal.outcome, "stopped");
   assert.deepEqual(stopped.task.runs.at(-1).terminal.feedback, {
     guidance: "review_permissions",
+    reason: null,
     offerInputPreparation: false,
   });
   assert.equal(stopped.task.signal, null);
