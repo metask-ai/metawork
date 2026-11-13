@@ -99,6 +99,30 @@ export type UpdateViewWire = {
   checkState: "unchecked" | "checking" | "succeeded" | "failed" | "unavailable";
   checkError:
     "none" | "network" | "timeout" | "invalid_manifest" | "unavailable";
+  checkDiagnostic: {
+    phase:
+      | "admission"
+      | "resolve"
+      | "connect"
+      | "send"
+      | "head"
+      | "body"
+      | "complete";
+    cause:
+      | "invalid_request"
+      | "dns_failed"
+      | "connect_failed"
+      | "tls_failed"
+      | "write_failed"
+      | "read_failed"
+      | "invalid_response"
+      | "response_too_large"
+      | "out_of_memory"
+      | "resource_limit"
+      | "cancelled"
+      | "deadline_exceeded";
+    elapsed: "under_1s" | "under_5s" | "under_15s" | "over_15s";
+  } | null;
   latestVersion: string | null;
   updateAvailable: boolean;
   downloadAvailable: boolean;
@@ -120,6 +144,7 @@ export function decodeUpdateViewWire(
   const item = object(value, path, [
     "checkState",
     "checkError",
+    "checkDiagnostic",
     "latestVersion",
     "updateAvailable",
     "downloadAvailable",
@@ -141,6 +166,43 @@ export function decodeUpdateViewWire(
       "invalid_manifest",
       "unavailable",
     ] as const),
+    checkDiagnostic:
+      item.checkDiagnostic === null
+        ? null
+        : ((value: unknown, path: string) => {
+            const item = object(value, path, ["phase", "cause", "elapsed"]);
+            return {
+              phase: enumValue(item.phase, path + ".phase", [
+                "admission",
+                "resolve",
+                "connect",
+                "send",
+                "head",
+                "body",
+                "complete",
+              ] as const),
+              cause: enumValue(item.cause, path + ".cause", [
+                "invalid_request",
+                "dns_failed",
+                "connect_failed",
+                "tls_failed",
+                "write_failed",
+                "read_failed",
+                "invalid_response",
+                "response_too_large",
+                "out_of_memory",
+                "resource_limit",
+                "cancelled",
+                "deadline_exceeded",
+              ] as const),
+              elapsed: enumValue(item.elapsed, path + ".elapsed", [
+                "under_1s",
+                "under_5s",
+                "under_15s",
+                "over_15s",
+              ] as const),
+            };
+          })(item.checkDiagnostic, path + ".checkDiagnostic"),
     latestVersion:
       item.latestVersion === null
         ? null

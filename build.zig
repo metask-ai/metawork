@@ -706,7 +706,9 @@ fn addRendererWireGenerator(b: *std.Build) void {
     const module = b.createModule(.{ .root_source_file = b.path("build_support/renderer_wire_generator.zig"), .target = b.graph.host });
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
-    module.addImport("product_update", b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host }));
+    const update = b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host });
+    update.addImport("metawork_http_contract", b.createModule(.{ .root_source_file = b.path("src/foundation/http_contract.zig"), .target = b.graph.host }));
+    module.addImport("product_update", update);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
@@ -1622,6 +1624,9 @@ fn wireAgentCore(
     });
     metawork_http_transport.addImport("metawork_http_memory", metawork_http_memory);
     metawork_http_transport.addImport("metawork_http_contract", metawork_http_contract);
+    // Update publishes the engine's typed failure facts; the engine itself
+    // stays Application-only.
+    product_update.addImport("metawork_http_contract", metawork_http_contract);
     oauth_loopback_transport.addImport("app_select_start", app_select_start);
     oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
     const metask_transport = b.createModule(.{

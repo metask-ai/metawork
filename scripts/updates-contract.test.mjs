@@ -15,6 +15,13 @@ const fixture = JSON.parse(
   ),
 );
 
+const failedFixture = JSON.parse(
+  readFileSync(
+    new URL("../src/product/update_failed.fixture", import.meta.url),
+    "utf8",
+  ),
+);
+
 test("updates decode the independent actual Host encoding without transporting download URLs", () => {
   assert.deepEqual(decodeUpdateView(fixture), fixture);
   assert.equal(Object.hasOwn(decodeUpdateView(fixture), "downloadUrl"), false);
@@ -24,6 +31,38 @@ test("updates decode the independent actual Host encoding without transporting d
     decodeUpdateView({ ...fixture, downloadAvailable: false }).updateAvailable,
     true,
   );
+});
+
+test("updates decode the failed check diagnostic without any endpoint or address", () => {
+  assert.deepEqual(decodeUpdateView(failedFixture), failedFixture);
+  assert.equal(
+    decodeUpdateView(failedFixture).checkDiagnostic.phase,
+    "connect",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(decodeUpdateView(failedFixture).checkDiagnostic),
+    /https?:|\/\/|\d+\.\d+\.\d+\.\d+|authorization|metask/i,
+  );
+  // A diagnostic belongs to a failed check and to nothing else.
+  assert.throws(() =>
+    decodeUpdateView({
+      ...fixture,
+      checkDiagnostic: failedFixture.checkDiagnostic,
+    }),
+  );
+  for (const patch of [
+    { checkDiagnostic: {} },
+    { checkDiagnostic: { ...failedFixture.checkDiagnostic, phase: "idle" } },
+    { checkDiagnostic: { ...failedFixture.checkDiagnostic, cause: "refused" } },
+    { checkDiagnostic: { ...failedFixture.checkDiagnostic, elapsed: 1200 } },
+    {
+      checkDiagnostic: {
+        ...failedFixture.checkDiagnostic,
+        host: "example.com",
+      },
+    },
+  ])
+    assert.throws(() => decodeUpdateView({ ...failedFixture, ...patch }));
 });
 
 test("updates reject missing extra malformed and inconsistent wire facts", () => {

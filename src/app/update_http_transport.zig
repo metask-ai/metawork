@@ -18,7 +18,9 @@ pub const Response = struct { status: u16, body_len: usize = 0 };
 pub const Error = error{ Network, Timeout, Cancelled, InvalidResponse };
 pub const Transport = struct {
     context: *anyopaque,
-    perform_fn: *const fn (*anyopaque, Request, []u8, *const Cancellation) Error!Response,
+    /// `diagnostic` receives the execution evidence when the request itself
+    /// failed, and stays null when a response arrived.
+    perform_fn: *const fn (*anyopaque, Request, []u8, *const Cancellation, *?update.CheckDiagnostic) Error!Response,
 };
 
 pub const Adapter = struct {
@@ -28,7 +30,7 @@ pub const Adapter = struct {
         return .{ .context = self, .perform_fn = perform };
     }
 
-    fn perform(context: *anyopaque, request: Request, output: []u8, cancellation: *const Cancellation) Error!Response {
+    fn perform(context: *anyopaque, request: Request, output: []u8, cancellation: *const Cancellation, diagnostic: *?update.CheckDiagnostic) Error!Response {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (cancellation.state.load(.acquire) != 0) return error.Cancelled;
         const url = switch (request) {
@@ -37,16 +39,23 @@ pub const Adapter = struct {
         };
         if (request == .download and !update.validDownloadUrl(url)) return error.InvalidResponse;
         const seconds: i64 = if (request == .manifest) 10 else 5;
-        return self.performAt(url, request == .download, output, cancellation, .fromSeconds(seconds));
+        return self.performAt(url, request == .download, output, cancellation, .fromSeconds(seconds), diagnostic);
     }
 
-    fn performAt(self: *Adapter, url: []const u8, head: bool, output: []u8, cancellation: *const Cancellation, timeout: std.Io.Duration) Error!Response {
+    fn performAt(self: *Adapter, url: []const u8, head: bool, output: []u8, cancellation: *const Cancellation, timeout: std.Io.Duration, diagnostic: *?update.CheckDiagnostic) Error!Response {
         const result = self.http.run(.{
             .consumer = .update,
             .isolation = .public,
             .budget = .{ .deadline = .fromNow(self.http.io, .{ .raw = timeout, .clock = .boot }) },
             .cancellation = .atomic(&cancellation.state),
         }, fetch, .{ url, head, output });
+        // Typed facts only. The engine reports no endpoint, address or header,
+        // and Product chooses how much of this the user sees.
+        diagnostic.* = if (result.diagnostic) |evidence| .{
+            .phase = evidence.phase,
+            .cause = evidence.cause,
+            .elapsed = .fromMilliseconds(evidence.elapsed_ms),
+        } else null;
         return switch (result.outcome) {
             .completed => |response| response catch |err| mapError(err),
             .failed => |err| mapError(err),
@@ -90,9 +99,11 @@ test "updates HTTP refuses cancellation and untrusted download before any networ
     var buffer: [8]u8 = undefined;
     var bad_url: update.Url = .{ .len = "https://evil.test/package.exe".len };
     @memcpy(bad_url.bytes[0..bad_url.len], "https://evil.test/package.exe");
-    try std.testing.expectError(error.InvalidResponse, adapter.transport().perform_fn(&adapter, .{ .download = bad_url }, &buffer, &cancellation));
+    var diagnostic: ?update.CheckDiagnostic = null;
+    try std.testing.expectError(error.InvalidResponse, adapter.transport().perform_fn(&adapter, .{ .download = bad_url }, &buffer, &cancellation, &diagnostic));
+    try std.testing.expect(diagnostic == null);
     cancellation.cancel();
-    try std.testing.expectError(error.Cancelled, adapter.transport().perform_fn(&adapter, .manifest, &buffer, &cancellation));
+    try std.testing.expectError(error.Cancelled, adapter.transport().perform_fn(&adapter, .manifest, &buffer, &cancellation, &diagnostic));
 }
 
 test "updates HTTP real GET and HEAD enforce byte bounds and never follow redirects" {
@@ -149,7 +160,8 @@ test "updates HTTP real GET and HEAD enforce byte bounds and never follow redire
         var adapter: Adapter = .{ .http = &engine };
         var cancellation: Cancellation = .{ .io = threaded.io() };
         var buffer: [2]u8 = undefined;
-        const result = adapter.performAt(url, mode == .head, &buffer, &cancellation, .fromSeconds(5));
+        var diagnostic: ?update.CheckDiagnostic = null;
+        const result = adapter.performAt(url, mode == .head, &buffer, &cancellation, .fromSeconds(5), &diagnostic);
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         switch (mode) {
@@ -213,7 +225,8 @@ test "updates HTTP deadline and cancellation join a real blocked response before
         defer engine.deinit();
         var adapter: Adapter = .{ .http = &engine };
         var buffer: [8]u8 = undefined;
-        const result = adapter.performAt(url, false, &buffer, &cancellation, .fromMilliseconds(500));
+        var diagnostic: ?update.CheckDiagnostic = null;
+        const result = adapter.performAt(url, false, &buffer, &cancellation, .fromMilliseconds(500), &diagnostic);
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         if (cancel) try std.testing.expectError(error.Cancelled, result) else try std.testing.expectError(error.Timeout, result);
@@ -229,5 +242,55 @@ test "updates HTTP registration failure is a network failure rather than cancell
     var adapter: Adapter = .{ .http = &engine };
     var cancellation: Cancellation = .{ .io = threaded.io() };
     var buffer: [8]u8 = undefined;
-    try std.testing.expectError(error.Network, adapter.performAt("http://127.0.0.1:1/fixture", false, &buffer, &cancellation, .fromSeconds(30)));
+    var diagnostic: ?update.CheckDiagnostic = null;
+    try std.testing.expectError(error.Network, adapter.performAt("http://127.0.0.1:1/fixture", false, &buffer, &cancellation, .fromSeconds(30), &diagnostic));
+}
+
+test "updates report where a real check stopped and why" {
+    const Phase = @FieldType(update.CheckDiagnostic, "phase");
+    const Cause = @FieldType(update.CheckDiagnostic, "cause");
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
+    var cancellation: Cancellation = .{ .io = threaded.io() };
+    var buffer: [8]u8 = undefined;
+
+    // A reserved name that must not resolve stops before any connection.
+    // A refused TCP connection is covered by the engine's own tests: std
+    // aborts on the Windows CONNECTION_REFUSED status rather than returning.
+    var unresolved: ?update.CheckDiagnostic = null;
+    try std.testing.expectError(error.Network, adapter.performAt("http://metawork-update-check.invalid/manifest.json", false, &buffer, &cancellation, .fromSeconds(10), &unresolved));
+    try std.testing.expectEqual(Phase.resolve, unresolved.?.phase);
+    try std.testing.expectEqual(Cause.dns_failed, unresolved.?.cause);
+
+    // A plain HTTP listener answering an HTTPS request fails the handshake.
+    // std reports a peer that drops the handshake as a generic connection
+    // error, so the cause stays connect_failed here; the TLS-specific cause
+    // is covered by the engine's own injected handshake tests.
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(std.testing.io);
+    const Plaintext = struct {
+        fn run(value: *std.Io.net.Server) void {
+            var connection = value.accept(std.testing.io) catch return;
+            defer connection.close(std.testing.io);
+            // Answer the ClientHello with plain HTTP, which is not a TLS
+            // record, so the handshake fails rather than the connection.
+            var reply: [128]u8 = undefined;
+            var writer = connection.writer(std.testing.io, &reply);
+            writer.interface.writeAll("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n") catch return;
+            writer.interface.flush() catch return;
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Plaintext.run, .{&listener});
+    defer thread.join();
+    const url = try std.fmt.allocPrint(std.testing.allocator, "https://127.0.0.1:{d}/manifest.json", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    var handshake: ?update.CheckDiagnostic = null;
+    try std.testing.expectError(error.Network, adapter.performAt(url, false, &buffer, &cancellation, .fromSeconds(5), &handshake));
+    try std.testing.expectEqual(Phase.connect, handshake.?.phase);
+    try std.testing.expectEqual(Cause.connect_failed, handshake.?.cause);
 }

@@ -1,6 +1,7 @@
 //! Product-owned update facts and policy. Network, timers and browser effects
 //! are supplied by Application; this aggregate has no Account or Agent input.
 const std = @import("std");
+const http = @import("metawork_http_contract");
 
 pub const manifest_url = "https://metawork.metask-ai.com/manifest.json";
 pub const website_url = "https://metawork.metask-ai.com";
@@ -136,6 +137,42 @@ pub fn parseManifest(allocator: std.mem.Allocator, bytes: []const u8, target: Ta
 
 pub const CheckState = enum { unchecked, checking, succeeded, failed, unavailable };
 pub const CheckError = enum { none, network, timeout, invalid_manifest, unavailable };
+
+/// How long the failed attempt took. Buckets, not a measurement: enough to
+/// separate a refused connection from a silent one, with nothing to track.
+pub const Elapsed = enum {
+    under_1s,
+    under_5s,
+    under_15s,
+    over_15s,
+
+    pub fn fromMilliseconds(value: u32) Elapsed {
+        if (value < 1000) return .under_1s;
+        if (value < 5000) return .under_5s;
+        if (value < 15000) return .under_15s;
+        return .over_15s;
+    }
+};
+
+/// Evidence for the latest failed check: where the request stopped and why.
+/// `CheckError` stays the product classification of what the user can do;
+/// this is the separate fact of what actually happened, and it exists only
+/// when the request itself failed. Not persisted, cleared with the attempt.
+pub const CheckDiagnostic = struct {
+    phase: http.Phase,
+    cause: http.Cause,
+    elapsed: Elapsed,
+};
+
+comptime {
+    // Only closed vocabularies, so a diagnostic cannot carry a URL, host,
+    // address, header, body or credential even by mistake.
+    for (@typeInfo(CheckDiagnostic).@"struct".fields) |field| switch (@typeInfo(field.type)) {
+        .@"enum" => {},
+        else => @compileError("an update diagnostic must stay typed facts, never text"),
+    };
+}
+
 pub const DownloadState = enum { idle, checking, opened, failed };
 pub const DownloadError = enum { none, stale_version, missing_download, invalid_link, network, timeout, browser_unavailable, unavailable };
 pub const HeadResult = enum { accessible, unsupported, invalid_link, network, timeout };
@@ -154,6 +191,7 @@ pub fn headResult(status: u16) HeadResult {
 pub const View = struct {
     checkState: CheckState,
     checkError: CheckError,
+    checkDiagnostic: ?CheckDiagnostic,
     latestVersion: ?[]const u8,
     updateAvailable: bool,
     downloadAvailable: bool,
@@ -161,7 +199,10 @@ pub const View = struct {
     downloadError: DownloadError,
 };
 pub const DownloadPreparation = struct { id: u64, version: Version, url: Url };
-pub const CheckCompletion = union(enum) { release: Release, failed: CheckError };
+/// `diagnostic` exists only when the request itself failed; a rejected status
+/// or an unusable manifest body is a completed request with no such evidence.
+pub const CheckFailure = struct { kind: CheckError, diagnostic: ?CheckDiagnostic = null };
+pub const CheckCompletion = union(enum) { release: Release, failed: CheckFailure };
 pub const CheckPreparation = struct { id: u64, target: Target };
 
 /// Application receives only update lifecycle capabilities, never the Control
@@ -191,6 +232,7 @@ pub const Runtime = struct {
     release: ?Release = null,
     check_state: CheckState = .unavailable,
     check_error: CheckError = .none,
+    check_diagnostic: ?CheckDiagnostic = null,
     download_state: DownloadState = .idle,
     download_error: DownloadError = .none,
 
@@ -204,6 +246,7 @@ pub const Runtime = struct {
         self.next_check_ms = if (automatic) now_ms +| Limits.initial_delay_ms else null;
         self.check_state = .unchecked;
         self.check_error = .none;
+        self.check_diagnostic = null;
     }
 
     pub fn due(self: *const Runtime, now_ms: u64) bool {
@@ -216,6 +259,7 @@ pub const Runtime = struct {
         self.check_id = self.sequence;
         self.check_state = .checking;
         self.check_error = .none;
+        self.check_diagnostic = null;
         if (self.automatic) self.next_check_ms = now_ms +| Limits.interval_ms;
         return self.sequence;
     }
@@ -228,13 +272,15 @@ pub const Runtime = struct {
                 self.release = release;
                 self.check_state = .succeeded;
                 self.check_error = .none;
+                self.check_diagnostic = null;
                 self.download_error = .none;
                 if (self.download == null) self.download_state = .idle;
             },
             .failed => |failure| {
-                std.debug.assert(failure != .none);
+                std.debug.assert(failure.kind != .none);
                 self.check_state = .failed;
-                self.check_error = failure;
+                self.check_error = failure.kind;
+                self.check_diagnostic = failure.diagnostic;
             },
         }
         return true;
@@ -245,6 +291,7 @@ pub const Runtime = struct {
         return .{
             .checkState = self.check_state,
             .checkError = self.check_error,
+            .checkDiagnostic = self.check_diagnostic,
             .latestVersion = if (self.release) |*release| release.version.text.slice() else null,
             .updateAvailable = self.available and newer,
             .downloadAvailable = self.available and newer and self.release.?.download != null,
@@ -317,6 +364,7 @@ pub const Runtime = struct {
         self.check_id = null;
         self.check_state = .unavailable;
         self.check_error = .none;
+        self.check_diagnostic = null;
         self.cancelDownload();
     }
 };
@@ -387,7 +435,7 @@ test "updates coalesce checks and schedule from attempts without persistence or 
     const id = runtime.beginCheck(31_000).?;
     try std.testing.expect(runtime.beginCheck(31_001) == null);
     try std.testing.expect(!runtime.due(32_000));
-    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .network }));
+    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .{ .kind = .network } }));
     try std.testing.expectEqual(CheckState.failed, runtime.view().checkState);
     try std.testing.expect(!runtime.view().updateAvailable);
     try std.testing.expect(!runtime.due(31_001));
@@ -404,7 +452,7 @@ test "updates keep last confirmed release on failure and replace it on valid che
     var runtime = try startedRuntime(false);
     try installFixture(&runtime);
     const id = runtime.beginCheck(50_000).?;
-    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .timeout }));
+    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .{ .kind = .timeout } }));
     try std.testing.expect(runtime.view().updateAvailable);
     try std.testing.expectEqual(CheckError.timeout, runtime.view().checkError);
     try std.testing.expectEqualStrings("0.2.10", runtime.view().latestVersion.?);
@@ -467,10 +515,59 @@ test "updates disconnect and shutdown revoke pending browser effects and stale c
     runtime.stop();
     runtime.browserResult(true);
     try std.testing.expectEqual(DownloadState.idle, runtime.view().downloadState);
-    try std.testing.expect(!runtime.completeCheck(check, .{ .failed = .network }));
+    try std.testing.expect(!runtime.completeCheck(check, .{ .failed = .{ .kind = .network } }));
     try std.testing.expect(runtime.beginCheck(80_000) == null);
     try std.testing.expect(runtime.beginDownload("0.2.10") == null);
     try std.testing.expect(!runtime.due(std.math.maxInt(u64)));
+}
+
+test "updates keep the failing phase and cause of the latest attempt only" {
+    try std.testing.expectEqual(Elapsed.under_1s, Elapsed.fromMilliseconds(999));
+    try std.testing.expectEqual(Elapsed.under_5s, Elapsed.fromMilliseconds(1000));
+    try std.testing.expectEqual(Elapsed.under_15s, Elapsed.fromMilliseconds(14_999));
+    try std.testing.expectEqual(Elapsed.over_15s, Elapsed.fromMilliseconds(15_000));
+
+    var runtime = try startedRuntime(false);
+    try installFixture(&runtime);
+    const failed = runtime.beginCheck(50_000).?;
+    try std.testing.expect(runtime.completeCheck(failed, .{ .failed = .{
+        .kind = .network,
+        .diagnostic = .{ .phase = .connect, .cause = .tls_failed, .elapsed = .under_5s },
+    } }));
+    try std.testing.expectEqual(CheckError.network, runtime.view().checkError);
+    try std.testing.expectEqual(http.Phase.connect, runtime.view().checkDiagnostic.?.phase);
+    try std.testing.expectEqual(http.Cause.tls_failed, runtime.view().checkDiagnostic.?.cause);
+    try std.testing.expectEqual(Elapsed.under_5s, runtime.view().checkDiagnostic.?.elapsed);
+
+    // A new attempt owns the evidence; the last confirmed release survives it.
+    const retry = runtime.beginCheck(60_000).?;
+    try std.testing.expect(runtime.view().checkDiagnostic == null);
+    try std.testing.expect(runtime.view().updateAvailable);
+    try std.testing.expect(runtime.completeCheck(retry, .{ .release = try parseManifest(std.testing.allocator, fixture, runtime.target) }));
+    try std.testing.expect(runtime.view().checkDiagnostic == null);
+
+    // A completed request that returned an unusable manifest has no evidence.
+    const invalid = runtime.beginCheck(70_000).?;
+    try std.testing.expect(runtime.completeCheck(invalid, .{ .failed = .{ .kind = .invalid_manifest } }));
+    try std.testing.expectEqual(CheckError.invalid_manifest, runtime.view().checkError);
+    try std.testing.expect(runtime.view().checkDiagnostic == null);
+
+    runtime.stop();
+    try std.testing.expect(runtime.view().checkDiagnostic == null);
+}
+
+test "updates publish the failed check diagnostic without any endpoint or address" {
+    var runtime = try startedRuntime(false);
+    const id = runtime.beginCheck(40_000).?;
+    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .{
+        .kind = .network,
+        .diagnostic = .{ .phase = .connect, .cause = .tls_failed, .elapsed = .under_5s },
+    } }));
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, runtime.view(), .{});
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @embedFile("update_failed.fixture"), "\r\n"), json);
+    for ([_][]const u8{ "://", "metask-ai", "downloads", "Authorization", "127.0.0.1", "manifest" }) |forbidden|
+        try std.testing.expect(std.mem.indexOf(u8, json, forbidden) == null);
 }
 
 test "updates actual Host encoding matches the independent URL-free Renderer fixture" {
