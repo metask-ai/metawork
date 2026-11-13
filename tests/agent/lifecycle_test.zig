@@ -4190,7 +4190,18 @@ test "close wakes a saturated event callback without fatal or poison" {
         var first_terminal = takeTestTerminal(session, first_run);
         defer first_terminal.deinit();
         const second_run = try submitSession(session, "close while waiting for consumer");
-        try session.waitForState(.running);
+        // The worker publishes .running before calling Core. Wait for the
+        // callback itself while the first Run still owns the entire queue.
+        try std.testing.expectEqual(@as(usize, 2), runtime.events.pendingForSession(session.id));
+        var callback_entered = false;
+        for (0..5000) |_| {
+            session.mutex.lockUncancelable(std.testing.io);
+            callback_entered = session.active_callback_refs != 0;
+            session.mutex.unlock(std.testing.io);
+            if (callback_entered) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(callback_entered);
         try closeSession(session, .session_close);
         var terminal = takeTestTerminal(session, second_run);
         defer terminal.deinit();
