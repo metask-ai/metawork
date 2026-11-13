@@ -27,6 +27,7 @@
 | `src/agent.zig`、`src/agent/`                                               | Agent                                      | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary                                                                                                                                                                                                                                                       |
 | `src/bridge.zig`、`src/bridge/`                                             | Bridge                                     | Renderer command authority、wire decode 与 ProductDelivery transport                                                                                                                                                                                                                                                                 |
 | `src/storage.zig`、`src/storage/`                                           | Storage                                    | backend-independent SQL contract、backend 与 conformance                                                                                                                                                                                                                                                                             |
+| `src/foundation/`                                                           | Foundation                                 | 无产品语义的执行机制。每个成员是独立可 import 的模块根，不发布 `src/foundation.zig`、barrel 或统一 facade；纯合同成员任何 owner 都可消费，引擎成员只有 Application 可消费                                                                                                                                                             |
 | `src/automation.zig`、`src/automation/`                                     | Automation capability                      | compile-time authority selection，不形成产品 owner                                                                                                                                                                                                                                                                                   |
 | `src/oauth/`                                                                | OAuth shared leaf                          | 只提供 PKCE、secret lifetime、严格 callback 解析与 loopback byte-pump 合同；不拥有 callback path、issuer/resource 接受、limit policy、响应文案或领域错误映射                                                                                                                                                                         |
 | `src/image/`                                                                | Encoded image shared leaf                  | 只解析有界容器、编码尺寸、动画及主图/容器结束事实；不解码像素或执行平台 effect，格式准入、尺寸及尾部政策由 Agent/Product 各自拥有                                                                                                                                                                                                    |
@@ -34,6 +35,8 @@
 | `src/product_identity.zig`                                                  | `app.zon`-derived shared leaf              | 把 build-time artifact identity 投影给 Application 及 Models/Account/MCP credential boundary，不形成领域 owner                                                                                                                                                                                                                       |
 
 `src/product/models.zig` 是 Product Control 构造并持有 Models aggregate 的 runtime root，只发布 `Runtime`、启动错误等 aggregate API；Product Control 可按需要同时精确导入该 root、`src/product/models/contract.zig` 的纯模型合同和 `src/product/models/ports.zig` 的窄 effect port。Application adapter消费 Models contract/port与 Metask provider transport leaf，Task与 Schedule只消费 contract，三条路线不经 root转发。`src/product/account/contract.zig`只发布 Account identity/authorization合同；Account root及内部 module不得导入任何 Models module。`src/product/agent_protocol_adapter.zig`只拥有 Product到 Agent的穷举协议映射，不能承载模型执行配置、推断或通用转换。它们都不是新的顶层产品 owner。`src/product/`只是 Account、Product Control及其 aggregate的目录归属，不发布统一 Product facade。
+
+`src/foundation/` 的成员按两条准入收取：该目录下任何文件都不得导入 Application、Product、Agent 或 Bridge 的模块，由 architecture guard 强制；且该成员能够原样搬到另一个完全不同的应用。成员之间不形成 owner 层级，也不互相转发；新增成员逐个按同一准入判断，不因目录位置自动取得身份。
 
 每个 `*.zig` module root 只显式发布消费者需要的类型、函数或窄 namespace。内部文件不得通过无边界 `usingnamespace`、barrel 或 forwarding facade 重新暴露；build graph 中为隔离测试或依赖形成的 leaf module 不因此取得新的 owner 身份。
 
@@ -76,6 +79,8 @@ main -> application
 application -> account, models capabilities, product control, agent, bridge, automation, Native SDK
 application -> native_sdk_compat
 application -> product identity
+application -> foundation engines
+application, product control, agent, bridge -> foundation contracts
 application, account -> OAuth shared mechanics and loopback contract
 bridge -> product control, account contract, Native SDK transport contract
 product control -> agent through product agent protocol adapter, account contract, models root/contract/ports
@@ -89,6 +94,8 @@ product control history schema, storage backend -> one Storage SQL contract modu
 ```
 
 Application 只做 composition、capability 注入、资源生命周期和跨 owner 调用顺序，不读取领域内部状态形成 policy。`app/`、`product/`、`agent/` 与 `bridge/` 的下层 owner 都不得反向导入 Application 实现。
+
+Foundation 与 Application、Product、Agent、Storage 平级，只拥有无产品语义的执行机制。它的纯合同成员任何 owner 都可以精确导入，但合同只承载已经发生的事实，不授予发起 effect 的能力；引擎成员只有 Application 可以导入并组合。Foundation 不得反向导入任何 owner。
 
 Product Control 可以消费 Agent、Account 与 Models 的纯合同，并可构造 Models aggregate，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Models contract/registry/runtime/provider 不得反向导入 Account 或消费方；Account root/contract/state/runtime不得导入 Models root/contract/runtime/ports/provider。Application可以同时组合两者并把一次 Account authorization lease交给 Metask catalog worker，但不得因此建立领域反向边。Task与 Schedule不得通过 Account取得模型执行类型，也不得导入 Models runtime/root/ports。Bridge可以消费 Product Control public surface、Models command/view、Account脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle或具体平台实现。Agent不得导入 Product Control、Models、Bridge、Application或 Renderer。`product_identity.zig`只消费 `app.zon` manifest与 build-time artifact option；Application的 Models/Account/MCP credential adapter可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract不依赖 Product、Application、Native SDK或 SQLite C类型；只有 concrete backend可以依赖 SQLite。
 

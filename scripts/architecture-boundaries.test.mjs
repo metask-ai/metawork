@@ -149,6 +149,59 @@ function externSymbols(source, libraries) {
     .sort();
 }
 
+const foundationRoot = "src/foundation/";
+
+/** Declared build modules, as Zig variable name -> root source path. */
+function moduleRootSources(buildSource) {
+  const sources = new Map();
+  for (const match of buildSource.matchAll(
+    /\bconst (\w+) = b\.createModule\(\.\{[\s\S]{0,300}?\.root_source_file = b\.path\("([^"]+)"\)/g,
+  ))
+    sources.set(match[1], match[2]);
+  return sources;
+}
+
+/** Import names bound to a module rooted in Application, Product, Agent or Bridge. */
+function ownerModuleNames(buildSource) {
+  const sources = moduleRootSources(buildSource);
+  const names = new Set(["metask_agentcore"]);
+  for (const edge of moduleImportEdges(buildSource))
+    if (
+      /^src\/(app|product|agent|bridge)[/.]/.test(
+        sources.get(edge.target) ?? "",
+      )
+    )
+      names.add(edge.name);
+  return names;
+}
+
+const foundationForbiddenModules = ownerModuleNames(read("build.zig"));
+
+function resolveImportPath(file, target) {
+  const stack = [];
+  for (const part of file.split("/").slice(0, -1).concat(target.split("/"))) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") stack.pop();
+    else stack.push(part);
+  }
+  return stack.join("/");
+}
+
+/**
+ * A Zig file reaches other code two ways: a named build module, or a relative
+ * file import. A Foundation member must stay inside Foundation on both.
+ */
+function foundationImportViolations(file, source) {
+  const violations = [];
+  for (const [, name] of source.matchAll(/@import\("([^"]+)"\)/g)) {
+    if (name.endsWith(".zig")) {
+      if (!resolveImportPath(file, name).startsWith(foundationRoot))
+        violations.push(name);
+    } else if (foundationForbiddenModules.has(name)) violations.push(name);
+  }
+  return violations;
+}
+
 test("permission reviewer is an isolated Completion consumer without approval authority", () => {
   const build = read("build.zig");
   const source = read("src/product/permission/review.zig");
@@ -906,6 +959,78 @@ test("named module roots exist and lower owners cannot import composition", () =
       `${file} exposes an implementation module`,
     );
   }
+});
+
+test("Foundation members import no Application, Product, Agent or Bridge module", () => {
+  const build = read("build.zig");
+  const sources = moduleRootSources(build);
+  const members = [...sources]
+    .filter(([, path]) => path.startsWith(foundationRoot))
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(members, [
+    "metawork_http_memory",
+    "metawork_http_transport",
+  ]);
+  for (const edge of moduleImportEdges(build)) {
+    if (!members.includes(edge.owner)) continue;
+    const target = sources.get(edge.target) ?? "";
+    assert.ok(
+      !/^src\/(app|product|agent|bridge)[/.]/.test(target),
+      `${edge.owner} imports ${edge.target} rooted at ${target}`,
+    );
+  }
+  for (const name of [
+    "metawork_app",
+    "metawork_agent",
+    "metawork_bridge",
+    "metawork_product_control",
+    "metawork_product_update",
+  ])
+    assert.ok(
+      foundationForbiddenModules.has(name),
+      `${name} must be a forbidden Foundation import`,
+    );
+
+  const files = zigFiles(foundationRoot);
+  assert.ok(files.length > 0, "src/foundation/ must hold members");
+  for (const file of files)
+    assert.deepEqual(foundationImportViolations(file, read(file)), []);
+
+  // This member must also carry no platform framework: std and Foundation only.
+  for (const file of files)
+    for (const [, name] of read(file).matchAll(/@import\("([^"]+)"\)/g))
+      assert.ok(
+        name.endsWith(".zig") ||
+          ["std", "builtin", "metawork_http_memory"].includes(name),
+        `${file} imports unexpected module ${name}`,
+      );
+});
+
+test("the Foundation import rule rejects owner modules and escaping relative imports", () => {
+  const member = "src/foundation/http_transport.zig";
+  for (const source of [
+    'const a = @import("metawork_product_control");',
+    'const a = @import("metawork_product_update");',
+    'const a = @import("metawork_agent");',
+    'const a = @import("metawork_bridge");',
+    'const a = @import("metawork_app");',
+    'const a = @import("metask_agentcore");',
+    'const a = @import("../product/update.zig");',
+    'const a = @import("../app/mcp_oauth.zig");',
+  ])
+    assert.equal(
+      foundationImportViolations(member, source).length,
+      1,
+      `the rule must reject ${source}`,
+    );
+  assert.deepEqual(
+    foundationImportViolations(
+      member,
+      'const std = @import("std");\nconst memory = @import("metawork_http_memory");\nconst probe = @import("http_idle_probe.zig");',
+    ),
+    [],
+  );
 });
 
 test("Product Control is the only composition owner identity", () => {
