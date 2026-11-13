@@ -960,6 +960,75 @@ test "HTTP write watch sees accepted bytes and only accepted bytes" {
     }
 }
 
+/// The slot holding the only pooled connection.
+fn pooledSlot(engine: *http.Engine) !*@TypeOf(engine.slots[0]) {
+    var found: ?*@TypeOf(engine.slots[0]) = null;
+    for (&engine.slots) |*slot| if (slot.client.connection_pool.free_len != 0) {
+        if (found != null) return error.TestUnexpectedResult;
+        found = slot;
+    };
+    return found orelse error.TestUnexpectedResult;
+}
+
+fn backdate(timestamp: *Io.Clock.Timestamp, milliseconds: i64) void {
+    timestamp.* = timestamp.subDuration(.{ .raw = .fromMilliseconds(milliseconds), .clock = .awake });
+}
+
+test "HTTP reuse honors a server Keep-Alive timeout of 5 s minus a 1 s margin" {
+    // The server announces Keep-Alive: timeout=5 and closes an idle connection
+    // after 5 s. Idle time is advanced by backdating instead of waiting.
+    const pool = try Pool.create(.{ .connections = 2, .keep_alive = "timeout=5, max=100" });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    const slot = try pooledSlot(&engine);
+    try std.testing.expectEqual(@as(i96, 4 * std.time.ns_per_s), slot.idle_limit.nanoseconds);
+    backdate(&slot.idle, 3500);
+    try std.testing.expect(try runScoped(&engine, url, "a"));
+    // Past 4 s: never probed, closed, replaced.
+    backdate(&slot.idle, 4500);
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    try pool.waitClosed(0);
+    try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
+}
+
+test "HTTP probe catches a server that closed within its Keep-Alive timeout" {
+    const pool = try Pool.create(.{ .connections = 2, .keep_alive = "timeout=5", .close_first = true });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    try pool.waitClosed(0);
+    backdate(&(try pooledSlot(&engine)).idle, 3500);
+    // Still within 4 s, so it is probed: FIN, then a new connection.
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
+}
+
+test "HTTP keeps no connection for a one second Keep-Alive and none past its lifetime" {
+    for ([_]bool{ false, true }) |lifetime| {
+        const pool = try Pool.create(.{ .connections = 2, .keep_alive = if (lifetime) null else "timeout=1" });
+        defer pool.destroy();
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, std.testing.io);
+        defer engine.deinit();
+        var url_buffer: [64]u8 = undefined;
+        const url = pool.url(&url_buffer);
+        try std.testing.expect(!try runScoped(&engine, url, "a"));
+        if (lifetime) backdate(&(try pooledSlot(&engine)).created, 301 * std.time.ms_per_s);
+        try std.testing.expect(!try runScoped(&engine, url, "a"));
+        try pool.waitClosed(0);
+        try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
+    }
+}
+
 test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" {
     const Held = struct {
         engine: *http.Engine,

@@ -112,8 +112,13 @@ pub const Engine = struct {
     pub const continuation_limit = request_limit;
     pub const resolver_limit = request_limit;
     const slot_count = request_limit + continuation_limit;
+    /// Idle limit without a server hint, and the cap on any hint.
     const idle_seconds = 30;
     const lifetime_seconds = 300;
+    /// Subtracted from a server's Keep-Alive timeout: our idle clock starts
+    /// after reading the response, later than the server's, and a request
+    /// needs about half a round trip to arrive. Covers RTT up to about 1 s.
+    const keep_alive_margin_seconds = 1;
     /// Idle connections kept per origin across isolations. Two covers the usual
     /// concurrency per origin (for example Account with Models on Metask, or a
     /// title with a permission review) without one origin filling every slot.
@@ -142,6 +147,8 @@ pub const Engine = struct {
         watched_writes: Io.Writer.VTable = undefined,
         created: Io.Clock.Timestamp = undefined,
         idle: Io.Clock.Timestamp = undefined,
+        /// From the last response's Keep-Alive timeout, else the default.
+        idle_limit: Io.Duration = .fromSeconds(idle_seconds),
         ca_scanned: ?Io.Clock.Timestamp = null,
 
         fn idleConnection(slot: *Slot) ?*Client.Connection {
@@ -150,7 +157,7 @@ pub const Engine = struct {
         }
 
         fn expired(slot: *const Slot, now: Io.Clock.Timestamp) bool {
-            return slot.idle.durationTo(now).raw.toSeconds() >= idle_seconds or
+            return slot.idle.durationTo(now).raw.nanoseconds >= slot.idle_limit.nanoseconds or
                 slot.created.durationTo(now).raw.toSeconds() >= lifetime_seconds;
         }
 
@@ -159,7 +166,13 @@ pub const Engine = struct {
         }
     };
 
-    const Lease = struct { slot: *Slot, reuse: bool };
+    const Lease = struct {
+        slot: *Slot,
+        reuse: bool,
+        /// This owner's expired idle connections, reserved for closing.
+        expired: [slot_count]*Slot = undefined,
+        expired_count: usize = 0,
+    };
 
     /// The engine must stay at this address until deinit, after its callers join.
     pub fn init(self: *Engine, allocator: std.mem.Allocator, io: Io) void {
@@ -219,6 +232,7 @@ pub const Engine = struct {
             if (operation.slot) |slot| {
                 std.debug.assert(slot.client.connection_pool.used.first == null);
                 slot.idle = .now(self.io, .awake);
+                slot.idle_limit = operation.idle_limit;
                 if (slot.retire_on_release) {
                     slot.retire_on_release = false;
                     if (slot.idleConnection() != null) retired = slot;
@@ -290,8 +304,17 @@ pub const Engine = struct {
                 if (stale and !current_stale) oldest = slot else if (stale == current_stale and slot.idle.raw.nanoseconds < current.idle.raw.nanoseconds) oldest = slot;
             } else oldest = slot;
         }
-        const chosen: Lease = if (exact) |slot| .{ .slot = slot, .reuse = true } else .{ .slot = empty orelse oldest.?, .reuse = false }; // admission reserves a slot per call
+        var chosen: Lease = if (exact) |slot| .{ .slot = slot, .reuse = true } else .{ .slot = empty orelse oldest.?, .reuse = false }; // admission reserves a slot per call
         chosen.slot.busy = true;
+        // An expired connection of this owner can never serve it again.
+        for (&self.slots) |*slot| {
+            if (slot.busy) continue;
+            const connection = slot.idleConnection() orelse continue;
+            if (!slot.expired(now) or !isolation.eql(slot.isolation) or !Slot.sameOrigin(connection, criteria.protocol, criteria.port, criteria.host)) continue;
+            slot.busy = true;
+            chosen.expired[chosen.expired_count] = slot;
+            chosen.expired_count += 1;
+        }
         // Under the mutex, so a concurrent retire sees the new owner.
         chosen.slot.isolation = isolation;
         return chosen;
@@ -363,6 +386,8 @@ pub const Operation = struct {
     failure: ?Error = null,
     reused: bool = false,
     retried: bool = false,
+    /// Idle limit for the connection after this response.
+    idle_limit: Io.Duration = .fromSeconds(Engine.idle_seconds),
     /// End of DNS, TCP and TLS: the deadline, or admission plus the connect budget.
     connect_end: Io.Clock.Timestamp,
     /// 0 establishing, 1 established in time, 2 connect budget expired first.
@@ -481,6 +506,7 @@ pub const Operation = struct {
         };
         const criteria: Client.ConnectionPool.Criteria = .{ .host = host, .port = uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), .protocol = protocol };
         const lease = self.engine.lease(criteria, self.control.isolation);
+        for (lease.expired[0..lease.expired_count]) |stale| self.engine.evict(stale);
         const slot = lease.slot;
         self.slot = slot;
         const client = &slot.client;
@@ -770,7 +796,10 @@ pub const Request = struct {
 
     pub fn deinit(self: *Request) void {
         const connection = self.raw.connection.?;
-        const reusable = self.received and (self.raw.reader.state == .ready or !self.raw.method.responseHasBody());
+        const slot = self.operation.slot.?;
+        const reusable = self.received and (self.raw.reader.state == .ready or !self.raw.method.responseHasBody()) and
+            self.operation.idle_limit.nanoseconds > 0 and
+            slot.created.untilNow(self.operation.io()).raw.toSeconds() < Engine.lifetime_seconds;
         connection.closing = connection.closing or !reusable or self.operation.gate.load(.acquire) & 2 != 0;
         // Do not let std Request.deinit drain an abandoned GET while canceling.
         self.raw.connection = null;
@@ -860,6 +889,7 @@ pub const Request = struct {
             break :response self.raw.receiveHead(&.{}) catch |again| return self.operation.fail(headError(again));
         };
         self.received = true;
+        self.operation.idle_limit = idleLimit(&response.head);
         self.operation.phase = .body;
         return response;
     }
@@ -883,6 +913,26 @@ pub const Request = struct {
         return writer.buffered();
     }
 };
+
+/// min(Keep-Alive timeout - margin, default). A timeout at or below the margin
+/// means the connection is not kept; no or an unparsable hint keeps the default.
+fn idleLimit(head: *const Client.Response.Head) Io.Duration {
+    const default: Io.Duration = .fromSeconds(Engine.idle_seconds);
+    var headers = head.iterateHeaders();
+    while (headers.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "keep-alive")) continue;
+        var parameters = std.mem.tokenizeScalar(u8, header.value, ',');
+        while (parameters.next()) |parameter| {
+            const trimmed = std.mem.trim(u8, parameter, " \t");
+            const separator = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, trimmed[0..separator], " \t"), "timeout")) continue;
+            const seconds = std.fmt.parseInt(u32, std.mem.trim(u8, trimmed[separator + 1 ..], " \t"), 10) catch return default;
+            if (seconds <= Engine.keep_alive_margin_seconds) return .fromNanoseconds(0);
+            return .fromSeconds(@min(seconds - Engine.keep_alive_margin_seconds, Engine.idle_seconds));
+        }
+    }
+    return default;
+}
 
 fn headError(err: Client.Request.ReceiveHeadError) Error {
     return switch (err) {
@@ -926,6 +976,29 @@ comptime {
 fn dispose(connection: *Client.Connection) void {
     connection.closing = true;
     connection.client.connection_pool.release(connection, connection.client.io);
+}
+
+test "HTTP Keep-Alive timeout parsing keeps a one second margin under the default" {
+    const cases = [_]struct { header: ?[]const u8, seconds: i64 }{
+        .{ .header = null, .seconds = 30 },
+        .{ .header = "timeout=5, max=100", .seconds = 4 },
+        .{ .header = "max=5,timeout=20", .seconds = 19 },
+        .{ .header = "Timeout = 75", .seconds = 30 },
+        .{ .header = "timeout=2", .seconds = 1 },
+        .{ .header = "timeout=1", .seconds = 0 },
+        .{ .header = "timeout=0", .seconds = 0 },
+        .{ .header = "timeout=soon", .seconds = 30 },
+        .{ .header = "max=100", .seconds = 30 },
+    };
+    for (cases) |case| {
+        var buffer: [128]u8 = undefined;
+        const bytes = if (case.header) |value|
+            try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nKeep-Alive: {s}\r\n\r\n", .{value})
+        else
+            "HTTP/1.1 200 OK\r\n\r\n";
+        const head = try Client.Response.Head.parse(bytes);
+        try std.testing.expectEqual(@as(i96, case.seconds * std.time.ns_per_s), idleLimit(&head).nanoseconds);
+    }
 }
 
 test {
