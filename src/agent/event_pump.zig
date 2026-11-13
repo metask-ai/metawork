@@ -264,6 +264,7 @@ pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
             .tool_start,
             .output_segment_begin,
             .output_segment_end,
+            .thinking_discarded,
             .progress,
             .tool_result,
             .context_warning,
