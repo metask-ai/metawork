@@ -191,6 +191,14 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 `fail closed` 只表示在缺少可靠 authority 时拒绝相应的危险 effect、无人值守执行或权限扩大，不等同于冻结整个应用，也不自动推出“禁止保存任何新状态”。decode 拒绝、数据证据保留、运行时可用性、mutation admission、commit certainty 和恢复可用性是不同事实，必须由 owner 分别建模；一个事实不能代替另一个事实。
 
+### 3.8 Application HTTP 执行
+
+MetaWork 自有的出站 HTTP 由 Application 组合共享执行层；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。执行层对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度，单次调用不得隐式重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
+
+发送许可、选中的终态和资源静止是独立事实。取消先取得发送门闩时不得发出 HTTP；发送许可放行后保守报告可能发送。返回前必须 join 全部 I/O 与同步借用回调，不能把 deadline 当作资源释放的墙钟保证；完整响应已经被选中时，清理期间的取消不覆盖该结果，领域对结果的接纳仍由原合同决定。所有调用方停止后才销毁共享执行层。
+
+连接只在同一 origin、TLS 与凭据作用域内有界复用，且仅复用未超过空闲与存活期限的连接；失活连接在发送前丢弃，发送后失败不得触发透明重放。请求控制与 headers 每次重新建立，保留系统 CA 校验和显式直连策略，不隐式读取代理环境配置。可控 HTTP 分配在释放时清零，这不构成所有在用 TLS/系统内存副本已清零的承诺。诊断仅记录请求编号、消费者、阶段、typed 原因、耗时、复用和发送事实，不记录 URL、headers、正文或凭据。
+
 ## 4. 跨模块合同
 
 - Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle 或任意执行配置。用户通过已开放 Native SDK UI/input surface 明确选择的物理路径，只能进入对应领域明确登记、容量有界的 typed command；路径值本身不建立 Workspace trust、文件读取成功或其他 Product authority，Host 必须按该领域合同重新校验。secret-bearing 产品命令只允许用户显式触发的 Custom Provider create/replace 与 MCP captureSecret，其手动凭据只能作为有界字段一次性转交对应 Host owner 的 credential mutation；

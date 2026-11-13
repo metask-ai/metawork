@@ -226,7 +226,10 @@ pub fn run(init: std.process.Init) !void {
     _ = try single_instance.init(init.io, init.gpa, init.minimal.args, paths.dataDir(), identity.runnerBundleId(), false, true);
     defer single_instance.deinit();
     try line(init, .{ .kind = "account_evaluation_stage", .stage = "primary_acquired" });
-    var http = Http{ .allocator = init.gpa, .io = init.io };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(init.gpa, init.io);
+    defer engine.deinit();
+    var http = Http{ .http = &engine };
     var loopback = Loopback.init(init.io);
     defer loopback.deinit();
     var account_runtime: account.Runtime = undefined;

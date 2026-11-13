@@ -4,6 +4,7 @@
 //! connection-test Runtimes around the Product Control transaction seams.
 
 const std = @import("std");
+const http_execution = @import("app_http_transport");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const control_ports = @import("metawork_product_control_ports");
@@ -200,6 +201,7 @@ const JobInput = union(enum) {
 };
 
 const Job = struct {
+    http_engine: ?*http_execution.Engine = null,
     allocator: std.mem.Allocator,
     io: std.Io,
     host: Host,
@@ -227,8 +229,7 @@ const Job = struct {
     fn transport(self: *Job, storage: *mcp_oauth.StdHttpTransport) mcp_oauth.Transport {
         if (self.transport_override) |transport_value| return transport_value;
         storage.* = .{
-            .allocator = self.allocator,
-            .io = self.io,
+            .http_engine = self.http_engine.?,
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
         };
@@ -410,6 +411,7 @@ const ConnectionTestResult = struct {
 };
 
 const ConnectionTestJob = struct {
+    http_engine: ?*http_execution.Engine = null,
     allocator: std.mem.Allocator,
     host: Host,
     io: std.Io,
@@ -484,8 +486,7 @@ const ConnectionTestJob = struct {
         const fallback: mcp_configuration.HttpDraftDetection = if (status == 401) .authentication_required else .access_denied;
         var cancellation: mcp_oauth.Cancellation = .{ .io = self.io };
         var http: mcp_oauth.StdHttpTransport = .{
-            .allocator = self.allocator,
-            .io = self.io,
+            .http_engine = self.http_engine orelse return fallback,
             .cancellation = &cancellation,
             .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromSeconds(5), .clock = .awake }),
         };
@@ -659,6 +660,7 @@ const ConfigurationApplyJob = struct {
 };
 
 const InstallationJob = struct {
+    http_engine: ?*http_execution.Engine = null,
     allocator: std.mem.Allocator,
     io: std.Io,
     host: Host,
@@ -676,8 +678,15 @@ const InstallationJob = struct {
             self.finished.store(true, .release);
             self.host.notify();
         }
-        var http: mcp_oauth.StdHttpTransport = .{ .allocator = self.allocator, .io = self.io, .cancellation = &self.cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(30) }) };
-        const transport = self.transport_override orelse http.transport();
+        var http: mcp_oauth.StdHttpTransport = undefined;
+        const transport = self.transport_override orelse configured: {
+            const engine = self.http_engine orelse {
+                self.failed = true;
+                return;
+            };
+            http = .{ .http_engine = engine, .cancellation = &self.cancellation, .deadline = .fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(30) }) };
+            break :configured http.transport();
+        };
         for (self.request.parsed.value.credentials, 0..) |plan, i| {
             if (self.cancellation.isCancelled()) {
                 self.failed = true;
@@ -930,6 +939,7 @@ pub const Coordinator = struct {
         var started = false;
         defer if (!started) self.allocator.destroy(job);
         job.* = .{
+            .http_engine = self.host_environment.http_engine,
             .allocator = self.allocator,
             .host = self.host,
             .io = self.io,
@@ -1357,7 +1367,7 @@ pub const Coordinator = struct {
                 if (!try self.installationPhase(.acquiring_credentials, null)) return false;
                 const next = self.control.installation(&id) orelse return error.InvalidState;
                 const job = try self.allocator.create(InstallationJob);
-                job.* = .{ .allocator = self.allocator, .io = self.io, .host = self.host, .server = id, .revision = next.revision, .request = parsed, .transport_override = self.transport_override, .cancellation = .init(self.io) };
+                job.* = .{ .http_engine = self.host_environment.http_engine, .allocator = self.allocator, .io = self.io, .host = self.host, .server = id, .revision = next.revision, .request = parsed, .transport_override = self.transport_override, .cancellation = .init(self.io) };
                 owned = false;
                 errdefer job.deinit();
                 job.thread = try std.Thread.spawn(.{}, InstallationJob.run, .{job});
@@ -1764,8 +1774,10 @@ pub const Coordinator = struct {
         var input = input_value;
         var input_owned = true;
         errdefer if (input_owned) deinitJobInput(self.allocator, &input);
+        if (input != .callback and self.transport_override == null and self.host_environment.http_engine == null) return error.InvalidConfig;
         const job = try self.allocator.create(Job);
         job.* = .{
+            .http_engine = self.host_environment.http_engine,
             .allocator = self.allocator,
             .io = self.io,
             .host = self.host,

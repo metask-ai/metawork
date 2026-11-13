@@ -3,6 +3,7 @@
 //! this owner only sequences platform time/credential/network capabilities.
 
 const std = @import("std");
+const http_execution = @import("app_http_transport");
 const control_ports = @import("metawork_product_control_ports");
 const mcp_types = @import("metawork_product_mcp");
 const mcp_oauth = @import("metawork_mcp_oauth");
@@ -89,6 +90,7 @@ const RefreshResult = union(enum) {
 };
 
 const RefreshJob = struct {
+    http_engine: *http_execution.Engine,
     allocator: std.mem.Allocator,
     io: std.Io,
     host: Host,
@@ -108,8 +110,7 @@ const RefreshJob = struct {
 
     fn run(self: *RefreshJob) void {
         var http: mcp_oauth.StdHttpTransport = .{
-            .allocator = self.allocator,
-            .io = self.io,
+            .http_engine = self.http_engine,
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
         };
@@ -209,6 +210,7 @@ const RefreshJob = struct {
 };
 
 pub const Coordinator = struct {
+    http_engine: *http_execution.Engine,
     allocator: std.mem.Allocator,
     io: std.Io,
     control: control_ports.McpOauthPort,
@@ -223,12 +225,14 @@ pub const Coordinator = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
+        http_engine: *http_execution.Engine,
         control: control_ports.McpOauthPort,
         credential_store: *mcp_platform.CredentialStore,
         authorizations: *mcp_platform.HttpAuthorizations,
         host: Host,
     ) Coordinator {
         return .{
+            .http_engine = http_engine,
             .allocator = allocator,
             .io = io,
             .control = control,
@@ -413,6 +417,7 @@ pub const Coordinator = struct {
             return err;
         };
         job.* = .{
+            .http_engine = self.http_engine,
             .allocator = self.allocator,
             .io = self.io,
             .host = self.host,
@@ -659,7 +664,10 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
     authorizations.allocator = failing.allocator();
     defer authorizations.allocator = std.testing.allocator;
     var credentials: mcp_platform.CredentialStore = undefined;
-    var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, .{
+    var engine: http_execution.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, &engine, .{
         .context = &fixture,
         .next_expiry_fn = Fixture.next,
         .begin_refresh_fn = Fixture.begin,
@@ -833,7 +841,10 @@ test "MCP OAuth maintenance respects backoff membership and disabled deletion bo
     var credential_store: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = undefined, .main_thread_id = std.Thread.getCurrentId() ^ 1 };
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = allocator };
     defer authorizations.deinit();
-    var coordinator = Coordinator.init(allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credential_store, &authorizations, .{ .context = &fixture, .now_unix_ms_fn = Fixture.now, .arm_fn = Fixture.arm, .cancel_fn = Fixture.cancelTimer, .notify_fn = Fixture.notify });
+    var engine: http_execution.Engine = undefined;
+    engine.init(allocator, std.testing.io);
+    defer engine.deinit();
+    var coordinator = Coordinator.init(allocator, std.testing.io, &engine, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credential_store, &authorizations, .{ .context = &fixture, .now_unix_ms_fn = Fixture.now, .arm_fn = Fixture.arm, .cancel_fn = Fixture.cancelTimer, .notify_fn = Fixture.notify });
     coordinator.reconcileTimer();
     try std.testing.expectEqual(@as(?u64, 32_500), fixture.armed);
     fixture.now_ms = 33_000;
@@ -979,7 +990,10 @@ test "MCP OAuth token commit distinguishes matching and retained descriptors wit
 
         var credentials: mcp_platform.CredentialStore = undefined;
         // Only the completion path is entered; no Host or credential effect.
-        var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credentials, &authorizations, undefined);
+        var engine: http_execution.Engine = undefined;
+        engine.init(std.testing.allocator, std.testing.io);
+        defer engine.deinit();
+        var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, &engine, .{ .context = &fixture, .next_expiry_fn = Fixture.next, .begin_refresh_fn = Fixture.begin, .complete_refresh_fn = Fixture.complete, .require_reauthorization_fn = Fixture.reauth, .clear_operation_fn = Fixture.clear, .recover_operation_fn = Fixture.clear }, &credentials, &authorizations, undefined);
         var job: RefreshJob = undefined;
         job.binding = .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .operation_id = "operation", .server_id = "server", .endpoint = "https://mcp.example.test/mcp", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{}, .client_id = "client", .token_endpoint_auth_method = "none", .client_secret_ref = null, .refresh_token_ref = "refresh", .consent_epoch = case.epoch, .token_revision = case.revision, .runtime_binding = case.binding };
         defer job.binding.deinit();

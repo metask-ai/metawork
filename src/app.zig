@@ -181,6 +181,7 @@ const App = struct {
         };
         const mcp_management_host = mcp_management_coordinator.platformHost(&self.platform);
         var mcp_host_environment = mcp_platform.HostEnvironment.fromProcess(self.env_map);
+        mcp_host_environment.http_engine = self.completion_transport.http;
         const startup_preparation = try mcp_startup.prepare(
             self.mcp_configuration_store,
             if (self.mcp_credential_store) |*store| store else null,
@@ -283,6 +284,7 @@ const App = struct {
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
+            self.completion_transport.http,
             control_storage.mcpOauthPort(),
             &self.mcp_credential_store.?,
             &self.mcp_authorizations.?,
@@ -818,10 +820,7 @@ pub fn run(init: std.process.Init) !void {
         }
     }
 
-    var account_http = metask_http_transport.Adapter{
-        .allocator = std.heap.c_allocator,
-        .io = init.io,
-    };
+    var account_http = metask_http_transport.Adapter{ .http = &http_engine };
     var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
     defer account_loopback.deinit();
     var account_runtime = account_api.Runtime.init(
@@ -1355,6 +1354,9 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     defer harness.destroy(allocator);
     var credentials: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
     var host: Effects = .{};
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(allocator, std.testing.io);
+    defer http_engine.deinit();
     var composition: App = .{
         .env_map = undefined,
         .io = std.testing.io,
@@ -1370,8 +1372,8 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
             .open_url_fn = Effects.open,
             .now_unix_ms_fn = Effects.now,
             .notify_fn = Effects.notify,
-        }, .{}),
-        .mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(allocator, std.testing.io, .{
+        }, .{ .http_engine = &http_engine }),
+        .mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(allocator, std.testing.io, &http_engine, .{
             .context = &host,
             .next_expiry_fn = Effects.next,
             .begin_refresh_fn = Effects.begin,

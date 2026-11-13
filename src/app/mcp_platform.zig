@@ -3,7 +3,7 @@
 //! preauthorized HTTP transport owners. It does not interpret MCP payloads.
 
 const std = @import("std");
-const http_memory = @import("app_http_memory");
+const http_execution = @import("app_http_transport");
 const select_start = @import("app_select_start");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
@@ -972,6 +972,7 @@ pub const DraftHttpObservation = struct {
 };
 
 pub const HostEnvironment = struct {
+    http_engine: ?*http_execution.Engine = null,
     process_attempt: u64 = 0,
     process_notifier: ?process_observation.Notifier = null,
     catalog_budget: ?*catalog_budget.Budget = null,
@@ -1052,6 +1053,7 @@ pub fn buildRuntime(
     var write: usize = 0;
     for (registry.servers, preparation.server_states) |server, state| {
         if (state != .eligible) continue;
+        if (std.mem.eql(u8, server.transport.kind, "streamable_http") and host_environment.http_engine == null) return error.InvalidConfig;
         const owner = try allocator.create(agent.McpTransportOwner);
         var authorization: ?*HttpAuthSlot = null;
         var observation: ?*process_observation.Slot = null;
@@ -1070,7 +1072,7 @@ pub fn buildRuntime(
         owner.* = (if (std.mem.eql(u8, server.transport.kind, "stdio"))
             createStdioOwner(io, allocator, server, preparation, host_environment, observation)
         else if (std.mem.eql(u8, server.transport.kind, "streamable_http"))
-            createHttpOwner(io, allocator, server, preparation, &authorization, host_environment.draft_http_observation)
+            createHttpOwner(host_environment.http_engine.?, io, allocator, server, preparation, &authorization, host_environment.draft_http_observation)
         else
             error.InvalidConfig) catch |err| {
             allocator.destroy(owner);
@@ -1699,6 +1701,7 @@ fn reservedStdioEnvironmentName(name: []const u8) bool {
 }
 
 const HttpContext = struct {
+    http_engine: *http_execution.Engine,
     allocator: std.mem.Allocator,
     io: std.Io,
     arena: std.heap.ArenaAllocator,
@@ -1768,45 +1771,28 @@ const HttpContext = struct {
     }
 
     const FetchFailure = error{ Timeout, Cancelled, Auth, Server, Network, InvalidResponse };
-    const Event = union(enum) {
-        response: FetchFailure!void,
-        timeout,
-        cancelled,
-    };
-
-    fn fetch(
-        self: *HttpContext,
-        request: agent.McpHttpRequest,
-        sink: *const agent.McpHttpResponseSink,
-    ) FetchFailure!void {
-        const deadline: std.Io.Clock.Timestamp = .fromNow(self.io, .{ .raw = .fromMilliseconds(request.timeout_ms), .clock = .awake });
-        var events: [3]Event = undefined;
-        var select = std.Io.Select(Event).init(self.io, &events);
-        select_start.start(&select, .{
-            .{ .response, fetchOne, .{ self, request, sink } },
-            .{ .timeout, waitDeadline, .{ self.io, deadline } },
-            .{ .cancelled, waitCancellation, .{ self.io, request.cancellation } },
-        }) catch return error.Network;
-        const first = select.await() catch {
-            select.cancelDiscard();
-            return error.Cancelled;
-        };
-        defer select.cancelDiscard();
-        return switch (first) {
-            .response => |result| try result,
-            .timeout => error.Timeout,
-            .cancelled => error.Cancelled,
+    fn fetch(self: *HttpContext, request: agent.McpHttpRequest, sink: *const agent.McpHttpResponseSink) FetchFailure!void {
+        const result = self.http_engine.run(.{
+            .consumer = .mcp,
+            .deadline = .fromNow(self.io, .{ .raw = .fromMilliseconds(request.timeout_ms), .clock = .awake }),
+            .cancellation = .{ .context = &request.cancellation, .requested_fn = requested, .wait_fn = waitCancellation },
+        }, fetchOne, .{ self, request, sink });
+        return switch (result.outcome) {
+            .completed => |response| response,
+            .failed => |err| mapHttpError(err),
         };
     }
 
-    fn fetchOne(
-        self: *HttpContext,
-        request_value: agent.McpHttpRequest,
-        sink: *const agent.McpHttpResponseSink,
-    ) FetchFailure!void {
-        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
-        var client: std.http.Client = .{ .allocator = memory.allocator(), .io = self.io };
-        defer client.deinit();
+    fn mapHttpError(err: http_execution.Error) FetchFailure {
+        return switch (err) {
+            error.Cancelled => error.Cancelled,
+            error.DeadlineExceeded => error.Timeout,
+            error.InvalidRequest, error.InvalidResponse, error.ResponseTooLarge => error.InvalidResponse,
+            else => error.Network,
+        };
+    }
+
+    fn fetchOne(operation: *http_execution.Operation, self: *HttpContext, request_value: agent.McpHttpRequest, sink: *const agent.McpHttpResponseSink) FetchFailure!void {
         var authorization_lease = if (self.authorization) |authorization|
             authorization.lease()
         else
@@ -1828,26 +1814,26 @@ const HttpContext = struct {
             self.allocator.free(value);
         };
         var headers: [max_custom_headers + 8]std.http.Header = undefined;
-        var request = try self.beginRequest(&client, request_value, bearer, &headers, &inspection);
+        var request = try self.beginRequest(operation, request_value, bearer, &headers, &inspection);
         defer request.deinit();
-        var response = request.receiveHead(&.{}) catch return error.Network;
+        var response = request.receiveHead() catch |err| return mapHttpError(err);
         const status: u16 = @intFromEnum(response.head.status);
         self.observeHttpStatus(&response, status, &inspection, request_value.method == .post);
         if (response.head.content_encoding != .identity) return error.InvalidResponse;
-        const exchange: Exchange = .{ .client = &client, .request = request_value, .bearer = bearer, .inspection = &inspection };
-        try self.deliverResponse(&response, status, sink, &inspection, &exchange);
+        const exchange: Exchange = .{ .operation = operation, .request = request_value, .bearer = bearer, .inspection = &inspection };
+        try self.deliverResponse(operation, &response, status, sink, &inspection, &exchange);
         if (!sink.inspect_fn(sink.context, .{ .context = &inspection, .check_fn = Inspection.check }))
             return error.InvalidResponse;
     }
 
     const Exchange = struct {
-        client: *std.http.Client,
+        operation: *http_execution.Operation,
         request: agent.McpHttpRequest,
         bearer: ?[]const u8,
         inspection: *Inspection,
     };
 
-    fn beginRequest(self: *HttpContext, client: *std.http.Client, request_value: agent.McpHttpRequest, bearer: ?[]const u8, headers: *[max_custom_headers + 8]std.http.Header, inspection: *Inspection) FetchFailure!std.http.Client.Request {
+    fn beginRequest(self: *HttpContext, operation: *http_execution.Operation, request_value: agent.McpHttpRequest, bearer: ?[]const u8, headers: *[max_custom_headers + 8]std.http.Header, inspection: *Inspection) FetchFailure!http_execution.Request {
         if (!Inspection.check(inspection, request_value.body)) return error.InvalidResponse;
         const uri = std.Uri.parse(self.url) catch return error.InvalidResponse;
         var count: usize = 0;
@@ -1865,25 +1851,18 @@ const HttpContext = struct {
             .post => .POST,
             .delete => .DELETE,
         };
-        var request = client.request(method, uri, .{
-            .redirect_behavior = .unhandled,
-            .headers = .{
+        var request = operation.open(method, uri, .{
+            .standard_headers = .{
                 .accept_encoding = .{ .override = "identity" },
                 .authorization = if (bearer) |value|
                     .{ .override = value }
                 else
                     .default,
             },
-            .extra_headers = headers[0..count],
-        }) catch return error.Network;
+            .headers = headers[0..count],
+        }) catch |err| return mapHttpError(err);
         errdefer request.deinit();
-        if (request_value.method == .post) {
-            request.transfer_encoding = .{ .content_length = request_value.body.len };
-            var request_body = request.sendBodyUnflushed(&.{}) catch return error.Network;
-            request_body.writer.writeAll(request_value.body) catch return error.Network;
-            request_body.end() catch return error.Network;
-            request.connection.?.flush() catch return error.Network;
-        } else request.sendBodiless() catch return error.Network;
+        request.send(if (request_value.method == .post) request_value.body else null) catch |err| return mapHttpError(err);
         return request;
     }
 
@@ -1937,24 +1916,35 @@ const HttpContext = struct {
     }
 
     fn sendContinuation(self: *HttpContext, exchange: *const Exchange, post: agent.McpHttpContinuationPost) FetchFailure!void {
-        if (exchange.request.cancellation.isCancelled()) return error.Cancelled;
+        exchange.operation.check() catch |err| return mapHttpError(err);
+        var control = exchange.operation.control;
+        control.continuation = true;
+        const result = self.http_engine.run(control, continuation, .{ self, exchange, post });
+        return switch (result.outcome) {
+            .completed => |response| response,
+            .failed => |err| mapHttpError(err),
+        };
+    }
+
+    fn continuation(operation: *http_execution.Operation, self: *HttpContext, exchange: *const Exchange, post: agent.McpHttpContinuationPost) FetchFailure!void {
         var request_value = exchange.request;
         request_value.method = .post;
         request_value.headers = post.headers;
         request_value.body = post.body;
         var headers: [max_custom_headers + 8]std.http.Header = undefined;
-        var request = try self.beginRequest(exchange.client, request_value, exchange.bearer, &headers, exchange.inspection);
+        var request = try self.beginRequest(operation, request_value, exchange.bearer, &headers, exchange.inspection);
         defer request.deinit();
-        var response = request.receiveHead(&.{}) catch return error.Network;
+        var response = request.receiveHead() catch |err| return mapHttpError(err);
         if (response.head.content_encoding != .identity) return error.InvalidResponse;
         const status: u16 = @intFromEnum(response.head.status);
         self.observeHttpStatus(&response, status, exchange.inspection, true);
-        try self.deliverResponse(&response, status, &post.response_sink, exchange.inspection, null);
+        try self.deliverResponse(operation, &response, status, &post.response_sink, exchange.inspection, null);
         if (!post.response_sink.inspect_fn(post.response_sink.context, .{ .context = exchange.inspection, .check_fn = Inspection.check })) return error.InvalidResponse;
     }
 
     fn deliverResponse(
         self: *HttpContext,
+        operation: *http_execution.Operation,
         response: *std.http.Client.Response,
         status: u16,
         sink: *const agent.McpHttpResponseSink,
@@ -1979,6 +1969,7 @@ const HttpContext = struct {
         defer std.crypto.secureZero(u8, &transfer_buffer);
         const reader = response.reader(&transfer_buffer);
         while (true) {
+            operation.check() catch |err| return mapHttpError(err);
             const chunk = reader.peekGreedy(1) catch |err| switch (err) {
                 error.EndOfStream => {
                     _ = sink.finish_fn(sink.context);
@@ -1997,6 +1988,7 @@ const HttpContext = struct {
                     .continue_reading => return error.InvalidResponse,
                     .post => |post| {
                         try self.sendContinuation(active, post);
+                        operation.check() catch |err| return mapHttpError(err);
                         switch (sink.control_fn(sink.context, .reply_completed)) {
                             .continue_reading => continue,
                             .stop => return,
@@ -2009,20 +2001,18 @@ const HttpContext = struct {
         }
     }
 
-    fn waitDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) void {
-        std.Io.Timeout.sleep(.{ .deadline = deadline }, io) catch {};
+    fn requested(context: *const anyopaque) bool {
+        const cancellation: *const agent.McpCancellation = @ptrCast(@alignCast(context));
+        return cancellation.isCancelled();
     }
 
-    fn waitCancellation(io: std.Io, cancellation: agent.McpCancellation) void {
-        while (!cancellation.isCancelled())
-            std.Io.Timeout.sleep(.{ .duration = .{
-                .raw = std.Io.Duration.fromMilliseconds(5),
-                .clock = .awake,
-            } }, io) catch return;
+    fn waitCancellation(io: std.Io, context: *const anyopaque) std.Io.Cancelable!void {
+        while (!requested(context)) try std.Io.sleep(io, .fromMilliseconds(5), .awake);
     }
 };
 
 fn createHttpOwner(
+    http_engine: *http_execution.Engine,
     io: std.Io,
     allocator: std.mem.Allocator,
     server: mcp_configuration.ServerWire,
@@ -2034,6 +2024,7 @@ fn createHttpOwner(
     const context = try allocator.create(HttpContext);
     errdefer allocator.destroy(context);
     context.* = .{
+        .http_engine = http_engine,
         .allocator = allocator,
         .io = io,
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -2612,7 +2603,10 @@ test "MCP HTTP rejects rotated credential echoes before returning JSON or SSE to
             const secret = try allocator.dupe(u8, "static-secret");
             defer secureFree(allocator, secret);
             var secrets = [_][]u8{secret};
-            var context: HttpContext = .{ .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &secrets, .authorization = slot, .backend = undefined };
+            var engine: http_execution.Engine = undefined;
+            engine.init(allocator, io);
+            defer engine.deinit();
+            var context: HttpContext = .{ .http_engine = &engine, .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &secrets, .authorization = slot, .backend = undefined };
             defer context.arena.deinit();
             context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = allocator, .endpoint = context.endpoint() });
             defer context.backend.deinit() catch unreachable;
@@ -2740,7 +2734,11 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
         .{ .access_token = "runtime-access-token" },
     );
     defer authorization.release();
+    var engine: http_execution.Engine = undefined;
+    engine.init(std.testing.allocator, threaded.io());
+    defer engine.deinit();
     var context: HttpContext = .{
+        .http_engine = &engine,
         .allocator = std.testing.allocator,
         .io = threaded.io(),
         .arena = arena,
@@ -2921,7 +2919,10 @@ test "MCP HTTP ping keeps the original stream lease session deadline and cancell
         defer listener.deinit(io);
         const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/mcp", .{listener.socket.address.getPort()});
         defer allocator.free(url);
-        var context: HttpContext = .{ .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .authorization = slot, .backend = undefined };
+        var engine: http_execution.Engine = undefined;
+        engine.init(allocator, io);
+        defer engine.deinit();
+        var context: HttpContext = .{ .http_engine = &engine, .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .authorization = slot, .backend = undefined };
         defer context.arena.deinit();
         context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = allocator, .endpoint = context.endpoint(), .max_response_bytes = 4096 });
         defer context.backend.deinit() catch unreachable;
@@ -3317,7 +3318,6 @@ test "MCP HTTP cancellation deadline and partial startup failure close the reque
             const index = registered;
             registered += 1;
             if (fail_at == index) {
-                received.waitUncancelable(std.testing.io);
                 return error.ConcurrencyUnavailable;
             }
             return io.vtable.groupConcurrent(userdata, group, bytes, alignment, start_fn);
@@ -3372,7 +3372,10 @@ test "MCP HTTP cancellation deadline and partial startup failure close the reque
         var fixture: Fixture = .{ .listener = &listener, .cancel = mode == 0 };
         const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/mcp", .{listener.socket.address.getPort()});
         defer std.testing.allocator.free(url);
-        var context: HttpContext = .{ .allocator = std.testing.allocator, .io = io, .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .backend = undefined };
+        var engine: http_execution.Engine = undefined;
+        engine.init(std.testing.allocator, io);
+        defer engine.deinit();
+        var context: HttpContext = .{ .http_engine = &engine, .allocator = std.testing.allocator, .io = io, .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .backend = undefined };
         defer context.arena.deinit();
         context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = std.testing.allocator, .endpoint = context.endpoint() });
         defer context.backend.deinit() catch unreachable;
@@ -3382,9 +3385,9 @@ test "MCP HTTP cancellation deadline and partial startup failure close the reque
             .failure => return error.TestUnexpectedResult,
         };
         defer transport.close_fn(connection);
-        const thread = try std.Thread.spawn(.{}, Fixture.run, .{&fixture});
+        const thread = if (mode < 2) try std.Thread.spawn(.{}, Fixture.run, .{&fixture}) else null;
         const result = transport.request_fn(connection, std.testing.allocator, "{}", if (mode == 1) 500 else 5000, .{ .is_cancelled_fn = Fixture.cancelled });
-        thread.join();
+        if (thread) |started| started.join();
         try std.testing.expectEqual(@as(?anyerror, null), fixture.failure);
         try std.testing.expectEqual(@as(agent.McpTransportFailure, switch (mode) {
             0 => .cancelled,
@@ -3462,7 +3465,11 @@ test "MCP platform distinguishes trusted Bearer challenges from bare HTTP auth r
         .{ .access_token = "runtime-access-token" },
     );
     defer authorization.release();
+    var engine: http_execution.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
     var context: HttpContext = .{
+        .http_engine = &engine,
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .arena = arena,
@@ -3566,7 +3573,10 @@ test "MCP private endpoint is resolved only in its HTTP owner and rejects cross-
         .tools = &.{},
     };
     var authorization: ?*HttpAuthSlot = null;
-    var owner = try createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization, null);
+    var engine: http_execution.Engine = undefined;
+    engine.init(allocator, std.testing.io);
+    defer engine.deinit();
+    var owner = try createHttpOwner(&engine, std.testing.io, allocator, server, &preparation, &authorization, null);
     defer owner.deinit();
     const backend: *agent.McpHttpBackend = @ptrCast(@alignCast(owner.transport.context));
     const context: *HttpContext = @fieldParentPtr("backend", backend);
@@ -3575,7 +3585,7 @@ test "MCP private endpoint is resolved only in its HTTP owner and rejects cross-
     try std.testing.expectEqualStrings("https://mcp.example.test/k/synthetic?route=private", context.url);
     var inspection: HttpContext.Inspection = .{ .context = context, .lease = null };
     try std.testing.expect(!HttpContext.Inspection.check(&inspection, context.url));
-    try std.testing.expectError(error.InvalidConfig, createHttpOwner(std.testing.io, allocator, server, &preparation, &authorization, null));
+    try std.testing.expectError(error.InvalidConfig, createHttpOwner(&engine, std.testing.io, allocator, server, &preparation, &authorization, null));
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {
@@ -3647,11 +3657,16 @@ test "MCP platform builds lazy stdio and HTTP transport owners without opening t
         },
     );
     defer preparation.deinit();
+    var engine: http_execution.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var environment = testHostEnvironment();
+    environment.http_engine = &engine;
     var input = (try buildRuntimeInput(
         std.testing.io,
         std.testing.allocator,
         &preparation,
-        testHostEnvironment(),
+        environment,
     )).?;
     defer input.deinit();
 }

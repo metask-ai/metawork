@@ -1255,6 +1255,7 @@ fn addMcpInteropTests(
             .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }),
         });
     }
+    cases.addImport("app_http_transport", existingImport(modules.app, "app_http_transport"));
     cases.addImport("lifecycle_fixture", existingImport(modules.app, "lifecycle_fixture"));
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("metawork_account_contract", modules.account_contract);
@@ -2456,7 +2457,7 @@ fn wireAgentCore(
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
     mcp_platform.addImport("app_select_start", app_select_start);
-    mcp_platform.addImport("app_http_memory", app_http_memory);
+    mcp_platform.addImport("app_http_transport", app_http_transport);
     const mcp_process_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/mcp_process.zig"),
         .target = target,
@@ -2481,8 +2482,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     mcp_oauth.addImport("oauth_mechanics", oauth_mechanics);
-    mcp_oauth.addImport("app_select_start", app_select_start);
-    mcp_oauth.addImport("app_http_memory", app_http_memory);
+    mcp_oauth.addImport("app_http_transport", app_http_transport);
     mcp_oauth.addImport("oauth_loopback", oauth_loopback);
     mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
