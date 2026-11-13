@@ -3784,29 +3784,34 @@ test("Composer Add menu selects an enabled Skill and preserves the message", asy
 });
 
 test("Composer references a file from the new task's selected workspace", async () => {
+  const { WorkspaceReferenceMenu } = await vite.ssrLoadModule(
+    "/src/features/workspaces/WorkspaceReferenceMenu.tsx",
+  );
   const user = userEvent.setup({ document });
   const browsed = [];
   const chosen = [];
   const target = { taskId: null, workspaceId: "2", workspaceEpoch: "4" };
+  const files = {
+    scope: "new-task:2",
+    target,
+    load: async (taskId, workspaceId, workspaceEpoch, path) => {
+      browsed.push({ taskId, workspaceId, workspaceEpoch, path });
+      return {
+        state: "ready",
+        entries:
+          path === ""
+            ? [{ name: "docs", kind: "directory" }]
+            : [{ name: "requirements.md", kind: "file" }],
+        redacted: false,
+        truncated: false,
+      };
+    },
+    choose: (reference) => chosen.push(reference),
+  };
   renderComposer({
     attachmentsEnabled: true,
-    workspaceFiles: {
-      scope: "new-task:2",
-      target,
-      load: async (taskId, workspaceId, workspaceEpoch, path) => {
-        browsed.push({ taskId, workspaceId, workspaceEpoch, path });
-        return {
-          state: "ready",
-          entries:
-            path === ""
-              ? [{ name: "docs", kind: "directory" }]
-              : [{ name: "requirements.md", kind: "file" }],
-          redacted: false,
-          truncated: false,
-        };
-      },
-      choose: (reference) => chosen.push(reference),
-    },
+    workspaceReferenceScope: files.scope,
+    workspaceReferenceMenu: createElement(WorkspaceReferenceMenu, { files }),
   });
   await user.click(screen.getByRole("button", { name: "Add to message" }));
   assert.deepEqual(
@@ -3819,12 +3824,12 @@ test("Composer references a file from the new task's selected workspace", async 
   const submenu = await screen.findByRole("menu", {
     name: "Reference workspace file",
   });
-  const files = within(submenu);
+  const fileMenu = within(submenu);
   assert.equal(screen.queryByRole("dialog"), null);
-  await user.click(await files.findByRole("menuitem", { name: "docs" }));
-  await files.findByRole("menuitem", { name: "requirements.md" });
-  await user.click(files.getByRole("menuitem", { name: "Up one folder" }));
-  await user.click(files.getByRole("menuitem", { name: "docs" }));
+  await user.click(await fileMenu.findByRole("menuitem", { name: "docs" }));
+  await fileMenu.findByRole("menuitem", { name: "requirements.md" });
+  await user.click(fileMenu.getByRole("menuitem", { name: "Up one folder" }));
+  await user.click(fileMenu.getByRole("menuitem", { name: "docs" }));
   assert.equal(document.activeElement?.textContent, "Up one folder");
   await user.keyboard("{ArrowDown}{Enter}");
   assert.deepEqual(browsed, [

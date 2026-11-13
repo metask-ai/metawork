@@ -108,7 +108,7 @@ const { TaskPanel, taskPanelTabLabels } = await vite.ssrLoadModule(
   "/src/features/task-panel/TaskPanel.tsx",
 );
 const { WorkspaceFileTree, useWorkspaceFileTree } = await vite.ssrLoadModule(
-  "/src/features/task-panel/WorkspaceFileTree.tsx",
+  "/src/features/workspaces/WorkspaceFileTree.tsx",
 );
 const { RunProcess } = await vite.ssrLoadModule(
   "/src/features/tasks/RunProcess.tsx",
@@ -6758,19 +6758,23 @@ test("App Workspace selection failure stays by its draft with source diagnostics
   await user.click(
     await screen.findByRole("option", { name: "Open local folder" }),
   );
-  await waitFor(() =>
-    assert.ok(document.querySelector(".workspace-selection-feedback")),
+  const notice = await screen.findByText(
+    "The workspace could not be opened. Choose it again.",
+    { selector: ".composer-workspace-notice > p" },
   );
   assert.ok(document.querySelector(".commandbar-alert") === null);
-  assert.ok(screen.queryByText("safe-picker-diagnostic <plain text>") === null);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Workspace diagnostics" }),
-  );
-  await screen.findByText("safe-picker-diagnostic <plain text>");
-  assert.ok(document.querySelector(".feedback-notice-details plain") === null);
-  fireEvent.keyDown(document.activeElement, { key: "Escape" });
+  const disclosure = notice.parentElement.querySelector("details");
+  assert.ok(disclosure);
+  assert.equal(disclosure.open, false);
+  const summary = disclosure.querySelector("summary");
+  assert.equal(summary.textContent, "Technical details");
+  await user.click(summary);
+  assert.equal(disclosure.open, true);
+  const diagnostic = disclosure.querySelector("pre");
+  assert.equal(diagnostic.textContent, "safe-picker-diagnostic <plain text>");
+  assert.equal(diagnostic.childElementCount, 0);
   await selectRecentTask(/First task/);
-  assert.ok(document.querySelector(".workspace-selection-feedback") === null);
+  assert.equal(notice.isConnected, false);
 });
 
 test("App compact errors stay local and their diagnostics survive dismissing the explanation", async (ctx) => {
