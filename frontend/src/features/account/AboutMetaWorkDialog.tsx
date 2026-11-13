@@ -4,8 +4,10 @@ import { productVersion } from "../../app/product-identity.ts";
 import type { UpdateView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
+import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { updateDiagnosticText } from "./update-diagnostics.ts";
 
 export type UpdateControls = {
   disabled: boolean;
@@ -163,6 +165,13 @@ export function AboutMetaWorkDialog({
               <p className="about-update-error" role="alert">
                 {errorMessage}
               </p>
+            )}
+            {updates.checkDiagnostic && (
+              <DiagnosticDisclosure label={t("updates.diagnostics")}>
+                <pre className="feedback-notice-details">
+                  {updateDiagnosticText(updates.checkDiagnostic, t)}
+                </pre>
+              </DiagnosticDisclosure>
             )}
             <div className="about-update-actions">
               {updates.downloadAvailable && (
