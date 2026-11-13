@@ -123,7 +123,8 @@ import {
 import {
   WorkspaceFileTree,
   useWorkspaceFileTree,
-} from "../features/task-panel/WorkspaceFileTree.tsx";
+} from "../features/workspaces/WorkspaceFileTree.tsx";
+import { WorkspaceReferenceMenu } from "../features/workspaces/WorkspaceReferenceMenu.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { TaskWorkspace } from "../features/tasks/NewTaskView.tsx";
 import {
@@ -4716,9 +4717,13 @@ export default function App() {
         }
         onDraftChange={updateComposerDraft}
         onChooseAttachments={() => void addAttachments()}
-        workspaceFiles={
-          workspaceReferenceTarget
-            ? {
+        workspaceReferenceScope={
+          workspaceReferenceTarget ? workspaceReferenceScope : undefined
+        }
+        workspaceReferenceMenu={
+          workspaceReferenceTarget ? (
+            <WorkspaceReferenceMenu
+              files={{
                 scope: workspaceReferenceScope,
                 target: workspaceReferenceTarget,
                 load: (taskId, workspaceId, epoch, path, options) =>
@@ -4734,8 +4739,9 @@ export default function App() {
                     { kind: "workspace_reference", reference },
                     workspaceReferenceScope,
                   ),
-              }
-            : undefined
+              }}
+            />
+          ) : undefined
         }
         onDropFiles={(files) => {
           if (

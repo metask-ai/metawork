@@ -3427,11 +3427,14 @@ pub fn installProductControlExecutionGeneration(
 }
 
 pub fn productControlTaskInput() product_control.TaskCreateInput {
-    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
-    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    const options = @import("lifecycle_fixture_options");
+    const workspace_root = if (std.fs.path.isAbsolute(options.workspace_root))
+        options.workspace_root
+    else
+        options.repository_root ++ std.fs.path.sep_str ++ options.workspace_root;
     return .{
         .workspace_root = workspace_root,
-        .trust = .{ .temporary = temporary_root },
+        .trust = .{ .temporary = workspace_root },
     };
 }
 

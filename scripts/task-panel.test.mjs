@@ -108,7 +108,7 @@ const { TaskPanel, taskPanelTabLabels } = await vite.ssrLoadModule(
   "/src/features/task-panel/TaskPanel.tsx",
 );
 const { WorkspaceFileTree, useWorkspaceFileTree } = await vite.ssrLoadModule(
-  "/src/features/task-panel/WorkspaceFileTree.tsx",
+  "/src/features/workspaces/WorkspaceFileTree.tsx",
 );
 const { RunProcess } = await vite.ssrLoadModule(
   "/src/features/tasks/RunProcess.tsx",
@@ -7053,19 +7053,23 @@ test("App Workspace selection failure stays by its draft with source diagnostics
   await user.click(
     await screen.findByRole("option", { name: "Open local folder" }),
   );
-  await waitFor(() =>
-    assert.ok(document.querySelector(".workspace-selection-feedback")),
+  const notice = await screen.findByText(
+    "The workspace could not be opened. Choose it again.",
+    { selector: ".composer-workspace-notice > p" },
   );
   assert.ok(document.querySelector(".commandbar-alert") === null);
-  assert.ok(screen.queryByText("safe-picker-diagnostic <plain text>") === null);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Workspace diagnostics" }),
-  );
-  await screen.findByText("safe-picker-diagnostic <plain text>");
-  assert.ok(document.querySelector(".feedback-notice-details plain") === null);
-  fireEvent.keyDown(document.activeElement, { key: "Escape" });
+  const disclosure = notice.parentElement.querySelector("details");
+  assert.ok(disclosure);
+  assert.equal(disclosure.open, false);
+  const summary = disclosure.querySelector("summary");
+  assert.equal(summary.textContent, "Technical details");
+  await user.click(summary);
+  assert.equal(disclosure.open, true);
+  const diagnostic = disclosure.querySelector("pre");
+  assert.equal(diagnostic.textContent, "safe-picker-diagnostic <plain text>");
+  assert.equal(diagnostic.childElementCount, 0);
   await selectRecentTask(/First task/);
-  assert.ok(document.querySelector(".workspace-selection-feedback") === null);
+  assert.equal(notice.isConnected, false);
 });
 
 test("App compact errors stay local and their diagnostics survive dismissing the explanation", async (ctx) => {
@@ -7620,6 +7624,9 @@ test("App pages through all retained history while keeping the current Run live"
   source.runs = Array.from({ length: 16 }, (_, index) => ({
     ...structuredClone(template),
     id: String(index + 1),
+    phase: "completed",
+    activity: null,
+    terminal: terminal(),
     input: {
       kind: "text",
       text: `History input ${index + 1}`,
@@ -7629,13 +7636,20 @@ test("App pages through all retained history while keeping the current Run live"
       ...structuredClone(template.output),
       commentary: [],
       response: `History response ${index + 1}`,
+      responseKind: "final",
     },
+    tools: [],
+    fileChanges: null,
   }));
   const current = source.runs.at(-1);
   current.phase = "running";
+  current.activity = template.activity;
   current.terminal = null;
-  source.currentRunId = "16";
+  current.output.response = "";
+  current.output.responseKind = null;
+  source.currentRunId = current.id;
   source.currentRunPhase = "running";
+  source.activeOperation = { kind: "run", id: current.id };
   await selectRecentTask(/First task/);
   assert.ok(screen.getByText("History input 16"));
   assert.equal(screen.queryByText("History input 1"), null);
@@ -7676,31 +7690,36 @@ test("App pages through all retained history while keeping the current Run live"
     await screen.findByText(`History input ${id}`);
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
   const fetchSnapshot = BridgeClient.prototype.fetchSnapshot;
-  let releaseOldestPage;
-  const oldestPageReady = new Promise((resolve) => {
-    releaseOldestPage = resolve;
-  });
-  ctx.after(() => releaseOldestPage());
+  const oldestPage = Promise.withResolvers();
+  ctx.after(oldestPage.resolve);
+  const updateRevision = String(BigInt(fixture.snapshot.revision) + 1n);
   let oldestPageRequested = false;
   ctx.mock.method(
     BridgeClient.prototype,
     "fetchSnapshot",
     async function (scope) {
       const snapshot = await fetchSnapshot.call(this, scope);
-      if (scope.beforeRunId === "5") {
+      if (scope.beforeRunId === "5" && snapshot.revision === updateRevision) {
         oldestPageRequested = true;
-        await oldestPageReady;
+        await oldestPage.promise;
       }
       return snapshot;
     },
   );
-  source.runs[5].contentVersion = "2";
-  source.runs[5].input.text = "Updated historical Run 6";
+  const updatedRun = source.runs[5];
+  updatedRun.contentVersion = "2";
+  updatedRun.fileChanges = { observation: "complete", changes: [fileChange()] };
   await publishAppFixture(fixture);
-  await screen.findByText("Updated historical Run 6");
   // Run 6 arrives on an intermediate page; the saved reading goal still
   // requires the oldest page before the full loaded interval is restored.
-  await waitFor(() => assert.equal(oldestPageRequested, true));
+  await waitFor(() => assert.equal(oldestPageRequested, true), {
+    timeout: 5_000,
+  });
+  const updatedRunFileChanges = () =>
+    within(
+      document.querySelector(`[data-run-id="${updatedRun.id}"]`),
+    ).getByRole("button", { name: /File changes.*Review changes/ });
+  assert.ok(updatedRunFileChanges());
   assert.equal(screen.queryByText("History input 1"), null);
   assert.equal(
     document.querySelector(".conversation-history-loading").textContent,
@@ -7710,7 +7729,7 @@ test("App pages through all retained history while keeping the current Run live"
     screen.getByRole("button", { name: "Stop task" }).disabled,
     false,
   );
-  releaseOldestPage();
+  await act(async () => oldestPage.resolve());
   await waitFor(() => {
     assert.deepEqual(
       [...document.querySelectorAll(".ai-exchange")].map(
@@ -7719,7 +7738,7 @@ test("App pages through all retained history while keeping the current Run live"
       Array.from({ length: 16 }, (_, index) => String(index + 1)),
     );
   });
-  assert.ok(screen.getByText("Updated historical Run 6"));
+  assert.ok(updatedRunFileChanges());
   const viewport = document.querySelector(".ai-conversation-viewport");
   Object.defineProperties(viewport, {
     scrollHeight: { configurable: true, value: 2000 },

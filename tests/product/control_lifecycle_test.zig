@@ -3107,6 +3107,7 @@ test "detached Task restores its committed target across restart without a globa
         try std.testing.expect(restored.modelsView().default_selection == null);
         try std.testing.expect(restored.newTaskAdmissionView().available);
         try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
+        try settleWorkspaceSkillQueries(&restored, workspace_id);
         const recovered = restored.testTaskConst(id).?;
         try std.testing.expectEqual(selected_revision, recovered.durable.model_intent.?.revision);
         try std.testing.expectEqual(.detached, std.meta.activeTag(recovered.runtime.attachment));
@@ -3264,6 +3265,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     _ = try configureTaskRebindTarget(&restored);
     _ = try configureTaskRebindModel(&restored, "next-model");
     try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
+    try settleWorkspaceSkillQueries(&restored, workspace_id);
     const recovered = restored.testTaskConst(id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(.detached, std.meta.activeTag(recovered.runtime.attachment));
     try std.testing.expectEqualStrings("next-model", recovered.durable.execution_model);
@@ -8206,7 +8208,8 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     );
     defer restored.deinit();
     try installControlExecution(&restored);
-    _ = try restored.openWorkspace(productControlTaskInput());
+    const restored_workspace = try restored.openWorkspace(productControlTaskInput());
+    try settleWorkspaceSkillQueries(&restored, restored_workspace);
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -8368,7 +8371,8 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     );
     defer restored.deinit();
     try installControlExecution(&restored);
-    _ = try restored.openWorkspace(productControlTaskInput());
+    const restored_workspace = try restored.openWorkspace(productControlTaskInput());
+    try settleWorkspaceSkillQueries(&restored, restored_workspace);
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -8518,7 +8522,8 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     );
     defer restored.deinit();
     try installControlExecutionGeneration(&restored, 2);
-    _ = try restored.openWorkspace(productControlTaskInput());
+    const restored_workspace = try restored.openWorkspace(productControlTaskInput());
+    try settleWorkspaceSkillQueries(&restored, restored_workspace);
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -8802,7 +8807,8 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     );
     defer restored.deinit();
     try installControlExecution(&restored);
-    _ = try restored.openWorkspace(productControlTaskInput());
+    const restored_workspace = try restored.openWorkspace(productControlTaskInput());
+    try settleWorkspaceSkillQueries(&restored, restored_workspace);
     try waitTaskSnapshot(
         &restored,
         "\"title\":\"continuation target\"",

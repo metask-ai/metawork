@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile, rename, rm } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
@@ -9,14 +9,15 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const destination = path.join(root, "frontend/src/bridge/generated-wire.ts");
 
 export async function generateRendererWire({ check = false, signal } = {}) {
+  const globalCache = path.resolve(
+    root,
+    process.env.ZIG_GLOBAL_CACHE_DIR || ".zig-cache/global",
+  );
+  // Zig 0.16.0 needs this directory before fetching ZIP dependencies.
+  await mkdir(path.join(globalCache, "tmp"), { recursive: true });
   const { stdout } = await promisify(execFile)(
     "zig",
-    [
-      "build",
-      "generate-renderer-wire",
-      "--global-cache-dir",
-      path.join(root, ".zig-cache/global"),
-    ],
+    ["build", "generate-renderer-wire", "--global-cache-dir", globalCache],
     { cwd: root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, signal },
   );
   const expected = await format(stdout, { parser: "typescript" });

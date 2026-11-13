@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { buildFrontend, buildNative } from "./build.mjs";
 import { runChild } from "./run-child-process.mjs";
 import { homedir } from "node:os";
@@ -361,7 +361,9 @@ export function developmentEnvironment(
 
 export async function withDevelopmentServer(root, useServer) {
   const { createServer } = await import("vite");
-  const server = await createServer({ root: path.join(root, "frontend") });
+  const server = await createServer({
+    root: await realpath(path.join(root, "frontend")),
+  });
   try {
     await server.listen();
     server.printUrls();

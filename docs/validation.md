@@ -204,6 +204,8 @@ npm run check
 npm test
 ```
 
+[CI](../.github/workflows/ci.yml) 在 PR 更新和 `main` 收到新提交时，使用 Windows x64 和 macOS arm64 runner 执行上述检查。各 job 按原生目标的 lock 从[官方发布清单](agentcore-abi-v1.md#11-官方发布来源与手动更新)选择并校验压缩包，再经现有 stager 验证和安装 bundle。依赖准备失败会使对应检查失败。
+
 `npm run dev` 先验证 canonical AgentCore bundle 与平台前置条件，在独立目录构建 Renderer 资源和 Debug Host，完成所需签名，再启动自有 Vite server 与新 primary Host。Host 通过 Native SDK 加载本次 Vite 地址，前端 UI 使用 HMR；Zig、Bridge wire/语义或构建配置变化后必须退出并重新运行该入口，不承诺运行中 Host 与已修改合同的 Renderer 兼容。Vite 仅使用已有的本机开发 origin；端口占用、构建、依赖、签名或服务启动失败必须明确失败，不连接其他实例或启动旧产物。Host 退出或启动失败后关闭本次 Vite server；正常退出清理自有运行目录，异常退出无法证明后代停止时保留资源。开发脚本的 Node 回归负责真实 HMR 消息、服务清理、端口冲突与开发/发布 CSP 隔离；真实 WebView 中的更新、Bridge 可达性和平台退出行为仍须由对应平台实测。
 
 Native SDK binding 的定向入口为 `zig build test-sdk-consumption`，复用正式 Application module graph，验证 Runtime 参数校验、credential 返回映射、window chrome 录制/回放及受限 Host URL handoff；领域事务与 shutdown 仍由对应 owner 和正式 Native/lifecycle 回归负责。binding 回归使用 SDK TestHarness，不打开真实浏览器或访问系统凭据。真实 handler、OAuth、credential storage、picker、notification 和 Windows 行为仍需各自平台验收；临时 HOME 不提供系统服务隔离，涉及外部应用或系统凭据的验收应在专用测试用户或虚拟机执行。
