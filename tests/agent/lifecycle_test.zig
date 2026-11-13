@@ -1191,6 +1191,7 @@ test "GenerateImage per-Run credentials are zeroed on every exit including produ
         const id = try session.prepareRunWithTools(.{ .text = "one frozen image Run" }, .{
             .binding = .{
                 .endpoint = "https://image-policy.example.test/v1/images/generations",
+                .source = "fixture-source",
                 .model = "fixture-image",
                 .credential = "owned-run-secret",
                 .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
@@ -1237,6 +1238,7 @@ test "GenerateImage failed per-Run preparation releases copies and leaves the Se
         const input: lifecycle.ImageGenerationRunInput = .{
             .binding = .{
                 .endpoint = "https://image-policy.example.test/v1/images/generations",
+                .source = "fixture-source",
                 .model = "fixture-image",
                 .credential = "owned-run-secret",
                 .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
@@ -1265,7 +1267,7 @@ test "GenerateImage callback holding lease before registration observes close an
         runtime.deinit();
     }
     const session = try openSession(runtime);
-    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit } });
+    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit } });
     const id = try session.prepareRun(.{ .text = "close registration race" });
     var work: ImageRunWork = .{ .session = session, .id = id };
     const run_thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
@@ -1332,7 +1334,7 @@ test "GenerateImage preallocates result before sending and performs no allocatio
     }
     probe.runtime = runtime;
     const session = try openSession(runtime);
-    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &probe, .commit_fn = Probe.commit } });
+    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &probe, .commit_fn = Probe.commit } });
     const id = try session.prepareRun(.{ .text = "result ownership under pressure" });
     var work: ImageRunWork = .{ .session = session, .id = id };
     const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});

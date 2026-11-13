@@ -50,7 +50,7 @@ test "HTTP fixed execution closes controls and consumes a real response" {
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/fixture", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .update, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .awake }) } }, fetch, .{ url, null, &output });
+    const result = engine.run(.{ .consumer = .update, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .awake }) } }, fetch, .{ url, null, &output });
     try std.testing.expect(result.outcome == .completed);
     const reply = try result.outcome.completed;
     try std.testing.expectEqual(@as(u16, 200), reply.status);
@@ -191,7 +191,7 @@ test "HTTP races both same-family and dual-stack addresses with async quota zero
         const url = try std.fmt.allocPrint(std.testing.allocator, "http://fixture.test:{d}/post", .{listener.socket.address.getPort()});
         defer std.testing.allocator.free(url);
         var output: [8]u8 = undefined;
-        const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) } }, fetch, .{ url, "body", &output });
+        const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) } }, fetch, .{ url, "body", &output });
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         try std.testing.expect(result.outcome == .completed);
@@ -221,7 +221,7 @@ test "HTTP cancellation closes send admission before a late connection returns" 
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/post", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(50), .clock = .boot }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(50), .clock = .boot }) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
@@ -285,7 +285,7 @@ test "HTTP only address keeps the whole remaining budget beyond three seconds" {
         var output: [8]u8 = undefined;
         const budget: http.Budget = if (connect_budget) .{ .connect = .fromSeconds(6) } else .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) };
         const started: Io.Clock.Timestamp = .now(io, .awake);
-        const result = engine.run(.{ .consumer = .metask, .budget = budget }, fetch, .{ url, "body", &output });
+        const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = budget }, fetch, .{ url, "body", &output });
         const elapsed = started.untilNow(io).raw.toMilliseconds();
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
@@ -308,7 +308,7 @@ test "HTTP slow TLS rejection on the only address stays a TLS failure" {
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
     const started: Io.Clock.Timestamp = .now(engine.io, .awake);
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
     const elapsed = started.untilNow(engine.io).raw.toMilliseconds();
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
@@ -333,7 +333,7 @@ test "HTTP TLS failure is not replaced by later connection failures or idle lane
     const url = try std.fmt.allocPrint(std.testing.allocator, "https://fixture.test:{d}/post", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectError(error.TlsFailed, result.outcome.completed);
@@ -359,7 +359,7 @@ test "HTTP starts later addresses 250 ms apart and caps only attempts with addre
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
     // 6 s over three addresses: the first attempt is capped at max(2 s, 6 s / 3).
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
@@ -381,7 +381,7 @@ test "HTTP connect budget ends DNS and TCP with their typed failures before any 
         engine.init(std.testing.allocator, io);
         defer engine.deinit();
         var output: [8]u8 = undefined;
-        const result = engine.run(.{ .consumer = .completion, .budget = .{ .connect = .fromMilliseconds(200) } }, fetch, .{ "http://fixture.test/post", "body", &output });
+        const result = engine.run(.{ .consumer = .completion, .isolation = .public, .budget = .{ .connect = .fromMilliseconds(200) } }, fetch, .{ "http://fixture.test/post", "body", &output });
         try std.testing.expectEqual(@as(http.Error, if (mode == .slow_dns) error.DnsFailed else error.ConnectFailed), result.outcome.failed);
         try std.testing.expectEqual(http.Send.not_sent, result.send);
         try std.testing.expectEqual(@as(usize, 0), Faults.dns_active.load(.acquire));
@@ -403,7 +403,7 @@ test "HTTP retains resolver capacity and borrowed inputs until canceled DNS join
     engine.init(std.testing.allocator, io);
     defer engine.deinit();
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(20), .clock = .awake }) } }, fetch, .{ "http://fixture.test/post", "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(20), .clock = .awake }) } }, fetch, .{ "http://fixture.test/post", "body", &output });
     try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
     try std.testing.expectEqual(http.Send.not_sent, result.send);
     try std.testing.expectEqual(@as(usize, 1), Faults.late.load(.acquire));
@@ -424,7 +424,7 @@ test "HTTP lost POST response is never replayed and retains may-sent evidence" {
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/post", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(@as(usize, 1), server.requests);
@@ -441,7 +441,7 @@ test "HTTP no capacity and preexisting controls refuse work without sending" {
         defer engine.deinit();
         var state: std.atomic.Value(u32) = .init(0);
         var output: [8]u8 = undefined;
-        const control: http.Control = .{ .consumer = .completion, .cancellation = .atomic(&state), .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } };
+        const control: http.Control = .{ .consumer = .completion, .isolation = .public, .cancellation = .atomic(&state), .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } };
         const result = engine.run(control, fetch, .{ "http://127.0.0.1:1/post", "body", &output });
         if (result.outcome == .completed) try std.testing.expectError(error.ResourceLimit, result.outcome.completed) else try std.testing.expectEqual(error.ResourceLimit, result.outcome.failed);
         try std.testing.expectEqual(http.Send.not_sent, result.send);
@@ -477,7 +477,7 @@ test "HTTP selected complete result survives cancellation in loser cleanup" {
     engine.init(std.testing.allocator, std.testing.io);
     defer engine.deinit();
     var fixture: Fixture = .{};
-    const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) }, .cancellation = .{ .context = &fixture, .requested_fn = Fixture.requested, .wait_fn = Fixture.wait } }, Fixture.complete, .{&fixture});
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) }, .cancellation = .{ .context = &fixture, .requested_fn = Fixture.requested, .wait_fn = Fixture.wait } }, Fixture.complete, .{&fixture});
     try std.testing.expectEqual(@as(u8, 42), result.outcome.completed);
     try std.testing.expectEqual(@as(u32, 1), fixture.state.load(.acquire));
 }
@@ -492,9 +492,9 @@ fn authorizedFetch(operation: *http.Operation, url: []const u8, token: []const u
     return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
 }
 
-test "HTTP reuses only clean same-scope connections and retires stale idle sockets" {
+test "HTTP reuses an owner's connection across token rotation and retires stale idle sockets" {
     for ([_]bool{ false, true }) |close_first| {
-        const pool = try Pool.create(.{ .connections = if (close_first) 3 else 2, .close_first = close_first });
+        const pool = try Pool.create(.{ .connections = if (close_first) 2 else 1, .close_first = close_first });
         defer pool.destroy();
         var engine: http.Engine = undefined;
         engine.init(std.testing.allocator, std.testing.io);
@@ -506,12 +506,13 @@ test "HTTP reuses only clean same-scope connections and retires stale idle socke
             // The stale idle socket must be visible before the probe runs.
             if (close_first and index == 1) try pool.waitClosed(0);
             var output: [8]u8 = undefined;
-            const result = engine.run(.{ .consumer = .completion, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, authorizedFetch, .{ url, if (index == 2) "Bearer second" else "Bearer first", &output });
+            const result = engine.run(.{ .consumer = .completion, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, authorizedFetch, .{ url, if (index == 2) "Bearer second" else "Bearer first", &output });
             try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
             value.* = result.reused;
         }
-        try std.testing.expectEqualSlices(bool, if (close_first) &.{ false, false, false } else &.{ false, true, false }, &reused);
-        try std.testing.expectEqual(@as(usize, if (close_first) 3 else 2), pool.accepted.load(.acquire));
+        // A rotated token keeps the owner's isolation and its connection.
+        try std.testing.expectEqualSlices(bool, if (close_first) &.{ false, false, true } else &.{ false, true, true }, &reused);
+        try std.testing.expectEqual(@as(usize, if (close_first) 2 else 1), pool.accepted.load(.acquire));
         try std.testing.expectEqual(@as(?anyerror, null), pool.failure);
     }
 }
@@ -601,9 +602,8 @@ const Pool = struct {
     }
 };
 
-fn scopedGet(operation: *http.Operation, url: []const u8, scope: []const u8, output: []u8) http.Error!Reply {
-    var headers = [_]std.http.Header{.{ .name = "X-Scope", .value = scope }};
-    var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{ .headers = &headers });
+fn plainGet(operation: *http.Operation, url: []const u8, output: []u8) http.Error!Reply {
+    var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{});
     defer request.deinit();
     try request.send(null);
     var response = try request.receiveHead();
@@ -613,7 +613,7 @@ fn scopedGet(operation: *http.Operation, url: []const u8, scope: []const u8, out
 
 fn runScoped(engine: *http.Engine, url: []const u8, scope: []const u8) !bool {
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .mcp, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, scopedGet, .{ url, scope, &output });
+    const result = engine.run(.{ .consumer = .mcp, .isolation = .of(.mcp_server, scope), .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, plainGet, .{ url, &output });
     try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
     return result.reused;
 }
@@ -634,6 +634,51 @@ test "HTTP alternating scopes keep their own pooled connections" {
     try std.testing.expectEqual(@as(?anyerror, null), pool.failure);
     // Scope "a" always lands on the first connection, "b" on the second.
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 0, 1, 0, 1 }, pool.served_by[0..6]);
+}
+
+test "HTTP isolation keys separate owners and namespaces without retaining identities" {
+    const a = http.Isolation.of(.mcp_server, "server-1");
+    try std.testing.expect(a.eql(.of(.mcp_server, "server-1")));
+    try std.testing.expect(!a.eql(.of(.mcp_server, "server-2")));
+    try std.testing.expect(!a.eql(.of(.completion_source, "server-1")));
+    try std.testing.expect(!a.eql(.public));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.asBytes(&a), "server-1") == null);
+}
+
+fn retireDuringBody(operation: *http.Operation, url: []const u8, output: []u8) http.Error!Reply {
+    var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{});
+    defer request.deinit();
+    try request.send(null);
+    var response = try request.receiveHead();
+    // The owner's identity ends while its request is still in flight.
+    operation.engine.retire(operation.control.isolation);
+    const bytes = try request.readAll(&response, output);
+    return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
+}
+
+test "HTTP retire closes idle connections now and in-flight ones on release" {
+    const pool = try Pool.create(.{ .connections = 4 });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    try std.testing.expect(!try runScoped(&engine, url, "b"));
+    try std.testing.expect(try runScoped(&engine, url, "a"));
+    engine.retire(.of(.mcp_server, "a"));
+    try pool.waitClosed(0);
+    try std.testing.expect(try runScoped(&engine, url, "b"));
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    var output: [8]u8 = undefined;
+    const result = engine.run(.{ .consumer = .mcp, .isolation = .of(.mcp_server, "a"), .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, retireDuringBody, .{ url, &output });
+    try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+    try std.testing.expect(result.reused);
+    try pool.waitClosed(2);
+    try std.testing.expect(!try runScoped(&engine, url, "a"));
+    try std.testing.expectEqual(@as(usize, 4), pool.accepted.load(.acquire));
+    try std.testing.expect(!pool.closed[1].load(.acquire));
 }
 
 test "HTTP keeps at most two idle connections per origin and evicts the oldest" {
@@ -692,7 +737,7 @@ test "HTTP refreshes the TLS clock on every new connection and rescans roots whe
         var server: TlsReject = .{ .listener = &listener, .delay = .fromNanoseconds(0) };
         const thread = try std.Thread.spawn(.{}, TlsReject.run, .{&server});
         var output: [8]u8 = undefined;
-        const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+        const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, fetch, .{ url, "body", &output });
         thread.join();
         try std.testing.expectError(error.TlsFailed, result.outcome.completed);
         // A refused handshake leaves no idle connection: slot 0 is chosen again.
@@ -717,7 +762,7 @@ test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" 
             return 1;
         }
         fn run(self: *@This()) http.Result(u8) {
-            return self.engine.run(.{ .consumer = .mcp, .budget = .{ .deadline = .fromNow(self.engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) } }, wait, .{self});
+            return self.engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(self.engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) } }, wait, .{self});
         }
         fn complete(_: *http.Operation) u8 {
             return 42;
@@ -738,9 +783,9 @@ test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" 
         started += 1;
     }
     for (0..workers.len) |_| try held.entered.wait(engine.io);
-    const refused = engine.run(.{ .consumer = .mcp, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) } }, Held.complete, .{});
+    const refused = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) } }, Held.complete, .{});
     try std.testing.expectEqual(error.ResourceLimit, refused.outcome.failed);
     try std.testing.expectEqual(http.Send.not_sent, refused.send);
-    const continuation = engine.run(.{ .consumer = .mcp, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) }, .continuation = true }, Held.complete, .{});
+    const continuation = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) }, .continuation = true }, Held.complete, .{});
     try std.testing.expectEqual(@as(u8, 42), continuation.outcome.completed);
 }

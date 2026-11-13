@@ -111,6 +111,7 @@ const RefreshJob = struct {
     fn run(self: *RefreshJob) void {
         var http: mcp_oauth.StdHttpTransport = .{
             .http_engine = self.http_engine,
+            .isolation = .of(.mcp_server, self.binding.server_id),
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
         };

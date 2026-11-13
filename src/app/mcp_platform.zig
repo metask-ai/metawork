@@ -1702,6 +1702,8 @@ fn reservedStdioEnvironmentName(name: []const u8) bool {
 
 const HttpContext = struct {
     http_engine: *http_execution.Engine,
+    /// Connection reuse belongs to this MCP server; retired with the owner.
+    isolation: http_execution.Isolation,
     allocator: std.mem.Allocator,
     io: std.Io,
     arena: std.heap.ArenaAllocator,
@@ -1729,6 +1731,8 @@ const HttpContext = struct {
         const backend: *agent.McpHttpBackend = @ptrCast(@alignCast(raw));
         const self: *HttpContext = @fieldParentPtr("backend", backend);
         self.backend.deinit() catch @panic("MCP HTTP owner released with live connections");
+        // Delete, disable, reconfiguration and shutdown all release the owner.
+        self.http_engine.retire(self.isolation);
         if (self.authorization) |authorization| authorization.release();
         for (self.secret_values) |secret| std.crypto.secureZero(u8, secret);
         self.arena.deinit();
@@ -1774,6 +1778,7 @@ const HttpContext = struct {
     fn fetch(self: *HttpContext, request: agent.McpHttpRequest, sink: *const agent.McpHttpResponseSink) FetchFailure!void {
         const result = self.http_engine.run(.{
             .consumer = .mcp,
+            .isolation = self.isolation,
             .budget = .{ .deadline = .fromNow(self.io, .{ .raw = .fromMilliseconds(request.timeout_ms), .clock = .awake }) },
             .cancellation = .{ .context = &request.cancellation, .requested_fn = requested, .wait_fn = waitCancellation },
         }, fetchOne, .{ self, request, sink });
@@ -2025,6 +2030,7 @@ fn createHttpOwner(
     errdefer allocator.destroy(context);
     context.* = .{
         .http_engine = http_engine,
+        .isolation = .of(.mcp_server, server.id),
         .allocator = allocator,
         .io = io,
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -2606,7 +2612,7 @@ test "MCP HTTP rejects rotated credential echoes before returning JSON or SSE to
             var engine: http_execution.Engine = undefined;
             engine.init(allocator, io);
             defer engine.deinit();
-            var context: HttpContext = .{ .http_engine = &engine, .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &secrets, .authorization = slot, .backend = undefined };
+            var context: HttpContext = .{ .http_engine = &engine, .isolation = .public, .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &secrets, .authorization = slot, .backend = undefined };
             defer context.arena.deinit();
             context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = allocator, .endpoint = context.endpoint() });
             defer context.backend.deinit() catch unreachable;
@@ -2739,6 +2745,7 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
     defer engine.deinit();
     var context: HttpContext = .{
         .http_engine = &engine,
+        .isolation = .public,
         .allocator = std.testing.allocator,
         .io = threaded.io(),
         .arena = arena,
@@ -2922,7 +2929,7 @@ test "MCP HTTP ping keeps the original stream lease session deadline and cancell
         var engine: http_execution.Engine = undefined;
         engine.init(allocator, io);
         defer engine.deinit();
-        var context: HttpContext = .{ .http_engine = &engine, .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .authorization = slot, .backend = undefined };
+        var context: HttpContext = .{ .http_engine = &engine, .isolation = .public, .allocator = allocator, .io = io, .arena = .init(allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .authorization = slot, .backend = undefined };
         defer context.arena.deinit();
         context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = allocator, .endpoint = context.endpoint(), .max_response_bytes = 4096 });
         defer context.backend.deinit() catch unreachable;
@@ -3375,7 +3382,7 @@ test "MCP HTTP cancellation deadline and partial startup failure close the reque
         var engine: http_execution.Engine = undefined;
         engine.init(std.testing.allocator, io);
         defer engine.deinit();
-        var context: HttpContext = .{ .http_engine = &engine, .allocator = std.testing.allocator, .io = io, .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .backend = undefined };
+        var context: HttpContext = .{ .http_engine = &engine, .isolation = .public, .allocator = std.testing.allocator, .io = io, .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .backend = undefined };
         defer context.arena.deinit();
         context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = std.testing.allocator, .endpoint = context.endpoint() });
         defer context.backend.deinit() catch unreachable;
@@ -3470,6 +3477,7 @@ test "MCP platform distinguishes trusted Bearer challenges from bare HTTP auth r
     defer engine.deinit();
     var context: HttpContext = .{
         .http_engine = &engine,
+        .isolation = .public,
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .arena = arena,
@@ -3586,6 +3594,82 @@ test "MCP private endpoint is resolved only in its HTTP owner and rejects cross-
     var inspection: HttpContext.Inspection = .{ .context = context, .lease = null };
     try std.testing.expect(!HttpContext.Inspection.check(&inspection, context.url));
     try std.testing.expectError(error.InvalidConfig, createHttpOwner(&engine, std.testing.io, allocator, server, &preparation, &authorization, null));
+}
+
+test "MCP HTTP owner release retires its server's pooled connections" {
+    const KeepAlive = struct {
+        listener: *std.Io.net.Server,
+        closed: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            var connection = self.listener.accept(std.testing.io) catch return;
+            defer {
+                connection.close(std.testing.io);
+                self.closed.store(true, .release);
+            }
+            var reads: [4096]u8 = undefined;
+            var writes: [4096]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            var writer = connection.writer(std.testing.io, &writes);
+            var http: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = http.receiveHead() catch return;
+            request.respond("{}", .{ .keep_alive = true }) catch return;
+            _ = http.receiveHead() catch {};
+        }
+        fn get(operation: *http_execution.Operation, url: []const u8) http_execution.Error!void {
+            var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{});
+            defer request.deinit();
+            try request.send(null);
+            var response = try request.receiveHead();
+            var output: [8]u8 = undefined;
+            _ = try request.readAll(&response, &output);
+        }
+    };
+    const allocator = std.testing.allocator;
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{});
+    defer listener.deinit(std.testing.io);
+    var server: KeepAlive = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, KeepAlive.run, .{&server});
+    defer thread.join();
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/mcp", .{listener.socket.address.getPort()});
+    defer allocator.free(url);
+    const secret = try allocator.dupe(u8, "https://mcp.example.test/k/synthetic?route=private");
+    defer secureFree(allocator, secret);
+    var credentials = [_]mcp_configuration.ResolvedCredential{.{ .locator = "endpoint/fixture", .secret = secret }};
+    const preparation: mcp_configuration.Preparation = .{ .allocator = allocator, .state = .available, .credentials = &credentials };
+    const server_wire: mcp_configuration.ServerWire = .{
+        .id = "private",
+        .namespace = "private",
+        .display_name = "Private",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "streamable_http", .sensitive_endpoint = .{ .origin = "https://mcp.example.test", .identity = "endpoint-generation", .credential_refs = &.{"endpoint/fixture"} } },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    var authorization: ?*HttpAuthSlot = null;
+    var engine: http_execution.Engine = undefined;
+    engine.init(allocator, std.testing.io);
+    defer engine.deinit();
+    var owner = try createHttpOwner(&engine, std.testing.io, allocator, server_wire, &preparation, &authorization, null);
+    var owner_live = true;
+    defer if (owner_live) owner.deinit();
+    const backend: *agent.McpHttpBackend = @ptrCast(@alignCast(owner.transport.context));
+    const context: *HttpContext = @fieldParentPtr("backend", backend);
+    try std.testing.expect(context.isolation.eql(.of(.mcp_server, "private")));
+    // A connection pooled under this server's isolation.
+    const result = engine.run(.{ .consumer = .mcp, .isolation = context.isolation, .budget = .{ .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, KeepAlive.get, .{url});
+    try result.outcome.completed;
+    owner_live = false;
+    owner.deinit();
+    for (0..400) |_| {
+        if (server.closed.load(.acquire)) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+    }
+    try std.testing.expect(server.closed.load(.acquire));
+    for (&engine.slots) |*slot| try std.testing.expectEqual(@as(usize, 0), slot.client.connection_pool.free_len);
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {

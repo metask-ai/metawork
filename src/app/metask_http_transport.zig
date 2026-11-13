@@ -23,7 +23,18 @@ pub const Adapter = struct {
         return .{
             .context = self,
             .perform_fn = performAccount,
+            .retire_fn = retireAccount,
         };
+    }
+
+    fn isolation(principal: ?[]const u8) http.Isolation {
+        // Requests made before the identity exists share one key.
+        return .of(.metask_account, principal orelse "");
+    }
+
+    fn retireAccount(context: *anyopaque, principal: []const u8) void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        self.http.retire(isolation(principal));
     }
 
     pub fn modelsTransport(self: *Adapter) metask_transport.Transport {
@@ -47,6 +58,7 @@ pub const Adapter = struct {
                     .userinfo => .userinfo,
                     .usage_stats => .usage_stats,
                 },
+                .principal = request.principal,
                 .body = request.body,
                 .bearer = request.bearer,
                 .control = request.control,
@@ -75,6 +87,7 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const result = self.http.run(.{
             .consumer = .metask,
+            .isolation = isolation(request.principal),
             .budget = .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
             .cancellation = if (request.control) |control| http.Cancellation.atomic(&control.cancellation.state) else null,
         }, fetch, .{ request, response_buffer });
@@ -175,7 +188,7 @@ pub const Adapter = struct {
 
     fn fetchHttp(operation: *http.Operation, endpoint: []const u8, method: std.http.Method, headers: []const std.http.Header, body: []const u8, output: []u8) FetchResult {
         const uri = std.Uri.parse(endpoint) catch return operation.fail(error.InvalidRequest);
-        var request = try operation.open(method, uri, .{ .headers = headers, .credential_scope = if (method == .POST) body else "" });
+        var request = try operation.open(method, uri, .{ .headers = headers });
         defer request.deinit();
         try request.send(if (method == .POST) body else null);
         var response = try request.receiveHead();
@@ -192,11 +205,11 @@ test "Account selected complete refresh response survives late cancellation" {
         .cancellation = &cancellation,
         .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot }),
     };
-    const response = try Adapter.selectedFetch(.{ .kind = .refresh_token, .control = control }, .{ .status = 200, .body_len = 2 }, &buffer, true);
+    const response = try Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null, .control = control }, .{ .status = 200, .body_len = 2 }, &buffer, true);
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("{}", response.body);
-    try std.testing.expectError(error.Cancelled, Adapter.selectedFetch(.{ .kind = .models, .control = control }, .{ .status = 200, .body_len = 2 }, &buffer, true));
-    try std.testing.expectError(error.Cancelled, Adapter.selectedFetch(.{ .kind = .refresh_token, .control = control }, error.ReadFailed, &buffer, true));
+    try std.testing.expectError(error.Cancelled, Adapter.selectedFetch(.{ .kind = .models, .principal = null, .control = control }, .{ .status = 200, .body_len = 2 }, &buffer, true));
+    try std.testing.expectError(error.Cancelled, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null, .control = control }, error.ReadFailed, &buffer, true));
 }
 
 test "Account DNS failure and connection refusal prove refresh was not sent" {
@@ -218,16 +231,16 @@ test "Account DNS failure and connection refusal prove refresh was not sent" {
     defer engine.deinit();
     var adapter: Adapter = .{ .http = &engine };
     var buffer: [64]u8 = undefined;
-    try std.testing.expectError(error.NetworkNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token }, &buffer));
+    try std.testing.expectError(error.NetworkNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null }, &buffer));
 
     vtable.netLookup = threaded.io().vtable.netLookup;
     vtable.netConnectIp = Failures.connect;
-    const execution = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ "http://127.0.0.1:80/token", std.http.Method.POST, &.{}, "test-body", &buffer });
+    const execution = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ "http://127.0.0.1:80/token", std.http.Method.POST, &.{}, "test-body", &buffer });
     const result = execution.outcome.completed;
     const send_started = execution.send == .may_have_been_sent;
     try std.testing.expectError(error.ConnectFailed, result);
     try std.testing.expect(!send_started);
-    try std.testing.expectError(error.NetworkNotSent, Adapter.selectedFetch(.{ .kind = .refresh_token }, result, &buffer, send_started));
+    try std.testing.expectError(error.NetworkNotSent, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started));
 }
 
 test "Account deadline and cancellation during connection prove refresh was not sent" {
@@ -252,10 +265,10 @@ test "Account deadline and cancellation during connection prove refresh was not 
         .cancellation = &cancellation,
         .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromMilliseconds(20), .clock = .boot }),
     };
-    try std.testing.expectError(error.DeadlineExceededNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .control = control }, &buffer));
+    try std.testing.expectError(error.DeadlineExceededNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = control }, &buffer));
     cancellation.cancel();
     control.deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot });
-    try std.testing.expectError(error.CancelledNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .control = control }, &buffer));
+    try std.testing.expectError(error.CancelledNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = control }, &buffer));
 }
 
 test "Account HTTP registration failure settles workers before reporting not sent" {
@@ -277,7 +290,7 @@ test "Account HTTP registration failure settles workers before reporting not sen
         var adapter: Adapter = .{ .http = &engine };
         var cancellation = metask_transport.Cancellation.init(engine.io);
         var buffer: [32]u8 = undefined;
-        try std.testing.expectError(error.NetworkNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .control = .{ .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(engine.io, .{ .raw = .fromSeconds(60), .clock = .boot }) } }, &buffer));
+        try std.testing.expectError(error.NetworkNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = .{ .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(engine.io, .{ .raw = .fromSeconds(60), .clock = .boot }) } }, &buffer));
     }
 }
 
@@ -341,7 +354,7 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         engine.init(std.testing.allocator, std.testing.io);
         defer engine.deinit();
         var buffer: [2]u8 = undefined;
-        const execution = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ endpoint, std.http.Method.POST, &.{}, "test-body", &buffer });
+        const execution = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ endpoint, std.http.Method.POST, &.{}, "test-body", &buffer });
         const result = execution.outcome.completed;
         const send_started = execution.send == .may_have_been_sent;
         thread.join();
@@ -349,14 +362,70 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         try std.testing.expectEqual(mode != .tls_failure, send_started);
         try std.testing.expectEqual(mode != .tls_failure, server.received_body);
         switch (mode) {
-            .tls_failure => try std.testing.expectError(error.NetworkNotSent, Adapter.selectedFetch(.{ .kind = .refresh_token }, result, &buffer, send_started)),
-            .lost_response => try std.testing.expectError(error.NetworkFailed, Adapter.selectedFetch(.{ .kind = .refresh_token }, result, &buffer, send_started)),
-            .oversized => try std.testing.expectError(error.ResponseTooLarge, Adapter.selectedFetch(.{ .kind = .refresh_token }, result, &buffer, send_started)),
+            .tls_failure => try std.testing.expectError(error.NetworkNotSent, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),
+            .lost_response => try std.testing.expectError(error.NetworkFailed, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),
+            .oversized => try std.testing.expectError(error.ResponseTooLarge, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),
             .complete, .compressed => {
-                const response = try Adapter.selectedFetch(.{ .kind = .refresh_token }, result, &buffer, send_started);
+                const response = try Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started);
                 try std.testing.expectEqual(@as(u16, 200), response.status);
                 try std.testing.expectEqualStrings("{}", response.body);
             },
         }
     }
+}
+
+test "Account retire closes the principal's pooled connection only" {
+    const KeepAlive = struct {
+        listener: *std.Io.net.Server,
+        closed: std.atomic.Value(usize) = .init(0),
+        /// One connection per thread, so both stay open side by side.
+        fn run(self: *@This()) void {
+            {
+                var connection = self.listener.accept(std.testing.io) catch return;
+                defer {
+                    connection.close(std.testing.io);
+                    _ = self.closed.fetchAdd(1, .acq_rel);
+                }
+                var reads: [4096]u8 = undefined;
+                var writes: [4096]u8 = undefined;
+                var reader = connection.reader(std.testing.io, &reads);
+                var writer = connection.writer(std.testing.io, &writes);
+                var server: std.http.Server = .init(&reader.interface, &writer.interface);
+                var request = server.receiveHead() catch return;
+                request.respond("{}", .{ .keep_alive = true }) catch return;
+                _ = server.receiveHead() catch {};
+            }
+        }
+    };
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{});
+    defer listener.deinit(std.testing.io);
+    var server: KeepAlive = .{ .listener = &listener };
+    var threads: [2]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, KeepAlive.run, .{&server});
+    defer for (threads) |thread| thread.join();
+    const endpoint = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/userinfo", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(endpoint);
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
+    var buffer: [8]u8 = undefined;
+    for ([_][]const u8{ "account-1", "account-2" }) |principal| {
+        const execution = engine.run(.{ .consumer = .metask, .isolation = Adapter.isolation(principal), .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ endpoint, std.http.Method.GET, &.{}, "", &buffer });
+        try std.testing.expectEqual(@as(u16, 200), (try execution.outcome.completed).status);
+    }
+    adapter.accountTransport().retire("account-1");
+    for (0..400) |_| {
+        if (server.closed.load(.acquire) == 1) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), server.closed.load(.acquire));
+    var pooled: usize = 0;
+    for (&engine.slots) |*slot| {
+        if (slot.client.connection_pool.free_len == 0) continue;
+        try std.testing.expect(slot.isolation.eql(Adapter.isolation("account-2")));
+        pooled += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), pooled);
 }

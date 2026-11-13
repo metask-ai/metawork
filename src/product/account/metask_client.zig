@@ -18,6 +18,10 @@ pub const RequestKind = enum {
 
 pub const Request = struct {
     kind: RequestKind,
+    /// Account principal the request acts for; null before the identity is
+    /// established (authorization-code exchange and its first userinfo).
+    /// Application isolates connection reuse by it.
+    principal: ?[]const u8,
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
     control: ?RequestControl = null,
@@ -41,6 +45,8 @@ pub const Transport = struct {
         request: Request,
         response_buffer: []u8,
     ) TransportError!Response,
+    /// Ends connection reuse for a principal whose credentials Account cleared.
+    retire_fn: *const fn (context: *anyopaque, principal: []const u8) void,
 
     pub fn perform(
         self: Transport,
@@ -49,7 +55,20 @@ pub const Transport = struct {
     ) TransportError!Response {
         return self.perform_fn(self.context, request, response_buffer);
     }
+
+    pub fn retire(self: Transport, principal: []const u8) void {
+        self.retire_fn(self.context, principal);
+    }
 };
+
+/// For transports that hold no pooled connections, such as test fakes.
+pub fn retireNothing(_: *anyopaque, _: []const u8) void {}
+
+/// The principal bound to a token set, or null before identity binding.
+pub fn principalOf(tokens: *const oauth.TokenSet) ?[]const u8 {
+    const account_id = tokens.accountId();
+    return if (account_id.len == 0) null else account_id;
+}
 
 pub const ClientError = error{
     OAuthExchangeFailed,
@@ -97,7 +116,7 @@ pub fn exchangeAuthorizationCode(
     var response_storage: [oauth.Limits.token_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &response_storage);
     const response = transport.perform(
-        .{ .kind = .exchange_code, .body = body, .control = control },
+        .{ .kind = .exchange_code, .principal = null, .body = body, .control = control },
         &response_storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
@@ -120,6 +139,7 @@ pub fn refresh(
         allocator,
         transport,
         &previous.refresh_token,
+        principalOf(previous),
         now_unix_seconds,
         control,
     );
@@ -129,6 +149,7 @@ pub fn refreshWithToken(
     allocator: std.mem.Allocator,
     transport: Transport,
     refresh_token: *const oauth.Secret,
+    principal: ?[]const u8,
     now_unix_seconds: i64,
     control: ?RequestControl,
 ) ClientError!oauth.TokenSet {
@@ -141,7 +162,7 @@ pub fn refreshWithToken(
     var response_storage: [oauth.Limits.token_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &response_storage);
     const response = transport.perform(
-        .{ .kind = .refresh_token, .body = body, .control = control },
+        .{ .kind = .refresh_token, .principal = principal, .body = body, .control = control },
         &response_storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
@@ -168,6 +189,7 @@ pub fn fetchIdentity(
     const response = transport.perform(
         .{
             .kind = .userinfo,
+            .principal = principalOf(tokens),
             .bearer = tokens.access_token.view(),
             .control = control,
         },
@@ -189,6 +211,7 @@ pub fn fetchIdentity(
 pub fn fetchUsageHistory(
     transport: Transport,
     bearer: []const u8,
+    principal: []const u8,
     range: summary.HistoryRange,
     control: ?RequestControl,
 ) ClientError!summary.UsageHistoryData {
@@ -199,6 +222,7 @@ pub fn fetchUsageHistory(
     const response = transport.perform(
         .{
             .kind = .usage_stats,
+            .principal = principal,
             .bearer = bearer,
             .control = control,
             .usage_stats_range = .{
@@ -289,7 +313,7 @@ const FakeTransport = struct {
     step: usize = 0,
 
     fn transport(self: *FakeTransport) Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = retireNothing };
     }
 
     fn perform(
@@ -394,7 +418,7 @@ test "userinfo failure never infers a principal from the token" {
     try std.testing.expectError(
         error.ServiceUnavailable,
         fetchIdentity(
-            .{ .context = &failing, .perform_fn = @TypeOf(failing).perform },
+            .{ .context = &failing, .perform_fn = @TypeOf(failing).perform, .retire_fn = retireNothing },
             &tokens,
             null,
         ),
@@ -431,7 +455,7 @@ test "refresh requires and installs the rotated refresh token" {
     }{};
     var tokens = try refresh(
         std.testing.allocator,
-        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = retireNothing },
         &previous,
         20,
         null,
@@ -475,8 +499,9 @@ test "refresh HTTP 400 distinguishes invalid grant from request and protocol err
         var transport: ErrorTransport = .{ .body = case.body };
         try std.testing.expectError(case.expected, refreshWithToken(
             std.testing.allocator,
-            .{ .context = &transport, .perform_fn = ErrorTransport.perform },
+            .{ .context = &transport, .perform_fn = ErrorTransport.perform, .retire_fn = retireNothing },
             &token,
+            null,
             100,
             null,
         ));

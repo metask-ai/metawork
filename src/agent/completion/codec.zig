@@ -50,12 +50,13 @@ pub const EncodedRequest = struct {
         self.header_count += 1;
     }
 
-    pub fn view(self: *const EncodedRequest, connect_timeout_ms: u32) transport.HttpRequest {
+    pub fn view(self: *const EncodedRequest, source: []const u8, connect_timeout_ms: u32) transport.HttpRequest {
         return .{
             .url = self.url,
             .headers = self.headers[0..self.header_count],
             .body = self.body,
             .connect_timeout_ms = connect_timeout_ms,
+            .source = source,
         };
     }
 
@@ -174,6 +175,6 @@ test "Encoded request owns and marks sensitive headers" {
     );
     defer encoded.deinit();
     try encoded.addHeader("authorization", "Bearer secret", true);
-    try std.testing.expect(encoded.view(1).headers[0].sensitive);
-    try std.testing.expectEqualStrings("Bearer secret", encoded.view(1).headers[0].value);
+    try std.testing.expect(encoded.view("fixture-source", 1).headers[0].sensitive);
+    try std.testing.expectEqualStrings("Bearer secret", encoded.view("fixture-source", 1).headers[0].value);
 }

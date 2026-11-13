@@ -204,6 +204,8 @@ pub const Cancellation = struct {
 /// unknown rather than as proof that no remote effect occurred.
 pub const StdHttpTransport = struct {
     http_engine: *http_execution.Engine,
+    /// The MCP server this OAuth work belongs to, or a draft probe's own key.
+    isolation: http_execution.Isolation,
     cancellation: *const Cancellation,
     deadline: std.Io.Clock.Timestamp,
 
@@ -216,6 +218,7 @@ pub const StdHttpTransport = struct {
         if (self.cancellation.isCancelled()) return error.CancelledBeforeSend;
         const result = self.http_engine.run(.{
             .consumer = .mcp_oauth,
+            .isolation = self.isolation,
             .budget = .{ .deadline = self.deadline },
             .cancellation = .atomic(&self.cancellation.state),
         }, fetchOne, .{ request, body_buffer, header_buffer });
@@ -285,7 +288,6 @@ pub const StdHttpTransport = struct {
                     .default,
             },
             .headers = headers[0..header_count],
-            .credential_scope = if (method == .POST) request.body else "",
         }) catch |err| return mapError(err);
         defer http_request.deinit();
         if (method == .GET and request.body.len != 0) return error.InvalidResponse;
@@ -3139,7 +3141,7 @@ test "MCP OAuth records the real HTTP write boundary without weakening HTTPS pol
         defer engine.deinit();
         var body: [512]u8 = undefined;
         var headers: [1024]u8 = undefined;
-        const execution = engine.run(.{ .consumer = .mcp_oauth, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, StdHttpTransport.fetchHttp, .{ @as(Request, .{ .method = .post, .url = url, .body = "fixture" }), &body, &headers });
+        const execution = engine.run(.{ .consumer = .mcp_oauth, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, StdHttpTransport.fetchHttp, .{ @as(Request, .{ .method = .post, .url = url, .body = "fixture" }), &body, &headers });
         const result = execution.outcome.completed;
         const started = execution.send == .may_have_been_sent;
         thread.join();
@@ -3150,7 +3152,7 @@ test "MCP OAuth records the real HTTP write boundary without weakening HTTPS pol
             try std.testing.expectEqual(error.Network, StdHttpTransport.classifyFailure(error.Network, started));
         }
         var cancellation = Cancellation.init(std.testing.io);
-        var transport: StdHttpTransport = .{ .http_engine = &engine, .cancellation = &cancellation, .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+        var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
         // The production entry still rejects a plain endpoint before sending.
         try std.testing.expectError(error.InvalidResponseBeforeSend, transport.transport().fetch(.{ .method = .post, .url = url }, &body, &headers));
     }
@@ -3191,7 +3193,7 @@ test "MCP OAuth failed control registration cannot start DNS or POST" {
     var engine: http_execution.Engine = undefined;
     engine.init(std.testing.allocator, io);
     defer engine.deinit();
-    var transport: StdHttpTransport = .{ .http_engine = &engine, .cancellation = &cancellation, .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+    var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
     var body: [32]u8 = undefined;
     var headers: [32]u8 = undefined;
     try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token" }, &body, &headers));
@@ -3228,7 +3230,7 @@ test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
         var engine: http_execution.Engine = undefined;
         engine.init(std.testing.allocator, io);
         defer engine.deinit();
-        var transport: StdHttpTransport = .{ .http_engine = &engine, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .boot }) };
+        var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .boot }) };
         var body: [32]u8 = undefined;
         var headers: [32]u8 = undefined;
         const result = transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers);
@@ -3249,7 +3251,7 @@ test "MCP OAuth unavailable concurrency proves the POST was not sent" {
     var engine: http_execution.Engine = undefined;
     engine.init(std.testing.allocator, io);
     defer engine.deinit();
-    var transport: StdHttpTransport = .{ .http_engine = &engine, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
+    var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
     var body: [32]u8 = undefined;
     var headers: [32]u8 = undefined;
     try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));

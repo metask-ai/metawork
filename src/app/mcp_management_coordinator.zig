@@ -202,6 +202,7 @@ const JobInput = union(enum) {
 
 const Job = struct {
     http_engine: ?*http_execution.Engine = null,
+    isolation: http_execution.Isolation,
     allocator: std.mem.Allocator,
     io: std.Io,
     host: Host,
@@ -230,6 +231,7 @@ const Job = struct {
         if (self.transport_override) |transport_value| return transport_value;
         storage.* = .{
             .http_engine = self.http_engine.?,
+            .isolation = self.isolation,
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
         };
@@ -485,8 +487,14 @@ const ConnectionTestJob = struct {
         }
         const fallback: mcp_configuration.HttpDraftDetection = if (status == 401) .authentication_required else .access_denied;
         var cancellation: mcp_oauth.Cancellation = .{ .io = self.io };
+        const engine = self.http_engine orelse return fallback;
+        // An unsaved draft has no server identity: this probe's key is its own
+        // and ends with it.
+        const isolation: http_execution.Isolation = .of(.mcp_draft, std.mem.asBytes(&self));
+        defer engine.retire(isolation);
         var http: mcp_oauth.StdHttpTransport = .{
-            .http_engine = self.http_engine orelse return fallback,
+            .http_engine = engine,
+            .isolation = isolation,
             .cancellation = &cancellation,
             .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromSeconds(5), .clock = .awake }),
         };
@@ -684,7 +692,7 @@ const InstallationJob = struct {
                 self.failed = true;
                 return;
             };
-            http = .{ .http_engine = engine, .cancellation = &self.cancellation, .deadline = .fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(30) }) };
+            http = .{ .http_engine = engine, .isolation = .of(.mcp_server, &self.server), .cancellation = &self.cancellation, .deadline = .fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(30) }) };
             break :configured http.transport();
         };
         for (self.request.parsed.value.credentials, 0..) |plan, i| {
@@ -1778,6 +1786,7 @@ pub const Coordinator = struct {
         const job = try self.allocator.create(Job);
         job.* = .{
             .http_engine = self.host_environment.http_engine,
+            .isolation = .of(.mcp_server, flow.start.server_id),
             .allocator = self.allocator,
             .io = self.io,
             .host = self.host,

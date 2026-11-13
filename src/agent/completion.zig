@@ -110,7 +110,8 @@ pub const Completion = struct {
             self.allocator.free(response_buffer);
         }
         const response = self.transport.perform(
-            encoded.view(request.connect_timeout_ms),
+            // The codec never sees provider_id; only the transport uses it.
+            encoded.view(self.provider_id, request.connect_timeout_ms),
             cancellation,
             response_buffer,
         ) catch |failure| return .{ .failure = transportFailure(failure) };

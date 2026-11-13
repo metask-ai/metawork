@@ -20,6 +20,7 @@ pub const Transport = metask_client_impl.Transport;
 pub const TransportRequest = metask_client_impl.Request;
 pub const TransportResponse = metask_client_impl.Response;
 pub const TransportError = metask_client_impl.TransportError;
+pub const retireNothing = metask_client_impl.retireNothing;
 pub const SummaryCompletion = summary_impl.Completion;
 
 test {

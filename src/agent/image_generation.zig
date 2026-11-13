@@ -130,6 +130,8 @@ pub const CredentialReader = struct {
 
 pub const BindingInput = struct {
     endpoint: []const u8,
+    /// Models execution source; isolates connection reuse only.
+    source: []const u8,
     model: []const u8,
     credential: []const u8,
     credential_reader: ?CredentialReader = null,
@@ -138,6 +140,7 @@ pub const BindingInput = struct {
 
 pub const OwnedBinding = struct {
     endpoint: []u8,
+    source: []u8,
     model: []u8,
     credential: []u8,
     credential_reader: ?CredentialReader = null,
@@ -154,21 +157,25 @@ pub const OwnedBinding = struct {
     }
 
     fn copy(allocator: std.mem.Allocator, input: BindingInput) !OwnedBinding {
-        if (input.model.len == 0 or input.model.len > 256 or !std.unicode.utf8ValidateSlice(input.model) or
+        if (input.source.len == 0 or input.source.len > 256 or
+            input.model.len == 0 or input.model.len > 256 or !std.unicode.utf8ValidateSlice(input.model) or
             input.credential.len == 0 or input.credential.len > 4096 or
             std.mem.indexOfAny(u8, input.credential, "\r\n\x00") != null) return error.InvalidBinding;
         for (input.model) |byte| if (std.ascii.isControl(byte)) return error.InvalidBinding;
         const endpoint = try allocator.dupe(u8, input.endpoint);
         errdefer allocator.free(endpoint);
+        const source = try allocator.dupe(u8, input.source);
+        errdefer allocator.free(source);
         const model = try allocator.dupe(u8, input.model);
         errdefer allocator.free(model);
         const credential = try allocator.dupe(u8, input.credential);
-        return .{ .endpoint = endpoint, .model = model, .credential = credential, .credential_reader = input.credential_reader, .output = input.output };
+        return .{ .endpoint = endpoint, .source = source, .model = model, .credential = credential, .credential_reader = input.credential_reader, .output = input.output };
     }
 
     pub fn clone(self: *const OwnedBinding, allocator: std.mem.Allocator) !OwnedBinding {
         return copy(allocator, .{
             .endpoint = self.endpoint,
+            .source = self.source,
             .model = self.model,
             .credential = self.credential,
             .credential_reader = self.credential_reader,
@@ -178,6 +185,7 @@ pub const OwnedBinding = struct {
 
     pub fn deinit(self: *OwnedBinding, allocator: std.mem.Allocator) void {
         allocator.free(self.endpoint);
+        allocator.free(self.source);
         allocator.free(self.model);
         std.crypto.secureZero(u8, self.credential);
         allocator.rawFree(self.credential, .of(u8), @returnAddress());
@@ -286,6 +294,7 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         .body = request,
         // DNS, TCP and TLS share at most 15 s of the call budget.
         .connect_timeout_ms = @min(limits.timeout_ms, 15_000),
+        .source = binding.source,
     }, &call.cancellation, buffer) catch return .{ .failed = .outcome_unknown };
     if (call.cancellation.isRequested()) return .{ .failed = .outcome_unknown };
     if (response.status < 200 or response.status >= 300) return .{ .failed = .provider_rejected };
@@ -367,6 +376,7 @@ test "image credential reader failure never sends the initial credential" {
     const network: http.Transport = .{ .context = &context, .perform_fn = Effects.send };
     var binding = try OwnedBinding.initForTesting(std.testing.allocator, .{
         .endpoint = "http://127.0.0.1:1234/v1/images/generations",
+        .source = "fixture-source",
         .model = "fixture-image",
         .credential = "synthetic-initial-key",
         .credential_reader = .{ .context = &context, .read_fn = Effects.read },
@@ -408,6 +418,7 @@ test "production target structure and isolated fixture admission remain separate
     var context: u8 = 0;
     var input: BindingInput = .{
         .endpoint = "https://images.example.test/v1/images/generations",
+        .source = "fixture-source",
         .model = "fixture-model",
         .credential = "synthetic-secret",
         .output = .{ .context = &context, .commit_fn = Fixture.output },
@@ -492,6 +503,7 @@ test "production image codec delivers a PNG beyond fixture byte limits through a
     const transport: http.Transport = .{ .context = &fixture, .perform_fn = Fixture.fetch };
     var binding = try OwnedBinding.init(allocator, .{
         .endpoint = "https://images.example.test/v1/images/generations",
+        .source = "fixture-source",
         .model = "fixture-model",
         .credential = "synthetic-secret",
         .output = .{ .context = &fixture, .commit_fn = Fixture.output },
@@ -585,7 +597,7 @@ test "post-send cancellation reports unknown and preserves incomplete cleanup fa
     for (std.enums.values(Fixture.Phase)) |phase| {
         var fixture: Fixture = .{ .phase = phase, .body = body };
         const transport: http.Transport = .{ .context = &fixture, .perform_fn = Fixture.fetch };
-        var binding = try OwnedBinding.initForTesting(std.testing.allocator, .{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &fixture, .commit_fn = Fixture.output } });
+        var binding = try OwnedBinding.initForTesting(std.testing.allocator, .{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &fixture, .commit_fn = Fixture.output } });
         defer binding.deinit(std.testing.allocator);
         var call: Call = .{ .cancellation = http.Cancellation.init(transport), .deadline_ns = 0, .io = std.testing.io };
         if (phase == .before_send) call.cancellation.request();

@@ -87,7 +87,7 @@ perform(http_request, cancellation, response_buffer)
     -> { status, body } | TransportError
 ```
 
-`http_request` 携带必填的 `connect_timeout_ms`，约束 DNS、TCP 与 TLS 建立；整次请求仍由调用方的取消约束。与输出预算相同，每个消费者显式提供自己的连接预算，不由 codec 或 Application adapter 私设默认值；`Completion.Request` 在 Transport 前拒绝零值或超过 60 秒的预算。
+`http_request` 携带必填的 `connect_timeout_ms`，约束 DNS、TCP 与 TLS 建立；整次请求仍由调用方的取消约束。与输出预算相同，每个消费者显式提供自己的连接预算，不由 codec 或 Application adapter 私设默认值；`Completion.Request` 在 Transport 前拒绝零值或超过 60 秒的预算。`http_request` 同时携带必填的 `source`，即所绑定的 `provider_id`，只用于 Application 的连接复用隔离，不进入 HTTP 请求，codec 从类型上不可见。
 
 Application 的 Completion adapter 通过共享 HTTP 执行层完成一次请求：
 

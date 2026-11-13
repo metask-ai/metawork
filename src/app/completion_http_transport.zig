@@ -20,6 +20,7 @@ pub const Backend = struct {
         if (request.connect_timeout_ms == 0) return error.InvalidHttp;
         const result = self.http.run(.{
             .consumer = .completion,
+            .isolation = .of(.completion_source, request.source),
             // Consumers bound the whole request by cancellation.
             .budget = .{ .connect = .fromMilliseconds(request.connect_timeout_ms) },
             .cancellation = .atomic(&cancellation.state),
@@ -99,7 +100,7 @@ test "Completion HTTP registration failure settles an already started request" {
         var backend: Backend = .{ .http = &engine };
         var cancellation = agent.CompletionCancellation.init(backend.transport());
         var buffer: [32]u8 = undefined;
-        try std.testing.expectError(error.ResourceLimit, backend.transport().perform(.{ .url = "https://completion.invalid/messages", .headers = &.{}, .body = "fixture", .connect_timeout_ms = 5_000 }, &cancellation, &buffer));
+        try std.testing.expectError(error.ResourceLimit, backend.transport().perform(.{ .url = "https://completion.invalid/messages", .headers = &.{}, .body = "fixture", .connect_timeout_ms = 5_000, .source = "fixture-source" }, &cancellation, &buffer));
     }
 }
 
@@ -142,7 +143,7 @@ test "Completion lost response is a read failure after one POST" {
     defer std.testing.allocator.free(url);
     var cancellation = agent.CompletionCancellation.init(backend.transport());
     var output: [8]u8 = undefined;
-    const result = backend.transport().perform(.{ .url = url, .headers = &.{}, .body = "{}", .connect_timeout_ms = 5_000 }, &cancellation, &output);
+    const result = backend.transport().perform(.{ .url = url, .headers = &.{}, .body = "{}", .connect_timeout_ms = 5_000, .source = "fixture-source" }, &cancellation, &output);
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expect(server.received);
@@ -207,7 +208,7 @@ test "Completion blocked streamed GET neither blocks another request nor outlive
     var held_output: [8]u8 = undefined;
     var held = try std.testing.io.concurrent(Backend.perform, .{
         @as(?*anyopaque, &backend),
-        @as(agent.CompletionHttpRequest, .{ .method = .get, .url = url, .headers = &.{}, .body = "", .stream = .{ .context = &stream, .receive_fn = Stream.receive }, .connect_timeout_ms = 5_000 }),
+        @as(agent.CompletionHttpRequest, .{ .method = .get, .url = url, .headers = &.{}, .body = "", .stream = .{ .context = &stream, .receive_fn = Stream.receive }, .connect_timeout_ms = 5_000, .source = "fixture-source" }),
         &cancellation,
         &held_output,
     });
@@ -218,7 +219,7 @@ test "Completion blocked streamed GET neither blocks another request nor outlive
     stream.entered.waitUncancelable(std.testing.io);
     var other_cancellation = agent.CompletionCancellation.init(backend.transport());
     var output: [8]u8 = undefined;
-    const other = try backend.transport().perform(.{ .method = .get, .url = url, .headers = &.{}, .body = "", .connect_timeout_ms = 5_000 }, &other_cancellation, &output);
+    const other = try backend.transport().perform(.{ .method = .get, .url = url, .headers = &.{}, .body = "", .connect_timeout_ms = 5_000, .source = "fixture-source" }, &other_cancellation, &output);
     try std.testing.expectEqualStrings("{}", other.body);
     try std.testing.expect(!stream.returned.load(.acquire));
     cancellation.request();

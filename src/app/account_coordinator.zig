@@ -272,6 +272,7 @@ fn testingTransport() account_api.Transport {
     return .{
         .context = &testing_transport_context,
         .perform_fn = testingPerform,
+        .retire_fn = account_api.retireNothing,
     };
 }
 
@@ -302,7 +303,7 @@ const SummaryTransport = struct {
     history_request_count: usize = 0,
 
     fn port(self: *SummaryTransport) account_api.Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = account_api.retireNothing };
     }
 
     fn perform(
@@ -911,7 +912,7 @@ const ClosingRefreshTransport = struct {
     observed_cancel: bool = false,
 
     fn port(self: *@This()) account_api.Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = account_api.retireNothing };
     }
     fn perform(context: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
         const self: *@This() = @ptrCast(@alignCast(context));

@@ -15,6 +15,10 @@ pub const RequestKind = enum {
 
 pub const Request = struct {
     kind: RequestKind,
+    /// Account principal the request acts for; null before the identity is
+    /// established (authorization-code exchange and its first userinfo).
+    /// Application isolates connection reuse by it.
+    principal: ?[]const u8,
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
     control: ?RequestControl = null,

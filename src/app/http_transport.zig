@@ -44,6 +44,35 @@ pub const Cancellation = struct {
     }
 };
 
+/// The business owner's identity for connection reuse. Reuse is keyed by
+/// origin, TLS configuration and this identity, never by token, path, query,
+/// headers or body, so credential rotation keeps reuse. Only the digest of the
+/// identity is retained.
+pub const Isolation = struct {
+    namespace: Namespace,
+    digest: [32]u8,
+
+    /// Distinct owners never share a connection even for equal identities.
+    pub const Namespace = enum(u8) { public, metask_account, mcp_server, mcp_draft, completion_source };
+
+    /// Credential-free endpoints owned by Application, such as updates.
+    pub const public: Isolation = .{ .namespace = .public, .digest = @splat(0) };
+
+    pub fn of(namespace: Namespace, identity: []const u8) Isolation {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, @intCast(identity.len), .little);
+        hash.update(&.{@intFromEnum(namespace)});
+        hash.update(&length);
+        hash.update(identity);
+        return .{ .namespace = namespace, .digest = hash.finalResult() };
+    }
+
+    pub fn eql(a: Isolation, b: Isolation) bool {
+        return a.namespace == b.namespace and std.mem.eql(u8, &a.digest, &b.digest);
+    }
+};
+
 /// Every caller bounds connection establishment explicitly.
 pub const Budget = union(enum) {
     /// Absolute end of the whole call, including DNS, TCP and TLS.
@@ -55,6 +84,7 @@ pub const Budget = union(enum) {
 
 pub const Control = struct {
     consumer: Consumer,
+    isolation: Isolation,
     budget: Budget,
     cancellation: ?Cancellation = null,
     /// Only an HTTP response to a server request on an already-held MCP stream.
@@ -81,7 +111,7 @@ pub const Engine = struct {
     const slot_count = request_limit + continuation_limit;
     const idle_seconds = 30;
     const lifetime_seconds = 300;
-    /// Idle connections kept per origin across scopes. Two covers the usual
+    /// Idle connections kept per origin across isolations. Two covers the usual
     /// concurrency per origin (for example Account with Models on Metask, or a
     /// title with a permission review) without one origin filling every slot.
     const origin_idle_limit = 2;
@@ -100,7 +130,9 @@ pub const Engine = struct {
     const Slot = struct {
         client: Client,
         busy: bool = false,
-        scope: [32]u8 = @splat(0),
+        isolation: Isolation = .public,
+        /// The owner retired this isolation while the slot was busy.
+        retire_on_release: bool = false,
         created: Io.Clock.Timestamp = undefined,
         idle: Io.Clock.Timestamp = undefined,
         ca_scanned: ?Io.Clock.Timestamp = null,
@@ -176,13 +208,19 @@ pub const Engine = struct {
             self.mutex.lockUncancelable(self.io);
             self.active[lane] -= 1;
             var surplus: ?*Slot = null;
+            var retired: ?*Slot = null;
             if (operation.slot) |slot| {
                 std.debug.assert(slot.client.connection_pool.used.first == null);
                 slot.idle = .now(self.io, .awake);
-                if (slot.idleConnection() != null) surplus = self.originSurplus(slot);
-                slot.busy = false;
+                if (slot.retire_on_release) {
+                    slot.retire_on_release = false;
+                    if (slot.idleConnection() != null) retired = slot;
+                } else if (slot.idleConnection() != null) surplus = self.originSurplus(slot);
+                // A retired slot stays busy until evict closes its connection.
+                if (retired == null) slot.busy = false;
             }
             self.mutex.unlock(self.io);
+            if (retired) |slot| self.evict(slot);
             if (surplus) |victim| self.evict(victim);
         }
         var storage: [3]Outcome = undefined;
@@ -222,7 +260,7 @@ pub const Engine = struct {
 
     /// An exact idle match (most recently used first), else a slot without an
     /// idle connection, else the least recently used idle slot, expired first.
-    fn lease(self: *Engine, criteria: Client.ConnectionPool.Criteria, scope: [32]u8) Lease {
+    fn lease(self: *Engine, criteria: Client.ConnectionPool.Criteria, isolation: Isolation) Lease {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const now: Io.Clock.Timestamp = .now(self.io, .awake);
@@ -236,7 +274,7 @@ pub const Engine = struct {
                 continue;
             };
             const stale = slot.expired(now);
-            if (!stale and std.mem.eql(u8, &scope, &slot.scope) and Slot.sameOrigin(connection, criteria.protocol, criteria.port, criteria.host)) {
+            if (!stale and isolation.eql(slot.isolation) and Slot.sameOrigin(connection, criteria.protocol, criteria.port, criteria.host)) {
                 if (exact == null or slot.idle.raw.nanoseconds > exact.?.idle.raw.nanoseconds) exact = slot;
             }
             if (oldest) |current| {
@@ -246,7 +284,31 @@ pub const Engine = struct {
         }
         const chosen: Lease = if (exact) |slot| .{ .slot = slot, .reuse = true } else .{ .slot = empty orelse oldest.?, .reuse = false }; // admission reserves a slot per call
         chosen.slot.busy = true;
+        // Under the mutex, so a concurrent retire sees the new owner.
+        chosen.slot.isolation = isolation;
         return chosen;
+    }
+
+    /// Closes idle connections of this isolation now; one in use closes when
+    /// its request ends. Owners call this when the identity stops being valid.
+    pub fn retire(self: *Engine, isolation: Isolation) void {
+        var idle: [slot_count]*Slot = undefined;
+        var count: usize = 0;
+        {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            for (&self.slots) |*slot| {
+                if (!slot.isolation.eql(isolation)) continue;
+                if (slot.busy) {
+                    slot.retire_on_release = true;
+                } else if (slot.idleConnection() != null) {
+                    slot.busy = true;
+                    idle[count] = slot;
+                    count += 1;
+                }
+            }
+        }
+        for (idle[0..count]) |slot| self.evict(slot);
     }
 
     /// Caller holds the mutex. Returns the oldest other idle connection of the
@@ -386,8 +448,6 @@ pub const Operation = struct {
     pub const Options = struct {
         headers: []const std.http.Header = &.{},
         standard_headers: Client.Request.Headers = .{},
-        /// Credentials in an OAuth body also partition reuse. Never retained.
-        credential_scope: []const u8 = "",
     };
 
     pub fn open(self: *Operation, method: std.http.Method, uri: std.Uri, options: Options) Error!Request {
@@ -397,38 +457,15 @@ pub const Operation = struct {
         if (uri.user != null or uri.password != null) return self.fail(error.InvalidRequest);
         var host_storage: [Io.net.HostName.max_len]u8 = undefined;
         const host = uri.getHost(&host_storage) catch return self.fail(error.InvalidRequest);
-        var scope_hash = std.crypto.hash.sha2.Sha256.init(.{});
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&scope_hash));
-        // Some integrations put credentials in the path or query. Partition by
-        // the request target as well as headers without retaining those bytes.
-        switch (uri.path) {
-            inline else => |bytes| hashField(&scope_hash, bytes),
-        }
-        if (uri.query) |query| switch (query) {
-            inline else => |bytes| hashField(&scope_hash, bytes),
-        };
         for (options.headers) |header| {
             if (header.name.len == 0 or std.mem.indexOfAny(u8, header.name, "\r\n:") != null or std.mem.indexOfAny(u8, header.value, "\r\n") != null) return self.fail(error.InvalidRequest);
-            hashField(&scope_hash, header.name);
-            hashField(&scope_hash, header.value);
         }
-        inline for (@typeInfo(Client.Request.Headers).@"struct".fields) |field| {
-            const value = @field(options.standard_headers, field.name);
-            hashField(&scope_hash, field.name);
-            switch (value) {
-                .default => hashField(&scope_hash, "default"),
-                .omit => hashField(&scope_hash, "omit"),
-                .override => |bytes| {
-                    if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return self.fail(error.InvalidRequest);
-                    hashField(&scope_hash, "override");
-                    hashField(&scope_hash, bytes);
-                },
-            }
-        }
-        hashField(&scope_hash, options.credential_scope);
-        const scope = scope_hash.finalResult();
+        inline for (@typeInfo(Client.Request.Headers).@"struct".fields) |field| switch (@field(options.standard_headers, field.name)) {
+            .default, .omit => {},
+            .override => |bytes| if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return self.fail(error.InvalidRequest),
+        };
         const criteria: Client.ConnectionPool.Criteria = .{ .host = host, .port = uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), .protocol = protocol };
-        const lease = self.engine.lease(criteria, scope);
+        const lease = self.engine.lease(criteria, self.control.isolation);
         const slot = lease.slot;
         self.slot = slot;
         const client = &slot.client;
@@ -441,7 +478,6 @@ pub const Operation = struct {
                 self.reused = true;
             } else dispose(candidate);
         } else Engine.discardIdle(slot);
-        slot.scope = scope;
         if (connection == null) {
             if (protocol == .tls) try self.refreshTls(slot);
             connection = try self.connect(client, criteria);
@@ -749,13 +785,6 @@ pub const Request = struct {
 fn dispose(connection: *Client.Connection) void {
     connection.closing = true;
     connection.client.connection_pool.release(connection, connection.client.io);
-}
-
-fn hashField(hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
-    var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, @intCast(bytes.len), .little);
-    hash.update(&length);
-    hash.update(bytes);
 }
 
 test {

@@ -169,6 +169,7 @@ pub const CatalogSession = struct {
             self.allocator,
             transport,
             oauth_access_token,
+            validated_account_id.view(),
             control,
             &self.last_http_status,
         );
@@ -530,6 +531,7 @@ fn fetchModels(
     allocator: std.mem.Allocator,
     transport: transport_api.Transport,
     access_token: []const u8,
+    principal: []const u8,
     control: ?transport_api.RequestControl,
     status_out: *u16,
 ) Error!ParsedModels {
@@ -543,6 +545,7 @@ fn fetchModels(
     }
     const response = transport.perform(.{
         .kind = .models,
+        .principal = principal,
         .bearer = access_token,
         .control = control,
     }, response_buffer) catch |err| return transportError(err);
