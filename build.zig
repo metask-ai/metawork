@@ -253,6 +253,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
         .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.oauth_loopback_transport, "app_select_start") },
         .{ .name = "metawork-http-memory", .root_module = existingImport(test_modules.app, "app_http_memory") },
+        .{ .name = "metawork-http-transport", .root_module = existingImport(test_modules.app, "app_http_transport") },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
         .{ .name = "metawork-product-models-metask", .root_module = test_modules.models_metask },
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
@@ -356,6 +357,8 @@ pub fn build(b: *std.Build) void {
             b.step("test-oauth-loopback-transport", "Run real OAuth callback concurrency and cancellation tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == existingImport(test_modules.oauth_loopback_transport, "app_select_start"))
             b.step("test-select-start", "Run partial Select registration cleanup tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == existingImport(test_modules.app, "app_http_transport"))
+            b.step("test-http-transport", "Run shared HTTP execution and resource tests").dependOn(&b.addRunArtifact(tests).step);
     }
     const projection_performance_module = b.createModule(.{
         .root_source_file = b.path("tests/product/projection_performance_test.zig"),
@@ -1595,6 +1598,12 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const app_http_transport = b.createModule(.{
+        .root_source_file = b.path("src/app/http_transport.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app_http_transport.addImport("app_http_memory", app_http_memory);
     oauth_loopback_transport.addImport("app_select_start", app_select_start);
     oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
     const metask_transport = b.createModule(.{
@@ -2536,6 +2545,7 @@ fn wireAgentCore(
     app.addImport("oauth_loopback_transport", oauth_loopback_transport);
     app.addImport("app_select_start", app_select_start);
     app.addImport("app_http_memory", app_http_memory);
+    app.addImport("app_http_transport", app_http_transport);
     app.addImport("account_ports", account_ports);
     app.addImport("account_credential_store", account_credential_store);
     app.addImport("metask_client", metask_client);
