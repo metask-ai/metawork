@@ -1,4 +1,5 @@
 const std = @import("std");
+const http_memory = @import("app_http_memory");
 const select_start = @import("app_select_start");
 const oauth = @import("account_oauth");
 const account_metask = @import("metask_client");
@@ -153,8 +154,9 @@ pub const Adapter = struct {
         response_buffer: []u8,
         send_started: *bool,
     ) FetchResult {
+        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
         var client: std.http.Client = .{
-            .allocator = self.allocator,
+            .allocator = memory.allocator(),
             .io = self.io,
         };
         defer client.deinit();

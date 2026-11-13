@@ -3,6 +3,7 @@
 //! Workbench remains the owner of durable product state and operation markers.
 
 const std = @import("std");
+const http_memory = @import("app_http_memory");
 const select_start = @import("app_select_start");
 const oauth_mechanics = @import("oauth_mechanics");
 const oauth_loopback = @import("oauth_loopback");
@@ -271,7 +272,8 @@ pub const StdHttpTransport = struct {
         send_started: *bool,
     ) FetchError!Response {
         if (!validHttpsUrl(request.url)) return error.InvalidResponse;
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
+        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
+        var client: std.http.Client = .{ .allocator = memory.allocator(), .io = self.io };
         defer client.deinit();
         return fetchWithClient(&client, request, body_buffer, header_buffer, send_started);
     }

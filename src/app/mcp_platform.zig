@@ -3,6 +3,7 @@
 //! preauthorized HTTP transport owners. It does not interpret MCP payloads.
 
 const std = @import("std");
+const http_memory = @import("app_http_memory");
 const select_start = @import("app_select_start");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
@@ -1803,7 +1804,8 @@ const HttpContext = struct {
         request_value: agent.McpHttpRequest,
         sink: *const agent.McpHttpResponseSink,
     ) FetchFailure!void {
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
+        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
+        var client: std.http.Client = .{ .allocator = memory.allocator(), .io = self.io };
         defer client.deinit();
         var authorization_lease = if (self.authorization) |authorization|
             authorization.lease()

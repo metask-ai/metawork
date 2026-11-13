@@ -1,6 +1,7 @@
 //! Application-owned, unauthenticated update HTTP. Production endpoints are
 //! selected by Product policy; this adapter never follows redirects or saves a package.
 const std = @import("std");
+const http_memory = @import("app_http_memory");
 const select_start = @import("app_select_start");
 const update = @import("metawork_product_update");
 
@@ -77,7 +78,8 @@ pub const Adapter = struct {
     }
 
     fn fetch(self: *Adapter, url: []const u8, head: bool, output: []u8) Fetch {
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
+        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
+        var client: std.http.Client = .{ .allocator = memory.allocator(), .io = self.io };
         defer client.deinit();
         return fetchHttp(&client, url, head, output);
     }

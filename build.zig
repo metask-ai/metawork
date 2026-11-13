@@ -252,6 +252,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
         .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
         .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.oauth_loopback_transport, "app_select_start") },
+        .{ .name = "metawork-http-memory", .root_module = existingImport(test_modules.app, "app_http_memory") },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
         .{ .name = "metawork-product-models-metask", .root_module = test_modules.models_metask },
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
@@ -460,6 +461,7 @@ pub fn build(b: *std.Build) void {
     const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     review_http_backend.addImport("metawork_agent", modules.agent);
     review_http_backend.addImport("app_select_start", existingImport(modules.oauth_loopback_transport, "app_select_start"));
+    review_http_backend.addImport("app_http_memory", existingImport(modules.app, "app_http_memory"));
     const completion_http_tests = b.addRunArtifact(b.addTest(.{ .root_module = review_http_backend }));
     b.step("test-completion-http-transport", "Run Completion HTTP registration and cancellation tests").dependOn(&completion_http_tests.step);
     artifacts.tests.step.dependOn(&completion_http_tests.step);
@@ -1188,6 +1190,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     const backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     backend.addImport("metawork_agent", modules.agent);
     backend.addImport("app_select_start", existingImport(modules.oauth_loopback_transport, "app_select_start"));
+    backend.addImport("app_http_memory", existingImport(modules.app, "app_http_memory"));
     const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
@@ -1584,6 +1587,11 @@ fn wireAgentCore(
     });
     const app_select_start = b.createModule(.{
         .root_source_file = b.path("src/app/select_start.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const app_http_memory = b.createModule(.{
+        .root_source_file = b.path("src/app/http_memory.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -2438,6 +2446,7 @@ fn wireAgentCore(
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
     mcp_platform.addImport("app_select_start", app_select_start);
+    mcp_platform.addImport("app_http_memory", app_http_memory);
     const mcp_process_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/mcp_process.zig"),
         .target = target,
@@ -2463,6 +2472,7 @@ fn wireAgentCore(
     });
     mcp_oauth.addImport("oauth_mechanics", oauth_mechanics);
     mcp_oauth.addImport("app_select_start", app_select_start);
+    mcp_oauth.addImport("app_http_memory", app_http_memory);
     mcp_oauth.addImport("oauth_loopback", oauth_loopback);
     mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
@@ -2525,6 +2535,7 @@ fn wireAgentCore(
     app.addImport("account_loopback", account_loopback);
     app.addImport("oauth_loopback_transport", oauth_loopback_transport);
     app.addImport("app_select_start", app_select_start);
+    app.addImport("app_http_memory", app_http_memory);
     app.addImport("account_ports", account_ports);
     app.addImport("account_credential_store", account_credential_store);
     app.addImport("metask_client", metask_client);

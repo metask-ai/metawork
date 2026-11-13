@@ -1,6 +1,7 @@
 //! Application-owned HTTP/TLS effect for Agent requests.
 
 const std = @import("std");
+const http_memory = @import("app_http_memory");
 const agent = @import("metawork_agent");
 const select_start = @import("app_select_start");
 
@@ -92,8 +93,9 @@ pub const Backend = struct {
             headers[index] = .{ .name = header.name, .value = header.value };
         }
         var response_writer = std.Io.Writer.fixed(response_buffer);
+        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
         var client: std.http.Client = .{
-            .allocator = self.allocator,
+            .allocator = memory.allocator(),
             .io = self.io,
         };
         defer client.deinit();
