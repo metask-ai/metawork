@@ -2806,6 +2806,7 @@ pub const Runtime = struct {
             return true;
         }
         const record = self.retainedInputRecord(task_id, operation_id) orelse return false;
+        if (record.retry_text == null) return false;
         self.releaseAdditionalRetryText(record);
         return true;
     }
@@ -3162,19 +3163,22 @@ pub const Runtime = struct {
         record.retry_text = null;
     }
 
-    /// Text a mutation retired and kept for one explicit resend.
-    pub const RetainedInput = struct { text: []const u8, retried_as: ?Submission };
+    /// Text a mutation retired and kept for one explicit resend. `text` is
+    /// empty once the resend has been accepted; `retried_as` then identifies it.
+    pub const RetainedInput = struct { text: ?[]const u8, retried_as: ?Submission };
 
     pub fn retainedInputForRetry(self: *Runtime, task_id: u64, operation_id: []const u8) ?RetainedInput {
         const record = self.retainedInputRecord(task_id, operation_id) orelse return null;
-        return .{ .text = record.retry_text.?, .retried_as = record.retried_as };
+        return .{ .text = record.retry_text, .retried_as = record.retried_as };
     }
 
+    /// An accepted resend keeps the record reachable, so a repeated command
+    /// answers with the submission it already produced.
     fn retainedInputRecord(self: *Runtime, task_id: u64, operation_id: []const u8) ?*task_state.AdditionalInput {
         const task = self.find(task_id) orelse return null;
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
             for (run.additional_inputs) |*input| if (input.*) |*record| {
-                if (record.retry_text == null) continue;
+                if (record.retry_text == null and record.retried_as == null) continue;
                 if (std.mem.eql(u8, record.operationId(), operation_id)) return record;
             };
         };

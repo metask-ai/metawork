@@ -4330,7 +4330,7 @@ pub const Runtime = struct {
         } else if (self.task_runtime.retainedInputForRetry(task_id, original)) |retained| {
             // A batch a Task mutation retired resends through the same surface.
             retried_as = retained.retried_as;
-            retained_input = .{ .text = retained.text };
+            if (retained.text) |text| retained_input = .{ .text = text };
         } else return result;
         if (retried_as) |existing| {
             result.operation_id = existing.operation_id;

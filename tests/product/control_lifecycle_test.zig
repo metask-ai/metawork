@@ -11332,6 +11332,13 @@ test "an approval mode change across the full access boundary keeps queued input
         const waiting = task.input_submissions.items[0];
         try std.testing.expect(waiting.force_new_run);
         try std.testing.expectEqualStrings("resent-batch", waiting.submission.operationId());
+        // An unknown response may repeat the command; it answers with the
+        // submission the first one produced instead of sending again.
+        const repeated = try scenario.control.retryTaskInput(scenario.task_id, "retired-batch", "resent-again");
+        try std.testing.expectEqual(.accepted, repeated.outcome);
+        try std.testing.expectEqualStrings("resent-batch", repeated.operationId());
+        try std.testing.expectEqual(@as(usize, 1), task.input_submissions.items.len);
+        try std.testing.expect(!scenario.control.discardTaskInputRetry(scenario.task_id, "retired-batch"));
     }
 }
 
