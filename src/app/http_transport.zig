@@ -97,6 +97,9 @@ pub fn Result(comptime T: type) type {
         send: Send,
         /// The request was attempted on a pooled idle connection.
         reused: bool = false,
+        /// That attempt failed safely and the request ran once more on a new
+        /// connection. Implies `reused`.
+        retried: bool = false,
     };
 }
 
@@ -133,6 +136,10 @@ pub const Engine = struct {
         isolation: Isolation = .public,
         /// The owner retired this isolation while the slot was busy.
         retire_on_release: bool = false,
+        /// A socket write of the current request returned success.
+        wrote: bool = false,
+        socket_writes: *const Io.Writer.VTable = undefined,
+        watched_writes: Io.Writer.VTable = undefined,
         created: Io.Clock.Timestamp = undefined,
         idle: Io.Clock.Timestamp = undefined,
         ca_scanned: ?Io.Clock.Timestamp = null,
@@ -189,10 +196,10 @@ pub const Engine = struct {
             // Only typed facts. No endpoint, headers, payload or backend message.
             // Connection attempts are counts only: never addresses or hosts.
             const attempts = &operation.attempts;
-            std.log.warn("http id={d} consumer={s} phase={s} cause={s} send={s} reused={} elapsed_ms={d} addresses={d} attempted={d} tls={d} connect={d} capped={d}", .{
-                id,                                @tagName(control.consumer),                     @tagName(operation.phase), @errorName(err),                     @tagName(operation.sendFact()),
-                operation.reused,                  started.untilNow(self.io).raw.toMilliseconds(), attempts.addresses,        attempts.attempted.load(.monotonic), attempts.tls.load(.monotonic),
-                attempts.connect.load(.monotonic), attempts.capped.load(.monotonic),
+            std.log.warn("http id={d} consumer={s} phase={s} cause={s} send={s} reused={} retried={} elapsed_ms={d} addresses={d} attempted={d} tls={d} connect={d} capped={d}", .{
+                id,                            @tagName(control.consumer),        @tagName(operation.phase),                      @errorName(err),    @tagName(operation.sendFact()),
+                operation.reused,              operation.retried,                 started.untilNow(self.io).raw.toMilliseconds(), attempts.addresses, attempts.attempted.load(.monotonic),
+                attempts.tls.load(.monotonic), attempts.connect.load(.monotonic), attempts.capped.load(.monotonic),
             });
         };
         operation.check() catch |err| return .{ .outcome = .{ .failed = err }, .send = .not_sent };
@@ -243,6 +250,7 @@ pub const Engine = struct {
         const result: Result(T) = .{
             .send = operation.sendFact(),
             .reused = operation.reused,
+            .retried = operation.retried,
             .outcome = switch (selected) {
                 .failed => |err| .{ .failed = err },
                 .value => |value| switch (value) {
@@ -354,6 +362,7 @@ pub const Operation = struct {
     phase: Phase = .admission,
     failure: ?Error = null,
     reused: bool = false,
+    retried: bool = false,
     /// End of DNS, TCP and TLS: the deadline, or admission plus the connect budget.
     connect_end: Io.Clock.Timestamp,
     /// 0 establishing, 1 established in time, 2 connect budget expired first.
@@ -448,6 +457,10 @@ pub const Operation = struct {
     pub const Options = struct {
         headers: []const std.http.Header = &.{},
         standard_headers: Client.Request.Headers = .{},
+        /// Whether a reused connection that failed before any response byte
+        /// may resend this request; null means GET and HEAD only. POST is
+        /// never replayable.
+        replayable: ?bool = null,
     };
 
     pub fn open(self: *Operation, method: std.http.Method, uri: std.Uri, options: Options) Error!Request {
@@ -460,6 +473,8 @@ pub const Operation = struct {
         for (options.headers) |header| {
             if (header.name.len == 0 or std.mem.indexOfAny(u8, header.name, "\r\n:") != null or std.mem.indexOfAny(u8, header.value, "\r\n") != null) return self.fail(error.InvalidRequest);
         }
+        const replayable = options.replayable orelse (method == .GET or method == .HEAD);
+        if (method == .POST and replayable) return self.fail(error.InvalidRequest);
         inline for (@typeInfo(Client.Request.Headers).@"struct".fields) |field| switch (@field(options.standard_headers, field.name)) {
             .default, .omit => {},
             .override => |bytes| if (std.mem.indexOfAny(u8, bytes, "\r\n") != null) return self.fail(error.InvalidRequest),
@@ -485,9 +500,20 @@ pub const Operation = struct {
         }
         errdefer dispose(connection.?);
         if (!self.established()) return self.fail(error.Cancelled);
+        watchWrites(slot, connection.?);
         try self.check();
-        const raw = client.request(method, uri, .{ .connection = connection, .redirect_behavior = .unhandled, .extra_headers = options.headers, .headers = options.standard_headers }) catch |err| return self.fail(if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRequest);
-        return .{ .operation = self, .raw = raw };
+        return .{
+            .operation = self,
+            .raw = try self.request(client, connection.?, method, uri, options),
+            .method = method,
+            .uri = uri,
+            .options = options,
+            .replayable = replayable,
+        };
+    }
+
+    fn request(self: *Operation, client: *Client, connection: *Client.Connection, method: std.http.Method, uri: std.Uri, options: Options) Error!Client.Request {
+        return client.request(method, uri, .{ .connection = connection, .redirect_behavior = .unhandled, .extra_headers = options.headers, .headers = options.standard_headers }) catch |err| return self.fail(if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRequest);
     }
 
     /// Every new TLS connection validates certificates against the current
@@ -567,12 +593,14 @@ pub const Operation = struct {
         return count;
     }
 
+    /// A retry has its own establishment window. Under a connect budget the
+    /// budget waiter has already let go, so every attempt is capped instead.
     fn connect(self: *Operation, client: *Client, criteria: Client.ConnectionPool.Criteria) Error!*Client.Connection {
         var addresses: [16]Io.net.IpAddress = undefined;
         const count = try self.resolve(criteria.host, criteria.port, &addresses);
         self.phase = .connect;
         self.attempts.addresses = count;
-        var race: ConnectRace = .{ .operation = self, .client = client, .criteria = criteria, .addresses = addresses[0..count] };
+        var race: ConnectRace = .{ .operation = self, .client = client, .criteria = criteria, .addresses = addresses[0..count], .end = self.connect_end, .cap_last = self.retried and self.control.budget == .connect };
         var storage: [ConnectRace.lanes]ConnectRace.Outcome = undefined;
         var selection: Io.Select(ConnectRace.Outcome) = .init(self.io(), &storage);
         defer {
@@ -615,6 +643,9 @@ const ConnectRace = struct {
     client: *Client,
     criteria: Client.ConnectionPool.Criteria,
     addresses: []const Io.net.IpAddress,
+    end: Io.Clock.Timestamp,
+    /// Without a waiter on the budget, the last attempt is capped as well.
+    cap_last: bool,
     mutex: Io.Mutex = .init,
     next: usize = 0,
     last_start: ?Io.Clock.Timestamp = null,
@@ -639,9 +670,11 @@ const ConnectRace = struct {
     /// Shares the remaining budget among the addresses not yet started, with a
     /// two-second floor; never more than what remains.
     fn cap(self: *const ConnectRace, io: Io, index: usize) ?Io.Duration {
-        if (index + 1 == self.addresses.len) return null;
-        const remaining = self.operation.connect_end.durationFromNow(io).raw.nanoseconds;
+        const last = index + 1 == self.addresses.len;
+        if (last and !self.cap_last) return null;
+        const remaining = self.end.durationFromNow(io).raw.nanoseconds;
         if (remaining <= 0) return .fromNanoseconds(0);
+        if (last) return .fromNanoseconds(remaining);
         const share = @divTrunc(remaining, @as(i96, @intCast(self.addresses.len - index)));
         return .fromNanoseconds(@min(remaining, @max(share, minimum_attempt.nanoseconds)));
     }
@@ -728,6 +761,12 @@ pub const Request = struct {
     operation: *Operation,
     raw: Client.Request,
     received: bool = false,
+    method: std.http.Method,
+    uri: std.Uri,
+    options: Operation.Options,
+    replayable: bool,
+    /// Borrowed from the caller and kept only for a single retry.
+    body: ?[]const u8 = null,
 
     pub fn deinit(self: *Request) void {
         const connection = self.raw.connection.?;
@@ -742,21 +781,84 @@ pub const Request = struct {
 
     pub fn send(self: *Request, body: ?[]const u8) Error!void {
         try self.operation.admitSend();
-        if (body) |bytes| {
+        self.body = body;
+        self.write() catch {
+            if (!self.retryAllowed(.send, error.WriteFailed)) return self.operation.fail(error.WriteFailed);
+            try self.retry();
+            self.write() catch return self.operation.fail(error.WriteFailed);
+        };
+    }
+
+    fn write(self: *Request) error{WriteFailed}!void {
+        self.operation.slot.?.wrote = false;
+        if (self.body) |bytes| {
             self.raw.transfer_encoding = .{ .content_length = bytes.len };
-            var writer = self.raw.sendBodyUnflushed(&.{}) catch return self.operation.fail(error.WriteFailed);
-            writer.writer.writeAll(bytes) catch return self.operation.fail(error.WriteFailed);
-            writer.end() catch return self.operation.fail(error.WriteFailed);
-            self.raw.connection.?.flush() catch return self.operation.fail(error.WriteFailed);
-        } else self.raw.sendBodiless() catch return self.operation.fail(error.WriteFailed);
+            var writer = try self.raw.sendBodyUnflushed(&.{});
+            try writer.writer.writeAll(bytes);
+            try writer.end();
+            try self.raw.connection.?.flush();
+        } else try self.raw.sendBodiless();
+    }
+
+    /// Only a pooled connection's failure may be retried, once, on a new
+    /// connection, and never for POST: (a) the request wrote nothing to the
+    /// socket, or (b) it is replayable and not one response byte arrived.
+    fn retryAllowed(self: *Request, stage: enum { send, head }, cause: anyerror) bool {
+        const operation = self.operation;
+        if (!operation.reused or operation.retried or self.method == .POST) return false;
+        const connection = self.raw.connection.?;
+        switch (stage) {
+            .send => if (!operation.slot.?.wrote) return true,
+            .head => switch (cause) {
+                // EOF before the first head byte.
+                error.HttpConnectionClosing => {},
+                // A transport reset, not a TLS protocol failure. Windows
+                // reports a reset read as Unexpected.
+                error.ReadFailed => switch (connection.getReadError() orelse return false) {
+                    error.ConnectionResetByPeer, error.Unexpected => {},
+                    else => return false,
+                },
+                else => return false,
+            },
+        }
+        return self.replayable and connection.reader().bufferedLen() == 0;
+    }
+
+    fn retry(self: *Request) Error!void {
+        const operation = self.operation;
+        try operation.check();
+        operation.retried = true;
+        const slot = operation.slot.?;
+        const failed = self.raw.connection.?;
+        self.raw.connection = null;
+        self.raw.deinit();
+        dispose(failed);
+        var host_storage: [Io.net.HostName.max_len]u8 = undefined;
+        const host = self.uri.getHost(&host_storage) catch return operation.fail(error.InvalidRequest);
+        const protocol = Client.Protocol.fromUri(self.uri).?;
+        const criteria: Client.ConnectionPool.Criteria = .{ .host = host, .port = self.uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), .protocol = protocol };
+        if (operation.control.budget == .connect) operation.connect_end = Io.Clock.Timestamp.now(operation.io(), .awake).addDuration(.{ .raw = operation.control.budget.connect, .clock = .awake });
+        if (protocol == .tls) try operation.refreshTls(slot);
+        const connection = try operation.connect(&slot.client, criteria);
+        slot.created = .now(operation.io(), .awake);
+        watchWrites(slot, connection);
+        self.raw = operation.request(&slot.client, connection, self.method, self.uri, self.options) catch |err| {
+            dispose(connection);
+            return err;
+        };
+        self.received = false;
+        operation.phase = .send;
     }
 
     pub fn receiveHead(self: *Request) Error!Client.Response {
         self.operation.phase = .head;
-        const response = self.raw.receiveHead(&.{}) catch |err| return self.operation.fail(switch (err) {
-            error.HttpHeadersInvalid, error.HttpHeadersOversize, error.HttpContentEncodingUnsupported => error.InvalidResponse,
-            else => error.ReadFailed,
-        });
+        const response = self.raw.receiveHead(&.{}) catch |err| response: {
+            if (!self.retryAllowed(.head, err)) return self.operation.fail(headError(err));
+            try self.retry();
+            self.write() catch return self.operation.fail(error.WriteFailed);
+            self.operation.phase = .head;
+            break :response self.raw.receiveHead(&.{}) catch |again| return self.operation.fail(headError(again));
+        };
         self.received = true;
         self.operation.phase = .body;
         return response;
@@ -781,6 +883,45 @@ pub const Request = struct {
         return writer.buffered();
     }
 };
+
+fn headError(err: Client.Request.ReceiveHeadError) Error {
+    return switch (err) {
+        error.HttpHeadersInvalid, error.HttpHeadersOversize, error.HttpContentEncodingUnsupported => error.InvalidResponse,
+        else => error.ReadFailed,
+    };
+}
+
+/// std exposes no count of bytes written, so a slot interposes on the socket
+/// writer's drain. Every plain and TLS write passes through it: the TLS client
+/// holds a pointer to this interface and reads its vtable on each call. Tests
+/// fail in both directions if a std change bypasses this.
+fn watchWrites(slot: *Engine.Slot, connection: *Client.Connection) void {
+    const writer = &connection.stream_writer.interface;
+    if (writer.vtable == &slot.watched_writes) return;
+    slot.socket_writes = writer.vtable;
+    slot.watched_writes = writer.vtable.*;
+    slot.watched_writes.drain = watchedDrain;
+    writer.vtable = &slot.watched_writes;
+}
+
+fn watchedDrain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+    const stream: *Io.net.Stream.Writer = @alignCast(@fieldParentPtr("interface", writer));
+    const connection: *Client.Connection = @alignCast(@fieldParentPtr("stream_writer", stream));
+    const slot: *Engine.Slot = @alignCast(@fieldParentPtr("client", connection.client));
+    const buffered = writer.end;
+    const consumed = try slot.socket_writes.drain(writer, data, splat);
+    // drain consumes buffered bytes by lowering `end`, then reports the rest.
+    if (consumed != 0 or writer.end < buffered) slot.wrote = true;
+    return consumed;
+}
+
+comptime {
+    // The write watch depends on these std shapes; a change fails the build.
+    std.debug.assert(@FieldType(Client.Connection, "stream_writer") == Io.net.Stream.Writer);
+    std.debug.assert(@FieldType(Io.net.Stream.Writer, "interface") == Io.Writer);
+    std.debug.assert(@FieldType(Io.Writer, "vtable") == *const Io.Writer.VTable);
+    std.debug.assert(@FieldType(Client, "connection_pool") == Client.ConnectionPool);
+}
 
 fn dispose(connection: *Client.Connection) void {
     connection.closing = true;

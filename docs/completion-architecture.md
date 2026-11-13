@@ -92,7 +92,7 @@ perform(http_request, cancellation, response_buffer)
 Application 的 Completion adapter 通过共享 HTTP 执行层完成一次请求：
 
 - 响应完整写入有界 caller-owned buffer；
-- 多地址连接必须在共享异步额度耗尽时仍能取得进展，单次调用不得隐式重放 HTTP；
+- 多地址连接必须在共享异步额度耗尽时仍能取得进展；POST 从不重放，GET 只在复用连接未收到任何响应字节时换新连接重试一次；
 - 发送许可与取消竞争；返回前等待所有 I/O 和借用回调静止；
 - 执行容量不足归类为资源限制，DNS、连接、TLS 与读写失败保持各自的 typed 原因；
 - 生产 TLS 使用系统 CA，不接受 Completion 自定义证书配置；

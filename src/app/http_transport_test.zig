@@ -66,6 +66,8 @@ const Faults = struct {
     var attempts: std.atomic.Value(usize) = .init(0);
     var late: std.atomic.Value(usize) = .init(0);
     var dns_active: std.atomic.Value(usize) = .init(0);
+    /// The next this many socket writes fail before any byte is accepted.
+    var failing_writes: std.atomic.Value(usize) = .init(0);
     /// Start time of each connection attempt, in attempt order.
     var starts: [8]Io.Clock.Timestamp = undefined;
 
@@ -76,6 +78,16 @@ const Faults = struct {
         attempts.store(0, .monotonic);
         late.store(0, .monotonic);
         dns_active.store(0, .monotonic);
+        failing_writes.store(0, .monotonic);
+    }
+
+    fn write(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
+        while (true) {
+            const pending = failing_writes.load(.acquire);
+            if (pending == 0) break;
+            if (failing_writes.cmpxchgWeak(pending, pending - 1, .acq_rel, .acquire) == null) return error.ConnectionResetByPeer;
+        }
+        return original.vtable.netWrite(userdata, handle, header, data, splat);
     }
 
     fn startedAfter(first: usize, second: usize) i64 {
@@ -263,6 +275,7 @@ fn faultIo(threaded: *Io.Threaded, vtable: *Io.VTable, mode: Faults.Mode) Io {
     vtable.* = threaded.io().vtable.*;
     vtable.netLookup = Faults.lookup;
     vtable.netConnectIp = Faults.connect;
+    vtable.netWrite = Faults.write;
     return .{ .userdata = threaded.io().userdata, .vtable = vtable };
 }
 
@@ -530,12 +543,31 @@ const Pool = struct {
     failure: ?anyerror = null,
     acceptor: ?std.Thread = null,
 
+    const Action = enum {
+        respond,
+        /// Read the request head, then close without any response byte.
+        drop,
+        /// Send part of a response head, then close.
+        truncate,
+    };
+
     const Options = struct {
         /// Exactly how many connections the peer accepts before it stops.
         connections: usize,
         /// The first connection closes right after its first response.
         close_first: bool = false,
+        /// What the peer does with the nth request on the nth connection.
+        action: *const fn (connection: usize, request: usize) Action = respondAlways,
+        /// Sent as the Keep-Alive header of every response.
+        keep_alive: ?[]const u8 = null,
     };
+
+    fn respondAlways(_: usize, _: usize) Action {
+        return .respond;
+    }
+
+    /// Set by a test so the peer cancels the client as it drops a request.
+    var cancel_on_drop: ?*std.atomic.Value(u32) = null;
 
     fn create(options: Options) !*Pool {
         const self = try std.testing.allocator.create(Pool);
@@ -584,11 +616,25 @@ const Pool = struct {
         var reader = stream.reader(std.testing.io, &reads);
         var writer = stream.writer(std.testing.io, &writes);
         var server: std.http.Server = .init(&reader.interface, &writer.interface);
-        while (true) {
+        var served: usize = 0;
+        while (true) : (served += 1) {
             var request = server.receiveHead() catch return;
             const number = self.requests.fetchAdd(1, .acq_rel);
             if (number < self.served_by.len) self.served_by[number] = index;
-            request.respond("{}", .{ .keep_alive = true }) catch return;
+            switch (self.options.action(index, served)) {
+                .respond => {},
+                .drop => {
+                    if (cancel_on_drop) |state| state.store(1, .release);
+                    return;
+                },
+                .truncate => {
+                    writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Le") catch {};
+                    writer.interface.flush() catch {};
+                    return;
+                },
+            }
+            const keep_alive: []const std.http.Header = if (self.options.keep_alive) |value| &.{.{ .name = "Keep-Alive", .value = value }} else &.{};
+            request.respond("{}", .{ .keep_alive = true, .extra_headers = keep_alive }) catch return;
             if (index == 0 and self.options.close_first) return;
         }
     }
@@ -749,6 +795,169 @@ test "HTTP refreshes the TLS clock on every new connection and rescans roots whe
     try std.testing.expect(scanned[2].?.raw.nanoseconds > scanned[1].?.raw.nanoseconds);
     try std.testing.expect(clocks[1].nanoseconds > clocks[0].nanoseconds);
     try std.testing.expect(clocks[2].nanoseconds > clocks[1].nanoseconds);
+}
+
+fn methodFetch(operation: *http.Operation, url: []const u8, method: std.http.Method, output: []u8) http.Error!Reply {
+    var request = try operation.open(method, std.Uri.parse(url) catch return error.InvalidRequest, .{});
+    defer request.deinit();
+    try request.send(if (method == .POST) "body" else null);
+    var response = try request.receiveHead();
+    const bytes = try request.readAll(&response, output);
+    return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
+}
+
+fn runMethod(engine: *http.Engine, url: []const u8, method: std.http.Method) http.Result(http.Error!Reply) {
+    var output: [8]u8 = undefined;
+    return engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, methodFetch, .{ url, method, &output });
+}
+
+/// The pooled connection fails on its second request; later ones respond.
+fn dropSecond(connection: usize, request: usize) Pool.Action {
+    return if (connection == 0 and request == 1) .drop else .respond;
+}
+
+fn truncateSecond(connection: usize, request: usize) Pool.Action {
+    return if (connection == 0 and request == 1) .truncate else .respond;
+}
+
+fn dropAfterFirst(connection: usize, request: usize) Pool.Action {
+    return if (connection == 0 and request == 0) .respond else .drop;
+}
+
+fn dropAlways(_: usize, _: usize) Pool.Action {
+    return .drop;
+}
+
+test "HTTP retries a replayable request once when a pooled connection closes before any response byte" {
+    const pool = try Pool.create(.{ .connections = 2, .action = dropSecond });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    _ = try runMethod(&engine, url, .GET).outcome.completed;
+    const result = runMethod(&engine, url, .GET);
+    try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+    try std.testing.expect(result.reused and result.retried);
+    try std.testing.expectEqual(@as(usize, 3), pool.requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
+}
+
+test "HTTP never retries once response bytes arrived, for POST, or on a new connection" {
+    for ([_]enum { truncated, post, fresh }{ .truncated, .post, .fresh }) |case| {
+        const pool = try Pool.create(.{ .connections = 1, .action = switch (case) {
+            .truncated => truncateSecond,
+            .post => dropSecond,
+            .fresh => dropAlways,
+        } });
+        defer pool.destroy();
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, std.testing.io);
+        defer engine.deinit();
+        var url_buffer: [64]u8 = undefined;
+        const url = pool.url(&url_buffer);
+        if (case != .fresh) _ = try runMethod(&engine, url, .GET).outcome.completed;
+        const result = runMethod(&engine, url, if (case == .post) .POST else .GET);
+        try std.testing.expectError(error.ReadFailed, result.outcome.completed);
+        try std.testing.expect(!result.retried);
+        try std.testing.expectEqual(case != .fresh, result.reused);
+        try std.testing.expectEqual(http.Send.may_have_been_sent, result.send);
+        try std.testing.expectEqual(@as(usize, if (case == .fresh) 1 else 2), pool.requests.load(.acquire));
+    }
+}
+
+test "HTTP retries at most once and never after the call was cancelled" {
+    for ([_]bool{ false, true }) |cancel| {
+        var state: std.atomic.Value(u32) = .init(0);
+        Pool.cancel_on_drop = if (cancel) &state else null;
+        defer Pool.cancel_on_drop = null;
+        const pool = try Pool.create(.{ .connections = if (cancel) 1 else 2, .action = dropAfterFirst });
+        defer pool.destroy();
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, std.testing.io);
+        defer engine.deinit();
+        var url_buffer: [64]u8 = undefined;
+        const url = pool.url(&url_buffer);
+        _ = try runMethod(&engine, url, .GET).outcome.completed;
+        var output: [8]u8 = undefined;
+        const result = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) }, .cancellation = .atomic(&state) }, methodFetch, .{ url, std.http.Method.GET, &output });
+        try std.testing.expect(result.reused);
+        if (cancel) {
+            // The peer cancels as it drops the request: no new connection.
+            const failure: ?http.Error = switch (result.outcome) {
+                .completed => |value| if (value) |_| null else |err| err,
+                .failed => |err| err,
+            };
+            try std.testing.expectEqual(@as(?http.Error, error.Cancelled), failure);
+            try std.testing.expect(!result.retried);
+            try std.testing.expectEqual(@as(usize, 2), pool.requests.load(.acquire));
+        } else {
+            // The retry's connection drops it too: no third attempt.
+            try std.testing.expectError(error.ReadFailed, result.outcome.completed);
+            try std.testing.expect(result.retried);
+            try std.testing.expectEqual(@as(usize, 3), pool.requests.load(.acquire));
+        }
+    }
+}
+
+test "HTTP retries a non-POST request whose first socket write accepted nothing" {
+    for ([_]std.http.Method{ .DELETE, .POST }) |method| {
+        var threaded: Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        var vtable: Io.VTable = undefined;
+        const io = faultIo(&threaded, &vtable, .first_v4);
+        const pool = try Pool.create(.{ .connections = if (method == .POST) 1 else 2 });
+        defer pool.destroy();
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, io);
+        defer engine.deinit();
+        var url_buffer: [64]u8 = undefined;
+        const url = pool.url(&url_buffer);
+        _ = try runMethod(&engine, url, .GET).outcome.completed;
+        Faults.failing_writes.store(1, .release);
+        const result = runMethod(&engine, url, method);
+        try std.testing.expect(result.reused);
+        if (method == .POST) {
+            try std.testing.expectError(error.WriteFailed, result.outcome.completed);
+            try std.testing.expect(!result.retried);
+            try std.testing.expectEqual(@as(usize, 1), pool.requests.load(.acquire));
+        } else {
+            try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+            try std.testing.expect(result.retried);
+            try std.testing.expectEqual(@as(usize, 2), pool.requests.load(.acquire));
+        }
+    }
+}
+
+fn observeWrites(operation: *http.Operation, url: []const u8, fail_first: bool, wrote: *bool) http.Error!void {
+    var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{});
+    defer request.deinit();
+    if (fail_first) Faults.failing_writes.store(1, .release);
+    request.send(null) catch {};
+    wrote.* = operation.slot.?.wrote;
+}
+
+test "HTTP write watch sees accepted bytes and only accepted bytes" {
+    // Guards the drain interposition against std changes in both directions.
+    for ([_]bool{ false, true }) |fail_first| {
+        var threaded: Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        var vtable: Io.VTable = undefined;
+        const io = faultIo(&threaded, &vtable, .first_v4);
+        const pool = try Pool.create(.{ .connections = 1 });
+        defer pool.destroy();
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, io);
+        defer engine.deinit();
+        var url_buffer: [64]u8 = undefined;
+        const url = pool.url(&url_buffer);
+        // Starts at the wrong answer: the watch must actively report.
+        var wrote = fail_first;
+        const result = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, observeWrites, .{ url, fail_first, &wrote });
+        _ = try result.outcome.completed;
+        try std.testing.expectEqual(!fail_first, wrote);
+    }
 }
 
 test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" {
