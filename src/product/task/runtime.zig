@@ -235,7 +235,7 @@ pub const InputAction = union(enum) {
     continuation: u64,
     submit: struct { index: usize, run_id: u64 },
     start: usize,
-    fail: struct { index: usize, reason: SendInputReason },
+    fail: struct { index: usize, reason: SendInputReason, blocking_task_id: ?u64 = null },
 };
 
 pub const RunAcceptanceEffect = struct {
@@ -670,6 +670,7 @@ pub const ReleaseEffects = struct {
     prepare_credential_release_fn: *const fn (*anyopaque, []const u8) bool,
     redact_all_fn: *const fn (*anyopaque, []const u8) void,
     release_projection_bytes_fn: *const fn (*anyopaque, usize) void,
+    discard_retry_attachment_fn: ?*const fn (*anyopaque, u64, u64) void = null,
 
     fn redactAll(self: ReleaseEffects, credential: []const u8) void {
         self.redact_all_fn(self.context, credential);
@@ -1149,6 +1150,7 @@ pub const ProjectionAuthority = struct {
     authority_stable: bool,
     model_selection_availability: task_view.ModelSelectionAvailability,
     model_rebind_required: bool = false,
+    model_input_blocker: ?SendInputReason = null,
 };
 
 /// Command admission uses its own typed observation port. It deliberately
@@ -1256,6 +1258,8 @@ pub const Runtime = struct {
     search_revision: u64 = 1,
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
+    retry_input_bytes: usize = 0,
+    input_failure_changed: bool = false,
     advancing_inputs: bool = false,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
@@ -2409,6 +2413,10 @@ pub const Runtime = struct {
 
     /// Message acceptance is Task-local and independent of execution readiness.
     pub fn receiveInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects) RunError!Submission {
+        return self.receiveInputReplacingRetry(task_id, operation_id, input, effects, null);
+    }
+
+    pub fn receiveInputReplacingRetry(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects, original: ?[]const u8) RunError!Submission {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
         if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
@@ -2423,6 +2431,7 @@ pub const Runtime = struct {
         var retired: ?usize = null;
         if (task.input_submissions.items.len >= effects.limits.max_pending_inputs_per_task) {
             for (task.input_submissions.items, 0..) |record, index| if (record.state != .waiting) {
+                if (original) |id| if (std.mem.eql(u8, id, record.submission.operationId())) continue;
                 retired = index;
                 break;
             };
@@ -2464,6 +2473,7 @@ pub const Runtime = struct {
         if (retired) |index| {
             var previous = task.input_submissions.orderedRemove(index);
             self.releaseSubmissionPayload(&previous);
+            self.releaseRetryInput(task_id, &previous, effects.release);
             deinitRunInput(self, effects.release, &previous.input);
             effects.release.releaseProjectionBytes(task_state.additional_input_projection_bytes);
         }
@@ -2473,7 +2483,7 @@ pub const Runtime = struct {
         // continuation work so additional messages cannot restart its query.
         if (!hasWaitingInputs(task) and self.inputContinuation(task_id) == null)
             task.skill_preparation = null;
-        task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload });
+        task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload, .force_new_run = original != null });
         if (task.initial_personal_catalog) |catalog| self.allocator.free(catalog.revision);
         task.initial_personal_catalog = null;
         self.pending_input_bytes += payload.bytes.len;
@@ -2492,7 +2502,7 @@ pub const Runtime = struct {
             break;
         };
         const index = next orelse return .none;
-        if (task.runtime.close_failed) return .{ .fail = .{ .index = index, .reason = .binding_unavailable } };
+        if (task.runtime.close_failed) return .{ .fail = .{ .index = index, .reason = .session_close_failed, .blocking_task_id = task_id } };
         if (task.approval_change != null or task.runtime.cancel_requested or task.runtime.close_requested) return .wait;
         switch (task.runtime.active_operation) {
             .compact, .restore => return .wait,
@@ -2501,6 +2511,7 @@ pub const Runtime = struct {
                 return .{ .start = index };
             },
             .run => |id| {
+                if (task.input_submissions.items[index].force_new_run) return .wait;
                 if (task.input_submissions.items[index].payload.?.input != .text) return .wait;
                 const run = task_state.findRun(task.durable.runs, id) orelse return .wait;
                 if (run.input == .skill or task_state.terminalPayload(run) != null or
@@ -2548,7 +2559,7 @@ pub const Runtime = struct {
 
     pub const WaitingInputEffects = struct {
         pub const RestoreFailure = struct { reason: SendInputReason, blocking_task_id: ?u64 = null };
-        pub const RunAdmission = union(enum) { admitted: u64, retry, rejected: SendInputReason };
+        pub const RunAdmission = union(enum) { admitted: u64, retry, rejected: RestoreFailure };
 
         context: *anyopaque,
         restore_fn: *const fn (*anyopaque, u64, u64) ?RestoreFailure,
@@ -2584,7 +2595,7 @@ pub const Runtime = struct {
                 switch (self.inputAction(id)) {
                     .none, .wait => break,
                     .fail => |action| {
-                        self.failWaitingInput(id, action.index, action.reason, null);
+                        self.failWaitingInput(id, action.index, action.reason, action.blocking_task_id);
                         effects.changed_fn(context);
                     },
                     .continuation => if (!effects.continue_fn(context, id)) break,
@@ -2625,6 +2636,15 @@ pub const Runtime = struct {
         if (task.model_intent_prepared or task.approval_change != null or effects.history_blocked_fn(effects.context)) return false;
         const authority = projection.authority(projectionAuthorityQuery(task));
         const continuation = self.recoveryProjectionWithAuthority(task, authority).continuation;
+        if (!authority.shutting_down and task_policy.taskLifecycle(task) == .open and
+            (continuation == .available or continuation.unavailable == .execution_rebind_required))
+        {
+            if (authority.model_input_blocker) |reason| {
+                if (reason == .models_catalog_loading) return false;
+                self.failWaitingInput(task_id, index, reason, null);
+                return true;
+            }
+        }
         if (authority.shutting_down or task_policy.taskLifecycle(task) != .open or
             !task_policy.continuationAvailable(continuation))
         {
@@ -2638,7 +2658,14 @@ pub const Runtime = struct {
                 },
                 else => {},
             };
-            self.failWaitingInput(task_id, index, .binding_unavailable, null);
+            const reason: SendInputReason = if (continuation == .unavailable) switch (continuation.unavailable) {
+                .session_poisoned => .session_poisoned,
+                .checkpoint_unavailable => .checkpoint_unavailable,
+                .execution_rebind_required => .execution_rebind_required,
+                .workspace_unavailable => .workspace_unavailable,
+                else => .binding_unavailable,
+            } else .binding_unavailable;
+            self.failWaitingInput(task_id, index, reason, null);
             return true;
         }
 
@@ -2655,7 +2682,7 @@ pub const Runtime = struct {
         switch (outcome) {
             .admitted => |id| self.finishWaitingInput(task_id, index, id, null, effects.release),
             .retry => return false,
-            .rejected => |reason| self.failWaitingInput(task_id, index, reason, null),
+            .rejected => |failure| self.failWaitingInput(task_id, index, failure.reason, failure.blocking_task_id),
         }
         return true;
     }
@@ -2670,22 +2697,24 @@ pub const Runtime = struct {
 
     /// Task decides when an original is cancelled or handed to a real Run;
     /// composition executes that resource action in the attachment owner.
-    pub fn settleInputResources(self: *Runtime, context: *anyopaque, settle: *const fn (*anyopaque, u64, u64, bool) void) void {
+    pub const InputResourceDisposition = union(enum) { discard, keep_original, retain_for_retry: u64 };
+
+    pub fn settleInputResources(self: *Runtime, context: *anyopaque, settle: *const fn (*anyopaque, u64, u64, InputResourceDisposition) void) void {
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
             while (self.takeInputResourceAction(id)) |action|
-                settle(context, id, action.resource_id, action.keep_original);
+                settle(context, id, action.resource_id, action.disposition);
         };
     }
 
-    fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
+    fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, disposition: InputResourceDisposition } {
         const task = self.find(task_id) orelse return null;
         for (task.input_submissions.items) |*record| {
             if (record.state == .waiting or record.input != .multimodal) continue;
             for (record.input.multimodal.attachments) |*item| if (item.resource_id != 0) {
                 const id = item.resource_id;
                 item.resource_id = 0;
-                return .{ .resource_id = id, .keep_original = false };
+                return .{ .resource_id = id, .disposition = if (record.retry_payload) |retry| .{ .retain_for_retry = retry.attachments[0].resource_id } else .discard };
             };
         }
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
@@ -2693,7 +2722,7 @@ pub const Runtime = struct {
             for (run.input.multimodal.attachments) |*item| if (item.resource_id != 0) {
                 const id = item.resource_id;
                 item.resource_id = 0;
-                return .{ .resource_id = id, .keep_original = true };
+                return .{ .resource_id = id, .disposition = .keep_original };
             };
         };
         return null;
@@ -2706,6 +2735,78 @@ pub const Runtime = struct {
             payload.deinit(self.allocator);
             record.payload = null;
         }
+    }
+
+    fn retainRetryInput(self: *Runtime, record: *InputSubmission) void {
+        const original = record.payload orelse return;
+        var input = original.input;
+        var attachments: [agent.multimodal_input_limits.max_parts]task_state.MultimodalAttachment = undefined;
+        if (input == .multimodal) {
+            for (input.multimodal.attachments, attachments[0..input.multimodal.attachments.len]) |part, *target| {
+                if (part.resource_id == 0) return;
+                target.* = part;
+                target.bytes = &.{};
+                target.reference = &.{};
+            }
+            input.multimodal.attachments = attachments[0..input.multimodal.attachments.len];
+        }
+        const budget = 4 * 1024 * 1024;
+        const retry = task_state.OwnedRunInput.cloneSelected(self.allocator, input, budget - self.retry_input_bytes, original.skill_selection) catch return;
+        self.retry_input_bytes += retry.bytes.len;
+        record.retry_payload = retry;
+    }
+
+    fn releaseRetryInput(self: *Runtime, task_id: u64, record: *InputSubmission, discard: ?ReleaseEffects) void {
+        if (record.retry_payload) |*retry| {
+            if (discard) |effects| if (effects.discard_retry_attachment_fn) |release| {
+                for (retry.attachments) |part| release(effects.context, task_id, part.resource_id);
+            };
+            self.retry_input_bytes -= retry.bytes.len;
+            retry.deinit(self.allocator);
+            record.retry_payload = null;
+        }
+    }
+
+    pub fn retrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8) ?*InputSubmission {
+        const task = self.find(task_id) orelse return null;
+        for (task.input_submissions.items) |*record| {
+            if (record.state == .failed and std.mem.eql(u8, record.submission.operationId(), operation_id)) return record;
+        }
+        return null;
+    }
+
+    pub fn inputRetryBlockedByClose(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return true;
+        return task.runtime.close_failed or task.runtime.close_requested or task.runtime.hasClosingSession();
+    }
+
+    pub fn finishRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, submission: Submission) void {
+        const record = self.retrySubmission(task_id, operation_id).?;
+        record.retried_as = submission;
+        self.releaseRetryInput(task_id, record, null);
+    }
+
+    pub fn discardRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, effects: ReleaseEffects) bool {
+        const record = self.retrySubmission(task_id, operation_id) orelse return false;
+        if (record.retry_payload == null) return false;
+        self.releaseRetryInput(task_id, record, effects);
+        return true;
+    }
+
+    pub fn pruneRetryInputs(self: *Runtime, effects: ReleaseEffects, available: *const fn (*anyopaque, u64, u64) bool) bool {
+        var changed = false;
+        for (self.tasks) |entry| if (entry) |task| {
+            for (task.input_submissions.items) |*record| {
+                const retry = record.retry_payload orelse continue;
+                for (retry.attachments) |part| {
+                    if (available(effects.context, task.durable.id, part.resource_id)) continue;
+                    self.releaseRetryInput(task.durable.id, record, effects);
+                    changed = true;
+                    break;
+                }
+            }
+        };
+        return changed;
     }
 
     pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
@@ -2747,9 +2848,17 @@ pub const Runtime = struct {
         if (record.state != .waiting) return;
         self.find(task_id).?.skill_preparation = null;
         record.state = .failed;
+        self.input_failure_changed = true;
         record.reason = reason;
         record.blocking_task_id = blocking_task_id;
+        if (reason != .shutting_down and reason != .continuation_cancelled) self.retainRetryInput(record);
         self.releaseSubmissionPayload(record);
+    }
+
+    pub fn takeInputFailureChanges(self: *Runtime) bool {
+        const changed = self.input_failure_changed;
+        self.input_failure_changed = false;
+        return changed;
     }
 
     /// Admission has already installed the real Run; only move correlation here.
@@ -3854,6 +3963,12 @@ pub const Runtime = struct {
             return err;
         };
         return true;
+    }
+
+    pub fn retryFailedSessionClose(self: *Runtime, task_id: u64, expected_binding_epoch: u64, effects: OperationEffects) CloseError!bool {
+        const task = self.find(task_id) orelse return false;
+        if (task.durable.binding_epoch != expected_binding_epoch or !canRetryFailedSessionClose(task)) return false;
+        return self.beginDetach(task_id, effects);
     }
 
     pub fn beginDetach(
@@ -6119,6 +6234,8 @@ pub const Runtime = struct {
                 .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
                 .input_acceptance_reason = acceptance_reason,
+                .model_input_blocker = external.model_input_blocker,
+                .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .catalog = effects.catalog,
@@ -6319,6 +6436,8 @@ pub const Runtime = struct {
             .available_approval_modes = self.availableApprovalModes(task, external, &available_modes),
             .shutting_down = external.shutting_down,
             .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
+            .model_input_blocker = external.model_input_blocker,
+            .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .catalog = effects.catalog,
@@ -10008,6 +10127,13 @@ fn idleSessionReleasable(task: *const task_state.Task) bool {
     return true;
 }
 
+fn canRetryFailedSessionClose(task: *const task_state.Task) bool {
+    return task.runtime.close_failed and task.runtime.liveConst() != null and
+        task.runtime.close_thread == null and !task.runtime.close_requested and
+        task.deletion == .idle and task.read_only_history == null and !task.durable.archived and
+        !task.model_intent_prepared and task.approval_change == null and closeReady(task);
+}
+
 fn closeReady(task: *const task_state.Task) bool {
     if (task.runtime.active_operation != .none or
         task_state.hasUnfinalizedTerminalEvents(task) or
@@ -10773,6 +10899,7 @@ fn deinitTask(
     }
     for (task.input_submissions.items) |*record| {
         self.releaseSubmissionPayload(record);
+        self.releaseRetryInput(task.durable.id, record, effects);
         deinitRunInput(self, effects, &record.input);
         effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
     }
@@ -11618,6 +11745,7 @@ const InputTestProjection = struct {
         const task = runtime.find(1).?;
         for (task.input_submissions.items) |*record| {
             runtime.releaseSubmissionPayload(record);
+            runtime.releaseRetryInput(task.durable.id, record, null);
             deinitRunInput(runtime, self.effects().release, &record.input);
             self.charged -= task_state.additional_input_projection_bytes;
         }
@@ -11830,8 +11958,9 @@ test "Task known Session close failure ends the message instead of waiting forev
     try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
     task.runtime.close_failed = true;
     const failure = runtime.inputAction(1).fail;
-    try std.testing.expectEqual(.binding_unavailable, failure.reason);
-    runtime.failWaitingInput(1, failure.index, failure.reason, null);
+    try std.testing.expectEqual(.session_close_failed, failure.reason);
+    try std.testing.expectEqual(@as(?u64, 1), failure.blocking_task_id);
+    runtime.failWaitingInput(1, failure.index, failure.reason, failure.blocking_task_id);
     try std.testing.expectEqual(.failed, task.input_submissions.items[0].state);
     try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
     try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);

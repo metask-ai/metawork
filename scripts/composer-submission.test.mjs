@@ -982,7 +982,7 @@ test("App send rejection keeps the created Task identity for a later send", asyn
   );
 });
 
-test("App rejected creation restores attachment text without reusing staged tokens", async (ctx) => {
+test("App rejected creation restores the attachment grant with its draft", async (ctx) => {
   const fixture = await renderPendingPasteApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
   await user.type(fixture.textarea, "Instruction with attachment");
@@ -995,17 +995,58 @@ test("App rejected creation restores attachment text without reusing staged toke
   await screen.findByRole("combobox", { name: "Model" });
   await user.click(screen.getByRole("button", { name: "Copy to input box" }));
   assert.equal(fixture.textarea.value, "Instruction with attachment");
-  assert.ok(screen.getByText(/Add them again before sending/));
+  assert.ok(screen.getByText(fixture.attachment.displayName));
   assert.equal(fixture.additions(), 1);
   await user.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => assert.equal(fixture.creations(), 2));
   await fixture.created(fixture.task, 1);
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
   assert.deepEqual(fixture.inputs[0][2], {
-    kind: "text",
+    kind: "multimodal",
     text: "Instruction with attachment",
+    attachmentTokens: [fixture.attachment.token],
   });
   await fixture.settle();
+});
+
+test("App releases rejected draft grants before staging new files", async (ctx) => {
+  const fixture = await renderPendingPasteApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const released = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "releaseAttachment",
+    async (token) => {
+      released.push(token);
+      return true;
+    },
+  );
+  fireEvent.change(fixture.textarea, {
+    target: { value: "rejected with a file" },
+  });
+  await fixture.begin();
+  await fixture.finish();
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle({ accepted: false, reason: "capacity_reached" });
+  assert.deepEqual(released, []);
+
+  const secondTask = {
+    ...structuredClone(fixture.task),
+    id: "4",
+    title: "Second task",
+  };
+  fixture.snapshot.tasks.push(secondTask);
+  await fixture.publish();
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Second task/ }))[0],
+  );
+  await screen.findByRole("button", { name: "Task information", exact: true });
+  const nextEditor = document.querySelector(".composer-bar textarea");
+  const file = new File(["new image"], "new.png", { type: "image/png" });
+  pasteItems(nextEditor, [imageItem(file)]);
+  await waitFor(() => assert.equal(fixture.additions(), 2));
+  assert.deepEqual(released, [fixture.attachment.token]);
 });
 
 test("App cancelled creation can reselect only after Host definitively rejects it", async (ctx) => {
@@ -1068,6 +1109,55 @@ test("App empty catalog after creation rejection keeps input and exposes catalog
   assert.equal(fixture.textarea.value, "No replacement available");
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
   assert.equal(fixture.creations(), 1);
+  assert.equal(fixture.inputs.length, 0);
+});
+
+test("An existing Task offers model catalog retry while preserving its draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const refresh = ctx.mock.method(
+    BridgeClient.prototype,
+    "refreshModelsCatalog",
+    async () => ({ accepted: true, reason: null }),
+  );
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Keep this input");
+  fixture.task.modelInputBlocker = "models_catalog_loading";
+  await fixture.publish();
+  await screen.findByText("Waiting for the Metask model catalog to refresh.");
+  assert.equal(
+    screen.queryByRole("button", { name: "Retry model refresh" }),
+    null,
+  );
+  fixture.task.modelInputBlocker = "models_catalog_failed";
+  await fixture.publish();
+  await user.click(
+    await screen.findByRole("button", { name: "Retry model refresh" }),
+  );
+  await waitFor(() => assert.equal(refresh.mock.callCount(), 1));
+  assert.equal(fixture.textarea.value, "Keep this input");
+  assert.equal(fixture.inputs.length, 0);
+});
+
+test("A retryable Session close offers an epoch-bound action without sending input", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const close = ctx.mock.method(
+    BridgeClient.prototype,
+    "retrySessionClose",
+    async () => true,
+  );
+  const user = userEvent.setup({ document });
+  fixture.task.sessionCloseRetryAvailable = true;
+  await fixture.publish();
+  await user.click(
+    await screen.findByRole("button", { name: "Retry closing session" }),
+  );
+  await waitFor(() => assert.equal(close.mock.callCount(), 1));
+  assert.deepEqual(close.mock.calls[0].arguments, [
+    fixture.task.id,
+    fixture.task.binding.epoch,
+  ]);
   assert.equal(fixture.inputs.length, 0);
 });
 
@@ -2142,6 +2232,36 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
   await act(async () => {});
   assert.equal(fixture.inputs.length, 65);
   assert.equal(fixture.inputs.at(-1)[2].text, "draft kept at capacity");
+});
+
+test("App bounds rejected drafts without using another Task's send capacity", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  await fixture.settle({ accepted: false, reason: "capacity_reached" });
+  async function send(text) {
+    const editor = document.querySelector(".composer-bar textarea");
+    fireEvent.change(editor, { target: { value: text } });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    await act(async () => {});
+  }
+  for (let i = 0; i < 65; i++) await send(`rejected-draft-${i}`);
+  assert.equal(fixture.inputs.length, 65);
+  assert.equal(screen.queryByText("rejected-draft-0"), null);
+  assert.ok(screen.getByText("rejected-draft-64"));
+
+  const secondTask = {
+    ...structuredClone(fixture.task),
+    id: "4",
+    title: "Second task",
+  };
+  fixture.snapshot.tasks.push(secondTask);
+  await fixture.publish();
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Second task/ }))[0],
+  );
+  await screen.findByRole("button", { name: "Task information", exact: true });
+  await send("can send to another task");
+  assert.equal(fixture.inputs.length, 66);
+  assert.equal(fixture.inputs.at(-1)[0], secondTask.id);
 });
 
 test("App names the Task blocking Session release and allows a later explicit creation retry", async (ctx) => {

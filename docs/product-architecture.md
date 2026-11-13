@@ -115,6 +115,8 @@ Metask 的凭据续期与新执行接纳分开：Account 刷新后，Application
 
 scope 由 Host Task 生命周期持有，Session detach 不删除连续性约束；退出、重新登录或身份替换后不跨 scope 续期，也不伪造已接纳 Run 的热撤权。hard expiry、clock 不可用、目录失败或候选失去授权仍阻止新的执行。实际 provider、protocol、endpoint 或 capability 改变继续走既有 checkpoint 与 binding 事务；仅模型改变且来源一致时使用 setModel。排队和未采用的追加输入保留精确一次语义，失败或取消明确收口，不能重放已采用输入或复活已取消批次。
 
+普通 Task 已接收的队首消息在当前连续授权与代次有效、且匹配代次的 Metask 目录刷新仍在运行时等待新 Run 准入或恢复。目录完成事件经 Application 的常规生命周期唤醒推进队列。目录失败或授权失效按当时事实结算。Application 对网络、超时和 5xx 的目录失败在同授权代次最多延迟重试一次，重试重新取得当次 lease；旧 timer 和 completion 不得跨代次采纳。目录重试只恢复目录资格，失败的用户提交由用户显式重发。
+
 Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权能否产生 lease 或无 secret 的执行接纳证明，Models 只回答 provider/source 能否解析，Product Control 只回答具体 Task/Schedule 目标是否满足安装与执行接纳。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion。Renderer Account command 只涉及登录、取消和退出；Models command 使用 source-qualified identifier 与对应 expected revision。除用户显式提交 Custom Provider create/replace 或 MCP captureSecret 时一次性转交手动凭据外，Renderer 不参与 prepare、commit、authorization lease 或 credential transfer；该表单值不属于可恢复 UI 状态。
@@ -180,7 +182,9 @@ Task aggregate 独占普通消息的接收、顺序、推进、停止及失败�
 
 Task 使用有界待处理列表和现有 lifecycle wake。队首文本可在已就绪文本 Run 中通过现有 RunControlLease 同步 submitInput；Skill、附件、未就绪或收尾阶段等待。空闲后队首领取和普通 Run admission 在同一主线程事务中完成，自身预留不阻挡自身，显式 run 不得越过队首。必要准备只登记一次，Control 调用对应 owner；明确失败不循环修复。瞬时时序拒绝保留等待，真正的无效输入、依赖/预算失败结束该消息，unknown 保留真实合同失败，不改投。复用 Session 同步控制能力，不建立 submit Executor job 或异步回执归并屏障。
 
-接收 metadata 随所有权移入根输入或 additional input，保留 operationId、原接收时间与展示位置且只投影一次。原文复用共享内存预算；附件接收时由 Control 协调一次性 grant 与原件移交 Task，等待期间不得保存栈上 callback 或 grant。未交付资源在取消时由原 owner 清理，已交付原件沿 Task 生命周期保留，清理失败保留原 owner 的有界 cleanup debt。安全历史保存展示记录与执行关联，具体失败原因只在内存；重启的未执行消息中断且无 raw payload，不从历史重建执行。
+接收 metadata 随所有权移入根输入或 additional input，保留 operationId、原接收时间与展示位置且只投影一次。原文复用共享内存预算；附件接收时由 Control 协调一次性 grant 与原件移交 Task，等待期间不得保存栈上 callback 或 grant。未交付资源在取消时由原 owner 清理，已交付原件沿 Task 生命周期保留，清理失败保留原 owner 的有界 cleanup debt。安全历史保存展示记录、执行关联和已确认失败的稳定原因类别。重启时仍在等待的提交转为中断，原始输入不从历史重建。
+
+确认未进入 Run 的失败提交可在独立有界额度内保留重建输入所需的数据；在途 payload 和预览随失败结算释放。保留原件移回启动可清理的暂存目录，逻辑上归原 Task 和失败提交独占；保留项继续计入物理容量，正常暂存需要容量时优先整条淘汰。Task 记录挤出、放弃和删除调用同一资源清理，实际删除后才释放额度。显式重发保护来源记录，重新校验 authority 并准备新 payload；新提交接收、原件移交和进程内关联在同一主线程事务完成。新提交进入新 Run 的正常顺序，原历史保留失败原因。失败或结果未知的命令不会自行再次执行。
 
 Task 在调用前预留有界 identity、安全消息投影及独立的原文 owned copy；Agent 调用仍只同步借用输入。原文预留失败必须先于 Core 效果拒绝，拒绝释放候选，接受保留 receipt sequence，合同失败保留 unknown。安全投影归属于原 Run，只供历史展示、对账和权限上下文使用，不能成为执行来源。原文仅在 Host 内存中按 Runtime 共享预算持有，单条遵守普通输入容量，数量与累计字节不得超过 Agent 发布的 Core 上限；Runtime 原文缓存总量不超过累计字节上限，合并临时缓冲另限为一个普通输入。原文不进入日志、Snapshot 或历史，收口和销毁必须清零释放，释放不重置 Core 已接受的累计额度。事件 input_adopted 提供真实 turn 与活动顺序；终态在 event-drain barrier 后以 Agent 权威计数收口接受前缀为 adopted/unadopted，计数无效时剩余记录为 unknown，已知采纳事实保留。仅由计数确认的采纳不伪造活动位置。
 
@@ -554,6 +558,8 @@ DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；J
 父子记录的物理删除由 Product 在同一事务内显式完成，外键延迟到提交检查且不得级联删除；遗漏子记录须使整个事务失败。单个可选 checkpoint 使用同一组完整字段表达 Run、Compact 与审批 anchor，不能按 anchor 种类分裂存储；审批 anchor 的 revision 上界同时受行内 SQL 约束和 Product 校验。局部约束与非主键唯一性必须可在既定 Storage 权限内演进，不以关闭外键或放宽 authorizer 作为升级前提。
 
 持久化 JSON 的结构、枚举域或接受语义发生版本变化时，必须同步推进唯一 migration identity；即使没有 DDL 也须有标记迁移，使旧版本在解码前以 `VersionUnknown` 拒绝写入和替换。验证须覆盖允许持久化的枚举全集及未知值拒绝，不将运行时专用状态误当作持久化能力。
+
+未执行输入的失败原因使用独立的历史枚举。仅记录已确认失败的安全类别。目录刷新中的等待、Run 接收竞态及接续状态不得写入此字段；旧记录缺少原因时保留为未知。
 
 schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 

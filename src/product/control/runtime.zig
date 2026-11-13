@@ -292,6 +292,7 @@ pub const TaskWorkspaceRequest = union(enum) {
 };
 
 pub const AttachmentFileStore = product_attachment.FileStore;
+pub const AttachmentDescriptor = product_attachment.Descriptor;
 pub const AttachmentArchiveTool = product_attachment.ArchiveTool;
 pub const AttachmentImagePreparation = product_attachment.ImagePreparation;
 pub const max_attachment_preview_pixels = product_attachment.max_image_preview_pixels;
@@ -1910,6 +1911,7 @@ pub const Runtime = struct {
     }
     pub fn beginPreparedAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, files: []const product_attachment.ReceiveFile) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        defer self.pruneInputRetries();
         return self.attachment_lane.beginPreparedBytes(&self.attachments, completion_id, id, files);
     }
     pub fn appendAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, index: usize, offset: usize, bytes: []const u8) Error!void {
@@ -1924,6 +1926,7 @@ pub const Runtime = struct {
         return self.attachment_lane.cancelStaging(completion_id);
     }
     pub fn drainAttachmentStagingCompletions(self: *Runtime, sink: AttachmentStagingSink) void {
+        defer self.pruneInputRetries();
         const AuthoritySink = struct {
             runtime: *Runtime,
             downstream: AttachmentStagingSink,
@@ -2668,6 +2671,7 @@ pub const Runtime = struct {
         output: []product_attachment.Descriptor,
     ) Error![]const product_attachment.Descriptor {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        defer self.pruneInputRetries();
         return self.attachments.stageBatch(candidates, output);
     }
 
@@ -2691,6 +2695,7 @@ pub const Runtime = struct {
 
     pub fn beginAttachmentReceive(self: *Runtime, files: []const product_attachment.ReceiveFile) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        defer self.pruneInputRetries();
         return self.attachments.beginReceive(files);
     }
 
@@ -2843,10 +2848,12 @@ pub const Runtime = struct {
         principal_ref: []const u8,
         authorization_generation: u64,
     ) models_contract.CatalogRefreshPrepareResult {
-        return self.custom_providers.prepareMetaskCatalogRefresh(
+        const result = self.custom_providers.prepareMetaskCatalogRefresh(
             principal_ref,
             authorization_generation,
         );
+        if (result == .ready) self.bumpRevision();
+        return result;
     }
 
     pub fn completeMetaskCatalogRefresh(
@@ -4283,7 +4290,7 @@ pub const Runtime = struct {
         var result: SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(operation_id.len) };
         self.reapTaskInputResources();
         @memcpy(result.operation_id[0..operation_id.len], operation_id);
-        self.receiveTaskInput(task_id, operation_id, input) catch |err| {
+        self.receiveTaskInput(task_id, operation_id, input, null) catch |err| {
             result.reason = sendInputRejection(err);
             return result;
         };
@@ -4294,14 +4301,72 @@ pub const Runtime = struct {
         return result;
     }
 
-    fn receiveTaskInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: TaskRunInput) Error!void {
+    pub fn retryTaskInput(self: *Runtime, task_id: u64, original: []const u8, operation_id: []const u8) Error!SendInputResult {
+        if (self.containsKnownCredential(operation_id) or self.containsKnownCredential(original) or
+            operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        self.reapTaskInputResources();
+        var result: SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(operation_id.len), .reason = .invalid_input };
+        @memcpy(result.operation_id[0..operation_id.len], operation_id);
+        const record = self.task_runtime.retrySubmission(task_id, original) orelse return result;
+        if (record.retried_as) |existing| {
+            result.operation_id = existing.operation_id;
+            result.operation_id_len = existing.operation_id_len;
+            result.reason = null;
+            result.outcome = .accepted;
+            return result;
+        }
+        const retained = record.retry_payload orelse return result;
+        if (self.task_runtime.inputRetryBlockedByClose(task_id)) {
+            result.reason = .session_releasing;
+            return result;
+        }
+        var ids: [product_attachment.max_files_per_message]u64 = undefined;
+        const input: TaskRunInput = switch (retained.input) {
+            .text => |value| .{ .text = value },
+            .skill => |skill| .{ .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .selection_revision = skill.selection_revision,
+                .argument_values = skill.argument_values,
+            } },
+            .multimodal => |media| blk: {
+                for (media.attachments, 0..) |part, index| ids[index] = part.resource_id;
+                break :blk .{ .multimodal = .{ .text = media.text, .attachment_ids = ids[0..media.attachments.len] } };
+            },
+        };
+        if (self.taskMetaskInputBlocker(task_id)) |reason| if (reason != .models_catalog_loading) {
+            result.reason = reason;
+            return result;
+        };
+        self.receiveTaskInput(task_id, operation_id, input, original) catch |err| {
+            self.pruneInputRetries();
+            result.reason = sendInputRejection(err);
+            return result;
+        };
+        result.reason = null;
+        result.outcome = .accepted;
+        self.advanceTaskInputs();
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+        return result;
+    }
+
+    pub fn discardTaskInputRetry(self: *Runtime, task_id: u64, original: []const u8) bool {
+        if (!self.task_runtime.discardRetrySubmission(task_id, original, self.taskRuntimeReleaseEffects())) return false;
+        self.bumpRevision();
+        return true;
+    }
+
+    fn receiveTaskInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: TaskRunInput, original: ?[]const u8) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse return error.UnknownTask;
         const workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id).?;
         _ = try self.workspace.taskRunAuthority(workspace_id, workspace_epoch);
         var staged: StagedTaskInput = .{};
         defer if (staged.borrow) |*borrow| borrow.rollback();
-        const task_input = try self.borrowTaskInput(task_id, input, &staged);
+        const task_input = try self.borrowTaskInput(task_id, input, &staged, original != null);
         var effects = self.taskRuntimeOperationEffects();
         effects.input_catalog = if (input == .skill and self.task_runtime.matchesInitialPersonalCatalog(
             task_id,
@@ -4311,11 +4376,12 @@ pub const Runtime = struct {
             self.skill.personalCatalogProjection()
         else
             try self.workspaceCatalog(workspace_id);
-        _ = try self.task_runtime.receiveInput(task_id, operation_id, task_input, effects);
+        const submission = try self.task_runtime.receiveInputReplacingRetry(task_id, operation_id, task_input, effects, original);
         if (staged.borrow) |*borrow| {
             borrow.retainForTask();
             staged.external.accept();
         }
+        if (original) |id| self.task_runtime.finishRetrySubmission(task_id, id, submission);
     }
 
     pub fn stopTask(self: *Runtime, task_id: u64) Error!void {
@@ -4505,7 +4571,7 @@ pub const Runtime = struct {
         external: AttachmentAcceptance = .{},
     };
 
-    fn borrowTaskInput(self: *Runtime, task_id: u64, input: TaskRunInput, staged: *StagedTaskInput) Error!task_runtime.RunInput {
+    fn borrowTaskInput(self: *Runtime, task_id: u64, input: TaskRunInput, staged: *StagedTaskInput, retrying: bool) Error!task_runtime.RunInput {
         return switch (input) {
             .text => |text| .{ .text = text },
             .skill => |skill| .{ .skill = .{
@@ -4526,12 +4592,10 @@ pub const Runtime = struct {
                         self.containsKnownCredential(reference.binding.path) or
                         self.containsKnownCredential(reference.text)) return error.InvalidRunInput;
                 }
-                staged.borrow = try self.attachments.borrow(
-                    multimodal.attachment_ids,
-                    &staged.parts,
-                    &staged.indices,
-                    task_id,
-                );
+                staged.borrow = if (retrying)
+                    try self.attachments.borrowRetry(multimodal.attachment_ids, &staged.parts, &staged.indices, task_id)
+                else
+                    try self.attachments.borrow(multimodal.attachment_ids, &staged.parts, &staged.indices, task_id);
                 for (staged.parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
                     const descriptor = self.attachments.descriptorFor(part.attachmentId()) orelse unreachable;
                     staged.items[index] = switch (part) {
@@ -4623,7 +4687,7 @@ pub const Runtime = struct {
         defer if (staged.borrow) |*borrow| borrow.rollback();
         const prepared_input: task_runtime.Runtime.WaitingInput = switch (input) {
             .command => |command| blk: {
-                const value = try self.borrowTaskInput(task_id, command, &staged);
+                const value = try self.borrowTaskInput(task_id, command, &staged, false);
                 if (value == .multimodal) for (staged.items[0..value.multimodal.attachments.len]) |*item| {
                     item.resource_id = 0;
                 };
@@ -4837,6 +4901,15 @@ pub const Runtime = struct {
             return err;
         };
         self.bumpRevision();
+    }
+
+    pub fn retryTaskSessionClose(self: *Runtime, task_id: u64, expected_binding_epoch: u64) Error!bool {
+        if (self.shutting_down) return false;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        if (!try self.task_runtime.retryFailedSessionClose(task_id, expected_binding_epoch, self.taskRuntimeOperationEffects())) return false;
+        self.bumpRevision();
+        return true;
     }
 
     fn detachTaskSession(self: *Runtime, task_id: u64) Error!void {
@@ -5301,6 +5374,7 @@ pub const Runtime = struct {
     fn syncLifecycleWithScheduleTimer(self: *Runtime, timer_elapsed: bool) void {
         const mcp_refresh_needed = self.syncLifecycleFactsWithScheduleTimer(timer_elapsed);
         self.advanceTaskInputs();
+        self.flushApprovalProjectionNoFail();
         self.syncPermissionReviews();
         self.retireQuiescentCredentials();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
@@ -5405,6 +5479,7 @@ pub const Runtime = struct {
             .rejection_reason_fn = sendInputRejection,
             .changed_fn = publishWaitingInputChange,
         });
+        if (self.task_runtime.takeInputFailureChanges()) self.approval_history_dirty = true;
     }
 
     fn waitingInputHistoryBlocked(context: *anyopaque) bool {
@@ -5430,11 +5505,30 @@ pub const Runtime = struct {
 
     fn reapTaskInputResources(self: *Runtime) void {
         self.task_runtime.settleInputResources(self, settleTaskInputResource);
+        self.pruneInputRetries();
     }
 
-    fn settleTaskInputResource(context: *anyopaque, task_id: u64, resource_id: u64, keep_original: bool) void {
+    fn pruneInputRetries(self: *Runtime) void {
+        if (self.task_runtime.pruneRetryInputs(self.taskRuntimeReleaseEffects(), hasRetryAttachment)) self.bumpRevision();
+    }
+
+    fn hasRetryAttachment(context: *anyopaque, task_id: u64, resource_id: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.attachments.settleTaskInput(resource_id, task_id, keep_original) catch |err| switch (err) {
+        return self.attachments.hasRetryInput(resource_id, task_id);
+    }
+
+    fn discardRetryAttachment(context: *anyopaque, task_id: u64, resource_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.attachments.discardRetryInput(resource_id, task_id);
+    }
+
+    fn settleTaskInputResource(context: *anyopaque, task_id: u64, resource_id: u64, disposition: task_runtime.Runtime.InputResourceDisposition) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (disposition == .retain_for_retry) {
+            _ = self.attachments.retainTaskInputForRetry(resource_id, task_id, disposition.retain_for_retry);
+            return;
+        }
+        self.attachments.settleTaskInput(resource_id, task_id, disposition == .keep_original) catch |err| switch (err) {
             error.CleanupFailed => self.bumpRevision(),
             else => @panic("Task attachment ownership invariant violated"),
         };
@@ -5453,7 +5547,10 @@ pub const Runtime = struct {
         const self: *Runtime = @ptrCast(@alignCast(context));
         const id = self.admitTaskRunInternal(task_id, binding_epoch, .{ .queued = index }, null) catch |err| return switch (err) {
             error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => .retry,
-            else => .{ .rejected = sendInputRejection(err) },
+            else => .{ .rejected = .{
+                .reason = sendInputRejection(err),
+                .blocking_task_id = if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null,
+            } },
         };
         return .{ .admitted = id };
     }
@@ -7132,6 +7229,7 @@ pub const Runtime = struct {
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
             .model_rebind_required = model_rebind_required,
+            .model_input_blocker = self.taskMetaskInputBlocker(query.task_id),
         };
     }
 
@@ -8131,6 +8229,7 @@ pub const Runtime = struct {
             .prepare_credential_release_fn = prepareTaskRuntimeCredentialRelease,
             .redact_all_fn = redactTaskRuntimeProducts,
             .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
+            .discard_retry_attachment_fn = discardRetryAttachment,
         };
     }
 
@@ -9311,6 +9410,25 @@ pub const Runtime = struct {
         const scope = try self.metaskAuthorizationScope(models_contract.metask_source_id);
         if (facts.metask_scope != 0 and facts.metask_scope != scope)
             return error.ExecutionUnavailable;
+    }
+
+    fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
+        const facts = self.task_runtime.modelFacts(task_id) orelse return null;
+        const uses_metask = if (facts.intent) |intent|
+            std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
+        else if (facts.installed) |installed| installed.is_metask else false;
+        if (!uses_metask) return null;
+        const check = self.metask_authorization_check orelse return if (builtin.is_test) null else .metask_authorization_required;
+        const current = check.current() orelse return .metask_authorization_required;
+        if (current.scope == 0 or current.generation == 0) return .metask_authorization_required;
+        if (facts.metask_scope != 0 and facts.metask_scope != current.scope) return .metask_authorization_changed;
+        return switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
+            .ready => null,
+            .loading => .models_catalog_loading,
+            .failed => .models_catalog_failed,
+            .needs_authentication => .metask_authorization_required,
+            else => .binding_unavailable,
+        };
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {

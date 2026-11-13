@@ -577,8 +577,11 @@ pub const InputSubmission = struct {
     submission: Submission,
     input: RunInputRecord,
     payload: ?OwnedRunInput,
+    retry_payload: ?OwnedRunInput = null,
+    retried_as: ?Submission = null,
+    force_new_run: bool = false,
     state: enum { waiting, failed, cancelled, interrupted } = .waiting,
-    /// Runtime-only explanation; history only retains the safe terminal state.
+    /// Only the stable reason of a failed submission is written to history.
     reason: ?SendInputReason = null,
     blocking_task_id: ?u64 = null,
     /// A required preparation is attempted once for this accepted message.
@@ -623,6 +626,13 @@ pub const SendInputReason = enum {
     session_close_failed,
     binding_changed,
     binding_unavailable,
+    models_catalog_loading,
+    models_catalog_failed,
+    metask_authorization_required,
+    metask_authorization_changed,
+    session_poisoned,
+    checkpoint_unavailable,
+    execution_rebind_required,
     task_unavailable,
     task_busy,
     workspace_unavailable,

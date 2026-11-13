@@ -992,6 +992,52 @@ export class BridgeClient {
       operationId,
     );
   }
+  async retryInput(
+    taskId: string,
+    originalOperationId: string,
+    operationId: string,
+  ) {
+    return decodeSendInputResult(
+      await this.invoke(commands.retryInput, {
+        taskId,
+        originalOperationId,
+        operationId,
+      }),
+      taskId,
+    );
+  }
+  async discardInputRetry(taskId: string, originalOperationId: string) {
+    const item = object(
+      await this.invoke(commands.discardInputRetry, {
+        taskId,
+        originalOperationId,
+      }),
+      "$",
+      ["discarded"],
+    );
+    if (typeof item.discarded !== "boolean")
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Invalid input discard result",
+      );
+    return item.discarded;
+  }
+  async retrySessionClose(taskId: string, expectedBindingEpoch: string) {
+    const item = object(
+      await this.invoke(commands.retrySessionClose, {
+        taskId,
+        expectedBindingEpoch,
+      }),
+      "$",
+      ["accepted"],
+    );
+    if (typeof item.accepted !== "boolean")
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Invalid Session close retry result",
+      );
+    return item.accepted;
+  }
   async stopTask(taskId: string) {
     const item = object(await this.invoke(commands.stop, { taskId }), "$", [
       "taskId",

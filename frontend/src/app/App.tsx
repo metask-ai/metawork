@@ -325,6 +325,7 @@ type LocalTaskSubmission = {
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
   blockingTaskId?: string;
+  reusableDraft?: boolean;
 };
 import {
   ArchiveNotice,
@@ -333,6 +334,7 @@ import {
 
 export default function App() {
   const { t } = useI18n();
+  const inputRetryActions = useRef(new Set<string>());
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
@@ -1712,10 +1714,11 @@ export default function App() {
   // Unknown results still own their local record, including in other Tasks.
   const localSubmissionCount = localSubmissions.filter(
     (entry) =>
-      entry.scope !== composerDraftScope ||
-      entry.state === "submitting" ||
-      entry.state === "accepted" ||
-      entry.state === "unknown",
+      !entry.reusableDraft &&
+      (entry.scope !== composerDraftScope ||
+        entry.state === "submitting" ||
+        entry.state === "accepted" ||
+        entry.state === "unknown"),
   ).length;
   const taskIdentityPending =
     newTaskDraftActive &&
@@ -3015,13 +3018,23 @@ export default function App() {
         null,
       ++localSubmissionSequence.current,
     );
+    const retained = localSubmissionsRef.current.filter(
+      (entry) => entry.reusableDraft,
+    );
+    const retired = retained.slice(
+      0,
+      Math.max(0, retained.length - maxLocalTaskSubmissions + 1),
+    );
+    const retiredIds = new Set(retired.map((entry) => entry.operationId));
     setLocalSubmissions((entries) => [
       ...entries.filter(
         (entry) =>
-          entry.scope !== scope ||
-          entry.state === "submitting" ||
-          entry.state === "accepted" ||
-          entry.state === "unknown",
+          !retiredIds.has(entry.operationId) &&
+          (entry.scope !== scope ||
+            entry.reusableDraft ||
+            entry.state === "submitting" ||
+            entry.state === "accepted" ||
+            entry.state === "unknown"),
       ),
       {
         operationId,
@@ -3033,6 +3046,7 @@ export default function App() {
         state: "submitting",
       },
     ]);
+    void releaseRejectedDraftAttachments(retired, generation);
     const result = await session.submit(
       operationId,
       input,
@@ -3056,6 +3070,8 @@ export default function App() {
       },
     );
     if (bridgeGenerationRef.current !== generation) return;
+    const reusableDraft =
+      result.kind === "create_rejected" || result.kind === "rejected";
     if (
       result.kind === "create_rejected" &&
       session.canReleaseAfterCreationRejection &&
@@ -3076,6 +3092,7 @@ export default function App() {
           ? {
               ...entry,
               state,
+              reusableDraft,
               reason: "reason" in result ? result.reason : undefined,
               blockingTaskId:
                 "blockingTaskId" in result ? result.blockingTaskId : undefined,
@@ -3085,6 +3102,105 @@ export default function App() {
     );
     await refreshSnapshot().catch(() => undefined);
   }
+
+  async function actOnFailedInput(
+    taskId: string,
+    original: string,
+    discard: boolean,
+  ) {
+    const key = `${taskId}:${original}`;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    inputRetryActions.current.add(key);
+    const audience = { scope: "task" as const, taskId };
+    const feedback = beginOperationFeedback(`input-retry:${key}`, audience);
+    const operationId = newComposerOperationId();
+    try {
+      if (discard) {
+        await client.discardInputRetry(taskId, original);
+        settleOperationFeedback(feedback, null);
+      } else {
+        const result = await client.retryInput(taskId, original, operationId);
+        settleOperationFeedback(
+          feedback,
+          result.outcome === "accepted"
+            ? null
+            : attentionStatus(mutationReasonMessageId(result.reason), audience),
+        );
+      }
+    } catch {
+      const observed = discard
+        ? false
+        : await client
+            .fetchSnapshot({
+              taskId,
+              beforeRunId: null,
+              runLimit: 1,
+              management: "none",
+              search: false,
+              searchQuery: "",
+              searchCursor: null,
+              receipts: [{ taskId, operationId }],
+            })
+            .then(
+              (snapshot) =>
+                snapshot.receipts.some(
+                  (receipt) =>
+                    receipt.taskId === taskId &&
+                    receipt.operationId === operationId &&
+                    receipt.observed,
+                ),
+              () => false,
+            );
+      settleOperationFeedback(
+        feedback,
+        observed ? null : attentionStatus("feedback.unconfirmed", audience),
+      );
+    } finally {
+      inputRetryActions.current.delete(key);
+      await refreshSnapshot().catch(() => undefined);
+    }
+  }
+  async function retryFailedSessionClose(taskId: string, bindingEpoch: string) {
+    const key = `session-close:${taskId}`;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    inputRetryActions.current.add(key);
+    const audience = { scope: "task" as const, taskId };
+    const feedback = beginOperationFeedback(key, audience);
+    try {
+      const accepted = await client.retrySessionClose(taskId, bindingEpoch);
+      settleOperationFeedback(
+        feedback,
+        accepted
+          ? null
+          : attentionStatus("input.session_close_failed", audience),
+      );
+    } catch {
+      settleOperationFeedback(
+        feedback,
+        attentionStatus("feedback.unconfirmed", audience),
+      );
+    } finally {
+      await refreshSnapshot().catch(() => undefined);
+      inputRetryActions.current.delete(key);
+    }
+  }
+
+  async function releaseRejectedDraftAttachments(
+    entries: readonly LocalTaskSubmission[],
+    generation: string,
+  ) {
+    const attachments = entries.flatMap((entry) =>
+      entry.generation === generation && entry.draft.kind === "multimodal"
+        ? entry.draft.attachments
+        : [],
+    );
+    await Promise.all(
+      attachments.map((attachment) =>
+        client.releaseAttachment(attachment.token).catch(() => undefined),
+      ),
+    );
+  }
+
   async function addAttachments(
     source: AddSource = { kind: "picker" },
     referenceScope?: string,
@@ -3156,6 +3272,35 @@ export default function App() {
       referenceCurrent() &&
       !operation.cancelled;
     try {
+      // Ready grants from rejected sends yield when the user adds new files.
+      const rejectedDrafts = localSubmissionsRef.current.filter(
+        (entry) =>
+          entry.reusableDraft &&
+          entry.generation === requestedGeneration &&
+          entry.draft.kind === "multimodal",
+      );
+      if (rejectedDrafts.length > 0) {
+        const ids = new Set(rejectedDrafts.map((entry) => entry.operationId));
+        setLocalSubmissions((entries) =>
+          entries.map((entry) =>
+            ids.has(entry.operationId) && entry.draft.kind === "multimodal"
+              ? {
+                  ...entry,
+                  draft: {
+                    kind: "text",
+                    text: entry.draft.text,
+                    attachmentsReloadRequired: true,
+                  },
+                }
+              : entry,
+          ),
+        );
+        await releaseRejectedDraftAttachments(
+          rejectedDrafts,
+          requestedGeneration,
+        );
+        if (!currentOperation()) return;
+      }
       const result = await add.run(source, (view) => {
         if (attachmentOperation.current === operation) setAttachmentView(view);
       });
@@ -4173,17 +4318,15 @@ export default function App() {
                 })}
               </p>
             )}
-            {(entry.state === "failed" ||
-              entry.state === "unknown" ||
-              entry.state === "cancelled") && (
+            {(entry.state === "failed" || entry.state === "cancelled") && (
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  if (!composerDraftHasContent(composerDraftRef.current))
+                  if (!composerDraftHasContent(composerDraftRef.current)) {
                     updateComposerDraft(
-                      entry.draft.kind === "multimodal"
+                      entry.draft.kind === "multimodal" && !entry.reusableDraft
                         ? {
                             kind: "text",
                             text: entry.draft.text,
@@ -4191,6 +4334,13 @@ export default function App() {
                           }
                         : entry.draft,
                     );
+                    if (entry.reusableDraft)
+                      setLocalSubmissions((items) =>
+                        items.filter(
+                          (item) => item.operationId !== entry.operationId,
+                        ),
+                      );
+                  }
                 }}
               >
                 {t("run.prepare_retry")}
@@ -4280,6 +4430,45 @@ export default function App() {
       : undefined;
   const composerFooter = (
     <>
+      {activeTask?.sessionCloseRetryAvailable && (
+        <div>
+          <p className="projection-note" role="status">
+            {t("input.session_close_failed")}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={bridgeUnavailable}
+            onClick={() =>
+              void retryFailedSessionClose(
+                activeTask.id,
+                activeTask.binding.epoch,
+              )
+            }
+          >
+            {t("input.retry_session_close")}
+          </Button>
+        </div>
+      )}
+      {activeTask?.lifecycle === "open" && activeTask.modelInputBlocker && (
+        <div>
+          <p className="projection-note" role="status">
+            {t(mutationReasonMessageId(activeTask.modelInputBlocker))}
+          </p>
+          {activeTask.modelInputBlocker === "models_catalog_failed" && (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={bridgeUnavailable}
+              onClick={() => runModelSetupAction("refresh")}
+            >
+              {t("input.retry_models_catalog")}
+            </Button>
+          )}
+        </div>
+      )}
       {[
         ...taskOperationFeedback,
         composerCatalogFeedback,
@@ -4351,6 +4540,7 @@ export default function App() {
         unavailable={Boolean(
           activeTask &&
           activeTask.lifecycle === "open" &&
+          !activeTask.modelInputBlocker &&
           !activeTask.continuationAvailable &&
           (activeTask.continuationUnavailableReason !== "runtime_unavailable" ||
             !activeTask.inputAcceptance.available),
@@ -5602,6 +5792,12 @@ export default function App() {
                     : undefined
                 }
                 onPrepareRetry={prepareRetry}
+                onRetryInput={(taskId, operationId) =>
+                  void actOnFailedInput(taskId, operationId, false)
+                }
+                onDiscardInputRetry={(taskId, operationId) =>
+                  void actOnFailedInput(taskId, operationId, true)
+                }
                 onOpenSettings={openSettings}
                 onPreviewFile={openFilePreview}
                 workspaceRoot={

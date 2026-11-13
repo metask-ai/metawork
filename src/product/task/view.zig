@@ -215,6 +215,8 @@ pub const Input = struct {
     available_approval_modes: []const task_state.ApprovalMode = &.{},
     shutting_down: bool,
     input_acceptance_reason: ?task_state.SendInputReason = null,
+    model_input_blocker: ?task_state.SendInputReason = null,
+    session_close_retry_available: bool = false,
     compact_blocker: ?ActionBlocker,
     text: TextProjection,
     catalog: CatalogProjection,
@@ -410,7 +412,14 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     writer.writeAll(if (input.input_acceptance_reason == null) "true" else "false") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
     if (input.input_acceptance_reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll("},\"inputSubmissions\":[") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+    if (input.model_input_blocker) |reason| {
+        writer.writeAll(",\"modelInputBlocker\":") catch return error.SnapshotTooLarge;
+        jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge;
+    }
+    if (input.session_close_retry_available)
+        writer.writeAll(",\"sessionCloseRetryAvailable\":true") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"inputSubmissions\":[") catch return error.SnapshotTooLarge;
     var first_submission = true;
     for (task.input_submissions.items) |record| {
         if (task_state.submissionHasExecution(task, record.submission.operationId())) continue;
@@ -422,6 +431,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try writeInput(writer, input.text, record.input, null);
         writer.print(",\"state\":\"{s}\",\"reason\":", .{@tagName(record.state)}) catch return error.SnapshotTooLarge;
         if (record.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (record.retry_payload != null and !task.durable.archived and task.read_only_history == null and task.deletion == .idle and !input.shutting_down)
+            writer.writeAll(",\"retryAvailable\":true") catch return error.SnapshotTooLarge;
         if (record.blocking_task_id) |id| {
             std.debug.assert(record.state == .failed and record.reason == .session_close_failed and id != 0);
             writer.print(",\"blockingTaskId\":\"{d}\"", .{id}) catch return error.SnapshotTooLarge;

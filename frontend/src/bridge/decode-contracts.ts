@@ -39,6 +39,7 @@ import {
 } from "./contracts.ts";
 import {
   sendInputReasons,
+  modelInputBlockers,
   type SendInputResult,
   type InputSubmission,
   type WaitingInputView,
@@ -3575,6 +3576,12 @@ function decodeTask(
   manifest: RunManifest[],
 ): TaskView {
   const item = object(value, path, [
+    ...(Object.hasOwn(record(value, path), "sessionCloseRetryAvailable")
+      ? ["sessionCloseRetryAvailable"]
+      : []),
+    ...(Object.hasOwn(record(value, path), "modelInputBlocker")
+      ? ["modelInputBlocker"]
+      : []),
     "inputReady",
     "signal",
     "compactBlocker",
@@ -4005,6 +4012,9 @@ function decodeTask(
         ...(record(raw, p).reason === "session_close_failed"
           ? ["blockingTaskId"]
           : []),
+        ...(Object.hasOwn(record(raw, p), "retryAvailable")
+          ? ["retryAvailable"]
+          : []),
       ]);
       const state = enumValue(entry.state, `${p}.state`, [
         "waiting",
@@ -4020,8 +4030,16 @@ function decodeTask(
         fail(p, "waiting or restored input has no failure reason");
       if (reason === "session_close_failed" && state !== "failed")
         fail(p, "Session blocker requires failed input");
+      if (
+        Object.hasOwn(entry, "retryAvailable") &&
+        (entry.retryAvailable !== true || state !== "failed")
+      )
+        fail(p, "Retry requires a failed input");
       return {
         ...decodeSessionBlocker(entry, reason, p),
+        ...(entry.retryAvailable === true
+          ? { retryAvailable: true as const }
+          : {}),
         submission: decodeInputSubmission(entry.submission, `${p}.submission`),
         input: decodeRunInput(entry.input, `${p}.input`),
         state,
@@ -4149,8 +4167,25 @@ function decodeTask(
   }
   if (continuationAvailable && continuationRecoveryAvailable)
     fail(path, "continuation and recovery cannot both be available");
+  if (
+    Object.hasOwn(item, "sessionCloseRetryAvailable") &&
+    item.sessionCloseRetryAvailable !== true
+  )
+    fail(path, "invalid Session close retry availability");
   return {
     inputReady: booleanValue(item.inputReady, `${path}.inputReady`),
+    ...(item.sessionCloseRetryAvailable === true
+      ? { sessionCloseRetryAvailable: true as const }
+      : {}),
+    ...(Object.hasOwn(item, "modelInputBlocker")
+      ? {
+          modelInputBlocker: enumValue(
+            item.modelInputBlocker,
+            `${path}.modelInputBlocker`,
+            modelInputBlockers,
+          ),
+        }
+      : {}),
     inputAcceptance,
     inputSubmissions,
     id: positiveWireId(item.id, `${path}.id`),

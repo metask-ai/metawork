@@ -1070,6 +1070,13 @@ export const sendInputReasons = [
   "session_close_failed",
   "binding_changed",
   "binding_unavailable",
+  "models_catalog_loading",
+  "models_catalog_failed",
+  "metask_authorization_required",
+  "metask_authorization_changed",
+  "session_poisoned",
+  "checkpoint_unavailable",
+  "execution_rebind_required",
   "task_unavailable",
   "task_busy",
   "workspace_unavailable",
@@ -1126,6 +1133,7 @@ export type WaitingInputView = {
   state: "waiting" | "failed" | "cancelled" | "interrupted";
   reason: SendInputReason | null;
   blockingTaskId?: string;
+  retryAvailable?: true;
 };
 export type AdditionalInputView = {
   submission: InputSubmission | null;
@@ -1163,7 +1171,17 @@ export const taskActionBlockers = [
 ] as const;
 export type TaskActionBlocker = (typeof taskActionBlockers)[number];
 
+export const modelInputBlockers = [
+  "binding_unavailable",
+  "models_catalog_loading",
+  "models_catalog_failed",
+  "metask_authorization_required",
+  "metask_authorization_changed",
+] as const;
+
 export type TaskView = {
+  modelInputBlocker?: (typeof modelInputBlockers)[number];
+  sessionCloseRetryAvailable?: true;
   signal: (typeof taskNavigationSignals)[number] | null;
   compactBlocker: TaskActionBlocker | null;
   inputReady: boolean;

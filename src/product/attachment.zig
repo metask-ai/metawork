@@ -4,7 +4,7 @@ pub const store = @import("attachment_store.zig");
 pub const FileStore = store.FileStore;
 pub const Format = enum { png, jpeg, webp };
 pub const Kind = enum { file, image };
-pub const State = enum { input_reserved, ready, borrowed, cleanup_pending, task_owned, task_cleanup_pending };
+pub const State = enum { input_reserved, ready, borrowed, cleanup_pending, task_owned, retry_owned, task_cleanup_pending };
 pub const max_files_per_message: usize = 8;
 pub const record_capacity: usize = 128;
 pub const Limits = struct {
@@ -73,6 +73,8 @@ const Entry = struct {
     workspace_reference: ?WorkspaceReference = null,
     workspace_path: []u8 = &.{},
     workspace_text: []u8 = &.{},
+    retry_group: u64 = 0,
+    retry_task_id: u64 = 0,
 };
 pub const CleanupDebt = struct { count: usize, bytes: usize };
 pub const Runtime = struct {
@@ -111,7 +113,7 @@ pub const Runtime = struct {
         if (self.receiving) |receive| _ = self.cancelReceive(receive.id);
         var incomplete = false;
         for (self.slots) |*slot| if (slot.*) |*entry| {
-            const cleaned = if (entry.state == .task_owned or entry.state == .task_cleanup_pending) self.destroyTaskInput(entry) else self.destroyEntry(entry, false);
+            const cleaned = if (entry.state == .task_owned or entry.state == .retry_owned or entry.state == .task_cleanup_pending) self.destroyTaskInput(entry) else self.destroyEntry(entry, false);
             if (!cleaned) {
                 incomplete = true;
                 self.freeEntryMemory(entry);
@@ -141,6 +143,9 @@ pub const Runtime = struct {
             total = std.math.add(usize, total, file.size_bytes) catch return error.StagingCapacity;
         }
         _ = self.retryCleanup();
+        while (self.freeSlotCount() < files.len or total > self.limits.max_staged_bytes - self.used_bytes) {
+            if (!self.evictOldestRetry()) break;
+        }
         if (self.freeSlotCount() < files.len or total > self.limits.max_staged_bytes - self.used_bytes) {
             const debt = self.cleanupDebt();
             if (self.freeSlotCount() + debt.count >= files.len and total <= self.limits.max_staged_bytes - (self.used_bytes - debt.bytes)) return error.CleanupFailed;
@@ -369,12 +374,23 @@ pub const Runtime = struct {
         return cleaned;
     }
     pub fn borrow(self: *Runtime, ids: []const u64, parts: []BorrowedPart, indices: []usize, task_id: u64) Error!Borrow {
+        return self.borrowInput(ids, parts, indices, task_id, false);
+    }
+
+    pub fn borrowRetry(self: *Runtime, ids: []const u64, parts: []BorrowedPart, indices: []usize, task_id: u64) Error!Borrow {
+        return self.borrowInput(ids, parts, indices, task_id, true);
+    }
+
+    fn borrowInput(self: *Runtime, ids: []const u64, parts: []BorrowedPart, indices: []usize, task_id: u64, retrying: bool) Error!Borrow {
         if (ids.len == 0) return error.EmptyBatch;
         if (task_id == 0 or ids.len > self.limits.max_files or parts.len < ids.len or indices.len < ids.len) return error.TooManyFiles;
         for (ids, 0..) |id, index| {
             for (ids[0..index]) |previous| if (previous == id) return error.DuplicateAttachment;
             const slot_index = self.findIndex(id) orelse return error.UnknownAttachment;
-            if (self.slots[slot_index].?.state != .ready) return error.AttachmentBusy;
+            const entry = &self.slots[slot_index].?;
+            if (retrying) {
+                if (entry.state != .retry_owned or entry.retry_task_id != task_id) return error.AttachmentBusy;
+            } else if (entry.state != .ready) return error.AttachmentBusy;
             indices[index] = slot_index;
         }
         var borrowed: usize = 0;
@@ -386,6 +402,7 @@ pub const Runtime = struct {
             const entry = &self.slots[slot_index].?;
             entry.state = .borrowed;
             borrowed += 1;
+            if (retrying) try self.classify(entry);
             try self.file_store.?.move(&entry.file, task_id);
             if (entry.workspace_reference != null) {
                 parts[index] = if (entry.format != null)
@@ -443,9 +460,47 @@ pub const Runtime = struct {
         if (cleaned) self.slots[index] = null else return error.CleanupFailed;
     }
 
+    pub fn retainTaskInputForRetry(self: *Runtime, id: u64, task_id: u64, group: u64) bool {
+        const index = self.findIndex(id) orelse return false;
+        const entry = &self.slots[index].?;
+        std.debug.assert(entry.state == .task_owned and entry.file.task_id == task_id and group != 0);
+        entry.state = .retry_owned;
+        entry.retry_task_id = task_id;
+        entry.retry_group = group;
+        self.file_store.?.move(&entry.file, 0) catch {
+            if (self.destroyTaskInput(entry)) self.slots[index] = null;
+            return false;
+        };
+        return true;
+    }
+
+    pub fn hasRetryInput(self: *const Runtime, id: u64, task_id: u64) bool {
+        const index = self.findIndex(id) orelse return false;
+        const entry = &self.slots[index].?;
+        return entry.state == .retry_owned and entry.retry_task_id == task_id;
+    }
+
+    pub fn discardRetryInput(self: *Runtime, id: u64, task_id: u64) void {
+        const index = self.findIndex(id) orelse return;
+        const entry = &self.slots[index].?;
+        if (entry.state != .retry_owned or entry.retry_task_id != task_id) return;
+        if (self.destroyTaskInput(entry)) self.slots[index] = null;
+    }
+
+    fn evictOldestRetry(self: *Runtime) bool {
+        var group: ?u64 = null;
+        for (self.slots) |slot| if (slot) |entry| {
+            if (entry.state == .retry_owned) group = @min(group orelse entry.retry_group, entry.retry_group);
+        };
+        const oldest = group orelse return false;
+        for (self.slots) |*slot| if (slot.*) |*entry| {
+            if (entry.state == .retry_owned and entry.retry_group == oldest and self.destroyTaskInput(entry)) slot.* = null;
+        };
+        return true;
+    }
+
     fn destroyTaskInput(self: *Runtime, entry: *Entry) bool {
-        std.debug.assert(entry.state == .task_owned or entry.state == .task_cleanup_pending);
-        std.debug.assert(entry.file.task_id != 0);
+        std.debug.assert(entry.state == .task_owned or entry.state == .retry_owned or entry.state == .task_cleanup_pending);
         self.file_store.?.deleteChecked(entry.file) catch {
             entry.state = .task_cleanup_pending;
             return false;
@@ -539,11 +594,17 @@ pub const Borrow = struct {
             const entry = &self.runtime.slots[index].?;
             // A failed move leaves a ready file at either location; its authority
             // is still the staging grant and the next borrow moves it afresh.
-            self.runtime.file_store.?.move(&entry.file, 0) catch {};
+            const moved = if (self.runtime.file_store.?.move(&entry.file, 0)) |_| true else |_| false;
             std.crypto.secureZero(u8, entry.reference);
             self.runtime.allocator.free(entry.reference);
             entry.reference = &.{};
-            entry.state = .ready;
+            entry.state = if (entry.retry_group == 0) .ready else .retry_owned;
+            if (entry.state == .retry_owned) {
+                std.crypto.secureZero(u8, entry.preview);
+                self.runtime.allocator.free(entry.preview);
+                entry.preview = &.{};
+                if (!moved and self.runtime.destroyTaskInput(entry)) self.runtime.slots[index] = null;
+            }
         }
         self.active = false;
     }
@@ -562,6 +623,8 @@ pub const Borrow = struct {
             const entry = &self.runtime.slots[index].?;
             std.debug.assert(entry.state == .borrowed and entry.file.task_id != 0);
             entry.state = .task_owned;
+            entry.retry_group = 0;
+            entry.retry_task_id = 0;
             for ([_][]u8{ entry.preview, entry.reference }) |bytes| {
                 std.crypto.secureZero(u8, bytes);
                 self.runtime.allocator.free(bytes);
@@ -958,6 +1021,33 @@ test "metadata preflight rejects an entire batch before original creation" {
     try std.testing.expectEqual(@as(usize, 4), runtime.freeSlotCount());
     try std.testing.expect(runtime.receiving == null);
     try std.testing.expectError(error.FileNotFound, fixture.store.root.openDir(std.testing.io, "0", .{}));
+}
+
+test "staging reclaims the entire oldest retry batch for another Task" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var limits = testLimits();
+    limits.max_staged_bytes = 8;
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    var output: [2]Descriptor = undefined;
+    const ready = try runtime.stageBatch(&.{ .{ .display_name = "a.txt", .bytes = "one" }, .{ .display_name = "b.txt", .bytes = "two" } }, &output);
+    const ids = [2]u64{ ready[0].id, ready[1].id };
+    var parts: [2]BorrowedPart = undefined;
+    var indices: [2]usize = undefined;
+    var borrow = try runtime.borrow(&ids, &parts, &indices, 42);
+    borrow.retainForTask();
+    for (ids) |id| {
+        try std.testing.expect(runtime.retainTaskInputForRetry(id, 42, ids[0]));
+        try std.testing.expect(!try runtime.releaseChecked(id));
+        try std.testing.expectEqual(@as(u64, 0), runtime.slots[runtime.findIndex(id).?].?.file.task_id);
+    }
+    try std.testing.expectError(error.AttachmentBusy, runtime.borrowRetry(&ids, &parts, &indices, 43));
+    const replacement = try runtime.stageBatch(&.{.{ .display_name = "c.txt", .bytes = "three" }}, &output);
+    for (ids) |id| try std.testing.expect(!runtime.hasRetryInput(id, 42));
+    try std.testing.expectEqual(@as(usize, 5), runtime.used_bytes);
+    var second = try runtime.borrow(&.{replacement[0].id}, &parts, &indices, 43);
+    second.rollback();
 }
 
 test "input cleanup cannot delete a Task original after failed Run rollback" {

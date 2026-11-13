@@ -791,6 +791,8 @@ export const zhCN: Record<MessageId, string> = {
   "input.waiting": "等待处理",
   "input.cancelled": "已停止",
   "input.unexecuted": "未执行",
+  "input.retry_original": "重发原消息",
+  "input.discard_retry": "放弃重发",
   "input.submitted": "消息已发送。",
   "input.unknown": "发送结果尚未确认，请核对本轮记录；系统不会自动重发。",
   "input.local_capacity":
@@ -1470,6 +1472,18 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.workspace_removing": "该工作区正在移除，请等待操作完成。",
   "mutation.reason.binding_changed": "任务的执行配置已变化，请确认后继续。",
   "mutation.reason.binding_unavailable": "任务的执行配置已不可用。",
+  "mutation.reason.models_catalog_loading": "正在等待 Metask 模型目录刷新。",
+  "mutation.reason.models_catalog_failed": "Metask 模型目录刷新失败。",
+  "mutation.reason.metask_authorization_required":
+    "请登录 Metask 后使用此模型。",
+  "mutation.reason.metask_authorization_changed":
+    "此任务的 Metask 授权已变更。",
+  "mutation.reason.session_poisoned": "当前会话已无法继续。",
+  "mutation.reason.checkpoint_unavailable": "已保存的会话检查点不可用。",
+  "mutation.reason.execution_rebind_required": "此会话需要可用的执行配置。",
+  "input.retry_models_catalog": "重试刷新模型",
+  "input.session_close_failed": "此任务的会话关闭失败。",
+  "input.retry_session_close": "重试关闭会话",
   "mutation.reason.task_unavailable": "该任务已不可用。",
   "mutation.reason.model_changed":
     "任务模型已在其他位置更新，请刷新后重新选择。",

@@ -179,6 +179,18 @@ test "Metask catalog refresh failure never falls back to an old credential" {
     try characterizeCredentialExpiry(.catalog_failure);
 }
 
+test "Metask catalog loading defers an attached Task until refresh completes" {
+    try characterizeCredentialExpiry(.catalog_loading_attached);
+}
+
+test "Metask catalog loading defers a detached Task until refresh completes" {
+    try characterizeCredentialExpiry(.catalog_loading_detached);
+}
+
+test "Metask Task retries failed Session close before explicit input retry" {
+    try characterizeCredentialExpiry(.session_close_retry);
+}
+
 test "Metask rejected credential update does not replay a Run and permits one explicit retry" {
     try characterizeCredentialExpiry(.update_rejected);
 }
@@ -288,7 +300,24 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
 }
 
-const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, account_switch_after_logout, logout, detached, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+
+const CatalogRetryTimer = struct {
+    id: ?u64 = null,
+    count: usize = 0,
+
+    fn start(context: ?*anyopaque, id: u64, interval: u64, repeats: bool) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        try std.testing.expect(self.id == null and !repeats and interval != 0);
+        self.id = id;
+        self.count += 1;
+    }
+
+    fn cancel(context: ?*anyopaque, id: u64) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.id == id) self.id = null;
+    }
+};
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     try characterizeCredentialExpiryWithSchedule(scenario, false);
@@ -326,6 +355,14 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     if (scenario == .reviewer or scenario == .title_rotation) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    const attachment_root = try std.fs.path.join(std.testing.allocator, &.{ home, "retry-attachments" });
+    defer std.testing.allocator.free(attachment_root);
+    var attachments = if (scenario == .catalog_failure) try control_api.AttachmentFileStore.init(std.testing.io, std.testing.allocator, attachment_root) else null;
+    defer if (attachments) |*store| store.deinit();
+    if (attachments) |*store| {
+        configuration.attachment_store = store;
+        configuration.attachment_images = .{ .prepare_fn = copyTestImage };
+    }
     configuration.directories.canonical_user_home = home;
     if (corrupt_schedule) configuration.schedule_persistence = .{ .enabled = true, .restored_bytes = "not-json" };
     var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
@@ -348,7 +385,13 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     control.commitAccountFactNoFail(account_runtime.preparedFact(&authenticated));
 
     var coordinator = coordinator_api.Coordinator.init(&account_runtime, .{ .context = &network, .perform_fn = Network.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
-    coordinator.setProbeNotifier(.{ .context = &network, .notify_fn = Network.wake });
+    var catalog_timer: CatalogRetryTimer = .{};
+    if (scenario == .catalog_failure) coordinator.setRetryTimer(.{ .context = &catalog_timer, .start_fn = CatalogRetryTimer.start, .cancel_fn = CatalogRetryTimer.cancel });
+    coordinator.setProbeNotifier(.{ .context = &wake_loop, .notify_fn = struct {
+        fn notify(context: *anyopaque) void {
+            _ = fixture.LifecycleWakeLoop.wake(context);
+        }
+    }.notify });
     coordinator.start(home, .{ .context = &network, .generate_slot_fn = Network.generate, .store_fn = Network.store, .get_fn = Network.get, .delete_fn = Network.delete });
     defer coordinator.shutdown();
     // Product may consult the admission port while settling recovery at shutdown.
@@ -411,6 +454,71 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     fake_core.setRestoreHistory(1, 0);
     fake_core.setRestoredModel(model_id);
     const default_revision = control.modelsView().selection_revision;
+    if (scenario == .session_close_retry) {
+        try std.testing.expect(!try control.retryTaskSessionClose(old_id, old_epoch));
+        fake_core.failNextSessionDestroy();
+        try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (old.runtime.close_failed) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CloseFailureDidNotSettle;
+        try expectBlocked(&control, old_id, "input-after-close-failed");
+        const failed = control.task_runtime.retrySubmission(old_id, "input-after-close-failed").?;
+        try std.testing.expectEqual(.session_close_failed, failed.reason.?);
+        try std.testing.expectEqual(old_id, failed.blocking_task_id.?);
+        const premature = try control.retryTaskInput(old_id, "input-after-close-failed", "premature-retry");
+        try std.testing.expectEqual(.rejected, premature.outcome);
+        try std.testing.expect(failed.retry_payload != null);
+        try std.testing.expect(!control.task_runtime.hasInputReceipt(old_id, "premature-retry"));
+        try std.testing.expect(!try control.retryTaskSessionClose(old_id, old_epoch + 1));
+        try std.testing.expect(try control.retryTaskSessionClose(old_id, old_epoch));
+        try std.testing.expect(!try control.retryTaskSessionClose(old_id, old_epoch));
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (old.runtime.attachment == .detached and old.runtime.close_thread == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CloseRetryDidNotSettle;
+        try std.testing.expectEqual(@as(usize, 1), runCalls());
+        const retried = try control.retryTaskInput(old_id, "input-after-close-failed", "retry-after-close");
+        try std.testing.expectEqual(.accepted, retried.outcome);
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.SessionCloseInputDidNotFinish;
+        try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "retry-after-close"));
+        return;
+    }
+    if (scenario == .catalog_loading_attached or scenario == .catalog_loading_detached) {
+        if (scenario == .catalog_loading_detached) {
+            try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (old.runtime.attachment == .detached and old.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.DetachDidNotSettle;
+        }
+        platform.now_unix_seconds = 150;
+        try commitRefresh(&account_runtime, &control);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try std.testing.expectEqual(.loading, control.modelsView().providers[0].catalog_state);
+        const accepted = try control.sendInput("wait-for-model-catalog", old_id, .{ .text = "Send after the catalog is ready." });
+        try std.testing.expectEqual(.accepted, accepted.outcome);
+        try std.testing.expectEqual(.waiting, old.input_submissions.items[0].state);
+        try std.testing.expectEqual(@as(usize, 1), runCalls());
+        try drainCatalog(&coordinator);
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CatalogWaitDidNotFinish;
+        try std.testing.expectEqual(@as(usize, 0), old.input_submissions.items.len);
+        try std.testing.expectEqual(@as(usize, 2), runCalls());
+        try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "wait-for-model-catalog"));
+        return;
+    }
     if (scenario == .detached) {
         try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
         for (0..5000) |_| {
@@ -689,6 +797,39 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
             try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[0].credential_digest);
             try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+            var descriptors: [1]control_api.AttachmentDescriptor = undefined;
+            const staged = try control.stageAttachments(&.{.{ .display_name = "test.png", .bytes = "\x89PNG\r\n\x1a\nimage" }}, &descriptors);
+            const id = staged[0].id;
+            const image = try control.sendInput("image-before-retry", old_id, .{ .multimodal = .{ .text = "Check this image", .attachment_ids = &.{id} } });
+            try std.testing.expectEqual(.accepted, image.outcome);
+            const failed = control.task_runtime.retrySubmission(old_id, "image-before-retry").?;
+            try std.testing.expectEqual(.models_catalog_failed, failed.reason.?);
+            try std.testing.expect(failed.payload == null);
+            try std.testing.expectEqual(@as(usize, 0), failed.retry_payload.?.attachments[0].bytes.len);
+            try std.testing.expect(!control.releaseAttachment(id));
+            network.fail_catalog = false;
+            const timer_id = catalog_timer.id orelse return error.CatalogRetryNotScheduled;
+            catalog_timer.id = null;
+            try std.testing.expect(coordinator.onCatalogRetryTimer(timer_id));
+            try drainCatalog(&coordinator);
+            try std.testing.expectEqual(@as(usize, 1), catalog_timer.count);
+            try std.testing.expect(!coordinator.onCatalogRetryTimer(timer_id));
+            const retried = try control.retryTaskInput(old_id, "image-before-retry", "new-image-operation");
+            try std.testing.expectEqual(.accepted, retried.outcome);
+            const duplicate = try control.retryTaskInput(old_id, "image-before-retry", "duplicate-image-operation");
+            try std.testing.expectEqual(.accepted, duplicate.outcome);
+            try std.testing.expectEqualStrings("new-image-operation", duplicate.operationId());
+            try std.testing.expect(control.task_runtime.hasInputReceipt(old_id, "new-image-operation"));
+            try std.testing.expect(!control.task_runtime.hasInputReceipt(old_id, "duplicate-image-operation"));
+            try std.testing.expect(control.task_runtime.retrySubmission(old_id, "image-before-retry").?.retry_payload == null);
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.ImageRetryDidNotFinish;
+            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old.durable.runs).?;
+            try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(run).?.outcome);
+            try std.testing.expectEqualStrings("new-image-operation", run.submission.?.operationId());
             return;
         }
         try std.testing.expectEqual(@as(usize, 1), network.refresh_calls.load(.acquire));
@@ -884,6 +1025,10 @@ fn expectBlocked(control: *control_api.Runtime, task_id: u64, operation: []const
     try std.testing.expectEqual(.failed, record.state);
     try std.testing.expectEqual(before, runCalls());
     try std.testing.expectEqual(.none, task.runtime.active_operation);
+}
+
+fn copyTestImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
+    return allocator.dupe(u8, bytes);
 }
 
 fn relogin(runtime: *account.Runtime) !void {
