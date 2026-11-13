@@ -4791,6 +4791,20 @@ pub const Runtime = struct {
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
             return error.BindingEpochMismatch;
+        // Compaction declares that it calls the model, so the Task must hold
+        // the current login's credential before it starts. It is admitted
+        // through the same path as every other model entry, including the
+        // rebind an installed source change requires.
+        if (product_task.mutationImpact(.manual_compact).model_access == .required) {
+            var model_target = try self.resolveTaskRunModel(task_id);
+            defer if (model_target) |*target| target.deinit();
+            if (model_target) |*target| {
+                if (self.task_runtime.installedModelNeedsSourceChange(task_id, target.input())) {
+                    _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
+                    return error.RestoreBusy;
+                }
+            }
+        }
         if (!self.task_runtime.continuationAvailable(
             task_id,
             self.taskRuntimeProjectionEffects(&self.liveViewText()),
