@@ -1,5 +1,6 @@
 import type {
   RunActivity,
+  RunModelError,
   RunPhase,
   RunView,
   ToolView,
@@ -23,6 +24,14 @@ export type RunPresentation = {
   tools: ToolView[];
   runningToolName: string | null;
 };
+
+/** Host-cleaned model error text is shown unless it is empty or fully masked. */
+export function modelErrorMessageVisible(modelError: RunModelError): boolean {
+  return (
+    modelError.message !== "" &&
+    !(modelError.hostRedacted && /^[*?\s]+$/.test(modelError.message))
+  );
+}
 
 /** A display estimate since a Host sample, never a liveness observation. */
 export function runElapsedSeconds(

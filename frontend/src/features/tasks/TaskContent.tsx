@@ -53,6 +53,7 @@ import {
 import {
   deriveRunPresentation,
   formatRunTimestamp,
+  modelErrorMessageVisible,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
   type RunProcessDisclosure,
@@ -310,6 +311,7 @@ export function TaskContent({
   onRetryInput,
   onDiscardInputRetry,
   onOpenSettings,
+  recharge,
   onPreviewFile,
   workspaceRoot = null,
   onPreviewWorkspaceFile,
@@ -350,6 +352,8 @@ export function TaskContent({
   onRetryInput?: (taskId: string, operationId: string) => void;
   onDiscardInputRetry?: (taskId: string, operationId: string) => void;
   onOpenSettings?: (target: "account" | "models") => void;
+  /** Current Account recharge eligibility; never inherited from Run history. */
+  recharge?: { available: boolean; busy: boolean; onOpen: () => void };
   loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
     taskId: string,
@@ -765,12 +769,19 @@ export function TaskContent({
           const terminal = run.terminal;
           const modelError = terminal?.modelError;
           const guidance = terminal?.feedback.guidance;
+          const providerReason = terminal?.feedback.reason ?? null;
+          const rechargeAction =
+            guidance === "recharge" && recharge?.available ? recharge : null;
           const settingsTarget =
-            guidance === "account_settings"
+            guidance === "account_settings" ||
+            (guidance === "recharge" && !rechargeAction)
               ? "account"
               : guidance === "model_settings"
                 ? "models"
                 : null;
+          const primarySettingsAction =
+            rechargeAction !== null ||
+            (settingsTarget !== null && onOpenSettings !== undefined);
           const canPrepareInput =
             isCurrent &&
             synchronized &&
@@ -782,15 +793,18 @@ export function TaskContent({
             guidance &&
             guidance !== "none" &&
             guidance !== "account_settings" &&
-            guidance !== "model_settings"
+            guidance !== "model_settings" &&
+            guidance !== "recharge"
               ? t(`run.guidance.${guidance}`)
               : undefined;
           const reason =
             terminal?.cause === "provider_failure"
               ? t(
-                  modelError
-                    ? `run.model_error.category.${modelError.category}`
-                    : "run.provider_failure.title",
+                  providerReason
+                    ? `run.model_error.reason.${providerReason}`
+                    : modelError
+                      ? `run.model_error.category.${modelError.category}`
+                      : "run.provider_failure.title",
                 )
               : terminal?.cause
                 ? t(`cause.${terminal.cause}`)
@@ -805,6 +819,14 @@ export function TaskContent({
               : terminal
                 ? t(terminalMessage(run.output.responseKind, terminal.outcome))
                 : "";
+          // A recognized first-party reason replaces, not repeats, upstream text.
+          const upstreamMessage =
+            terminal?.cause === "provider_failure" &&
+            modelError &&
+            providerReason === null &&
+            modelErrorMessageVisible(modelError)
+              ? modelError.message
+              : undefined;
           const terminalLabel = terminal?.recordingIncomplete
             ? terminal.outcome === "completed"
               ? t("run.recording_incomplete")
@@ -1069,6 +1091,7 @@ export function TaskContent({
                     }
                     state={outcomeState(terminal.outcome)}
                     label={visibleTerminalLabel}
+                    quote={upstreamMessage}
                     detail={guidanceText}
                     announce={
                       isCurrent &&
@@ -1077,9 +1100,26 @@ export function TaskContent({
                       ) === false
                     }
                     action={
-                      (settingsTarget && onOpenSettings) || canPrepareInput ? (
+                      primarySettingsAction || canPrepareInput ? (
                         <div className="run-terminal-actions">
-                          {settingsTarget && onOpenSettings ? (
+                          {rechargeAction ? (
+                            <button
+                              className="ai-activity-retry ai-activity-external focus-ring"
+                              data-primary="true"
+                              disabled={
+                                responseDisabled ||
+                                !synchronized ||
+                                rechargeAction.busy
+                              }
+                              title={t(
+                                "settings.account_recharge_browser_hint",
+                              )}
+                              onClick={rechargeAction.onOpen}
+                            >
+                              <Icon name="external-link" />
+                              {t("settings.account_recharge")}
+                            </button>
+                          ) : settingsTarget && onOpenSettings ? (
                             <button
                               className="ai-activity-retry focus-ring"
                               data-primary="true"
@@ -1120,7 +1160,7 @@ export function TaskContent({
                   run={run}
                   composerHasDraft={composerHasDraft}
                   onPrepareRetry={
-                    settingsTarget && onOpenSettings && canPrepareInput
+                    primarySettingsAction && canPrepareInput
                       ? prepareInput
                       : undefined
                   }

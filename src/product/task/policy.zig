@@ -278,6 +278,7 @@ pub const RunGuidance = enum {
     none,
     account_settings,
     model_settings,
+    recharge,
     review_context,
     revise_instruction,
     wait,
@@ -287,7 +288,22 @@ pub const RunGuidance = enum {
     review_image_input,
 };
 
-pub const RunFeedback = struct { guidance: RunGuidance, offer_input_preparation: bool };
+/// First-party provider failure reason recognized from an exact gateway code.
+pub const RunProviderReason = enum {
+    metask_insufficient_balance,
+};
+
+pub const RunFeedback = struct {
+    guidance: RunGuidance,
+    reason: ?RunProviderReason,
+    offer_input_preparation: bool,
+};
+
+/// Metask gateway error codes with first-party account meaning. Codes are
+/// matched byte-for-byte; message, type and HTTP status are never parsed.
+const metask_error_codes = [_]struct { code: []const u8, reason: RunProviderReason }{
+    .{ .code = "insufficient_balance", .reason = .metask_insufficient_balance },
+};
 
 /// Advice never grants execution, login, payment, or model mutation authority.
 pub fn runFeedback(
@@ -295,7 +311,13 @@ pub fn runFeedback(
     cause: ?task_state.RunCause,
     detail: ?*const task_state.RunModelError,
 ) RunFeedback {
-    const guidance: RunGuidance = switch (outcome) {
+    const provider_reason: ?RunProviderReason = if (outcome == .failed and cause == .provider_failure)
+        if (detail) |observed| providerReason(observed) else null
+    else
+        null;
+    const guidance: RunGuidance = if (provider_reason) |known| switch (known) {
+        .metask_insufficient_balance => .recharge,
+    } else switch (outcome) {
         .completed, .dependency_contract_failure => .none,
         .cancelled => if (cause == .timeout) .prepare_retry else .none,
         .stopped => if (cause) |reason| switch (reason) {
@@ -315,6 +337,7 @@ pub fn runFeedback(
     };
     return .{
         .guidance = guidance,
+        .reason = provider_reason,
         .offer_input_preparation = switch (outcome) {
             .completed => false,
             .cancelled => cause == .timeout,
@@ -334,6 +357,81 @@ fn providerGuidance(detail: *const task_state.RunModelError) RunGuidance {
         .server_error, .timeout, .connection, .stream_interrupted => .prepare_retry,
         .unknown => .model_settings,
     };
+}
+
+fn providerReason(detail: *const task_state.RunModelError) ?RunProviderReason {
+    if (detail.source != .metask) return null;
+    const code = detail.detail.view().code orelse return null;
+    for (metask_error_codes) |entry| {
+        if (std.mem.eql(u8, code, entry.code)) return entry.reason;
+    }
+    return null;
+}
+
+test "Metask first-party reason requires the exact Metask code on the primary provider failure" {
+    var detail: task_state.RunModelError = .{ .source = .metask, .detail = try agent.ModelError.init(.{
+        .run_id = 1,
+        .category = .payment_required,
+        .code = "insufficient_balance",
+        .type = "insufficient_balance",
+        .message = "可用余额和套餐额度不足，请充值、兑换或订阅后再试",
+        .http_status = 402,
+        .retry = .not_retryable,
+        .attempts = 1,
+    }) };
+    const recognized = runFeedback(.failed, .provider_failure, &detail);
+    try std.testing.expectEqual(@as(?RunProviderReason, .metask_insufficient_balance), recognized.reason);
+    try std.testing.expectEqual(.recharge, recognized.guidance);
+    try std.testing.expect(recognized.offer_input_preparation);
+    // The code, not the category, carries the first-party meaning.
+    detail.detail.category = .unknown;
+    try std.testing.expectEqual(.recharge, runFeedback(.failed, .provider_failure, &detail).guidance);
+    detail.detail.category = .payment_required;
+
+    // Supplemental observations and other outcomes never surface the reason.
+    for ([_]struct { outcome: task_state.RunOutcome, cause: ?task_state.RunCause }{
+        .{ .outcome = .failed, .cause = .event_pipeline_failure },
+        .{ .outcome = .failed, .cause = .agent_failure },
+        .{ .outcome = .dependency_contract_failure, .cause = .dependency_contract_failure },
+        .{ .outcome = .interrupted, .cause = .app_shutdown },
+        .{ .outcome = .failed, .cause = null },
+    }) |case| {
+        const feedback = runFeedback(case.outcome, case.cause, &detail);
+        try std.testing.expectEqual(@as(?RunProviderReason, null), feedback.reason);
+        try std.testing.expect(feedback.guidance != .recharge);
+    }
+
+    // Other sources keep the generic source-matched advice.
+    for ([_]?task_state.RunModelError.Source{ .custom_provider, null }) |source| {
+        detail.source = source;
+        const feedback = runFeedback(.failed, .provider_failure, &detail);
+        try std.testing.expectEqual(@as(?RunProviderReason, null), feedback.reason);
+        try std.testing.expectEqual(.model_settings, feedback.guidance);
+    }
+    detail.source = .metask;
+
+    // Other, absent, or merely similar codes are not recognized.
+    for ([_]?[]const u8{ null, "", "Insufficient_Balance", "insufficient_balance ", "x_insufficient_balance", "insufficient_quota" }) |code| {
+        var other: task_state.RunModelError = .{ .source = .metask, .detail = try agent.ModelError.init(.{
+            .run_id = 1,
+            .category = .payment_required,
+            .code = code,
+            .type = "insufficient_balance",
+            .message = "insufficient_balance",
+            .retry = .not_retryable,
+            .attempts = 1,
+        }) };
+        const feedback = runFeedback(.failed, .provider_failure, &other);
+        try std.testing.expectEqual(@as(?RunProviderReason, null), feedback.reason);
+        try std.testing.expectEqual(.account_settings, feedback.guidance);
+        other.source = .custom_provider;
+        try std.testing.expectEqual(.model_settings, runFeedback(.failed, .provider_failure, &other).guidance);
+    }
+
+    // No structured detail keeps the generic retry advice.
+    const absent = runFeedback(.failed, .provider_failure, null);
+    try std.testing.expectEqual(@as(?RunProviderReason, null), absent.reason);
+    try std.testing.expectEqual(.prepare_retry, absent.guidance);
 }
 
 test "model recovery advice respects exact source and primary cause without granting replay authority" {
@@ -374,6 +472,7 @@ test "model recovery advice respects exact source and primary cause without gran
         detail.detail.category = case.category;
         const feedback = runFeedback(.failed, .provider_failure, &detail);
         try std.testing.expectEqual(case.guidance, feedback.guidance);
+        try std.testing.expectEqual(@as(?RunProviderReason, null), feedback.reason);
         try std.testing.expect(feedback.offer_input_preparation);
     }
 }

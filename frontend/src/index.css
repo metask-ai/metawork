@@ -3084,6 +3084,17 @@ button.run-process-tool:hover {
   margin-top: 2px;
 }
 
+.ai-activity-quote {
+  display: -webkit-box;
+  margin-top: 2px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .run-terminal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3114,6 +3125,12 @@ button.run-process-tool:hover {
 
 .ai-activity-retry {
   border: 0;
+}
+
+.ai-activity-external {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .run-terminal-actions .ai-activity-retry[data-primary="false"] {

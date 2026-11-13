@@ -5799,6 +5799,11 @@ export default function App() {
                   void actOnFailedInput(taskId, operationId, true)
                 }
                 onOpenSettings={openSettings}
+                recharge={{
+                  available: snapshot.account.state === "authenticated",
+                  busy: accountBusy,
+                  onOpen: () => void openAccountRecharge(),
+                }}
                 onPreviewFile={openFilePreview}
                 workspaceRoot={
                   panelWorkspace && !panelWorkspace.redacted

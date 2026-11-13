@@ -141,7 +141,7 @@ const terminal = {
   cause: null,
   diagnosticDisposition: "absent",
   recordingIncomplete: false,
-  feedback: { guidance: "none", offerInputPreparation: false },
+  feedback: { guidance: "none", reason: null, offerInputPreparation: false },
   modelError: null,
 };
 const done = {
