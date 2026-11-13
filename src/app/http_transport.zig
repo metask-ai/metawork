@@ -950,6 +950,8 @@ pub const Request = struct {
             self.operation.idle_limit.nanoseconds > 0 and
             slot.created.untilNow(self.operation.io()).raw.toSeconds() < Engine.lifetime_seconds;
         connection.closing = connection.closing or !reusable or self.operation.gate.load(.acquire) & 2 != 0;
+        // A closing connection is freed through the wiping allocator instead.
+        if (!connection.closing and !wipeIdle(connection)) connection.closing = true;
         // Do not let std Request.deinit drain an abandoned GET while canceling.
         self.raw.connection = null;
         self.raw.deinit();
@@ -1065,6 +1067,7 @@ pub const Request = struct {
         const buffer = allocator.alloc(u8, size) catch return self.operation.fail(error.OutOfMemory);
         defer allocator.free(buffer);
         var transfer_buffer: [256]u8 = undefined;
+        defer std.crypto.secureZero(u8, &transfer_buffer);
         var decompress: std.http.Decompress = undefined;
         const reader = response.readerDecompressing(&transfer_buffer, &decompress, buffer);
         var writer: Io.Writer = .fixed(output);
@@ -1131,6 +1134,24 @@ comptime {
     std.debug.assert(@FieldType(Io.net.Stream.Writer, "interface") == Io.Writer);
     std.debug.assert(@FieldType(Io.Writer, "vtable") == *const Io.Writer.VTable);
     std.debug.assert(@FieldType(Client, "connection_pool") == Client.ConnectionPool);
+}
+
+/// Clears the previous request head (such as Authorization) and response bytes
+/// (such as tokens) before a connection idles in the pool: the plaintext and
+/// socket buffers of both directions. A buffer still holding unread or unsent
+/// bytes means the connection is not clean, so it is not kept.
+fn wipeIdle(connection: *Client.Connection) bool {
+    const writers = [_]*Io.Writer{ connection.writer(), &connection.stream_writer.interface };
+    const readers = [_]*Io.Reader{ connection.reader(), &connection.stream_reader.interface };
+    for (writers) |writer| if (writer.end != 0) return false;
+    for (readers) |reader| if (reader.bufferedLen() != 0) return false;
+    for (writers) |writer| std.crypto.secureZero(u8, writer.buffer);
+    for (readers) |reader| {
+        reader.seek = 0;
+        reader.end = 0;
+        std.crypto.secureZero(u8, reader.buffer);
+    }
+    return true;
 }
 
 fn dispose(connection: *Client.Connection) void {

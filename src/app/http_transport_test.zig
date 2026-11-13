@@ -549,6 +549,9 @@ const Pool = struct {
         drop,
         /// Send part of a response head, then close.
         truncate,
+        /// Send the head and part of the body, cancel the client through
+        /// `cancel_on_drop`, then wait for the client to close.
+        stall,
     };
 
     const Options = struct {
@@ -560,6 +563,8 @@ const Pool = struct {
         action: *const fn (connection: usize, request: usize) Action = respondAlways,
         /// Sent as the Keep-Alive header of every response.
         keep_alive: ?[]const u8 = null,
+        /// Every response body.
+        body: []const u8 = "{}",
     };
 
     fn respondAlways(_: usize, _: usize) Action {
@@ -632,9 +637,19 @@ const Pool = struct {
                     writer.interface.flush() catch {};
                     return;
                 },
+                .stall => {
+                    writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\npartial") catch return;
+                    writer.interface.flush() catch return;
+                    if (cancel_on_drop) |state| {
+                        state.store(1, .release);
+                        std.testing.io.futexWake(u32, &state.raw, std.math.maxInt(u32));
+                    }
+                    _ = reader.interface.discardRemaining() catch {};
+                    return;
+                },
             }
             const keep_alive: []const std.http.Header = if (self.options.keep_alive) |value| &.{.{ .name = "Keep-Alive", .value = value }} else &.{};
-            request.respond("{}", .{ .keep_alive = true, .extra_headers = keep_alive }) catch return;
+            request.respond(self.options.body, .{ .keep_alive = true, .extra_headers = keep_alive }) catch return;
             if (index == 0 and self.options.close_first) return;
         }
     }
@@ -1070,6 +1085,116 @@ test "HTTP statistics count reuse per consumer and summaries carry no request da
         try std.testing.expect(std.mem.indexOf(u8, summary, forbidden) == null);
     // Only the active consumer gets a line.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, summary, "\n"));
+}
+
+/// Backing allocator that records every release and whether any released
+/// byte was still non-zero. Used from engine worker threads.
+const Observed = struct {
+    releases: std.atomic.Value(usize) = .init(0),
+    dirty: std.atomic.Value(bool) = .init(false),
+
+    fn allocator(self: *Observed) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+
+    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        return std.testing.allocator.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *Observed = @ptrCast(@alignCast(context));
+        for (memory) |byte| if (byte != 0) self.dirty.store(true, .release);
+        _ = self.releases.fetchAdd(1, .acq_rel);
+        std.testing.allocator.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+fn secretFetch(operation: *http.Operation, url: []const u8, output: []u8) http.Error!Reply {
+    var headers = [_]std.http.Header{.{ .name = "Authorization", .value = "Bearer request-secret" }};
+    var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{ .headers = &headers });
+    defer request.deinit();
+    try request.send(null);
+    var response = try request.receiveHead();
+    const bytes = try request.readAll(&response, output);
+    return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
+}
+
+fn runSecret(engine: *http.Engine, url: []const u8, isolation: http.Isolation, cancellation: ?http.Cancellation) http.Result(http.Error!Reply) {
+    var output: [64]u8 = undefined;
+    return engine.run(.{ .consumer = .metask, .isolation = isolation, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) }, .cancellation = cancellation }, secretFetch, .{ url, &output });
+}
+
+test "HTTP pooled connections keep neither the request head nor the response body" {
+    const pool = try Pool.create(.{ .connections = 1, .body = "{\"token\":\"response-secret\"}" });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    _ = try runSecret(&engine, url, .public, null).outcome.completed;
+    const slot = try pooledSlot(&engine);
+    const connection: *std.http.Client.Connection = @alignCast(@fieldParentPtr("pool_node", slot.client.connection_pool.free.first.?));
+    const buffers = [_][]const u8{ connection.writer().buffer, connection.stream_writer.interface.buffer, connection.reader().buffer, connection.stream_reader.interface.buffer };
+    for (buffers) |buffer| for ([_][]const u8{ "request-secret", "response-secret", "Authorization" }) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, buffer, secret) == null);
+    // Still a clean, reusable connection.
+    try std.testing.expect(runSecret(&engine, url, .public, null).reused);
+}
+
+test "HTTP engine frees connections through the wiping allocator on failure, cancellation and eviction" {
+    var observed: Observed = .{};
+    var state: std.atomic.Value(u32) = .init(0);
+    Pool.cancel_on_drop = &state;
+    defer Pool.cancel_on_drop = null;
+    const Script = struct {
+        // Connection 0 fails at once, 1 stalls mid-body, the rest respond.
+        fn action(connection: usize, _: usize) Pool.Action {
+            return switch (connection) {
+                0 => .drop,
+                1 => .stall,
+                else => .respond,
+            };
+        }
+    };
+    const pool = try Pool.create(.{ .connections = 5, .action = Script.action });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(observed.allocator(), std.testing.io);
+    var engine_live = true;
+    defer if (engine_live) engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+
+    var released = observed.releases.load(.acquire);
+    try std.testing.expectError(error.ReadFailed, runSecret(&engine, url, .public, null).outcome.completed);
+    try std.testing.expect(observed.releases.load(.acquire) > released);
+
+    // The drop above also tripped the shared cancellation hook.
+    state.store(0, .release);
+    released = observed.releases.load(.acquire);
+    const cancelled = runSecret(&engine, url, .public, .atomic(&state));
+    try std.testing.expectEqual(error.Cancelled, cancelled.outcome.failed);
+    try pool.waitClosed(1);
+    try std.testing.expect(observed.releases.load(.acquire) > released);
+
+    // Retire, then expiry, each close a pooled connection.
+    _ = try runSecret(&engine, url, .of(.metask_account, "a"), null).outcome.completed;
+    released = observed.releases.load(.acquire);
+    engine.retire(.of(.metask_account, "a"));
+    try pool.waitClosed(2);
+    try std.testing.expect(observed.releases.load(.acquire) > released);
+    _ = try runSecret(&engine, url, .of(.metask_account, "b"), null).outcome.completed;
+    backdate(&(try pooledSlot(&engine)).idle, 31 * std.time.ms_per_s);
+    released = observed.releases.load(.acquire);
+    // The owner's next lease closes its expired connection and opens another.
+    try std.testing.expect(!runSecret(&engine, url, .of(.metask_account, "b"), null).reused);
+    try pool.waitClosed(3);
+    try std.testing.expect(observed.releases.load(.acquire) > released);
+
+    engine_live = false;
+    engine.deinit();
+    try std.testing.expect(!observed.dirty.load(.acquire));
 }
 
 test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" {
