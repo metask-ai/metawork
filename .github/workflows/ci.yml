@@ -37,9 +37,17 @@ jobs:
         with:
           node-version: 24
 
-      - uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+          use-cache: false
+
+      - name: Prepare Zig cache
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE '.zig-cache/global'
+          New-Item -ItemType Directory -Force (Join-Path $cache 'tmp') | Out-Null
+          "ZIG_GLOBAL_CACHE_DIR=$cache" >> $env:GITHUB_ENV
 
       - name: Install npm dependencies
         run: npm ci
