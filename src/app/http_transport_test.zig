@@ -493,77 +493,217 @@ fn authorizedFetch(operation: *http.Operation, url: []const u8, token: []const u
 }
 
 test "HTTP reuses only clean same-scope connections and retires stale idle sockets" {
-    const KeepAlive = struct {
-        listener: *Io.net.Server,
-        close_first: bool,
-        closed: Io.Event = .unset,
-        connections: usize = 0,
-        requests: usize = 0,
-        failure: ?anyerror = null,
-        fn run(self: *@This()) void {
-            self.serve() catch |err| {
-                self.failure = err;
-            };
-        }
-        fn serve(self: *@This()) !void {
-            while (self.requests < 3) {
-                var connection = try self.listener.accept(std.testing.io);
-                self.connections += 1;
-                var closed = false;
-                defer if (!closed) connection.close(std.testing.io);
-                var reads: [4096]u8 = undefined;
-                var writes: [4096]u8 = undefined;
-                var reader = connection.reader(std.testing.io, &reads);
-                var writer = connection.writer(std.testing.io, &writes);
-                var server: std.http.Server = .init(&reader.interface, &writer.interface);
-                while (self.requests < 3) {
-                    var request = server.receiveHead() catch |err| {
-                        if (err == error.HttpConnectionClosing) break;
-                        return err;
-                    };
-                    var headers = request.iterateHeaders();
-                    var token: []const u8 = "";
-                    while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
-                        token = header.value;
-                    };
-                    try std.testing.expectEqualStrings(if (self.requests == 2) "Bearer second" else "Bearer first", token);
-                    self.requests += 1;
-                    try request.respond("{}", .{ .keep_alive = self.requests != 3 });
-                    if (self.close_first and self.requests == 1) break;
-                }
-                // The deferred close runs before the next iteration; use an
-                // explicit shutdown to make the stale-idle probe deterministic.
-                if (self.close_first and self.requests == 1) {
-                    connection.close(std.testing.io);
-                    closed = true;
-                    self.closed.set(std.testing.io);
-                }
-            }
-        }
-    };
     for ([_]bool{ false, true }) |close_first| {
+        const pool = try Pool.create(.{ .connections = if (close_first) 3 else 2, .close_first = close_first });
+        defer pool.destroy();
         var engine: http.Engine = undefined;
         engine.init(std.testing.allocator, std.testing.io);
         defer engine.deinit();
-        const address: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
-        var listener = try address.listen(std.testing.io, .{});
-        defer listener.deinit(std.testing.io);
-        var server: KeepAlive = .{ .listener = &listener, .close_first = close_first };
-        const thread = try std.Thread.spawn(.{}, KeepAlive.run, .{&server});
-        const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/fixture", .{listener.socket.address.getPort()});
-        defer std.testing.allocator.free(url);
-        for (0..3) |index| {
-            if (close_first and index == 1) server.closed.waitUncancelable(std.testing.io);
+        var url_buffer: [64]u8 = undefined;
+        const url = pool.url(&url_buffer);
+        var reused: [3]bool = undefined;
+        for (&reused, 0..) |*value, index| {
+            // The stale idle socket must be visible before the probe runs.
+            if (close_first and index == 1) try pool.waitClosed(0);
             var output: [8]u8 = undefined;
             const result = engine.run(.{ .consumer = .completion, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, authorizedFetch, .{ url, if (index == 2) "Bearer second" else "Bearer first", &output });
-            try std.testing.expect(result.outcome == .completed);
             try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+            value.* = result.reused;
         }
-        thread.join();
-        try std.testing.expectEqual(@as(?anyerror, null), server.failure);
-        try std.testing.expectEqual(@as(usize, if (close_first) 3 else 2), server.connections);
-        try std.testing.expectEqual(@as(usize, 3), server.requests);
+        try std.testing.expectEqualSlices(bool, if (close_first) &.{ false, false, false } else &.{ false, true, false }, &reused);
+        try std.testing.expectEqual(@as(usize, if (close_first) 3 else 2), pool.accepted.load(.acquire));
+        try std.testing.expectEqual(@as(?anyerror, null), pool.failure);
     }
+}
+
+// Keep-alive peer serving each accepted connection on its own thread until the
+/// client closes it. Counts connections and requests, and records which
+/// connection served each request.
+const Pool = struct {
+    listener: Io.net.Server,
+    options: Options,
+    accepted: std.atomic.Value(usize) = .init(0),
+    requests: std.atomic.Value(usize) = .init(0),
+    served_by: [64]usize = @splat(0),
+    closed: [16]std.atomic.Value(bool) = @splat(.init(false)),
+    failure: ?anyerror = null,
+    acceptor: ?std.Thread = null,
+
+    const Options = struct {
+        /// Exactly how many connections the peer accepts before it stops.
+        connections: usize,
+        /// The first connection closes right after its first response.
+        close_first: bool = false,
+    };
+
+    fn create(options: Options) !*Pool {
+        const self = try std.testing.allocator.create(Pool);
+        errdefer std.testing.allocator.destroy(self);
+        const address: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        self.* = .{ .listener = try address.listen(std.testing.io, .{}), .options = options };
+        self.acceptor = try std.Thread.spawn(.{}, acceptAll, .{self});
+        return self;
+    }
+
+    /// The engine must have closed every pooled connection (deinit) first.
+    fn destroy(self: *Pool) void {
+        if (self.acceptor) |thread| thread.join();
+        self.listener.deinit(std.testing.io);
+        std.testing.allocator.destroy(self);
+    }
+
+    fn url(self: *Pool, buffer: []u8) []const u8 {
+        return std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}/fixture", .{self.listener.socket.address.getPort()}) catch unreachable;
+    }
+
+    fn acceptAll(self: *Pool) void {
+        var threads: [16]?std.Thread = @splat(null);
+        defer for (threads) |thread| if (thread) |value| value.join();
+        for (0..self.options.connections) |index| {
+            const stream = self.listener.accept(std.testing.io) catch |err| {
+                self.failure = err;
+                return;
+            };
+            _ = self.accepted.fetchAdd(1, .acq_rel);
+            threads[index] = std.Thread.spawn(.{}, serve, .{ self, stream, index }) catch |err| {
+                stream.close(std.testing.io);
+                self.failure = err;
+                return;
+            };
+        }
+    }
+
+    fn serve(self: *Pool, stream: Io.net.Stream, index: usize) void {
+        defer {
+            stream.close(std.testing.io);
+            self.closed[index].store(true, .release);
+        }
+        var reads: [4096]u8 = undefined;
+        var writes: [4096]u8 = undefined;
+        var reader = stream.reader(std.testing.io, &reads);
+        var writer = stream.writer(std.testing.io, &writes);
+        var server: std.http.Server = .init(&reader.interface, &writer.interface);
+        while (true) {
+            var request = server.receiveHead() catch return;
+            const number = self.requests.fetchAdd(1, .acq_rel);
+            if (number < self.served_by.len) self.served_by[number] = index;
+            request.respond("{}", .{ .keep_alive = true }) catch return;
+            if (index == 0 and self.options.close_first) return;
+        }
+    }
+
+    fn waitClosed(self: *Pool, index: usize) !void {
+        for (0..400) |_| {
+            if (self.closed[index].load(.acquire)) return;
+            Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+fn scopedGet(operation: *http.Operation, url: []const u8, scope: []const u8, output: []u8) http.Error!Reply {
+    var headers = [_]std.http.Header{.{ .name = "X-Scope", .value = scope }};
+    var request = try operation.open(.GET, std.Uri.parse(url) catch return error.InvalidRequest, .{ .headers = &headers });
+    defer request.deinit();
+    try request.send(null);
+    var response = try request.receiveHead();
+    const bytes = try request.readAll(&response, output);
+    return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
+}
+
+fn runScoped(engine: *http.Engine, url: []const u8, scope: []const u8) !bool {
+    var output: [8]u8 = undefined;
+    const result = engine.run(.{ .consumer = .mcp, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, scopedGet, .{ url, scope, &output });
+    try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+    return result.reused;
+}
+
+test "HTTP alternating scopes keep their own pooled connections" {
+    const pool = try Pool.create(.{ .connections = 2 });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    // Runs before the pool joins its connection threads.
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    var reused: [6]bool = undefined;
+    for (&reused, 0..) |*value, index| value.* = try runScoped(&engine, url, if (index % 2 == 0) "a" else "b");
+    try std.testing.expectEqualSlices(bool, &.{ false, false, true, true, true, true }, &reused);
+    try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
+    try std.testing.expectEqual(@as(?anyerror, null), pool.failure);
+    // Scope "a" always lands on the first connection, "b" on the second.
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 0, 1, 0, 1 }, pool.served_by[0..6]);
+}
+
+test "HTTP keeps at most two idle connections per origin and evicts the oldest" {
+    const pool = try Pool.create(.{ .connections = 4 });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    // Runs before the pool joins its connection threads.
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    var reused: [6]bool = undefined;
+    for (&reused, [_][]const u8{ "a", "b", "c", "c", "b", "a" }) |*value, scope| value.* = try runScoped(&engine, url, scope);
+    // The third idle connection evicted the oldest (scope "a").
+    try pool.waitClosed(0);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false, true, true, false }, &reused);
+    try std.testing.expectEqual(@as(usize, 4), pool.accepted.load(.acquire));
+}
+
+test "HTTP evicts the least recently used slot only when every slot holds a connection" {
+    const origins = 17;
+    var pools: [origins]*Pool = undefined;
+    var created: usize = 0;
+    defer for (pools[0..created]) |pool| pool.destroy();
+    for (&pools, 0..) |*pool, index| {
+        pool.* = try Pool.create(.{ .connections = if (index == 0) 2 else 1 });
+        created += 1;
+    }
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var urls: [origins][64]u8 = undefined;
+    for (&pools, 0..) |pool, index| try std.testing.expect(!try runScoped(&engine, pool.url(&urls[index]), "a"));
+    // Sixteen slots: the seventeenth origin evicted the first.
+    try pools[0].waitClosed(0);
+    try std.testing.expect(try runScoped(&engine, pools[1].url(&urls[1]), "a"));
+    try std.testing.expect(!try runScoped(&engine, pools[0].url(&urls[0]), "a"));
+    try std.testing.expectEqual(@as(usize, 2), pools[0].accepted.load(.acquire));
+}
+
+test "HTTP refreshes the TLS clock on every new connection and rescans roots when due" {
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{});
+    defer listener.deinit(std.testing.io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "https://127.0.0.1:{d}/post", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    var scanned: [3]?Io.Clock.Timestamp = undefined;
+    var clocks: [3]Io.Timestamp = undefined;
+    for (0..3) |round| {
+        if (round == 2) for (&engine.slots) |*slot| if (slot.ca_scanned) |value| {
+            slot.ca_scanned = value.subDuration(.{ .raw = .fromSeconds(301), .clock = .awake });
+        };
+        var server: TlsReject = .{ .listener = &listener, .delay = .fromNanoseconds(0) };
+        const thread = try std.Thread.spawn(.{}, TlsReject.run, .{&server});
+        var output: [8]u8 = undefined;
+        const result = engine.run(.{ .consumer = .metask, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+        thread.join();
+        try std.testing.expectError(error.TlsFailed, result.outcome.completed);
+        // A refused handshake leaves no idle connection: slot 0 is chosen again.
+        scanned[round] = engine.slots[0].ca_scanned;
+        clocks[round] = engine.slots[0].client.now.?;
+    }
+    try std.testing.expect(scanned[0] != null);
+    try std.testing.expectEqual(scanned[0].?.raw.nanoseconds, scanned[1].?.raw.nanoseconds);
+    try std.testing.expect(scanned[2].?.raw.nanoseconds > scanned[1].?.raw.nanoseconds);
+    try std.testing.expect(clocks[1].nanoseconds > clocks[0].nanoseconds);
+    try std.testing.expect(clocks[2].nanoseconds > clocks[1].nanoseconds);
 }
 
 test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" {

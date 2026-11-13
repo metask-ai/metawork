@@ -65,6 +65,8 @@ pub fn Result(comptime T: type) type {
     return struct {
         outcome: union(enum) { completed: T, failed: Error },
         send: Send,
+        /// The request was attempted on a pooled idle connection.
+        reused: bool = false,
     };
 }
 
@@ -79,6 +81,13 @@ pub const Engine = struct {
     const slot_count = request_limit + continuation_limit;
     const idle_seconds = 30;
     const lifetime_seconds = 300;
+    /// Idle connections kept per origin across scopes. Two covers the usual
+    /// concurrency per origin (for example Account with Models on Metask, or a
+    /// title with a permission review) without one origin filling every slot.
+    const origin_idle_limit = 2;
+    /// A rescan costs about 2-4 ms (46 roots, 50 KB measured on Windows 10), so
+    /// root store changes reach every slot within one connection lifetime.
+    const ca_rescan_seconds = lifetime_seconds;
 
     io: Io,
     memory: memory.ZeroingAllocator,
@@ -94,7 +103,24 @@ pub const Engine = struct {
         scope: [32]u8 = @splat(0),
         created: Io.Clock.Timestamp = undefined,
         idle: Io.Clock.Timestamp = undefined,
+        ca_scanned: ?Io.Clock.Timestamp = null,
+
+        fn idleConnection(slot: *Slot) ?*Client.Connection {
+            const node = slot.client.connection_pool.free.first orelse return null;
+            return @alignCast(@fieldParentPtr("pool_node", node));
+        }
+
+        fn expired(slot: *const Slot, now: Io.Clock.Timestamp) bool {
+            return slot.idle.durationTo(now).raw.toSeconds() >= idle_seconds or
+                slot.created.durationTo(now).raw.toSeconds() >= lifetime_seconds;
+        }
+
+        fn sameOrigin(connection: *Client.Connection, protocol: Client.Protocol, port: u16, host: Io.net.HostName) bool {
+            return connection.protocol == protocol and connection.port == port and connection.host().eql(host);
+        }
     };
+
+    const Lease = struct { slot: *Slot, reuse: bool };
 
     /// The engine must stay at this address until deinit, after its callers join.
     pub fn init(self: *Engine, allocator: std.mem.Allocator, io: Io) void {
@@ -149,12 +175,15 @@ pub const Engine = struct {
         defer {
             self.mutex.lockUncancelable(self.io);
             self.active[lane] -= 1;
+            var surplus: ?*Slot = null;
             if (operation.slot) |slot| {
                 std.debug.assert(slot.client.connection_pool.used.first == null);
                 slot.idle = .now(self.io, .awake);
+                if (slot.idleConnection() != null) surplus = self.originSurplus(slot);
                 slot.busy = false;
             }
             self.mutex.unlock(self.io);
+            if (surplus) |victim| self.evict(victim);
         }
         var storage: [3]Outcome = undefined;
         var selection: Io.Select(Outcome) = .init(self.io, &storage);
@@ -175,6 +204,7 @@ pub const Engine = struct {
         selection.cancelDiscard();
         const result: Result(T) = .{
             .send = operation.sendFact(),
+            .reused = operation.reused,
             .outcome = switch (selected) {
                 .failed => |err| .{ .failed = err },
                 .value => |value| switch (value) {
@@ -190,24 +220,58 @@ pub const Engine = struct {
         return result;
     }
 
-    fn lease(self: *Engine, criteria: Client.ConnectionPool.Criteria, scope: [32]u8) *Slot {
+    /// An exact idle match (most recently used first), else a slot without an
+    /// idle connection, else the least recently used idle slot, expired first.
+    fn lease(self: *Engine, criteria: Client.ConnectionPool.Criteria, scope: [32]u8) Lease {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        var available: ?*Slot = null;
+        const now: Io.Clock.Timestamp = .now(self.io, .awake);
+        var exact: ?*Slot = null;
+        var empty: ?*Slot = null;
+        var oldest: ?*Slot = null;
         for (&self.slots) |*slot| {
             if (slot.busy) continue;
-            if (available == null) available = slot;
-            if (!std.mem.eql(u8, &scope, &slot.scope)) continue;
-            const node = slot.client.connection_pool.free.first orelse continue;
-            const connection: *Client.Connection = @alignCast(@fieldParentPtr("pool_node", node));
-            if (connection.protocol == criteria.protocol and connection.port == criteria.port and connection.host().eql(criteria.host)) {
-                available = slot;
-                break;
+            const connection = slot.idleConnection() orelse {
+                if (empty == null) empty = slot;
+                continue;
+            };
+            const stale = slot.expired(now);
+            if (!stale and std.mem.eql(u8, &scope, &slot.scope) and Slot.sameOrigin(connection, criteria.protocol, criteria.port, criteria.host)) {
+                if (exact == null or slot.idle.raw.nanoseconds > exact.?.idle.raw.nanoseconds) exact = slot;
             }
+            if (oldest) |current| {
+                const current_stale = current.expired(now);
+                if (stale and !current_stale) oldest = slot else if (stale == current_stale and slot.idle.raw.nanoseconds < current.idle.raw.nanoseconds) oldest = slot;
+            } else oldest = slot;
         }
-        const slot = available.?; // admission reserves at most one slot per call
-        slot.busy = true;
-        return slot;
+        const chosen: Lease = if (exact) |slot| .{ .slot = slot, .reuse = true } else .{ .slot = empty orelse oldest.?, .reuse = false }; // admission reserves a slot per call
+        chosen.slot.busy = true;
+        return chosen;
+    }
+
+    /// Caller holds the mutex. Returns the oldest other idle connection of the
+    /// same origin when the origin is over its idle limit, reserved for evict.
+    fn originSurplus(self: *Engine, released: *Slot) ?*Slot {
+        const connection = released.idleConnection().?;
+        var count: usize = 1;
+        var oldest: ?*Slot = null;
+        for (&self.slots) |*slot| {
+            if (slot == released or slot.busy) continue;
+            const other = slot.idleConnection() orelse continue;
+            if (!Slot.sameOrigin(other, connection.protocol, connection.port, connection.host())) continue;
+            count += 1;
+            if (oldest == null or slot.idle.raw.nanoseconds < oldest.?.idle.raw.nanoseconds) oldest = slot;
+        }
+        if (count <= origin_idle_limit) return null;
+        oldest.?.busy = true;
+        return oldest;
+    }
+
+    fn evict(self: *Engine, slot: *Slot) void {
+        discardIdle(slot);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        slot.busy = false;
     }
 
     fn discardIdle(slot: *Slot) void {
@@ -364,26 +428,22 @@ pub const Operation = struct {
         hashField(&scope_hash, options.credential_scope);
         const scope = scope_hash.finalResult();
         const criteria: Client.ConnectionPool.Criteria = .{ .host = host, .port = uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), .protocol = protocol };
-        const slot = self.engine.lease(criteria, scope);
+        const lease = self.engine.lease(criteria, scope);
+        const slot = lease.slot;
         self.slot = slot;
         const client = &slot.client;
-        if (!std.mem.eql(u8, &scope, &slot.scope) or (client.connection_pool.free_len != 0 and
-            (slot.idle.untilNow(self.io()).raw.toSeconds() >= Engine.idle_seconds or slot.created.untilNow(self.io()).raw.toSeconds() >= Engine.lifetime_seconds))) Engine.discardIdle(slot);
+        var connection: ?*Client.Connection = null;
+        if (lease.reuse) {
+            const candidate = slot.idleConnection().?;
+            client.connection_pool.acquire(self.io(), candidate);
+            if (idle_probe.probe(self.io(), candidate) == .idle) {
+                connection = candidate;
+                self.reused = true;
+            } else dispose(candidate);
+        } else Engine.discardIdle(slot);
         slot.scope = scope;
-        var connection: ?*Client.Connection = client.connection_pool.findConnection(self.io(), criteria);
-        if (connection) |candidate| {
-            if (idle_probe.probe(self.io(), candidate) == .idle) self.reused = true else {
-                dispose(candidate);
-                connection = null;
-            }
-        }
         if (connection == null) {
-            Engine.discardIdle(slot);
-            if (protocol == .tls) {
-                const now = Io.Clock.real.now(self.io());
-                if (client.now == null) client.ca_bundle.rescan(client.allocator, self.io(), now) catch |err| return self.fail(if (err == error.Canceled) error.Cancelled else error.TlsFailed);
-                client.now = now;
-            }
+            if (protocol == .tls) try self.refreshTls(slot);
             connection = try self.connect(client, criteria);
             slot.created = .now(self.io(), .awake);
         }
@@ -392,6 +452,30 @@ pub const Operation = struct {
         try self.check();
         const raw = client.request(method, uri, .{ .connection = connection, .redirect_behavior = .unhandled, .extra_headers = options.headers, .headers = options.standard_headers }) catch |err| return self.fail(if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRequest);
         return .{ .operation = self, .raw = raw };
+    }
+
+    /// Every new TLS connection validates certificates against the current
+    /// time. The root store is rescanned into a fresh bundle when due; a failed
+    /// rescan keeps the previous bundle and fails only when there is none.
+    fn refreshTls(self: *Operation, slot: *Engine.Slot) Error!void {
+        const client = &slot.client;
+        const now = Io.Clock.real.now(self.io());
+        const due = if (slot.ca_scanned) |scanned| scanned.untilNow(self.io()).raw.toSeconds() >= Engine.ca_rescan_seconds else true;
+        if (due) {
+            var bundle: std.crypto.Certificate.Bundle = .empty;
+            defer bundle.deinit(client.allocator);
+            if (bundle.rescan(client.allocator, self.io(), now)) {
+                client.ca_bundle_lock.lockUncancelable(self.io());
+                defer client.ca_bundle_lock.unlock(self.io());
+                std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
+                slot.ca_scanned = .now(self.io(), .awake);
+            } else |err| {
+                if (err == error.Canceled) return self.fail(error.Cancelled);
+                if (slot.ca_scanned == null) return self.fail(error.TlsFailed);
+                std.log.warn("http consumer={s} root certificate rescan failed; keeping the previous bundle", .{@tagName(self.control.consumer)});
+            }
+        }
+        client.now = now;
     }
 
     fn resolve(self: *Operation, host: Io.net.HostName, port: u16, addresses: *[16]Io.net.IpAddress) Error!usize {
