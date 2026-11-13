@@ -559,6 +559,8 @@ DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；J
 
 持久化 JSON 的结构、枚举域或接受语义发生版本变化时，必须同步推进唯一 migration identity；即使没有 DDL 也须有标记迁移，使旧版本在解码前以 `VersionUnknown` 拒绝写入和替换。验证须覆盖允许持久化的枚举全集及未知值拒绝，不将运行时专用状态误当作持久化能力。
 
+未执行输入的失败原因使用独立的历史枚举。仅记录已确认失败的安全类别。目录刷新中的等待、Run 接收竞态及接续状态不得写入此字段；旧记录缺少原因时保留为未知。
+
 schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 
 普通同步保存仅在调用期间借用 typed 候选；Repository prepare 必须独立拥有后续提交和确认需要的 SQL 参数、索引及 witness，不能保留对调用方内存的引用。已有跨线程审批及恢复任务独立拥有 typed 输入，沿用同一 writer、lease、完成通知和确认屏障。普通保存严格校验完整候选；任一 Task 无效时拒绝整次提交，保留内存事实并报告不含 secret 的 Task 身份及失败类别，不隐式降级成保留帧。旧 store 导入仍按逐条恢复规则降级。启动由 Application 移交 owned typed 恢复结果，Product 恢复后释放；SQL 加载不经过 framed 编解码，分页超出 Storage 预算时必须丢弃整页后缩小重读，不采纳部分结果。

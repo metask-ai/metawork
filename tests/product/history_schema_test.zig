@@ -1294,6 +1294,71 @@ test "history typed JSON accepts owner enums without losing their Product semant
     }
 }
 
+test "history SQL round trips the full failed input reason domain and rejects other tags" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    const task = &state.tasks[0];
+    const template = task.input_submissions[0];
+    const reasons = std.meta.tags(history.wire.InputFailureReason);
+    task.input_submissions = try allocator.alloc(history.wire.InputSubmissionWire, reasons.len);
+    for (task.input_submissions, reasons) |*input, reason| {
+        input.* = template;
+        input.submission.operation_id = @tagName(reason);
+        input.state = "failed";
+        input.failure_reason = reason;
+        input.blocking_task_id = if (reason == .session_close_failed) task.id else null;
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), state);
+    try expectSame(allocator, database.capability(), state);
+
+    for ([_][]const u8{ "unknown", "models_catalog_loading", "run_changed", "task_busy", "too_late" }) |tag| {
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{
+            .statement = .{
+                .sql = "UPDATE task_input_submissions SET payload=json_set(payload, '$.failure_reason', ?1) WHERE ordinal=0",
+                .params = &.{.{ .text = tag }},
+            },
+            .expected_changes = .{ .exactly = 1 },
+        }}));
+        try std.testing.expectError(error.InvalidEnumTag, history.load(allocator, database.capability()));
+    }
+}
+
+test "history SQL upgrade keeps valid failed input reasons and removes old runtime-only tags" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    const task = &state.tasks[0];
+    var template = task.input_submissions[0];
+    template.state = "failed";
+    var submissions = [_]history.wire.InputSubmissionWire{ template, template };
+    submissions[0].failure_reason = .session_close_failed;
+    submissions[0].blocking_task_id = task.id;
+    submissions[1].submission.operation_id = "previous-runtime-reason";
+    task.input_submissions = &submissions;
+    const path = try temporaryPath(allocator, temporary.dir);
+    const previous_migrations = schema.migrations[0..6];
+    {
+        const previous = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
+        defer previous.destroy() catch unreachable;
+        _ = try save(allocator, previous.capability(), state);
+        try std.testing.expectEqual(sql.MutationOutcome.committed, previous.capability().mutate(&.{.{
+            .statement = .{ .sql = "UPDATE task_input_submissions SET payload=json_set(payload, '$.failure_reason', 'models_catalog_loading') WHERE ordinal=1" },
+            .expected_changes = .{ .exactly = 1 },
+        }}));
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    try expectSame(allocator, database.capability(), state);
+    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations));
+}
+
 test "history file reference JSON preserves Host image provenance and defaults old records to false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1350,7 +1415,7 @@ test "history schema upgrades legacy video references and fences out the previou
     reference.kind = "video";
     reference.presentation_state = "legacy";
     const path = try temporaryPath(allocator, temporary.dir);
-    const previous_migrations = schema.migrations[0 .. schema.migrations.len - 1];
+    const previous_migrations = schema.migrations[0..3];
     var legacy = reference.*;
     legacy.presentation_state = "generated_video";
     legacy.presentation_anchor = .{ .after_output_count = 0, .presentation_order = 1 };

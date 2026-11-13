@@ -949,11 +949,68 @@ pub const SubmissionWire = struct {
     after_output_count: u32 = 0,
 };
 
+// Stable history tags. Changing the runtime enum must not change these spellings.
+pub const InputFailureReason = enum {
+    session_releasing,
+    session_capacity,
+    session_close_failed,
+    binding_changed,
+    binding_unavailable,
+    models_catalog_failed,
+    metask_authorization_required,
+    metask_authorization_changed,
+    session_poisoned,
+    checkpoint_unavailable,
+    execution_rebind_required,
+    task_unavailable,
+    workspace_unavailable,
+    workspace_changed,
+    workspace_removing,
+    catalog_loading,
+    catalog_unavailable,
+    stale_catalog,
+    skill_not_found,
+    skill_unavailable,
+    invalid_skill_arguments,
+    missing_instruction,
+    unsupported_input,
+    capacity_reached,
+    shutting_down,
+    invalid_input,
+    resource_limit,
+    checkpoint_budget_required,
+    admission_failed,
+
+    fn fromRuntime(reason: task_state.SendInputReason) ?InputFailureReason {
+        return switch (reason) {
+            .models_catalog_loading,
+            .task_busy,
+            .unsupported_attachment,
+            .run_changed,
+            .run_not_ready,
+            .run_stopping,
+            .too_late,
+            .continuation_cancelled,
+            .combined_input_too_large,
+            .checkpoint_failed,
+            .schedule_failed,
+            => null,
+            inline else => |tag| @field(InputFailureReason, @tagName(tag)),
+        };
+    }
+
+    fn runtimeReason(self: InputFailureReason) task_state.SendInputReason {
+        return switch (self) {
+            inline else => |tag| @field(task_state.SendInputReason, @tagName(tag)),
+        };
+    }
+};
+
 pub const InputSubmissionWire = struct {
     submission: SubmissionWire,
     input: RunInputWire,
     state: []const u8,
-    failure_reason: ?task_state.SendInputReason = null,
+    failure_reason: ?InputFailureReason = null,
     blocking_task_id: ?u64 = null,
 };
 
@@ -1312,7 +1369,10 @@ pub fn projectTask(
             .submission = submissionWire(&record.submission),
             .input = try projectInput(allocator, record.input),
             .state = @tagName(record.state),
-            .failure_reason = if (record.state == .failed) record.reason else null,
+            .failure_reason = if (record.state == .failed and record.reason != null)
+                InputFailureReason.fromRuntime(record.reason.?)
+            else
+                null,
             .blocking_task_id = record.blocking_task_id,
         };
         submission_index += 1;
@@ -1940,7 +2000,7 @@ pub fn restoreTask(
             .input = input,
             .payload = null,
             .state = state,
-            .reason = record.failure_reason,
+            .reason = if (record.failure_reason) |reason| reason.runtimeReason() else null,
             .blocking_task_id = record.blocking_task_id,
         });
     }
@@ -5685,6 +5745,11 @@ test "Task model intent survives framed history independently of installed bindi
 }
 
 test "failed input history round trips its reason and validates Session blockers" {
+    for (std.meta.tags(InputFailureReason)) |reason|
+        try std.testing.expectEqual(reason, InputFailureReason.fromRuntime(reason.runtimeReason()).?);
+    try std.testing.expectEqual(null, InputFailureReason.fromRuntime(.models_catalog_loading));
+    try std.testing.expectEqual(null, InputFailureReason.fromRuntime(.run_changed));
+
     var tasks = [_]TaskWire{reviewTestTask()};
     var submissions = [_]InputSubmissionWire{.{
         .submission = .{ .operation_id = "rejected-message" },
