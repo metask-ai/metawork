@@ -24,6 +24,7 @@ pub const McpConfigurationApplyStartOutcome = dispatcher_impl.McpConfigurationAp
 pub const McpSecretSlot = dispatcher_impl.McpSecretSlot;
 pub const WindowChromePlatformEnvironment = dispatcher_impl.WindowChromePlatformEnvironment;
 pub const WindowChromeControlAction = dispatcher_impl.WindowChromeControlAction;
+pub const DirectoryOpenResult = dispatcher_impl.DirectoryOpenResult;
 
 pub const ProductDelivery = product_delivery_impl.Delivery;
 pub const ProductDeliveryTransport = product_delivery_impl.Transport;

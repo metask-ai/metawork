@@ -8838,6 +8838,24 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-warning);
 }
 
+.workspace-open-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.workspace-open-failure > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.workspace-open-failure > .icon-button {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
+}
+
 .task-permission-fact {
   display: grid;
   justify-items: end;

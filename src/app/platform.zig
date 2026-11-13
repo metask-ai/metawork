@@ -379,21 +379,29 @@ pub const Adapter = struct {
         return true;
     }
 
-    fn openDirectory(context: ?*anyopaque, root: []const u8) !void {
-        const self: *Adapter = @ptrCast(@alignCast(context orelse return error.RuntimeUnavailable));
-        if (std.Thread.getCurrentId() != self.main_thread_id) return error.WrongThread;
-        if (self.native_runtime == null) return error.RuntimeUnavailable;
+    fn openDirectory(context: ?*anyopaque, root: []const u8) bridge_api.DirectoryOpenResult {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse
+            return .{ .system_open_failed = error.RuntimeUnavailable }));
+        if (std.Thread.getCurrentId() != self.main_thread_id)
+            return .{ .system_open_failed = error.WrongThread };
+        if (self.native_runtime == null)
+            return .{ .system_open_failed = error.RuntimeUnavailable };
         var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const canonical = try canonicalizeDirectory(self, root, &canonical_storage);
-        if (!std.mem.eql(u8, canonical, root)) return error.InvalidPath;
+        const canonical = canonicalizeDirectory(self, root, &canonical_storage) catch |err|
+            return .{ .directory_unavailable = err };
+        if (!std.mem.eql(u8, canonical, root))
+            return .{ .directory_unavailable = error.CanonicalRootChanged };
         var url_storage: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
-        const url = try directoryFileUrl(
+        const url = directoryFileUrl(
             if (builtin.os.tag == .windows) .windows else .posix,
             canonical,
             &url_storage,
-        );
-        const services_value = self.platform_services orelse return error.RuntimeUnavailable;
-        try services_value.openExternalUrl(url);
+        ) catch |err| return .{ .system_open_failed = err };
+        const services_value = self.platform_services orelse
+            return .{ .system_open_failed = error.RuntimeUnavailable };
+        services_value.openExternalUrl(url) catch |err|
+            return .{ .system_open_failed = err };
+        return .opened;
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) !void {
@@ -857,7 +865,7 @@ test "directory file URLs keep the POSIX UTF-8 percent encoding" {
     }) |case| try std.testing.expectEqualStrings(case[1], try directoryFileUrl(.posix, case[0], &storage));
 }
 
-test "SDK consumption project directory opening uses an encoded local URL and preserves navigation policy" {
+test "SDK consumption project directory opening classifies failures and preserves navigation policy" {
     const Spy = struct {
         var calls: usize = 0;
         var fail = false;
@@ -886,19 +894,22 @@ test "SDK consumption project directory opening uses an encoded local URL and pr
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
-    try Adapter.openDirectory(&adapter, root);
+    try std.testing.expectEqual(bridge_api.DirectoryOpenResult.opened, Adapter.openDirectory(&adapter, root));
     try std.testing.expectEqual(@as(usize, 1), Spy.calls);
     try std.testing.expectEqual(native_sdk.security.ExternalLinkAction.deny, harness.runtime.options.security.navigation.external_links.action);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.options.security.navigation.external_links.allowed_urls.len);
     Spy.fail = true;
-    try std.testing.expectError(error.InjectedOpenFailure, Adapter.openDirectory(&adapter, root));
+    try std.testing.expectEqualDeep(bridge_api.DirectoryOpenResult{ .system_open_failed = error.InjectedOpenFailure }, Adapter.openDirectory(&adapter, root));
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
     Spy.fail = false;
     adapter.main_thread_id +%= 1;
-    try std.testing.expectError(error.WrongThread, Adapter.openDirectory(&adapter, root));
+    try std.testing.expectEqualDeep(bridge_api.DirectoryOpenResult{ .system_open_failed = error.WrongThread }, Adapter.openDirectory(&adapter, root));
     adapter.main_thread_id -%= 1;
+    var alias_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const alias = try std.fmt.bufPrint(&alias_storage, "{s}{s}.", .{ root, std.fs.path.sep_str });
+    try std.testing.expectEqualDeep(bridge_api.DirectoryOpenResult{ .directory_unavailable = error.CanonicalRootChanged }, Adapter.openDirectory(&adapter, alias));
     try tmp.dir.deleteDir(std.testing.io, folder);
-    if (Adapter.openDirectory(&adapter, root)) |_| return error.ExpectedMissingDirectory else |_| {}
+    try std.testing.expect(Adapter.openDirectory(&adapter, root) == .directory_unavailable);
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }
 

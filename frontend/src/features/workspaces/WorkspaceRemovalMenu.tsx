@@ -5,7 +5,10 @@ import {
   type MouseEvent,
   type KeyboardEvent,
 } from "react";
-import type { WorkspaceView } from "../../bridge/contracts.ts";
+import type {
+  WorkspaceOpenResult,
+  WorkspaceView,
+} from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
@@ -16,6 +19,7 @@ import {
 } from "../../components/ui/context-menu-anchor.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { useWorkspaceDirectoryOpen } from "./useWorkspaceDirectoryOpen.ts";
+import { WorkspaceOpenFailureNotice } from "./WorkspaceOpenFailureNotice.tsx";
 
 export function WorkspaceRemovalMenu({
   workspace,
@@ -27,7 +31,7 @@ export function WorkspaceRemovalMenu({
 }: {
   children: ReactNode;
   workspace: WorkspaceView;
-  onOpen: () => Promise<{ opened: boolean }>;
+  onOpen: () => Promise<WorkspaceOpenResult>;
   openDisabled: boolean;
   onNewTask: () => void;
   onRemove: () => Promise<boolean>;
@@ -38,11 +42,8 @@ export function WorkspaceRemovalMenu({
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeFailed, setRemoveFailed] = useState(false);
-  const { cannotOpen, openDirectory, openFailed } = useWorkspaceDirectoryOpen(
-    workspace,
-    onOpen,
-    openDisabled,
-  );
+  const { cannotOpen, openDirectory, openFailure, dismissOpenFailure } =
+    useWorkspaceDirectoryOpen(workspace, onOpen, openDisabled);
   const cancel = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const popup = useRef<HTMLDivElement>(null);
@@ -118,10 +119,15 @@ export function WorkspaceRemovalMenu({
           <Icon name="more" />
         </button>
       </div>
-      {openFailed && (
-        <p className="task-list-empty" role="alert">
-          {t("workspace.open_failed")}
-        </p>
+      {openFailure && (
+        <WorkspaceOpenFailureNotice
+          failure={openFailure}
+          className="task-list-empty"
+          onDismiss={() => {
+            dismissOpenFailure();
+            if (trigger.current?.isConnected) trigger.current.focus();
+          }}
+        />
       )}
       <Menu.Root
         open={menuOpen}
