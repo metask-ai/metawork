@@ -191,6 +191,16 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 `fail closed` 只表示在缺少可靠 authority 时拒绝相应的危险 effect、无人值守执行或权限扩大，不等同于冻结整个应用，也不自动推出“禁止保存任何新状态”。decode 拒绝、数据证据保留、运行时可用性、mutation admission、commit certainty 和恢复可用性是不同事实，必须由 owner 分别建模；一个事实不能代替另一个事实。
 
+### 3.8 Application HTTP 执行
+
+MetaWork 自有的出站 HTTP 由 Application 组合共享执行层；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。执行层对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
+
+每个调用方显式给出整次调用的 deadline，或在由自身取消约束整次调用时给出 DNS、TCP 与 TLS 的连接预算。多地址连接最多两路并行，后一地址至少在前一次尝试开始 250 ms 后才启动；只有其后仍有地址的尝试才按剩余预算分摊设上限（不少于 2 秒），最后或唯一地址使用全部剩余预算。未尝试的地址不构成失败；对外报告的失败按 TLS、连接、DNS 的顺序取最具体者，诊断只记录各类尝试的计数。
+
+发送许可、选中的终态和资源静止是独立事实。取消先取得发送门闩时不得发出 HTTP；发送许可放行后保守报告可能发送。返回前必须 join 全部 I/O 与同步借用回调，不能把 deadline 当作资源释放的墙钟保证；完整响应已经被选中时，清理期间的取消不覆盖该结果，领域对结果的接纳仍由原合同决定。所有调用方停止后才销毁共享执行层。
+
+连接只在同一 origin、TLS 配置与业务 owner 声明的隔离身份内复用，且仅复用未超过空闲与存活期限的连接：空闲上限取 30 秒与服务端 Keep-Alive timeout 减 1 秒中的较小者，提示不足 2 秒时不保留连接；存活上限 300 秒。隔离身份由 owner 提供（Metask 为账号 principal，身份建立前共用一个未认证身份；MCP 为服务 id；Completion 为执行来源；Update 不需要），不随 token、路径、查询、headers 或正文变化，执行层只保留其摘要。身份失效时由 owner 请求 retire：Account 清除凭据、MCP 服务的 transport owner 释放时，关闭该身份的空闲连接，正在使用的连接在请求结束时关闭。失活连接在发送前丢弃。复用连接上的失败只在两种情况下换新连接重试一次：本请求一个字节都未写出且方法不是 POST，或请求可重放（默认仅 GET 与 HEAD）且未收到任何响应字节。POST 与新建连接上的失败从不重试，重试也不改变保守的发送事实。每个 origin 保留的空闲连接数有上限，空闲槽不足时淘汰最久未用者。请求控制与 headers 每次重新建立，保留系统 CA 校验和显式直连策略，不隐式读取代理环境配置；新建 TLS 连接以当前时间校验证书，新建 TLS 连接时若距上次扫描已满一个连接存活期则重扫系统根证书，重扫失败时沿用上一份，没有可用根证书时 TLS 失败。可控 HTTP 分配在释放时清零；连接放回池前清零其明文与 socket 读写缓冲中的上一请求头与响应内容。这不构成所有在用 TLS/系统内存副本已清零的承诺。诊断仅记录请求编号、消费者、阶段、typed 原因、耗时、复用、重试和发送事实，以及连接尝试的计数，不记录 URL、地址、headers、正文或凭据。执行层另按消费者累计请求、复用、新建连接、判活结果、复用失败、重试、过期与淘汰次数，以及建连与首包耗时的分桶计数，在退出时及有新活动时至多每小时写入日志；这些统计同样不含 URL、host、地址、headers、正文、凭据或隔离身份。
+
 ## 4. 跨模块合同
 
 - Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle 或任意执行配置。用户通过已开放 Native SDK UI/input surface 明确选择的物理路径，只能进入对应领域明确登记、容量有界的 typed command；路径值本身不建立 Workspace trust、文件读取成功或其他 Product authority，Host 必须按该领域合同重新校验。secret-bearing 产品命令只允许用户显式触发的 Custom Provider create/replace 与 MCP captureSecret，其手动凭据只能作为有界字段一次性转交对应 Host owner 的 credential mutation；

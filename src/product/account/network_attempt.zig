@@ -258,7 +258,7 @@ pub const NetworkAttempt = struct {
                 var tracked: RefreshTransportEvidence = .{ .transport = self.transport };
                 var refreshed = self.credential_owner.?.refresh(
                     self.allocator,
-                    .{ .context = &tracked, .perform_fn = RefreshTransportEvidence.perform },
+                    .{ .context = &tracked, .perform_fn = RefreshTransportEvidence.perform, .retire_fn = RefreshTransportEvidence.retire },
                     self.now_unix_seconds,
                     control,
                 ) catch |err| {
@@ -288,6 +288,11 @@ pub const NetworkAttempt = struct {
     const RefreshTransportEvidence = struct {
         transport: metask.Transport,
         may_have_sent: bool = false,
+
+        fn retire(context: *anyopaque, principal: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.transport.retire(principal);
+        }
 
         fn perform(context: *anyopaque, request: metask.Request, output: []u8) metask.TransportError!metask.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -359,7 +364,7 @@ const RefreshTransport = struct {
     started: std.atomic.Value(u32) = .init(0),
 
     fn transport(self: *RefreshTransport) metask.Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = metask.retireNothing };
     }
 
     fn perform(
@@ -409,7 +414,7 @@ const LoginTransport = struct {
     started: std.atomic.Value(u32) = .init(0),
 
     fn transport(self: *LoginTransport) metask.Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = metask.retireNothing };
     }
 
     fn perform(

@@ -813,6 +813,7 @@ pub const OwnedImageExecution = struct {
         const candidate = self.candidate.input();
         return .{ .binding = .{
             .endpoint = candidate.endpoint,
+            .source = candidate.selection.source_id,
             .model = candidate.selection.model_id,
             .credential = candidate.bearer,
             .credential_reader = self.authorization.reader(),
@@ -890,6 +891,7 @@ pub const OwnedVideoExecution = struct {
         const candidate = self.candidate.input();
         return .{
             .endpoint = candidate.endpoint,
+            .source = candidate.selection.source_id,
             .model = candidate.selection.model_id,
             .credential = self.authorization.reader() orelse return null,
             .transport = self.transport,

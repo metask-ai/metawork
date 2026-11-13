@@ -198,6 +198,8 @@ pub const CompactJob = struct {
 
 const automatic_title_result_capacity = state.automatic_title_result_capacity;
 const automatic_title_timeout_ms: u32 = 15_000;
+/// DNS, TCP and TLS share at most 15 s of the title budget.
+const automatic_title_connect_timeout_ms: u32 = @min(automatic_title_timeout_ms, 15_000);
 const automatic_title_watchdog_poll_ms: u32 = 10;
 const automatic_title_system_prompt =
     "Generate a concise title for this task. Return only one plain-text title " ++
@@ -413,6 +415,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
         .system = automatic_title_system_prompt,
         .messages = &messages,
         .max_output_tokens = 4096,
+        .connect_timeout_ms = automatic_title_connect_timeout_ms,
     }, &request_cancellation);
     watchdog.finished.store(true, .release);
     watchdog_thread.join();

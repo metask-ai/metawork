@@ -212,7 +212,10 @@ fn successful(mode: []const u8, expected: usize) !void {
     defer std.testing.allocator.free(trace_path);
     var fixture = try Fixture.start(trace_path, mode);
     defer fixture.deinit();
-    var network: backend.Backend = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var network: backend.Backend = .{ .http = &engine };
     const runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, .{ .transport = network.transport() });
     defer {
         runtime.shutdown() catch unreachable;
@@ -220,7 +223,7 @@ fn successful(mode: []const u8, expected: usize) !void {
     }
     var sink: Sink = .{ .dir = tmp.dir };
     const session = try open(runtime, root, &fixture, .full_access);
-    try session.configureImageGenerationForTesting(.{ .endpoint = fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = sink.output() });
+    try session.configureImageGenerationForTesting(.{ .endpoint = fixture.endpoint, .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = sink.output() });
     try execute(session);
     try std.testing.expectEqual(expected, sink.saved);
     const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, std.testing.allocator, .limited(1024));
@@ -254,6 +257,7 @@ const Harness = struct {
     tmp: std.testing.TmpDir,
     root: [:0]u8,
     fixture: Fixture,
+    engine: @import("app_http_transport").Engine,
     network: backend.Backend,
     runtime: *agent.Runtime,
     sink: Sink,
@@ -267,7 +271,9 @@ const Harness = struct {
         defer std.testing.allocator.free(trace_path);
         self.fixture = try Fixture.start(trace_path, mode);
         errdefer self.fixture.deinit();
-        self.network = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+        self.engine.init(std.testing.allocator, std.testing.io);
+        errdefer self.engine.deinit();
+        self.network = .{ .http = &self.engine };
         self.runtime = if (std.mem.startsWith(u8, mode, "video"))
             try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 })
         else
@@ -277,13 +283,14 @@ const Harness = struct {
     fn deinit(self: *Harness) void {
         self.runtime.shutdown() catch unreachable;
         self.runtime.deinit();
+        self.engine.deinit();
         self.fixture.deinit();
         std.testing.allocator.free(self.root);
         self.tmp.cleanup();
     }
     fn session(self: *Harness, permission: agent.PermissionMode, binding: bool) !*agent.Session {
         const value = try open(self.runtime, self.root, &self.fixture, permission);
-        if (binding) try value.configureImageGenerationForTesting(.{ .endpoint = self.fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = self.sink.output() });
+        if (binding) try value.configureImageGenerationForTesting(.{ .endpoint = self.fixture.endpoint, .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = self.sink.output() });
         return value;
     }
     fn trace(self: *Harness) ![]u8 {
@@ -551,7 +558,7 @@ test "GenerateImage accept_edits denial and noninteractive permission stop have 
     var config = openOptions(h.root, &h.fixture, .accept_edits);
     config.permission_interaction = .noninteractive;
     const session = try h.runtime.createSession(config);
-    try session.configureImageGenerationForTesting(.{ .endpoint = h.fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = h.sink.output() });
+    try session.configureImageGenerationForTesting(.{ .endpoint = h.fixture.endpoint, .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = h.sink.output() });
     var run = try session.beginRun(try session.prepareRun(.{ .text = "Generate the fixture image." }));
     defer run.deinit();
     var terminal = run.execute();
@@ -640,6 +647,7 @@ test "GenerateImage canonical Core saves actual Workspace files and rejects outp
         const session = try h.session(.full_access, false);
         try session.configureImageGenerationForTesting(.{
             .endpoint = h.fixture.endpoint,
+            .source = "fixture-source",
             .model = "fixture-image",
             .credential = "synthetic-image-key",
             .output = output.port(),
@@ -702,14 +710,17 @@ test "GenerateImage captured output root refuses an ancestor retargeted to a jun
     defer std.testing.allocator.free(trace_path);
     var fixture = try Fixture.start(trace_path, "output-root-junction");
     defer fixture.deinit();
-    var network: backend.Backend = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var network: backend.Backend = .{ .http = &engine };
     const runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 }, .{ .transport = network.transport() });
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
     const session = try open(runtime, root, &fixture, .full_access);
-    try session.configureImageGenerationForTesting(.{ .endpoint = fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = output.port() });
+    try session.configureImageGenerationForTesting(.{ .endpoint = fixture.endpoint, .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = output.port() });
     try executeWorker(session);
     const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(trace);
@@ -733,7 +744,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
             _ = self.calls.fetchAdd(1, .monotonic);
             // Test effect only: assert the frozen HTTPS policy target, then
             // route synthetic credentials to the one local fixture listener.
-            return self.network.transport().perform(.{ .url = self.endpoint, .headers = request.headers, .body = request.body }, cancellation, buffer);
+            return self.network.transport().perform(.{ .url = self.endpoint, .headers = request.headers, .body = request.body, .connect_timeout_ms = request.connect_timeout_ms, .source = request.source }, cancellation, buffer);
         }
         fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -752,7 +763,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
     var model = "fixture-image".*;
     var credential = "synthetic-image-key".*;
     var input: agent.ImageGenerationRunInput = .{
-        .binding = .{ .endpoint = &endpoint, .model = &model, .credential = &credential, .output = h.sink.output() },
+        .binding = .{ .endpoint = &endpoint, .source = "fixture-source", .model = &model, .credential = &credential, .output = h.sink.output() },
         .transport = first.transport(),
     };
     const id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, input, null, null, null);
@@ -783,6 +794,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
     const next: agent.ImageGenerationRunInput = .{
         .binding = .{
             .endpoint = "https://image-policy.example.test/v1/images/generations",
+            .source = "fixture-source",
             .model = "fixture-image",
             .credential = "synthetic-image-key",
             .output = h.sink.output(),
@@ -920,7 +932,7 @@ test "GenerateImage owns binding buffers and concurrent sessions keep distinct o
     defer std.testing.allocator.free(endpoint);
     var model = "fixture-image".*;
     var credential = "synthetic-image-key".*;
-    try second.configureImageGenerationForTesting(.{ .endpoint = endpoint, .model = &model, .credential = &credential, .output = second_sink.output() });
+    try second.configureImageGenerationForTesting(.{ .endpoint = endpoint, .source = "fixture-source", .model = &model, .credential = &credential, .output = second_sink.output() });
     @memset(endpoint, 'x');
     @memset(&model, 'x');
     @memset(&credential, 'x');
@@ -1009,7 +1021,7 @@ test "GenerateImage real Workspace output joins cancelled file work on stop clos
         var barrier: workspace_output.TestSupport.Barrier = .{ .io = std.testing.io };
         workspace_output.TestSupport.blockBeforeWrite(&output, &barrier);
         const session = try h.session(.full_access, false);
-        try session.configureImageGenerationForTesting(.{ .endpoint = h.fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = output.port() });
+        try session.configureImageGenerationForTesting(.{ .endpoint = h.fixture.endpoint, .source = "fixture-source", .model = "fixture-image", .credential = "synthetic-image-key", .output = output.port() });
         var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = "Generate the fixture image." }) };
         const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
         var joined = false;
@@ -1173,7 +1185,7 @@ const image_product = struct {
             _ = self.image_calls.fetchAdd(1, .monotonic);
             // This test effect is the only target rewrite. No real credential
             // or formal service is used; production Models supplies the target.
-            return self.network.transport().perform(.{ .url = self.endpoint, .body = request.body, .headers = request.headers }, cancellation, output);
+            return self.network.transport().perform(.{ .url = self.endpoint, .body = request.body, .headers = request.headers, .connect_timeout_ms = request.connect_timeout_ms, .source = request.source }, cancellation, output);
         }
         fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -1361,7 +1373,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     h.runtime.deinit();
     h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
     var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir, .fallback = fallback };
-    var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
+    var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account, .retire_fn = image_product.account_api.retireNothing }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
     var platform: image_product.account_api.TestSupport.Platform = .{};
     image_product.account_api.TestSupport.attachPlatform(&account, &platform);
     defer {
@@ -1719,6 +1731,7 @@ const VideoGateway = struct {
     fn input(self: *VideoGateway, output: agent.VideoGenerationOutput) agent.VideoGenerationRunInput {
         return .{
             .endpoint = image_product.models.metask_videos_url,
+            .source = "fixture-source",
             .model = image_product.models.metask_default_video_model,
             .credential = .{ .context = self, .read_fn = credential },
             .transport = self.transport(),
@@ -2196,7 +2209,7 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     var delivery: ProductDeliveryEffect = .{ .reader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() } };
 
     var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir, .video_catalog = true };
-    var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
+    var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account, .retire_fn = image_product.account_api.retireNothing }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
     var platform: image_product.account_api.TestSupport.Platform = .{};
     image_product.account_api.TestSupport.attachPlatform(&account, &platform);
     defer {

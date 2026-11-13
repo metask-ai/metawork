@@ -5,6 +5,7 @@ pub const max_output_tokens: u64 = std.math.maxInt(u32);
 pub const max_request_bytes: usize = 16 * 1024 * 1024;
 pub const max_response_bytes: usize = 4 * 1024 * 1024;
 pub const max_result_bytes: usize = 1024 * 1024;
+pub const max_connect_timeout_ms: u32 = 60_000;
 
 pub const Role = enum {
     user,
@@ -26,6 +27,8 @@ pub const Request = struct {
     system: []const u8 = "",
     messages: []const Message,
     max_output_tokens: u64,
+    /// DNS, TCP and TLS budget; each consumer provides its own bound.
+    connect_timeout_ms: u32,
 };
 
 pub const Usage = struct {

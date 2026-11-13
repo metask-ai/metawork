@@ -87,11 +87,14 @@ perform(http_request, cancellation, response_buffer)
     -> { status, body } | TransportError
 ```
 
-`src/app/completion_http_transport.zig` 使用 `std.http.Client.fetch` 完成一次请求：
+`http_request` 携带必填的 `connect_timeout_ms`，约束 DNS、TCP 与 TLS 建立；整次请求仍由调用方的取消约束。与输出预算相同，每个消费者显式提供自己的连接预算，不由 codec 或 Application adapter 私设默认值；`Completion.Request` 在 Transport 前拒绝零值或超过 60 秒的预算。`http_request` 同时携带必填的 `source`，即所绑定的 `provider_id`，只用于 Application 的连接复用隔离，不进入 HTTP 请求，codec 从类型上不可见。
+
+Application 的 Completion adapter 通过共享 HTTP 执行层完成一次请求：
 
 - 响应完整写入有界 caller-owned buffer；
-- 请求线程与 cancellation wait 使用 `std.Io.Select` 竞争；
-- 返回前取消并等待 losing operation 静止；
+- 多地址连接必须在共享异步额度耗尽时仍能取得进展；POST 从不重放，GET 只在复用连接未收到任何响应字节时换新连接重试一次；
+- 发送许可与取消竞争；返回前等待所有 I/O 和借用回调静止；
+- 执行容量不足归类为资源限制，DNS、连接、TLS 与读写失败保持各自的 typed 原因；
 - 生产 TLS 使用系统 CA，不接受 Completion 自定义证书配置；
 - redirect 不自动跟随。
 
@@ -154,6 +157,7 @@ MetaWork 产品代码不调用或 re-export AgentCore Completion API，也不保
 - credential/header copy 清零；
 - model binding 单字段边界、两种 endpoint policy，以及所有 Session/Completion/Probe 入口在外部调用前的一致拒绝；
 - 四种 codec 精确编码调用方的输出预算，零值与超限在 Transport 前拒绝；
+- 连接预算的零值与超限在 Transport 前拒绝；
 - Transport cancellation、response limit、allocation failure 与 unknown failure 保持各自的 typed 结果；
 - Provider Probe、自动标题与 permission 审核器使用各自对应的冻结模型执行绑定；
 - architecture guard 证明 Completion/Protocol 不导入 AgentCore SDK；

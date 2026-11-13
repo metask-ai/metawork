@@ -381,6 +381,9 @@ fn prepareHttpFixtureWithNegotiation(
 }
 
 fn activateHttpFixture(protocol_version: []const u8, framing: []const u8) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -399,7 +402,9 @@ fn activateHttpFixture(protocol_version: []const u8, framing: []const u8) !void 
         std.testing.io,
         std.testing.allocator,
         &preparation,
-        .{},
+        .{
+            .http_engine = &http_engine,
+        },
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -653,6 +658,9 @@ test "canonical AgentCore negotiates 2025 Streamable HTTP SSE framing" {
 }
 
 test "canonical AgentCore AUTO downgrades a bare HTTP 400 probe" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -674,7 +682,9 @@ test "canonical AgentCore AUTO downgrades a bare HTTP 400 probe" {
         std.testing.io,
         std.testing.allocator,
         &preparation,
-        .{},
+        .{
+            .http_engine = &http_engine,
+        },
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -987,6 +997,9 @@ const CandidateBudgetProbe = struct {
 };
 
 test "canonical MCP ABI rejects a hanging candidate within its transport budget and preserves the published catalog" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1003,7 +1016,9 @@ test "canonical MCP ABI rejects a hanging candidate within its transport budget 
     defer candidate.deinit();
     var preparation = try prepareHttpFixture(healthy.endpoint, "2026-07-28");
     defer preparation.deinit();
-    var initial_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var initial_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer initial_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
     defer {
@@ -1018,7 +1033,9 @@ test "canonical MCP ABI rejects a hanging candidate within its transport budget 
     defer activation.deinit();
     try appendHttpCandidate(&preparation, candidate.endpoint);
     preparation.registry.?.value.servers[1].timeout_ms = std.math.maxInt(u32);
-    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer candidate_build.deinit();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.armed", .data = "armed" });
     defer tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.release", .data = "release" }) catch {};
@@ -1061,6 +1078,9 @@ test "production MCP adds healthy B when an already loaded A reaches its configu
 }
 
 fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1088,7 +1108,7 @@ fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
     var preparation = try prepareHttpFixture(source_a.endpoint, "2026-07-28");
     defer preparation.deinit();
     preparation.registry.?.value.servers[0].timeout_ms = 350;
-    var initial = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
+    var initial = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer initial.deinit();
     try budget.begin(0, false);
     const initial_result = runtime.applyMcpConfiguration(&initial.input.?) catch |err| {
@@ -1111,7 +1131,7 @@ fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
     preparation.registry.?.value.generation = 2;
     preparation.registry.?.value.servers[1].timeout_ms = 350;
     preparation.server_states[0] = .disabled;
-    var candidate = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
+    var candidate = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer candidate.deinit();
     var input = try runtime.prepareMcpMembership(2, &candidate.input.?, &.{ "deterministic-http", "candidate-http" });
     defer input.deinit();
@@ -1154,6 +1174,9 @@ test "canonical MCP ABI keeps original Selection usable while a new candidate ap
 }
 
 fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1170,7 +1193,9 @@ fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
     defer candidate.deinit();
     var preparation = try prepareHttpFixture(healthy.endpoint, "2026-07-28");
     defer preparation.deinit();
-    var initial_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var initial_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer initial_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
     defer {
@@ -1196,7 +1221,9 @@ fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
     probe.selector.server_binding_identity = agent.mcpBindingIdentity("deterministic-http");
     probe.selector.tool_name = sdk.bytesView("echo");
     try appendHttpCandidate(&preparation, candidate.endpoint);
-    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer candidate_build.deinit();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "candidate.armed", .data = "armed" });
     var apply: ConfigurationApplyProbe = .{ .runtime = runtime, .input = &candidate_build.input.? };
@@ -1251,6 +1278,9 @@ fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
 }
 
 test "canonical MCP ABI adds a healthy server after an already loaded server becomes unreachable" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1267,7 +1297,9 @@ test "canonical MCP ABI adds a healthy server after an already loaded server bec
     var preparation = try prepareHttpFixture(first.endpoint, "2026-07-28");
     defer preparation.deinit();
     preparation.registry.?.value.servers[0].timeout_ms = 200;
-    var initial_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var initial_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer initial_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
     defer {
@@ -1284,7 +1316,9 @@ test "canonical MCP ABI adds a healthy server after an already loaded server bec
     first.deinit();
     first_running = false;
     try appendHttpCandidate(&preparation, next.endpoint);
-    var next_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var next_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer next_build.deinit();
     try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&next_build.input.?));
     const next_activation = switch (try runtime.activateMcp()) {
@@ -1319,6 +1353,9 @@ test "canonical MCP ABI adds a healthy server after an already loaded server bec
 }
 
 test "canonical MCP shared members survive more than the retired configuration limit" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1329,7 +1366,9 @@ test "canonical MCP shared members survive more than the retired configuration l
     defer fixture.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
     defer preparation.deinit();
-    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
     defer {
@@ -1363,6 +1402,9 @@ test "canonical MCP shared members survive more than the retired configuration l
 }
 
 test "an untrusted report after real MCP adoption retains resources and fences further MCP effects" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const CorruptReport = struct {
         var original: wire.RuntimeApplyMcpConfigurationFnV1 = undefined;
 
@@ -1382,7 +1424,9 @@ test "an untrusted report after real MCP adoption retains resources and fences f
     defer fixture.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
     defer preparation.deinit();
-    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer build.deinit();
     const api = try sdk.Api.discover();
     var raw = api.raw.*;
@@ -1455,6 +1499,9 @@ fn expectHostMcpCreateAndRestore(runtime: *agent.Runtime, options_value: agent.S
 }
 
 test "canonical MCP ABI accepts original selectors during refresh and after publication" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1467,7 +1514,9 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
     defer fixture.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
     defer preparation.deinit();
-    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &build.input.? });
     defer {
@@ -1571,6 +1620,9 @@ test "real Product shutdown joins an in-flight MCP refresh while a Run waits for
 }
 
 fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1602,7 +1654,9 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     const registry_storage = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
     defer std.testing.allocator.free(registry_storage);
     var durable_registry: DurableRegistry = .{ .storage = registry_storage };
-    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
     var runtime_owned = true;
@@ -1755,6 +1809,9 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
 const McpRepeatTiming = enum { valid, expired, refreshed, refreshed_allow, refreshed_deny, schema_changed, expanded, source_replaced };
 
 fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTiming) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const expire_between_runs = timing == .expired or timing == .refreshed;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1774,7 +1831,9 @@ fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTi
     var preparation = try prepareHttpFixture(fixture.endpoint, protocol_version);
     defer preparation.deinit();
     if (timing == .expanded) preparation.registry.?.value.servers[0].tools = &.{ "echo", "new_echo" };
-    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
         .max_sessions = 1,
@@ -1815,7 +1874,9 @@ fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTi
                 replacement_fixture = try HttpFixture.start(protocol_version, "json", replacement_trace);
                 var replaced_preparation = try prepareHttpFixture(replacement_fixture.?.endpoint, protocol_version);
                 defer replaced_preparation.deinit();
-                var replaced_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &replaced_preparation, .{});
+                var replaced_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &replaced_preparation, .{
+                    .http_engine = &http_engine,
+                });
                 defer replaced_build.deinit();
                 try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&replaced_build.input.?));
             }
@@ -1864,6 +1925,9 @@ test "canonical compatible MCP rejected configuration preserves healthy server a
 }
 
 fn expectIsolatedMcpActivation(protocol_version: []const u8) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -1878,7 +1942,9 @@ fn expectIsolatedMcpActivation(protocol_version: []const u8) !void {
     stopped.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, protocol_version);
     defer preparation.deinit();
-    var healthy_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var healthy_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer healthy_build.deinit();
     const registry = &preparation.registry.?;
     const servers = try registry.arena.allocator().alloc(mcp_configuration.ServerWire, 2);
@@ -1892,7 +1958,9 @@ fn expectIsolatedMcpActivation(protocol_version: []const u8) !void {
     std.testing.allocator.free(preparation.server_states);
     preparation.server_states = try std.testing.allocator.alloc(mcp_configuration.ServerPreparationState, 2);
     @memset(preparation.server_states, .eligible);
-    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
     defer {
@@ -1926,6 +1994,9 @@ test "real Product converges healthy members with a rejected candidate in either
 }
 
 fn expectProductIncrementalConvergence(bad_first: bool) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1998,7 +2069,9 @@ fn expectProductIncrementalConvergence(bad_first: bool) !void {
         for (candidate.registry.?.value.servers, candidate.server_states) |server, *state| {
             if (!std.mem.eql(u8, server.id, step.candidate_id.?)) state.* = .disabled;
         }
-        var build = try mcp_platform.buildRuntime(std.testing.io, a, &candidate, .{});
+        var build = try mcp_platform.buildRuntime(std.testing.io, a, &candidate, .{
+            .http_engine = &http_engine,
+        });
         defer build.deinit();
         var input = try runtime.prepareMcpMembership(3, &build.input.?, step.member_ids);
         defer input.deinit();
@@ -2073,6 +2146,9 @@ test "real Product adding a bad server preserves formal health and can recover b
 }
 
 fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2092,7 +2168,9 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     const approved = &preparation.registry.?.value.servers[0];
     const fingerprint = mcp_configuration.connectionFingerprint(approved.*);
     approved.connection_approval = .{ .fingerprint = try preparation.registry.?.arena.allocator().dupe(u8, &fingerprint) };
-    var healthy_build = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{});
+    var healthy_build = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer healthy_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, a, .{ .max_sessions = 1 });
     var runtime_owned = true;
@@ -2135,7 +2213,9 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     defer candidate.deinit();
     const bad_id = try a.dupe(u8, candidate.registry.?.value.servers[1].id);
     defer a.free(bad_id);
-    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, a, &candidate, .{});
+    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, a, &candidate, .{
+        .http_engine = &http_engine,
+    });
     defer candidate_build.deinit();
     try control.beginMcpConfigurationApply(2);
     try std.testing.expectEqual(.rejected, try runtime.applyMcpConfiguration(&candidate_build.input.?));
@@ -2164,7 +2244,9 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     var recovered_manifest = (try mcp_configuration.RuntimeManifest.candidate(a, &recovered)).?;
     var recovered_manifest_owned = true;
     defer if (recovered_manifest_owned) recovered_manifest.deinit();
-    var recovered_build = try mcp_platform.buildRuntime(std.testing.io, a, &recovered, .{});
+    var recovered_build = try mcp_platform.buildRuntime(std.testing.io, a, &recovered, .{
+        .http_engine = &http_engine,
+    });
     defer recovered_build.deinit();
     try control.beginMcpConfigurationApply(3);
     try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&recovered_build.input.?));
@@ -2275,6 +2357,9 @@ fn runWithPermission(runtime: *agent.Runtime, session: *agent.Session, run_id: u
 }
 
 fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -2293,7 +2378,9 @@ fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !v
         std.testing.io,
         std.testing.allocator,
         &preparation,
-        .{},
+        .{
+            .http_engine = &http_engine,
+        },
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -2604,6 +2691,9 @@ fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !v
 }
 
 test "expired MCP authority is typed and the same model succeeds after refresh" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -2627,7 +2717,9 @@ test "expired MCP authority is typed and the same model succeeds after refresh" 
         std.testing.io,
         std.testing.allocator,
         &preparation,
-        .{},
+        .{
+            .http_engine = &http_engine,
+        },
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -2767,6 +2859,9 @@ test "static HTTP header and STDIO env reach a new Product Task real MCP call" {
 }
 
 fn verifyProtectedHttpDraft(workbench: *product_control.Runtime, registry: *DurableRegistry, endpoint: []const u8) !mcp_configuration.CreateResult {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const header = "Bearer mcp-static-fixture-secret";
     var draft = try workbench.prepareMcpHttpDraftCreate(0, "Deterministic HTTP", endpoint, &.{.{
         .name = "Authorization",
@@ -2776,7 +2871,9 @@ fn verifyProtectedHttpDraft(workbench: *product_control.Runtime, registry: *Dura
     if (draft != .prepared) return error.TestUnexpectedResult;
     var candidate = (try draft.prepared.httpDraftPreparation(product_mcp_limits)) orelse return error.TestUnexpectedResult;
     defer candidate.deinit();
-    var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{});
+    var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{
+        .http_engine = &http_engine,
+    });
     defer built.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &built.input.? });
     defer runtime.deinit();
@@ -2797,6 +2894,9 @@ fn verifyProtectedHttpDraft(workbench: *product_control.Runtime, registry: *Dura
 }
 
 fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: agent.McpTransportKind, race: McpCreationRace, static_auth: bool) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -2923,6 +3023,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
         std.testing.allocator,
         &restarted_preparation,
         .{
+            .http_engine = &http_engine,
             .executable_search_path = std.fs.path.dirname(options.node_path),
             .windows_system_root = options.windows_system_root,
         },
@@ -3207,7 +3308,9 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
             if (!std.mem.eql(u8, server.id, b_id)) {
                 state.* = .disabled;
             };
-        var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{});
+        var built = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &candidate, .{
+            .http_engine = &http_engine,
+        });
         defer built.deinit();
         var input = try restarted_runtime.prepareMcpMembership(generation, &built.input.?, step.member_ids);
         defer input.deinit();
@@ -3710,6 +3813,9 @@ test "real Core Product rebind preserves full access and restore ceilings before
 const TaskSwitchAuthority = enum { narrow, replace_connection };
 
 fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_protocol: models_contract.Protocol, authority_case: TaskSwitchAuthority, approval_mode: product_control.ApprovalMode) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const manual = approval_mode == .manual;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3741,7 +3847,9 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     const registry_bytes = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
     defer std.testing.allocator.free(registry_bytes);
     var registry = DurableRegistry{ .storage = registry_bytes };
-    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &runtime_build.input.? });
     var runtime_owned = true;
@@ -4015,6 +4123,9 @@ test "canonical MCP SSE waits for pong before original tool response with exact 
 }
 
 test "canonical MCP timeout bounds each RPC rather than the complete configuration apply" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4032,7 +4143,9 @@ test "canonical MCP timeout bounds each RPC rather than the complete configurati
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
-    var build = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{});
+    var build = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{
+        .http_engine = &http_engine,
+    });
     defer build.deinit();
     const start = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
     const outcome = try runtime.applyMcpConfiguration(&build.input.?);
@@ -4074,6 +4187,9 @@ fn settleCoordinator(coordinator: *management_coordinator.Coordinator) !void {
 }
 
 test "real Coordinator settles eligibility loss and edit without self waking" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4117,7 +4233,7 @@ test "real Coordinator settles eligibility loss and edit without self waking" {
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = a };
     defer authorizations.deinit();
     var host: CoordinatorHost = .{};
-    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, host.host(), .{ .catalog_budget = budget });
+    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, host.host(), .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer coordinator.deinit();
     try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(0, .{ .display_name = "Source", .url = source.endpoint, .timeout_ms = 2000, .negotiation = "modern_only" })).outcome);
     try settleCoordinator(&coordinator);
@@ -4170,6 +4286,9 @@ test "real Coordinator settles eligibility loss and edit without self waking" {
 }
 
 test "production candidate budget admits a slow healthy source beside four existing members" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4209,7 +4328,7 @@ test "production candidate budget admits a slow healthy source beside four exist
     }
     const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
     defer budget.release();
-    var first = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
+    var first = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer first.deinit();
     try std.testing.expectEqual(std.math.maxInt(u32), first.input.?.servers.?.descriptors[0].timeout_ms);
     try std.testing.expectEqual(std.math.maxInt(u32), servers[0].timeout_ms);
@@ -4219,7 +4338,7 @@ test "production candidate budget admits a slow healthy source beside four exist
     @memset(preparation.server_states, .disabled);
     preparation.server_states[4] = .eligible;
     preparation.registry.?.value.generation = 2;
-    var candidate = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .catalog_budget = budget });
+    var candidate = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer candidate.deinit();
     var input = try runtime.prepareMcpMembership(2, &candidate.input.?, &ids);
     defer input.deinit();
@@ -4232,6 +4351,9 @@ test "production candidate budget admits a slow healthy source beside four exist
 }
 
 test "real Core connects a restored expired grant only with committed new bearer and discovers tools" {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4351,7 +4473,9 @@ test "real Core connects a restored expired grant only with committed new bearer
     const candidate_json = try mcp_configuration.encode(&candidate_bytes, step.preparation.registry.?.value, product_mcp_limits);
     var credentials = try mcp_configuration.prepare(a, candidate_json, true, false, store.resolver(), product_mcp_limits);
     defer credentials.deinit();
-    var build = try mcp_platform.buildRuntime(std.testing.io, a, &credentials, .{});
+    var build = try mcp_platform.buildRuntime(std.testing.io, a, &credentials, .{
+        .http_engine = &http_engine,
+    });
     defer build.deinit();
     var input = try owner.core.prepareMcpMembership(2, &build.input.?, step.member_ids);
     defer input.deinit();
@@ -4468,6 +4592,9 @@ const InstallationTestHost = struct {
 
 const AutomaticInstallationCase = enum { public_http, failed_retry, no_tools_retry, catalog_refresh, manual_credential, oauth_cancel, credential_template, stdio_environment };
 fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.testing.allocator, std.testing.io);
+    defer http_engine.deinit();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4559,7 +4686,7 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = a };
     defer authorizations.deinit();
     var host: InstallationTestHost = .{ .refuse = mode == .oauth_cancel };
-    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, .{ .context = &host, .confirmation_available = true, .capture_available = true, .oauth_available = true, .request_dialog_fn = InstallationTestHost.request, .open_url_fn = InstallationTestHost.open, .now_unix_ms_fn = InstallationTestHost.now, .notify_fn = InstallationTestHost.notify }, .{ .catalog_budget = budget, .executable_search_path = std.fs.path.dirname(options.node_path), .windows_system_root = options.windows_system_root });
+    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, .{ .context = &host, .confirmation_available = true, .capture_available = true, .oauth_available = true, .request_dialog_fn = InstallationTestHost.request, .open_url_fn = InstallationTestHost.open, .now_unix_ms_fn = InstallationTestHost.now, .notify_fn = InstallationTestHost.notify }, .{ .http_engine = &http_engine, .catalog_budget = budget, .executable_search_path = std.fs.path.dirname(options.node_path), .windows_system_root = options.windows_system_root });
     defer coordinator.deinit();
     coordinator.transport_override = .{ .context = &host, .fetch_fn = InstallationTestHost.fetch };
     var retried = false;

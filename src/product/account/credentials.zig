@@ -131,6 +131,12 @@ pub const CredentialOwner = struct {
         try current.bindAccountId(principal_ref);
     }
 
+    /// The principal bound to the installed credentials, if any.
+    pub fn principal(self: *const CredentialOwner) ?[]const u8 {
+        const current = if (self.tokens) |*value| value else return null;
+        return metask.principalOf(current);
+    }
+
     pub fn refreshToken(self: *const CredentialOwner) ?*const oauth.Secret {
         if (self.tokens) |*tokens| return &tokens.refresh_token;
         if (self.stored_refresh_token) |*token| return token;
@@ -155,10 +161,12 @@ pub const CredentialOwner = struct {
                 value
             else
                 return error.TokenRefreshFailed;
+            // A refresh-only restore has no bound identity yet.
             break :blk try metask.refreshWithToken(
                 allocator,
                 transport,
                 refresh_token,
+                null,
                 now_unix_seconds,
                 control,
             );
@@ -319,7 +327,7 @@ test "refresh rotation is available before strict identity lookup" {
     }{};
     var rotation = try owner.refresh(
         std.testing.allocator,
-        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = metask.retireNothing },
         100,
         null,
     );
@@ -333,7 +341,7 @@ test "refresh rotation is available before strict identity lookup" {
     try std.testing.expectError(
         error.ProtocolInvalid,
         owner.fetchIdentity(
-            .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
+            .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = metask.retireNothing },
             null,
         ),
     );

@@ -3,7 +3,7 @@
 //! Workbench remains the owner of durable product state and operation markers.
 
 const std = @import("std");
-const select_start = @import("app_select_start");
+const http_execution = @import("app_http_transport");
 const oauth_mechanics = @import("oauth_mechanics");
 const oauth_loopback = @import("oauth_loopback");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
@@ -203,8 +203,9 @@ pub const Cancellation = struct {
 /// still classify cancellation after a POST may have started as outcome
 /// unknown rather than as proof that no remote effect occurred.
 pub const StdHttpTransport = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
+    http_engine: *http_execution.Engine,
+    /// The MCP server this OAuth work belongs to, or a draft probe's own key.
+    isolation: http_execution.Isolation,
     cancellation: *const Cancellation,
     deadline: std.Io.Clock.Timestamp,
 
@@ -212,43 +213,29 @@ pub const StdHttpTransport = struct {
         return .{ .context = self, .fetch_fn = fetch };
     }
 
-    fn fetch(
-        raw: ?*anyopaque,
-        request: Request,
-        body_buffer: []u8,
-        header_buffer: []u8,
-    ) FetchError!Response {
+    fn fetch(raw: ?*anyopaque, request: Request, body_buffer: []u8, header_buffer: []u8) FetchError!Response {
         const self: *StdHttpTransport = @ptrCast(@alignCast(raw.?));
         if (self.cancellation.isCancelled()) return error.CancelledBeforeSend;
-        if (self.deadline.raw.nanoseconds <= self.deadline.clock.now(self.io).nanoseconds)
-            return error.DeadlineExceededBeforeSend;
-        const Event = union(enum) {
-            response: FetchError!Response,
-            deadline,
-            cancelled,
+        const result = self.http_engine.run(.{
+            .consumer = .mcp_oauth,
+            .isolation = self.isolation,
+            .budget = .{ .deadline = self.deadline },
+            .cancellation = .atomic(&self.cancellation.state),
+        }, fetchOne, .{ request, body_buffer, header_buffer });
+        const sent = result.send == .may_have_been_sent;
+        return switch (result.outcome) {
+            .completed => |response| response catch |err| classifyFailure(err, sent),
+            .failed => |err| classifyFailure(mapError(err), sent),
         };
-        var events: [3]Event = undefined;
-        var selection = std.Io.Select(Event).init(self.io, &events);
-        // Only fetchOne writes this fact. Every read follows a join, including
-        // partial Select registration failure, so no guessed error mapping or
-        // extra operation identity is needed.
-        var send_started = false;
-        select_start.start(&selection, .{
-            .{ .response, fetchOne, .{ self, request, body_buffer, header_buffer, &send_started } },
-            .{ .deadline, waitDeadline, .{ self.io, self.deadline } },
-            .{ .cancelled, waitCancellation, .{self.cancellation} },
-        }) catch return classifyFailure(error.Network, send_started);
-        const outcome = selection.await() catch {
-            selection.cancelDiscard();
-            return classifyFailure(error.Network, send_started);
-        };
-        selection.cancelDiscard();
-        return switch (outcome) {
-            // A complete selected response remains a known remote result;
-            // cancellation during loser cleanup cannot erase it.
-            .response => |response| response catch |err| classifyFailure(err, send_started),
-            .deadline => classifyFailure(error.DeadlineExceeded, send_started),
-            .cancelled => classifyFailure(error.Cancelled, send_started),
+    }
+
+    fn mapError(err: http_execution.Error) FetchError {
+        return switch (err) {
+            error.Cancelled => error.Cancelled,
+            error.DeadlineExceeded => error.DeadlineExceeded,
+            error.InvalidRequest, error.InvalidResponse => error.InvalidResponse,
+            error.ResponseTooLarge => error.ResponseTooLarge,
+            else => error.Network,
         };
     }
 
@@ -263,29 +250,13 @@ pub const StdHttpTransport = struct {
         };
     }
 
-    fn fetchOne(
-        self: *StdHttpTransport,
-        request: Request,
-        body_buffer: []u8,
-        header_buffer: []u8,
-        send_started: *bool,
-    ) FetchError!Response {
+    fn fetchOne(operation: *http_execution.Operation, request: Request, body_buffer: []u8, header_buffer: []u8) FetchError!Response {
         if (!validHttpsUrl(request.url)) return error.InvalidResponse;
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
-        defer client.deinit();
-        return fetchWithClient(&client, request, body_buffer, header_buffer, send_started);
+        return fetchHttp(operation, request, body_buffer, header_buffer);
     }
 
-    /// HTTP mechanics only. HTTPS endpoint policy remains at fetchOne; tests
-    /// use a plain loopback peer to observe the actual write boundary without
-    /// changing TLS verification or the production endpoint policy.
-    fn fetchWithClient(
-        client: *std.http.Client,
-        request: Request,
-        body_buffer: []u8,
-        header_buffer: []u8,
-        send_started: *bool,
-    ) FetchError!Response {
+    // Tests use plain loopback peers here; production keeps its HTTPS policy.
+    fn fetchHttp(operation: *http_execution.Operation, request: Request, body_buffer: []u8, header_buffer: []u8) FetchError!Response {
         if (request.headers.len > 8) return error.InvalidResponse;
         const uri = std.Uri.parse(request.url) catch return error.InvalidResponse;
         var headers: [8]std.http.Header = undefined;
@@ -308,31 +279,20 @@ pub const StdHttpTransport = struct {
             .get => .GET,
             .post => .POST,
         };
-        var http_request = client.request(method, uri, .{
-            .redirect_behavior = .unhandled,
-            .headers = .{
+        var http_request = operation.open(method, uri, .{
+            .standard_headers = .{
                 .accept_encoding = .{ .override = "identity" },
                 .authorization = if (authorization) |value|
                     .{ .override = value }
                 else
                     .default,
             },
-            .extra_headers = headers[0..header_count],
-        }) catch return error.Network;
+            .headers = headers[0..header_count],
+        }) catch |err| return mapError(err);
         defer http_request.deinit();
         if (method == .GET and request.body.len != 0) return error.InvalidResponse;
-        send_started.* = true;
-        if (method == .POST) {
-            http_request.transfer_encoding = .{ .content_length = request.body.len };
-            var request_body = http_request.sendBodyUnflushed(&.{}) catch
-                return error.Network;
-            request_body.writer.writeAll(request.body) catch return error.Network;
-            request_body.end() catch return error.Network;
-            http_request.connection.?.flush() catch return error.Network;
-        } else {
-            http_request.sendBodiless() catch return error.Network;
-        }
-        var response = http_request.receiveHead(&.{}) catch return error.Network;
+        http_request.send(if (method == .POST) request.body else null) catch |err| return mapError(err);
+        var response = http_request.receiveHead() catch |err| return mapError(err);
         if (response.head.content_encoding != .identity)
             return error.InvalidResponse;
         var header_writer = std.Io.Writer.fixed(header_buffer);
@@ -352,24 +312,13 @@ pub const StdHttpTransport = struct {
                         return error.ResponseTooLarge;
             }
         }
-        var body_writer = std.Io.Writer.fixed(body_buffer);
-        var transfer_buffer: [4096]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-        _ = reader.streamRemaining(&body_writer) catch return error.ResponseTooLarge;
+        const body = http_request.readAll(&response, body_buffer) catch |err| return mapError(err);
         return .{
             .status = @intFromEnum(response.head.status),
             .content_type = content_type,
             .www_authenticate = www_authenticate,
-            .body = body_writer.buffered(),
+            .body = body,
         };
-    }
-
-    fn waitDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) void {
-        deadline.wait(io) catch {};
-    }
-
-    fn waitCancellation(cancellation: *const Cancellation) void {
-        cancellation.wait();
     }
 };
 
@@ -3187,12 +3136,14 @@ test "MCP OAuth records the real HTTP write boundary without weakening HTTPS pol
         defer std.testing.allocator.free(url);
         var peer: Peer = .{ .listener = &listener, .reply = reply };
         const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
-        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
-        defer client.deinit();
+        var engine: http_execution.Engine = undefined;
+        engine.init(std.testing.allocator, std.testing.io);
+        defer engine.deinit();
         var body: [512]u8 = undefined;
         var headers: [1024]u8 = undefined;
-        var started = false;
-        const result = StdHttpTransport.fetchWithClient(&client, .{ .method = .post, .url = url, .body = "fixture" }, &body, &headers, &started);
+        const execution = engine.run(.{ .consumer = .mcp_oauth, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, StdHttpTransport.fetchHttp, .{ @as(Request, .{ .method = .post, .url = url, .body = "fixture" }), &body, &headers });
+        const result = execution.outcome.completed;
+        const started = execution.send == .may_have_been_sent;
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
         try std.testing.expect(peer.seen and started);
@@ -3201,13 +3152,13 @@ test "MCP OAuth records the real HTTP write boundary without weakening HTTPS pol
             try std.testing.expectEqual(error.Network, StdHttpTransport.classifyFailure(error.Network, started));
         }
         var cancellation = Cancellation.init(std.testing.io);
-        var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = std.testing.io, .cancellation = &cancellation, .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+        var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
         // The production entry still rejects a plain endpoint before sending.
         try std.testing.expectError(error.InvalidResponseBeforeSend, transport.transport().fetch(.{ .method = .post, .url = url }, &body, &headers));
     }
 }
 
-test "MCP OAuth partial Select registration joins DNS before classifying no send" {
+test "MCP OAuth failed control registration cannot start DNS or POST" {
     const Probe = struct {
         var base: std.Io = undefined;
         var entered: std.Io.Event = .unset;
@@ -3216,7 +3167,6 @@ test "MCP OAuth partial Select registration joins DNS before classifying no send
         fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, bytes: []const u8, alignment: std.mem.Alignment, run: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
             registered += 1;
             if (registered == 2) {
-                entered.waitUncancelable(base);
                 return error.ConcurrencyUnavailable;
             }
             return base.vtable.groupConcurrent(userdata, group, bytes, alignment, run);
@@ -3240,11 +3190,15 @@ test "MCP OAuth partial Select registration joins DNS before classifying no send
     vtable.groupConcurrent = Probe.concurrent;
     const io: std.Io = .{ .userdata = Probe.base.userdata, .vtable = &vtable };
     var cancellation = Cancellation.init(io);
-    var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+    var engine: http_execution.Engine = undefined;
+    engine.init(std.testing.allocator, io);
+    defer engine.deinit();
+    var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
     var body: [32]u8 = undefined;
     var headers: [32]u8 = undefined;
     try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token" }, &body, &headers));
-    try std.testing.expect(Probe.exited);
+    try std.testing.expect(!Probe.exited);
+    try std.testing.expectEqual(@as(usize, 2), Probe.registered);
 }
 
 test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
@@ -3273,7 +3227,10 @@ test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
         const io: std.Io = .{ .userdata = Dns.io.userdata, .vtable = &vtable };
         var cancellation: Cancellation = .{ .io = io };
         Dns.cancellation = &cancellation;
-        var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .boot }) };
+        var engine: http_execution.Engine = undefined;
+        engine.init(std.testing.allocator, io);
+        defer engine.deinit();
+        var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .boot }) };
         var body: [32]u8 = undefined;
         var headers: [32]u8 = undefined;
         const result = transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers);
@@ -3291,7 +3248,10 @@ test "MCP OAuth unavailable concurrency proves the POST was not sent" {
     defer threaded.deinit();
     const io = threaded.io();
     var cancellation: Cancellation = .{ .io = io };
-    var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
+    var engine: http_execution.Engine = undefined;
+    engine.init(std.testing.allocator, io);
+    defer engine.deinit();
+    var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
     var body: [32]u8 = undefined;
     var headers: [32]u8 = undefined;
     try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));

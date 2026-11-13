@@ -15,11 +15,15 @@ pub const max_arguments_bytes = max_prompt_bytes * 6 + 64;
 pub const result_bytes = delivery.Receipt.max_path_bytes * 6 + 128;
 pub const max_file_bytes = 64 * 1024 * 1024;
 pub const timeout_ns = 11 * 60 * std.time.ns_per_s;
+/// DNS, TCP and TLS share at most 15 s of each request's budget.
+const connect_timeout_ms: u32 = 15_000;
 
 /// The Run owner retains the immutable strings and effect contexts through
 /// callback quiescence. Credentials are copied into one request at a time.
 pub const Input = struct {
     endpoint: []const u8,
+    /// Models execution source; isolates connection reuse only.
+    source: []const u8,
     model: []const u8,
     credential: images.CredentialReader,
     transport: http.Transport,
@@ -160,6 +164,8 @@ fn request(input: Input, call: *images.Call, endpoint: []const u8, body: []const
         },
         .body = body,
         .stream = stream,
+        .connect_timeout_ms = connect_timeout_ms,
+        .source = input.source,
     }, &call.cancellation, buffer);
 }
 

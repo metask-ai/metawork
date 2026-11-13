@@ -96,6 +96,7 @@ const SummaryJob = struct {
             if (metask_client.fetchUsageHistory(
                 self.transport,
                 self.lease.access_token,
+                self.lease.principal_ref,
                 range,
                 control,
             )) |history|
@@ -1384,6 +1385,10 @@ pub const Runtime = struct {
     }
 
     fn clearCredentials(self: *Runtime) void {
+        // The only place Account drops credentials: logout, sign-out after a
+        // rejected refresh, and shutdown. Pooled connections for the principal
+        // end with them.
+        if (self.credentials.principal()) |principal| self.effects.transport.retire(principal);
         self.credentials.clear();
         self.bumpAuthorizationGeneration();
     }
@@ -1904,9 +1909,19 @@ fn loginStartError(err: login_attempt.StartError) contract.ErrorCode {
 const RuntimeTestTransport = struct {
     calls: usize = 0,
     failure: metask_client.TransportError = error.NetworkFailed,
+    retired: [32]u8 = undefined,
+    retired_len: ?usize = null,
+    retire_count: usize = 0,
 
     fn port(self: *RuntimeTestTransport) metask_client.Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = retire };
+    }
+
+    fn retire(context: *anyopaque, principal: []const u8) void {
+        const self: *RuntimeTestTransport = @ptrCast(@alignCast(context));
+        self.retire_count += 1;
+        @memcpy(self.retired[0..principal.len], principal);
+        self.retired_len = principal.len;
     }
 
     fn perform(
@@ -1971,6 +1986,34 @@ test "authorization lease requires authenticated matching unexpired credentials"
     try std.testing.expectEqual(generation, runtime.authorization_generation);
     // Already handed-off owned credentials retain their independent lifetime.
     try std.testing.expectEqualStrings("access-token", lease.access_token);
+}
+
+test "clearing credentials retires the principal's pooled connections once" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        101,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    try std.testing.expectEqual(@as(usize, 0), transport.retire_count);
+    runtime.clearCredentials();
+    try std.testing.expectEqual(@as(usize, 1), transport.retire_count);
+    try std.testing.expectEqualStrings("account-1", transport.retired[0..transport.retired_len.?]);
+    // Nothing left to retire once the credentials are gone.
+    runtime.clearCredentials();
+    try std.testing.expectEqual(@as(usize, 1), transport.retire_count);
 }
 
 test "incomplete profile identity still issues an authorization lease" {
@@ -2450,7 +2493,7 @@ test "cold restore request error preserves the retained refresh credential" {
         std.testing.allocator,
         std.testing.io,
         std.Thread.getCurrentId(),
-        .{ .context = &context, .perform_fn = RequestErrorTransport.perform },
+        .{ .context = &context, .perform_fn = RequestErrorTransport.perform, .retire_fn = metask_client.retireNothing },
         TestSupport.loopbackEndpoint(),
         .{ .context = &context, .notify_fn = runtimeTestWake },
     );
@@ -2568,7 +2611,7 @@ const RotationTestTransport = struct {
     unsent_failures_remaining: usize = 0,
     calls: usize = 0,
     fn port(self: *@This()) metask_client.Transport {
-        return .{ .context = self, .perform_fn = perform };
+        return .{ .context = self, .perform_fn = perform, .retire_fn = metask_client.retireNothing };
     }
     fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
         const self: *@This() = @ptrCast(@alignCast(context));
@@ -2678,7 +2721,7 @@ test "explicit nonconsumption restores permission only after marker deletion" {
     };
     for ([_]bool{ false, true }) |delete_fails| {
         var context: u8 = 0;
-        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &context, .perform_fn = RequestFailure.perform }, TestSupport.loopbackEndpoint(), .{ .context = &context, .notify_fn = runtimeTestWake });
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &context, .perform_fn = RequestFailure.perform, .retire_fn = metask_client.retireNothing }, TestSupport.loopbackEndpoint(), .{ .context = &context, .notify_fn = runtimeTestWake });
         var platform: TestSupport.Platform = .{ .marker_delete_fails = delete_fails };
         try platform.setStoredRefreshToken("refresh-token");
         defer {

@@ -400,7 +400,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     defer fake_core.releaseControlled();
 
     var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .responses_model = scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin, .rotate_token = scenario != .continuation_unchanged and scenario != .candidate_same_token_relogin };
-    var account_runtime = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &network, .perform_fn = Network.refresh }, account.TestSupport.loopbackEndpoint(), .{ .context = &network, .notify_fn = Network.wake });
+    var account_runtime = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &network, .perform_fn = Network.refresh, .retire_fn = account.retireNothing }, account.TestSupport.loopbackEndpoint(), .{ .context = &network, .notify_fn = Network.wake });
     var platform: account.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account.TestSupport.attachPlatform(&account_runtime, &platform);
     defer {

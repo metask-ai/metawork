@@ -737,7 +737,7 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
         fn wake(_: *anyopaque) void {}
     };
     var fixture: Fixture = .{};
-    var account = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &fixture, .perform_fn = Fixture.accountHttp }, account_api.TestSupport.loopbackEndpoint(), .{ .context = &fixture, .notify_fn = Fixture.wake });
+    var account = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &fixture, .perform_fn = Fixture.accountHttp, .retire_fn = account_api.retireNothing }, account_api.TestSupport.loopbackEndpoint(), .{ .context = &fixture, .notify_fn = Fixture.wake });
     var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account_api.TestSupport.attachPlatform(&account, &platform);
     defer {

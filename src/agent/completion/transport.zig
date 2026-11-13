@@ -12,6 +12,12 @@ pub const HttpRequest = struct {
     body: []const u8,
     method: enum { post, get } = .post,
     stream: ?ResponseStream = null,
+    /// Bound for DNS, TCP and TLS. The overall request is bounded by the
+    /// caller's own cancellation, so every caller states this explicitly.
+    connect_timeout_ms: u32,
+    /// The execution source (`provider_id`) that owns this request. It only
+    /// isolates connection reuse and never enters the HTTP request.
+    source: []const u8,
 };
 
 /// A successful response is borrowed only while the transport worker runs
@@ -58,6 +64,7 @@ pub const Error = error{
     ReadFailed,
     InvalidHttp,
     ResponseTooLarge,
+    ResourceLimit,
     OutOfMemory,
     Unexpected,
 };

@@ -15,6 +15,8 @@ pub const Failure = enum {
 };
 
 const probe_timeout_ms: u32 = 30_000;
+/// DNS, TCP and TLS share at most 15 s of the probe budget.
+const probe_connect_timeout_ms: u32 = @min(probe_timeout_ms, 15_000);
 const watchdog_poll_ms: u32 = 10;
 
 pub const Cancellation = struct {
@@ -96,7 +98,7 @@ pub fn run(
         .text = "Reply with OK.",
     }};
     var complete_outcome = owner.complete(
-        .{ .messages = &messages, .max_output_tokens = 4096 },
+        .{ .messages = &messages, .max_output_tokens = 4096, .connect_timeout_ms = probe_connect_timeout_ms },
         &request_cancellation,
     );
     watchdog.finished.store(true, .release);
