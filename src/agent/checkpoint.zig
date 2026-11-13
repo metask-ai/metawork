@@ -372,6 +372,9 @@ fn exportCheckpoint(
         .image_input_unsupported,
         .image_input_capability_unknown,
         .goal_conflict,
+        .message_position_out_of_range,
+        .not_user_message,
+        .message_position_compacted,
         .ok,
         => dependencyFailure(.checkpoint_export),
     } };
@@ -436,6 +439,9 @@ pub fn describe(
             .image_input_unsupported,
             .image_input_capability_unknown,
             .goal_conflict,
+            .message_position_out_of_range,
+            .not_user_message,
+            .message_position_compacted,
             => dependencyFailure(.describe),
         } };
     }

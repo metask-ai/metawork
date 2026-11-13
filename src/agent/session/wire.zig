@@ -135,6 +135,7 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
             },
             .output_segment_begin,
             .output_segment_end,
+            .thinking_discarded,
             .usage,
             .retry_notice,
             .stream_done,

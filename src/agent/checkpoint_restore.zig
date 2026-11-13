@@ -376,6 +376,9 @@ fn failureForStatus(status: sdk.Status, local: LocalSourceFailure) Failure {
         .image_input_unsupported,
         .image_input_capability_unknown,
         .goal_conflict,
+        .message_position_out_of_range,
+        .not_user_message,
+        .message_position_compacted,
         .ok,
         => dependencyFailure(.restore),
     };

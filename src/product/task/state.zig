@@ -2018,7 +2018,7 @@ pub fn applyEvent(
     };
     var durable_boundary = false;
     switch (event) {
-        .prompt_manifest, .model_error => return .unchanged,
+        .prompt_manifest, .model_error, .thinking_discarded => return .unchanged,
         .goal_updated => return .unknown,
         .input_adopted => |input| {
             var found = false;

@@ -231,7 +231,7 @@ const server = createServer(async (request, response) => {
       writeFileSync(join(workspace, "starvation-ready"), "ready");
       return;
     }
-    if (mode === "stream-interruption" && requests === 1) {
+    if (mode === "stream-interruption" && requests <= 2) {
       response.writeHead(200, { "content-type": "text/event-stream" });
       for (const event of start()) response.write(send(event));
       const timer = setTimeout(() => response.destroy(), 100);

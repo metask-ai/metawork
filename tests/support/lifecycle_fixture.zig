@@ -2870,6 +2870,10 @@ pub fn sessionUpdatePermissionMode(handle: ?*wire.SessionHandle, code: u32, out_
     return wire.STATUS_OK;
 }
 
+fn sessionRewindToUserMessage(_: ?*wire.SessionHandle, _: u64, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork does not call AgentCore rewind");
+}
+
 const fake_session_control_api = wire.SessionControlApiV1{
     .struct_size = @sizeOf(wire.SessionControlApiV1),
     .reserved0 = 0,
@@ -2882,6 +2886,7 @@ const fake_session_control_api = wire.SessionControlApiV1{
     .export_checkpoint = sessionExportCheckpoint,
     .set_prompt_profile = sessionSetPromptProfile,
     .update_permission_mode = sessionUpdatePermissionMode,
+    .rewind_to_user_message = sessionRewindToUserMessage,
 };
 
 const fake_skill_api = wire.SkillApiV1{
