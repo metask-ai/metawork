@@ -1,8 +1,6 @@
-//! Application-owned, unauthenticated update HTTP. Production endpoints are
-//! selected by Product policy; this adapter never follows redirects or saves a package.
+//! Application-owned update policy over the shared HTTP execution layer.
 const std = @import("std");
-const http_memory = @import("app_http_memory");
-const select_start = @import("app_select_start");
+const http = @import("app_http_transport");
 const update = @import("metawork_product_update");
 
 pub const Cancellation = struct {
@@ -12,10 +10,6 @@ pub const Cancellation = struct {
     pub fn cancel(self: *Cancellation) void {
         self.state.store(1, .release);
         self.io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
-    }
-
-    fn wait(self: *const Cancellation) void {
-        while (self.state.load(.acquire) == 0) self.io.futexWait(u32, &self.state.raw, 0) catch return;
     }
 };
 
@@ -28,11 +22,7 @@ pub const Transport = struct {
 };
 
 pub const Adapter = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-
-    const Fetch = union(enum) { response: Response, failed, invalid };
-    const Outcome = union(enum) { fetched: Fetch, deadline, cancelled };
+    http: *http.Engine,
 
     pub fn transport(self: *Adapter) Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -51,74 +41,50 @@ pub const Adapter = struct {
     }
 
     fn performAt(self: *Adapter, url: []const u8, head: bool, output: []u8, cancellation: *const Cancellation, timeout: std.Io.Duration) Error!Response {
-        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = timeout, .clock = .boot });
-        var storage: [3]Outcome = undefined;
-        var selection = std.Io.Select(Outcome).init(self.io, &storage);
-        select_start.start(&selection, .{
-            .{ .fetched, fetch, .{ self, url, head, output } },
-            .{ .deadline, waitDeadline, .{ self.io, deadline } },
-            .{ .cancelled, Cancellation.wait, .{cancellation} },
-        }) catch return error.Network;
-        const outcome = selection.await() catch {
-            selection.cancelDiscard();
-            return error.Cancelled;
-        };
-        // Joins the losing operations before any output buffer can be released.
-        selection.cancelDiscard();
-        if (cancellation.state.load(.acquire) != 0) return error.Cancelled;
-        return switch (outcome) {
-            .deadline => error.Timeout,
-            .cancelled => error.Cancelled,
-            .fetched => |result| switch (result) {
-                .response => |value| value,
-                .failed => error.Network,
-                .invalid => error.InvalidResponse,
-            },
+        const result = self.http.run(.{
+            .consumer = .update,
+            .deadline = .fromNow(self.http.io, .{ .raw = timeout, .clock = .boot }),
+            .cancellation = .atomic(&cancellation.state),
+        }, fetch, .{ url, head, output });
+        return switch (result.outcome) {
+            .completed => |response| response catch |err| mapError(err),
+            .failed => |err| mapError(err),
         };
     }
 
-    fn fetch(self: *Adapter, url: []const u8, head: bool, output: []u8) Fetch {
-        var memory: http_memory.ZeroingAllocator = .{ .backing = self.allocator };
-        var client: std.http.Client = .{ .allocator = memory.allocator(), .io = self.io };
-        defer client.deinit();
-        return fetchHttp(&client, url, head, output);
-    }
-
-    fn fetchHttp(client: *std.http.Client, url: []const u8, head: bool, output: []u8) Fetch {
-        const uri = std.Uri.parse(url) catch return .invalid;
-        var request = client.request(if (head) .HEAD else .GET, uri, .{
-            .redirect_behavior = .unhandled,
-            .extra_headers = &.{
-                .{ .name = "Accept", .value = "application/json" },
-                .{ .name = "Accept-Encoding", .value = "identity" },
-                .{ .name = "Cache-Control", .value = "no-cache" },
-            },
-        }) catch return .failed;
+    fn fetch(operation: *http.Operation, url: []const u8, head: bool, output: []u8) http.Error!Response {
+        const uri = std.Uri.parse(url) catch return operation.fail(error.InvalidRequest);
+        var request = try operation.open(if (head) .HEAD else .GET, uri, .{ .headers = &.{
+            .{ .name = "Accept", .value = "application/json" },
+            .{ .name = "Accept-Encoding", .value = "identity" },
+            .{ .name = "Cache-Control", .value = "no-cache" },
+        } });
         defer request.deinit();
-        request.sendBodiless() catch return .failed;
-        var response = request.receiveHead(&.{}) catch return .failed;
+        try request.send(null);
+        var response = try request.receiveHead();
         const status: u16 = @intFromEnum(response.head.status);
-        // No package body, redirect target, or error response is consumed.
-        if (head or status != 200) return .{ .response = .{ .status = status } };
-        if (response.head.content_encoding != .identity) return .invalid;
-        var transfer_buffer: [256]u8 = undefined;
-        var decompress: std.http.Decompress = undefined;
-        const reader = response.readerDecompressing(&transfer_buffer, &decompress, &.{});
-        var writer = std.Io.Writer.fixed(output);
-        _ = reader.streamRemaining(&writer) catch |err| return switch (err) {
-            error.WriteFailed => .invalid,
-            error.ReadFailed => .failed,
-        };
-        return .{ .response = .{ .status = status, .body_len = writer.buffered().len } };
+        // Product chooses endpoints. No package, redirect or error body is read.
+        if (head or status != 200) return .{ .status = status };
+        if (response.head.content_encoding != .identity) return operation.fail(error.InvalidResponse);
+        const body = try request.readAll(&response, output);
+        return .{ .status = status, .body_len = body.len };
     }
 
-    fn waitDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) void {
-        deadline.wait(io) catch {};
+    fn mapError(err: http.Error) Error {
+        return switch (err) {
+            error.Cancelled => error.Cancelled,
+            error.DeadlineExceeded => error.Timeout,
+            error.InvalidRequest, error.InvalidResponse, error.ResponseTooLarge => error.InvalidResponse,
+            else => error.Network,
+        };
     }
 };
 
 test "updates HTTP refuses cancellation and untrusted download before any network work" {
-    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
     var cancellation: Cancellation = .{ .io = std.testing.io };
     var buffer: [8]u8 = undefined;
     var bad_url: update.Url = .{ .len = "https://evil.test/package.exe".len };
@@ -176,7 +142,10 @@ test "updates HTTP real GET and HEAD enforce byte bounds and never follow redire
         const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
         const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/manifest.json", .{listener.socket.address.getPort()});
         defer std.testing.allocator.free(url);
-        var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, threaded.io());
+        defer engine.deinit();
+        var adapter: Adapter = .{ .http = &engine };
         var cancellation: Cancellation = .{ .io = threaded.io() };
         var buffer: [2]u8 = undefined;
         const result = adapter.performAt(url, mode == .head, &buffer, &cancellation, .fromSeconds(5));
@@ -238,7 +207,10 @@ test "updates HTTP deadline and cancellation join a real blocked response before
         const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
         const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/manifest.json", .{listener.socket.address.getPort()});
         defer std.testing.allocator.free(url);
-        var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, threaded.io());
+        defer engine.deinit();
+        var adapter: Adapter = .{ .http = &engine };
         var buffer: [8]u8 = undefined;
         const result = adapter.performAt(url, false, &buffer, &cancellation, .fromMilliseconds(500));
         thread.join();
@@ -250,7 +222,10 @@ test "updates HTTP deadline and cancellation join a real blocked response before
 test "updates HTTP registration failure is a network failure rather than cancellation" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
     defer threaded.deinit();
-    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
     var cancellation: Cancellation = .{ .io = threaded.io() };
     var buffer: [8]u8 = undefined;
     try std.testing.expectError(error.Network, adapter.performAt("http://127.0.0.1:1/fixture", false, &buffer, &cancellation, .fromSeconds(30)));

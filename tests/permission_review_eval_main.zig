@@ -23,7 +23,10 @@ pub fn main(init: std.process.Init) !void {
     var trace: @import("permission_review_network_trace").Trace = undefined;
     try trace.init(init.io);
     defer trace.deinit();
-    var backend: http.Backend = .{ .allocator = init.gpa, .io = trace.io() };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(init.gpa, trace.io());
+    defer engine.deinit();
+    var backend: http.Backend = .{ .http = &engine };
     var observed = suite.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
     const completion = try agent.Completion.init(init.gpa, observed.transport(), .{
         .target = .{ .provider_id = "permission-review-evaluation", .protocol = protocol, .base_url = base_url, .model = model },

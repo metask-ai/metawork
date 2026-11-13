@@ -58,6 +58,7 @@ pub const Error = error{
     ReadFailed,
     InvalidHttp,
     ResponseTooLarge,
+    ResourceLimit,
     OutOfMemory,
     Unexpected,
 };

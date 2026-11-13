@@ -65,7 +65,10 @@ test "review HTTP deadline joins the old request and isolates later 503 invalid 
     }
     var duplicate_trace: @import("permission_review_network_trace").Trace = undefined;
     try std.testing.expectError(error.DiagnosticTraceAlreadyActive, duplicate_trace.init(threaded.io()));
-    var backend = http.Backend{ .allocator = std.testing.allocator, .io = trace.io() };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(std.testing.allocator, trace.io());
+    defer engine.deinit();
+    var backend = http.Backend{ .http = &engine };
     var observed = evaluation.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
     const owner = try agent.Completion.init(std.testing.allocator, observed.transport(), .{
         .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = endpoint, .model = "fixture-review" },

@@ -212,7 +212,10 @@ fn successful(mode: []const u8, expected: usize) !void {
     defer std.testing.allocator.free(trace_path);
     var fixture = try Fixture.start(trace_path, mode);
     defer fixture.deinit();
-    var network: backend.Backend = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var network: backend.Backend = .{ .http = &engine };
     const runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 }, .{ .transport = network.transport() });
     defer {
         runtime.shutdown() catch unreachable;
@@ -254,6 +257,7 @@ const Harness = struct {
     tmp: std.testing.TmpDir,
     root: [:0]u8,
     fixture: Fixture,
+    engine: @import("app_http_transport").Engine,
     network: backend.Backend,
     runtime: *agent.Runtime,
     sink: Sink,
@@ -267,7 +271,9 @@ const Harness = struct {
         defer std.testing.allocator.free(trace_path);
         self.fixture = try Fixture.start(trace_path, mode);
         errdefer self.fixture.deinit();
-        self.network = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+        self.engine.init(std.testing.allocator, std.testing.io);
+        errdefer self.engine.deinit();
+        self.network = .{ .http = &self.engine };
         self.runtime = if (std.mem.startsWith(u8, mode, "video"))
             try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 })
         else
@@ -277,6 +283,7 @@ const Harness = struct {
     fn deinit(self: *Harness) void {
         self.runtime.shutdown() catch unreachable;
         self.runtime.deinit();
+        self.engine.deinit();
         self.fixture.deinit();
         std.testing.allocator.free(self.root);
         self.tmp.cleanup();
@@ -702,7 +709,10 @@ test "GenerateImage captured output root refuses an ancestor retargeted to a jun
     defer std.testing.allocator.free(trace_path);
     var fixture = try Fixture.start(trace_path, "output-root-junction");
     defer fixture.deinit();
-    var network: backend.Backend = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    var engine: @import("app_http_transport").Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var network: backend.Backend = .{ .http = &engine };
     const runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 }, .{ .transport = network.transport() });
     defer {
         runtime.shutdown() catch unreachable;

@@ -182,7 +182,7 @@ fn codecFailure(failure: codec.Error) Failure {
 fn transportFailure(failure: transport.Error) Failure {
     return switch (failure) {
         error.Cancelled => .cancelled,
-        error.ResponseTooLarge => .resource_limit,
+        error.ResponseTooLarge, error.ResourceLimit => .resource_limit,
         error.OutOfMemory => .out_of_memory,
         error.DnsFailed => .{ .transport_failed = .dns },
         error.ConnectFailed => .{ .transport_failed = .connect },
@@ -451,6 +451,7 @@ test "transport resource failures preserve their typed Completion semantics" {
     }{
         .{ .transport_error = error.Cancelled, .expected = .cancelled },
         .{ .transport_error = error.ResponseTooLarge, .expected = .resource_limit },
+        .{ .transport_error = error.ResourceLimit, .expected = .resource_limit },
         .{ .transport_error = error.OutOfMemory, .expected = .out_of_memory },
         .{ .transport_error = error.Unexpected, .expected = .{ .transport_failed = .other } },
     };

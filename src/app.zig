@@ -366,7 +366,7 @@ const App = struct {
 
         if (product_identity.artifact_kind != .automation) {
             const host = self.platform.dispatcherPlatform();
-            self.update_transport = .{ .allocator = std.heap.c_allocator, .io = self.io };
+            self.update_transport = .{ .http = self.completion_transport.http };
             self.updates = .{
                 .allocator = std.heap.c_allocator,
                 .io = self.io,
@@ -607,6 +607,9 @@ fn createAgentRuntime(
 }
 
 pub fn run(init: std.process.Init) !void {
+    var http_engine: @import("app_http_transport").Engine = undefined;
+    http_engine.init(std.heap.c_allocator, init.io);
+    defer http_engine.deinit();
     var app = App{
         .env_map = init.environ_map,
         .io = init.io,
@@ -615,8 +618,7 @@ pub fn run(init: std.process.Init) !void {
         .automation = app_automation.Adapter.init(init.environ_map),
         .platform = app_platform.Adapter.init(init.io, std.Thread.getCurrentId()),
         .completion_transport = .{
-            .allocator = std.heap.c_allocator,
-            .io = init.io,
+            .http = &http_engine,
         },
     };
     app.platform.setProductDeliveryTrace(app.automation.productDeliveryTraceEnabled());

@@ -171,7 +171,13 @@ const Host = struct {
             });
             break;
         }
-        var backend = CompletionHttp{ .allocator = self.init.gpa, .io = self.init.io };
+        var trace: @import("permission_review_network_trace").Trace = undefined;
+        try trace.init(self.init.io);
+        defer trace.deinit();
+        var engine: @import("app_http_transport").Engine = undefined;
+        engine.init(self.init.gpa, trace.io());
+        defer engine.deinit();
+        var backend = CompletionHttp{ .http = &engine };
         const protocol = protocol_adapter.toAgent(input.target.protocol);
         if (std.mem.eql(u8, self.init.environ_map.get("METAWORK_REVIEW_EVAL_SCHEMA_PROBE") orelse "", "1")) {
             return @import("permission_schema_probe").run(self.init, .{
@@ -179,10 +185,6 @@ const Host = struct {
                 .credential = input.api_key,
             }, backend.transport(), self.revision);
         }
-        var trace: @import("permission_review_network_trace").Trace = undefined;
-        try trace.init(self.init.io);
-        defer trace.deinit();
-        backend.io = trace.io();
         var observed = evaluation.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
         const completion = try agent.Completion.init(self.init.gpa, observed.transport(), .{
             .target = .{ .provider_id = input.target.provider_id, .protocol = protocol, .base_url = input.target.base_url, .model = input.target.model },

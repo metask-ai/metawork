@@ -463,8 +463,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
     const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     review_http_backend.addImport("metawork_agent", modules.agent);
-    review_http_backend.addImport("app_select_start", existingImport(modules.oauth_loopback_transport, "app_select_start"));
-    review_http_backend.addImport("app_http_memory", existingImport(modules.app, "app_http_memory"));
+    review_http_backend.addImport("app_http_transport", existingImport(modules.app, "app_http_transport"));
     const completion_http_tests = b.addRunArtifact(b.addTest(.{ .root_module = review_http_backend }));
     b.step("test-completion-http-transport", "Run Completion HTTP registration and cancellation tests").dependOn(&completion_http_tests.step);
     artifacts.tests.step.dependOn(&completion_http_tests.step);
@@ -475,6 +474,7 @@ pub fn build(b: *std.Build) void {
     review_http_cases.addImport("metawork_agent", modules.agent);
     review_http_cases.addImport("permission_review", modules.product_permission_review);
     review_http_cases.addImport("completion_http_backend", review_http_backend);
+    review_http_cases.addImport("app_http_transport", existingImport(modules.app, "app_http_transport"));
     review_http_cases.addOptions("review_http_fixture_options", review_http_options);
     const review_http_run = b.addRunArtifact(b.addTest(.{ .root_module = review_http_cases }));
     b.step("test-permission-review-http", "Verify real HTTP permission review cancellation and response isolation").dependOn(&review_http_run.step);
@@ -495,6 +495,7 @@ pub fn build(b: *std.Build) void {
     const review_eval_main = b.createModule(.{ .root_source_file = b.path("tests/permission_review_eval_main.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
     review_eval_main.addImport("metawork_agent", modules.agent);
     review_eval_main.addImport("completion_http_backend", review_http_backend);
+    review_eval_main.addImport("app_http_transport", existingImport(modules.app, "app_http_transport"));
     review_eval_main.addImport("permission_review_evaluation", review_eval_module);
     review_eval_main.addImport("permission_review_network_trace", review_network_trace);
     modules.app.addImport("permission_review_evaluation", review_eval_module);
@@ -1192,11 +1193,11 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     fixture_options.addOption([]const u8, "xlsx_report_path", b.pathFromRoot("tests/fixtures/office/checked-summary-report.json"));
     const backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     backend.addImport("metawork_agent", modules.agent);
-    backend.addImport("app_select_start", existingImport(modules.oauth_loopback_transport, "app_select_start"));
-    backend.addImport("app_http_memory", existingImport(modules.app, "app_http_memory"));
+    backend.addImport("app_http_transport", existingImport(modules.app, "app_http_transport"));
     const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
+    cases.addImport("app_http_transport", existingImport(modules.app, "app_http_transport"));
     cases.addImport("image_output", modules.image_output);
     cases.addImport("video_output", modules.video_output);
     cases.addImport("app_output_file", modules.output_file);
