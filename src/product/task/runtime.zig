@@ -540,7 +540,6 @@ pub const RecoveryStartInput = struct {
     workspace_kind: recovery_job.WorkspaceKind,
     execution: models_contract.ConfigInput,
     source_generation: u64 = 0,
-    metask_authorization_scope: u64 = 0,
     continuation_source_id: ?u64 = null,
     /// Pending approval transaction identity for synchronous recovery admission.
     approval_revision: ?u64 = null,
@@ -593,7 +592,6 @@ pub const DeletionSync = struct {
 };
 
 pub const CreateCandidate = struct {
-    metask_authorization_scope: u64 = 0,
     execution_generation: u64,
     execution_protocol: task_state.Protocol,
     execution_model: []u8,
@@ -623,7 +621,6 @@ pub const CreateTaskInput = struct {
     model: []const u8,
     model_ref: ?models_contract.ModelRef = null,
     source_generation: u64 = 0,
-    metask_authorization_scope: u64 = 0,
     permission_profile: task_state.PermissionProfile,
     permission_review_delegated: bool = false,
     permission_interaction: task_state.PermissionInteraction,
@@ -2300,7 +2297,6 @@ pub const Runtime = struct {
         input.pinned_catalog.* = null;
         var candidate = CreateCandidate{
             .execution_generation = input.execution.execution_generation,
-            .metask_authorization_scope = input.metask_authorization_scope,
             .execution_protocol = input.protocol,
             .execution_model = execution_model,
             .model_intent = model_intent,
@@ -2387,7 +2383,6 @@ pub const Runtime = struct {
                 .ui_history = ui_history,
             },
             .runtime = .{
-                .metask_authorization_scope = owned.metask_authorization_scope,
                 .mcp_authority_at_creation = owned.mcp_authority,
                 .attachment = .{ .attached = .{
                     .binding = owned.binding.take(),
@@ -4179,7 +4174,6 @@ pub const Runtime = struct {
             source_generation: u64,
             protocol: models_contract.Protocol,
         },
-        metask_scope: u64,
     };
 
     pub fn modelFacts(self: *const Runtime, task_id: u64) ?ModelFacts {
@@ -4193,7 +4187,6 @@ pub const Runtime = struct {
                 .source_generation = execution.source_generation,
                 .protocol = execution.protocol,
             } else null,
-            .metask_scope = task.runtime.metask_authorization_scope,
         };
     }
 
@@ -4240,25 +4233,24 @@ pub const Runtime = struct {
         return !execution.matchesSource(candidate);
     }
 
-    pub fn metaskCredentialScope(self: *const Runtime, task_id: u64) ?u64 {
-        const task = self.findConst(task_id) orelse return null;
-        if (task.runtime.restore_job != null) return null;
-        const execution = task.runtime.executionConst() orelse return null;
-        if (task.runtime.metask_authorization_scope == 0 or !std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return null;
-        return task.runtime.metask_authorization_scope;
+    fn renewsMetaskCredential(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        if (task.runtime.restore_job != null) return false;
+        const execution = task.runtime.executionConst() orelse return false;
+        return std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id);
     }
 
-    /// Account authority is checked by Product Control. This owner enforces
-    /// the Task's original scope and owns the Session/Host atomic handoff.
-    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: []const u8, resolved_source_generation: ?u64) !CredentialRenewal {
+    /// Account authority is checked by Product Control. This owner owns the
+    /// Session/Host atomic handoff; any current login renews the installed
+    /// credential in place.
+    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, generation: u64, value: []const u8, resolved_source_generation: ?u64) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;
         const execution = task.runtime.execution() orelse return .unrelated;
         if (task.runtime.credential_update_failed and task.runtime.credential_failed_generation == generation and
             resolved_source_generation == null) return .unrelated;
         task.runtime.credential_renewal_deferred = false;
-        if (scope == 0 or task.runtime.metask_authorization_scope != scope or
-            !std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return .unrelated;
+        if (!std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return .unrelated;
         if (task.durable.archived or task.deletion != .idle or task.runtime.close_requested or task.runtime.hasClosingSession()) return .unrelated;
         if (task.runtime.active_operation == .restore or task.runtime.active_operation == .compact) {
             task.runtime.credential_renewal_deferred = true;
@@ -4317,33 +4309,33 @@ pub const Runtime = struct {
         return .updated;
     }
 
-    pub fn needsDeferredMetaskCredential(self: *const Runtime, scope: u64) bool {
+    pub fn needsDeferredMetaskCredential(self: *const Runtime) bool {
         for (self.tasks) |entry| if (entry) |task| {
             if (task.runtime.credential_renewal_deferred and task.runtime.active_operation != .compact and
-                self.metaskCredentialScope(task.durable.id) == scope) return true;
+                self.renewsMetaskCredential(task.durable.id)) return true;
         };
         return false;
     }
 
-    pub fn deferMetaskCredentialRenewals(self: *Runtime, scope: u64) void {
+    pub fn deferMetaskCredentialRenewals(self: *Runtime) void {
         for (self.tasks) |entry| if (entry) |task| {
-            if (self.metaskCredentialScope(task.durable.id) == scope)
+            if (self.renewsMetaskCredential(task.durable.id))
                 task.runtime.credential_renewal_deferred = true;
         };
     }
 
-    pub fn renewMetaskExecutions(self: *Runtime, scope: u64, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
+    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
-            changed = self.renewMetaskMedia(id, scope, generation, credential) or changed;
-            if (self.metaskCredentialScope(id) != scope) continue;
+            changed = self.renewMetaskMedia(id, generation, credential) or changed;
+            if (!self.renewsMetaskCredential(id)) continue;
             const value = credential orelse {
                 self.failCredentialRenewal(id, generation, true, false);
                 changed = true;
                 continue;
             };
-            const outcome = self.renewMetaskCredential(id, scope, generation, value, null) catch |err| {
+            const outcome = self.renewMetaskCredential(id, generation, value, null) catch |err| {
                 self.failMetaskCredentialUpdate(id, generation, err, effects);
                 changed = true;
                 continue;
@@ -4372,20 +4364,20 @@ pub const Runtime = struct {
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
     }
 
-    fn renewMetaskMedia(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: ?[]const u8) bool {
+    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: ?[]const u8) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
             if (run.image_execution) |*image|
-                changed = renewMediaCredential(self.allocator, run, &image.authorization, scope, generation, value) or changed;
+                changed = renewMediaCredential(self.allocator, run, &image.authorization, generation, value) or changed;
             if (run.video_execution) |*video|
-                changed = renewMediaCredential(self.allocator, run, &video.authorization, scope, generation, value) or changed;
+                changed = renewMediaCredential(self.allocator, run, &video.authorization, generation, value) or changed;
         };
         return changed;
     }
 
-    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, scope: u64, generation: u64, value: ?[]const u8) bool {
-        if (authorization.scope != scope or authorization.generation == generation) return false;
+    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: ?[]const u8) bool {
+        if (authorization.generation == generation) return false;
         const source = authorization.source orelse return false;
         authorization.generation = generation;
         if (value) |key| {
@@ -6476,7 +6468,8 @@ pub const Runtime = struct {
     pub const RestoreCapabilityEffects = struct {
         context: *anyopaque,
         prepare_fn: *const fn (*anyopaque, u64, *const agent.SessionRestoreInputs) anyerror!RestoreFilters,
-        metask_scope_fn: *const fn (*anyopaque, []const u8) ?u64,
+        /// Whether the current Account authorization admits the provider.
+        authorized_fn: *const fn (*anyopaque, []const u8) bool,
     };
 
     pub fn restoreSkillFacts(self: *const Runtime, task_id: u64) ?struct {
@@ -6500,9 +6493,7 @@ pub const Runtime = struct {
         const rebind = if (job.rebind) |*value| value else return false;
         if (task.durable.approval_revision != rebind.approval_revision) return false;
         const execution = if (job.outcome == .candidate) &job.outcome.candidate.execution else &job.attempt.execution;
-        const scope = effects.metask_scope_fn(effects.context, execution.provider_id) orelse return false;
-        const expected_scope = if (rebind.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
-        if (scope != expected_scope) return false;
+        if (!effects.authorized_fn(effects.context, execution.provider_id)) return false;
         const capabilities = if (rebind.capabilities) |*value| value else return true;
         const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
         defer if (current.skill) |value| value.deinit() catch {};
@@ -6560,12 +6551,6 @@ pub const Runtime = struct {
         const task = self.findConst(task_id) orelse return null;
         const attached = task.runtime.attachedConst() orelse return null;
         return if (attached.health == .available) attached.binding.routeId() else null;
-    }
-
-    pub fn recoveryAuthorizationScope(self: *const Runtime, task_id: u64, original: bool) ?u64 {
-        const task = self.findConst(task_id) orelse return null;
-        const job = task.runtime.restore_job orelse return 0;
-        return if (original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
     }
 
     /// An owned copy survives release of the live Session access.
@@ -6751,7 +6736,6 @@ pub const Runtime = struct {
             },
         };
         job.continuation_source_id = input.continuation_source_id;
-        job.metask_authorization_scope = input.metask_authorization_scope;
         job.credential = job.attempt.execution.secret;
         restore_lease_owned = false;
         job_initialized = true;
@@ -7767,7 +7751,6 @@ pub const Runtime = struct {
                     task.runtime.credential_update_failed = false;
                     task.runtime.credential_failed_generation = 0;
                     task.runtime.credential_renewal_deferred = false;
-                    task.runtime.metask_authorization_scope = if (job.rebind != null and job.rebind.?.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
                     task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = if (candidate.report) |report| .{
                         .restored_rules = report.restored_permission_rules,

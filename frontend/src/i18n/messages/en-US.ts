@@ -1714,8 +1714,6 @@ export const enUS = {
     "The Metask model catalog failed to refresh.",
   "mutation.reason.metask_authorization_required":
     "Sign in to Metask to use this model.",
-  "mutation.reason.metask_authorization_changed":
-    "This task's Metask authorization changed.",
   "mutation.reason.session_poisoned":
     "The current session can no longer continue.",
   "mutation.reason.checkpoint_unavailable":

@@ -73,8 +73,8 @@ checking | signed_out | authorizing | authenticated
 3. Application 将 lease 交给一次 Models Metask catalog operation；Models module 不导入 Account，也不持久化 OAuth token；
 4. logout、credential 失效、identity replacement 或 authorization generation 变化后，旧 lease/completion 失效，Application 取消并 join 对应 catalog job，再通知 Models 将 Metask provider 置为 `needs_authentication`；
 5. Models 清除 transient Metask credential 和可解析目录，但保留无 secret 的 Metask selection intent；custom source 不受影响；
-6. 已经交给 Task/Run 的 owned binding 按自己的生命周期收口，Account 退出不构成对在飞执行的热撤权；后续执行的接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
-7. Account 向 Application 提供不分配 secret copy 的主线程执行接纳证明，使用与 lease 相同的 authenticated、principal、generation 和 hard-expiry/clock gate。证明只含进程内 authorization generation 与连续授权 scope，不进入 Renderer、日志或持久化 metadata。正常 token refresh 保留 scope；新登录替换或 credential 清除结束旧 scope，即使重新登录的是相同 principal 也不能自动延长旧 Task 的连续授权。scope 不替代每次接纳时的授权有效性校验。
+6. 已经交给 Task/Run 的 owned binding 按自己的生命周期收口：新登录与正常刷新一样，已接纳的 Run 原位采用当前凭据；退出登录或凭据清除不撤销在飞 Run 已持有的凭据。后续执行的接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
+7. Account 向 Application 提供不分配 secret copy 的主线程执行接纳证明，使用与 lease 相同的 authenticated、principal、generation 和 hard-expiry/clock gate。证明只含进程内 authorization generation，不进入 Renderer、日志或持久化 metadata。token refresh、新登录与 credential 清除都推进 generation；授权不与 Task 绑定，既有 Task 在任意一次登录后的执行接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
 
 Account 不知道 provider 当前是否为默认值、是否存在 custom source、是否有 Task 正在运行，也不因这些事实拒绝 logout。Models 也不能调用 Account 登录、刷新或退出；它只能接受当次 lease 或观察授权不可用。
 

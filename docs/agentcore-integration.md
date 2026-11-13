@@ -170,7 +170,7 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 `GenerateVideo` 只接收 `prompt`，每 Run 至多提交一次。Agent 通过冻结的 Metask target 提交 `model`、`input.prompt` 和 `parameters`，校验有界任务 ID，用同一 target 查询终态并从 `/content` 下载。查询遇到瞬时传输错误、HTTP 429 或 5xx 时在同一调用期限内退避重试，收到有效状态后恢复常规轮询间隔。永久错误、无效响应或任务 ID 不一致结束本地等待。每次请求读取当时有效的 Run 凭据副本。只接纳有界的 MP4 响应，使用 Application 的 Workspace 输出 effect 流式写入，提交后返回相对路径、MIME 与大小。Agent 按生图规则精确匹配当次保存回执与成功工具结果，以独立 sideband 将可信路径交给 Product。提交后 Stop 或超时只结束本地等待和下载，远端结果未知时报告 `outcome_unknown`，禁止重发创建请求。已知生成后的下载失败报告 `download_failed`，本地写入或发布失败报告 `output_failed`，无法确认的清理单独报告。响应附带的媒体 URL 不参与请求目标选择。
 
-图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
+图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
 
 当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配后标为待交付；owning event 成功入队后才移除 Agent 槽。消费者关闭导致未入队时，已合法匹配的引用通过有界 TerminalResult 尾部交接，下一 Run 不继承槽位。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
