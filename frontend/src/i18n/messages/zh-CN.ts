@@ -1476,8 +1476,6 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.models_catalog_failed": "Metask 模型目录刷新失败。",
   "mutation.reason.metask_authorization_required":
     "请登录 Metask 后使用此模型。",
-  "mutation.reason.metask_authorization_changed":
-    "此任务的 Metask 授权已变更。",
   "mutation.reason.session_poisoned": "当前会话已无法继续。",
   "mutation.reason.checkpoint_unavailable": "已保存的会话检查点不可用。",
   "mutation.reason.execution_rebind_required": "此会话需要可用的执行配置。",

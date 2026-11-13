@@ -629,7 +629,6 @@ pub const SendInputReason = enum {
     models_catalog_loading,
     models_catalog_failed,
     metask_authorization_required,
-    metask_authorization_changed,
     session_poisoned,
     checkpoint_unavailable,
     execution_rebind_required,
@@ -806,8 +805,8 @@ pub const OwnedImageExecution = struct {
     release_output_fn: *const fn (*anyopaque) void,
     authorization: MediaCredentials = .{},
 
-    pub fn enableCredentialRenewal(self: *OwnedImageExecution, allocator: std.mem.Allocator, io: std.Io, scope: u64, generation: u64) std.mem.Allocator.Error!void {
-        try self.authorization.enable(allocator, io, self.candidate.input().bearer, scope, generation);
+    pub fn enableCredentialRenewal(self: *OwnedImageExecution, allocator: std.mem.Allocator, io: std.Io, generation: u64) std.mem.Allocator.Error!void {
+        try self.authorization.enable(allocator, io, self.candidate.input().bearer, generation);
     }
 
     pub fn input(self: *const OwnedImageExecution) agent.ImageGenerationRunInput {
@@ -830,15 +829,13 @@ pub const OwnedImageExecution = struct {
 };
 
 pub const MediaCredentials = struct {
-    scope: u64 = 0,
     generation: u64 = 0,
     source: ?*execution_credentials.Source = null,
     versions: std.ArrayList([]u8) = .empty,
 
-    pub fn enable(self: *MediaCredentials, allocator: std.mem.Allocator, io: std.Io, bearer: []const u8, scope: u64, generation: u64) std.mem.Allocator.Error!void {
-        std.debug.assert(self.source == null and scope != 0 and generation != 0);
+    pub fn enable(self: *MediaCredentials, allocator: std.mem.Allocator, io: std.Io, bearer: []const u8, generation: u64) std.mem.Allocator.Error!void {
+        std.debug.assert(self.source == null and generation != 0);
         self.source = try execution_credentials.Source.create(allocator, io, bearer);
-        self.scope = scope;
         self.generation = generation;
     }
 

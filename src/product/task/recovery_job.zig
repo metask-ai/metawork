@@ -380,7 +380,6 @@ pub const Job = struct {
     binding_commit: BindingCommit = .not_started,
     unknown_history: ?[32]u8 = null,
     rebind: ?Rebind = null,
-    metask_authorization_scope: u64 = 0,
     continuation_source_id: ?u64 = null,
     export_checkpoint_fn: ?*const fn (*Job, *agent_session.Access, []const u8) ExportOutcome = null,
     /// Borrowed from the transferred execution owner. Workers never mutate
