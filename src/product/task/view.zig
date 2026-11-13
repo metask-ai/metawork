@@ -435,7 +435,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try writeInput(writer, input.text, record.input, null);
         writer.print(",\"state\":\"{s}\",\"reason\":", .{@tagName(record.state)}) catch return error.SnapshotTooLarge;
         if (record.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        if (record.retry_payload != null and !task.durable.archived and task.read_only_history == null and task.deletion == .idle and !input.shutting_down)
+        if (record.retry_payload != null and resendAdmitted(task, input.shutting_down))
             writer.writeAll(",\"retryAvailable\":true") catch return error.SnapshotTooLarge;
         if (record.blocking_task_id) |id| {
             std.debug.assert(record.state == .failed and record.reason == .session_close_failed and id != 0);
@@ -555,7 +555,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
                 task_state.runProjectionFacts(run)
         else
             task_state.runProjectionFacts(run);
-        try writeRun(writer, input.text, run, projection, input.now_ms);
+        try writeRun(writer, input.text, run, projection, resendAdmitted(task, input.shutting_down), input.now_ms);
     }
     writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
     var compact_count: usize = 0;
@@ -803,11 +803,18 @@ pub fn writeInputAcceptance(writer: *std.Io.Writer, text: TextProjection, result
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
+/// A Task admits an explicit resend only while it still accepts ordinary work.
+pub fn resendAdmitted(task: *const task_state.Task, shutting_down: bool) bool {
+    return !task.durable.archived and task.read_only_history == null and
+        task.deletion == .idle and !shutting_down;
+}
+
 pub fn writeRun(
     writer: *std.Io.Writer,
     text_projection: TextProjection,
     run: *const task_state.RunRecord,
     projection: task_state.RunProjectionFacts,
+    resend_admitted: bool,
     now_ms: ?u64,
 ) Error!void {
     const terminal = projection.terminal;
@@ -864,6 +871,9 @@ pub fn writeRun(
             jsonValue(writer, @tagName(continuation_reason.?)) catch return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (record.retry_text != null and record.retried_as == null and
+            record.state == .unadopted and resend_admitted)
+            writer.writeAll(",\"retryAvailable\":true") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"submission\":") catch return error.SnapshotTooLarge;
         try writeSubmission(writer, text_projection, record.submission);
         writer.writeByte('}') catch return error.SnapshotTooLarge;

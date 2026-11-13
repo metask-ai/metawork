@@ -325,6 +325,18 @@ const ReviewScenario = struct {
     }
 
     fn initConfigured(configuration: product_control.Configuration, max_runs: usize, plan: fixture.Plan, input_enabled: bool) !*@This() {
+        return initApproval(configuration, max_runs, plan, input_enabled, .manual, null);
+    }
+
+    /// `ready` overrides the snapshot the fixture waits for before returning.
+    fn initApproval(
+        configuration: product_control.Configuration,
+        max_runs: usize,
+        plan: fixture.Plan,
+        input_enabled: bool,
+        approval_mode: product_control.ApprovalMode,
+        ready: ?[]const u8,
+    ) !*@This() {
         fake_core.reset();
         fake_core.input_enabled = input_enabled;
         fake_core.setNextPlan(plan);
@@ -343,7 +355,7 @@ const ReviewScenario = struct {
         errdefer self.control.deinit();
         try installControlExecution(&self.control);
         var input = productControlTaskInput();
-        input.approval_mode = .manual;
+        input.approval_mode = approval_mode;
         self.task_id = try self.control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&self.control));
         // Task catalog readiness does not prove Workspace discovery has
         // vacated the one-slot executor queue. Finish both setup operations
@@ -351,7 +363,10 @@ const ReviewScenario = struct {
         try waitInitialTaskCatalog(&self.control, self.task_id);
         try settleWorkspaceSkillQueries(&self.control, try self.control.taskWorkspaceId(self.task_id));
         _ = try runPreparedTask(&self.control, self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
-        try waitControlSnapshot(&self.control, if (plan == .ui_wait) "\"currentRunPhase\":\"waiting_ui\"" else "\"inputReady\":true");
+        try waitControlSnapshot(&self.control, ready orelse if (plan == .ui_wait)
+            "\"currentRunPhase\":\"waiting_ui\""
+        else
+            "\"inputReady\":true");
         return self;
     }
 
@@ -11029,16 +11044,236 @@ test "active input terminal reservation obeys accepted archive approval and work
             .approval => _ = try scenario.control.setApprovalMode(scenario.task_id, .auto_review, task.durable.binding_epoch, task.durable.approval_revision),
             .workspace => try scenario.control.removeWorkspace(task.durable.workspace_id),
         }
-        try std.testing.expect(source.input_continuation_cancelled);
-        try std.testing.expect(!source.input_continuation_pending);
-        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+        // Archive and Workspace removal still retire the batch. An approval
+        // change inside one Core profile declares it held.
+        const retires = action != .approval;
+        try std.testing.expectEqual(retires, source.input_continuation_cancelled);
+        try std.testing.expectEqual(!retires, source.input_continuation_pending);
         lease.deinit();
+        if (!retires) {
+            try settleApprovalChange(scenario);
+            fake_core.expected_run_text = "follow up";
+        }
         try settleInputScenario(scenario);
-        try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+        try std.testing.expectEqual(@as(usize, if (retires) 1 else 2), fake_core.run_calls);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
     }
 }
 
-test "active input approval cancellation applies only to existing messages and rejected sends cannot reopen it" {
+/// The Run states an approval mode change can land on.
+const ApprovalRunState = enum { generating, executing_tools, waiting_ui, reviewing, queued_input };
+
+fn approvalStateApplies(state: ApprovalRunState, from: product_control.ApprovalMode) bool {
+    return switch (state) {
+        .generating, .executing_tools, .queued_input => true,
+        // Only manual approval leaves a request waiting for the user.
+        .waiting_ui => from == .manual,
+        // Only automatic review has a reviewer in flight.
+        .reviewing => from == .auto_review,
+    };
+}
+
+fn settleApprovalChange(scenario: *ReviewScenario) !void {
+    const task = scenario.control.testTask(scenario.task_id).?;
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        scenario.control.syncLifecycle();
+        if (task.approval_change == null) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Drains Agent events and Control lifecycle until the Task has no work left.
+fn settleApprovalScenario(scenario: *ReviewScenario) !void {
+    const task = scenario.control.testTask(scenario.task_id).?;
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        scenario.control.syncLifecycle();
+        if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none and
+            task.approval_change == null and
+            !scenario.control.task_runtime.hasInputContinuation(scenario.task_id) and
+            scenario.control.task_runtime.inputAction(scenario.task_id) == .none) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "an approval mode change acts on its declared impact in every Run state" {
+    const Transition = struct { from: product_control.ApprovalMode, to: product_control.ApprovalMode };
+    const transitions = [_]Transition{
+        .{ .from = .manual, .to = .auto_review },
+        .{ .from = .auto_review, .to = .manual },
+        .{ .from = .manual, .to = .full_access },
+        .{ .from = .full_access, .to = .manual },
+        .{ .from = .auto_review, .to = .full_access },
+        .{ .from = .full_access, .to = .auto_review },
+    };
+    for (transitions) |transition| {
+        const profile_changes = transition.from.profile() != transition.to.profile();
+        for (std.enums.values(ApprovalRunState)) |state| {
+            if (!approvalStateApplies(state, transition.from)) continue;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+            defer std.testing.allocator.free(home);
+            var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+            defer checkpoint_store.deinit();
+            var transport: ReviewerTransport = .{};
+            var history: TaskPersistenceProbe = .{};
+            var configuration = productControlConfiguration();
+            configuration.directories.canonical_user_home = home;
+            configuration.task_persistence = history.capability();
+            configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+            configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+            const plan: fixture.Plan = switch (state) {
+                .generating, .queued_input => .controlled,
+                .executing_tools => .controlled_executing_tools,
+                .waiting_ui, .reviewing => .ui_wait,
+            };
+            const ready: ?[]const u8 = if (state == .reviewing) "\"inputReady\":true" else null;
+            const scenario = try ReviewScenario.initApproval(configuration, 2, plan, true, transition.from, ready);
+            defer scenario.deinit();
+            defer transport.released.store(true, .release);
+            if (state == .reviewing) try transport.awaitEntered(&scenario.control);
+            const task = scenario.control.testTask(scenario.task_id).?;
+            const source = &task.durable.runs[0].?;
+            const epoch = task.durable.binding_epoch;
+            if (state == .queued_input) {
+                const queued = try scenario.control.testSendInput("queued-before-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "queued follow-up" });
+                try std.testing.expectEqual(.submitted, queued.outcome);
+            }
+            const prior_revision = task.durable.approval_revision;
+            const ack = try scenario.control.setApprovalMode(scenario.task_id, transition.to, epoch, prior_revision);
+            try std.testing.expectEqual(prior_revision + 1, ack);
+            if (!profile_changes) {
+                // Declared unchanged execution configuration: the Run is not
+                // asked to stop, and the queued batch stays where it is.
+                try std.testing.expectEqual(.run, std.meta.activeTag(task.runtime.active_operation));
+                try std.testing.expectEqual(source.id, task.runtime.active_operation.run);
+                try std.testing.expectEqual(.none, source.pending_termination.load(.acquire));
+                if (state == .queued_input) {
+                    try std.testing.expect(!source.input_continuation_cancelled);
+                    try std.testing.expectEqualStrings("queued follow-up", source.additional_inputs[0].?.raw_text.?);
+                    try std.testing.expect(source.additional_inputs[0].?.continuation_cancel_reason == null);
+                    try std.testing.expect(source.additional_inputs[0].?.retry_text == null);
+                }
+            }
+            try settleApprovalChange(scenario);
+            try std.testing.expectEqual(transition.to, try scenario.control.taskApprovalMode(scenario.task_id));
+            if (profile_changes) {
+                // Crossing the Core profile boundary stops the Run by design.
+                // The queued text is retired for an explicit resend, never
+                // silently destroyed.
+                if (state == .queued_input) {
+                    try std.testing.expect(source.input_continuation_cancelled);
+                    const record = source.additional_inputs[0].?;
+                    try std.testing.expect(record.raw_text == null);
+                    try std.testing.expectEqualStrings("queued follow-up", record.retry_text.?);
+                    try std.testing.expect(record.retried_as == null);
+                    try std.testing.expectEqual(.approval_mode_change, record.continuation_cancel_reason.?);
+                }
+                transport.released.store(true, .release);
+                fake_core.releaseControlled();
+                try settleApprovalScenario(scenario);
+                try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+                continue;
+            }
+            // The Run was never interrupted, so releasing it finishes the same
+            // Run; a held batch then drives exactly one continuation.
+            try std.testing.expectEqual(.run, std.meta.activeTag(task.runtime.active_operation));
+            try std.testing.expectEqual(source.id, task.runtime.active_operation.run);
+            transport.released.store(true, .release);
+            // A request the change handed back to the user keeps the untouched
+            // Run waiting; answer it so the Run can finish.
+            if (task.runtime.pending_ui_request_id != 0) {
+                var answered = false;
+                for (0..5000) |_| {
+                    try scenario.control.drainAgentEvents();
+                    scenario.control.syncLifecycle();
+                    const request_id = task.runtime.pending_ui_request_id;
+                    if (request_id == 0) {
+                        answered = true;
+                        break;
+                    }
+                    if (scenario.control.respondUi(scenario.task_id, source.id, request_id, .{ .permission = .allow_once })) {
+                        answered = true;
+                        break;
+                    } else |_| {}
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                }
+                try std.testing.expect(answered);
+            }
+            if (state == .queued_input) fake_core.expected_run_text = "queued follow-up";
+            fake_core.releaseControlled();
+            try settleApprovalScenario(scenario);
+            try std.testing.expectEqual(@as(usize, if (state == .queued_input) 2 else 1), fake_core.run_calls);
+            if (state == .queued_input) {
+                try std.testing.expect(fake_core.run_text_matches);
+                try std.testing.expectEqual(.transferred, source.additional_inputs[0].?.state);
+                try std.testing.expectEqual(@as(?u64, task.durable.runs[1].?.id), source.additional_inputs[0].?.transferred_to_run_id);
+            }
+            try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+            try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.retry_input_bytes);
+        }
+    }
+}
+
+test "an approval mode change across the full access boundary keeps queued input for an explicit resend" {
+    for ([_]bool{ true, false }) |resend| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.testTask(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        const epoch = task.durable.binding_epoch;
+        const queued = try scenario.control.testSendInput("retired-batch", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "keep this message" });
+        try std.testing.expectEqual(.submitted, queued.outcome);
+        _ = try scenario.control.setApprovalMode(scenario.task_id, .full_access, epoch, task.durable.approval_revision);
+        try settleApprovalChange(scenario);
+        fake_core.releaseControlled();
+        try settleApprovalScenario(scenario);
+        const record = source.additional_inputs[0].?;
+        try std.testing.expectEqual(.unadopted, record.state);
+        try std.testing.expectEqualStrings("keep this message", record.retry_text.?);
+        try std.testing.expectEqual(@as(usize, "keep this message".len), scenario.control.task_runtime.retry_input_bytes);
+        var snapshot_storage: [512 * 1024]u8 = undefined;
+        const snapshot = try scenario.control.writeAggregateFixture(&snapshot_storage);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer parsed.deinit();
+        const inputs = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items;
+        try std.testing.expectEqualStrings("approval_mode_change", inputs[0].object.get("continuationReason").?.string);
+        try std.testing.expect(inputs[0].object.get("retryAvailable").?.bool);
+        if (!resend) {
+            try std.testing.expect(scenario.control.discardTaskInputRetry(scenario.task_id, "retired-batch"));
+            try std.testing.expect(source.additional_inputs[0].?.retry_text == null);
+            try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.retry_input_bytes);
+            try std.testing.expect(!scenario.control.discardTaskInputRetry(scenario.task_id, "retired-batch"));
+            continue;
+        }
+        const accepted = try scenario.control.retryTaskInput(scenario.task_id, "retired-batch", "resent-batch");
+        try std.testing.expectEqual(.accepted, accepted.outcome);
+        try std.testing.expect(source.additional_inputs[0].?.retry_text == null);
+        try std.testing.expect(source.additional_inputs[0].?.retried_as != null);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.retry_input_bytes);
+        // A resend is a new submission, so it never rejoins the retired batch.
+        const waiting = task.input_submissions.items[0];
+        try std.testing.expect(waiting.force_new_run);
+        try std.testing.expectEqualStrings("resent-batch", waiting.submission.operationId());
+    }
+}
+
+test "active input joins one batch across an approval change in the same Core profile and a Stop retires it" {
     const Next = enum { none, rejected, accepted, accepted_then_stop };
     for (std.enums.values(Next)) |next| {
         var tmp = std.testing.tmpDir(.{});
@@ -11054,24 +11289,22 @@ test "active input approval cancellation applies only to existing messages and r
         const task = scenario.control.testTask(scenario.task_id).?;
         const source = &task.durable.runs[0].?;
         const epoch = task.durable.binding_epoch;
-        _ = try scenario.control.testSendInput("before-mode-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "old cancelled message" });
+        _ = try scenario.control.testSendInput("before-mode-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "queued before the change" });
         _ = try scenario.control.setApprovalMode(scenario.task_id, .auto_review, epoch, task.durable.approval_revision);
-        for (0..5000) |_| {
-            scenario.control.syncLifecycle();
-            if (task.approval_change == null) break;
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        }
-        try std.testing.expect(task.approval_change == null);
+        try settleApprovalChange(scenario);
         try std.testing.expectEqual(.auto_review, try scenario.control.taskApprovalMode(scenario.task_id));
-        try std.testing.expect(source.input_continuation_cancelled);
-        try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
-        try std.testing.expectEqual(.continuation_cancelled, source.additional_inputs[0].?.continuation_cancel_reason.?);
+        // Manual and automatic review share one Core profile, so the change
+        // declares the queued batch held.
+        try std.testing.expect(!source.input_continuation_cancelled);
+        try std.testing.expectEqualStrings("queued before the change", source.additional_inputs[0].?.raw_text.?);
+        try std.testing.expect(source.additional_inputs[0].?.continuation_cancel_reason == null);
 
+        fake_core.expected_run_text = "queued before the change";
         if (next == .rejected) {
             fake_core.forced_input_status = wire.STATUS_TOO_LATE;
             const response = try scenario.control.testSendInput("rejected-after-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "rejected message" });
             try std.testing.expectEqual(.rejected, response.outcome);
-            try std.testing.expect(source.input_continuation_cancelled);
+            try std.testing.expect(!source.input_continuation_cancelled);
             fake_core.forced_input_status = null;
         } else if (next == .accepted or next == .accepted_then_stop) {
             for ([_][]const u8{ "new first message", "new second message" }, 0..) |text, i| {
@@ -11080,28 +11313,39 @@ test "active input approval cancellation applies only to existing messages and r
             }
             try std.testing.expect(!source.input_continuation_cancelled);
             try std.testing.expect(source.input_continuation_failure == null);
-            fake_core.expected_run_text = "new first message\n\nnew second message";
+            fake_core.expected_run_text = "queued before the change\n\nnew first message\n\nnew second message";
             if (next == .accepted_then_stop) try scenario.control.cancel(scenario.task_id, source.id);
         }
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
-        try std.testing.expectEqual(@as(usize, if (next == .accepted) 2 else 1), fake_core.run_calls);
-        try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
-        try std.testing.expect(source.additional_inputs[0].?.transferred_to_run_id == null);
+        // A user Stop retires the batch; nothing else interrupts it.
+        const retired = next == .accepted_then_stop;
+        try std.testing.expectEqual(@as(usize, if (retired) 1 else 2), fake_core.run_calls);
+        const expected_state: task_state.AdditionalInputState = if (retired) .unadopted else .transferred;
+        try std.testing.expectEqual(expected_state, source.additional_inputs[0].?.state);
         try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
-        if (next == .accepted) {
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.retry_input_bytes);
+        if (retired) {
+            try std.testing.expect(source.additional_inputs[0].?.transferred_to_run_id == null);
+            try std.testing.expect(source.additional_inputs[0].?.retry_text == null);
+        } else {
             try std.testing.expect(fake_core.run_text_matches);
-            for (source.additional_inputs[1..3]) |entry| {
+            const target = @as(?u64, task.durable.runs[1].?.id);
+            try std.testing.expectEqual(target, source.additional_inputs[0].?.transferred_to_run_id);
+            if (next == .accepted) for (source.additional_inputs[1..3]) |entry| {
                 try std.testing.expectEqual(.transferred, entry.?.state);
-                try std.testing.expectEqual(@as(?u64, task.durable.runs[1].?.id), entry.?.transferred_to_run_id);
-            }
+                try std.testing.expectEqual(target, entry.?.transferred_to_run_id);
+            };
         }
         var snapshot_storage: [512 * 1024]u8 = undefined;
         const snapshot = try scenario.control.writeAggregateFixture(&snapshot_storage);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer parsed.deinit();
         const inputs = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items;
-        try std.testing.expectEqualStrings("continuation_cancelled", inputs[0].object.get("continuationReason").?.string);
+        if (retired)
+            try std.testing.expectEqualStrings("continuation_cancelled", inputs[0].object.get("continuationReason").?.string)
+        else
+            try std.testing.expect(inputs[0].object.get("continuationReason").? == .null);
     }
 }
 

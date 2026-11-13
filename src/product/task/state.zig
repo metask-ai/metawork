@@ -611,6 +611,10 @@ pub const AdditionalInput = struct {
     transferred_to_run_id: ?u64 = null,
     /// Execution-only owned text; never serialized or reconstructed from history.
     raw_text: ?[]u8 = null,
+    /// Text kept for one explicit resend after a mutation retired this batch.
+    /// Runtime-only, charged to the shared resend budget, never serialized.
+    retry_text: ?[]u8 = null,
+    retried_as: ?Submission = null,
     /// Cancellation belongs to this accepted input, not later sends in the Run.
     continuation_cancel_reason: ?SendInputReason = null,
     submission: ?Submission = null,

@@ -1157,6 +1157,7 @@ export type AdditionalInputView = {
     | "transferred";
   transferredToRunId: string | null;
   continuationReason: SendInputReason | null;
+  retryAvailable?: true;
 };
 export const taskNavigationSignals = [
   "attention",

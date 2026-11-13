@@ -4309,33 +4309,41 @@ pub const Runtime = struct {
         self.reapTaskInputResources();
         var result: SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(operation_id.len), .reason = .invalid_input };
         @memcpy(result.operation_id[0..operation_id.len], operation_id);
-        const record = self.task_runtime.retrySubmission(task_id, original) orelse return result;
-        if (record.retried_as) |existing| {
+        var ids: [product_attachment.max_files_per_message]u64 = undefined;
+        var retried_as: ?task_runtime.Submission = null;
+        var retained_input: ?TaskRunInput = null;
+        if (self.task_runtime.retrySubmission(task_id, original)) |record| {
+            retried_as = record.retried_as;
+            if (record.retry_payload) |retained| retained_input = switch (retained.input) {
+                .text => |value| .{ .text = value },
+                .skill => |skill| .{ .skill = .{
+                    .skill_id = skill.skill_id,
+                    .catalog_revision = skill.catalog_revision,
+                    .selection_revision = skill.selection_revision,
+                    .argument_values = skill.argument_values,
+                } },
+                .multimodal => |media| blk: {
+                    for (media.attachments, 0..) |part, index| ids[index] = part.resource_id;
+                    break :blk .{ .multimodal = .{ .text = media.text, .attachment_ids = ids[0..media.attachments.len] } };
+                },
+            };
+        } else if (self.task_runtime.retainedInputForRetry(task_id, original)) |retained| {
+            // A batch a Task mutation retired resends through the same surface.
+            retried_as = retained.retried_as;
+            retained_input = .{ .text = retained.text };
+        } else return result;
+        if (retried_as) |existing| {
             result.operation_id = existing.operation_id;
             result.operation_id_len = existing.operation_id_len;
             result.reason = null;
             result.outcome = .accepted;
             return result;
         }
-        const retained = record.retry_payload orelse return result;
+        const input = retained_input orelse return result;
         if (self.task_runtime.inputRetryBlockedByClose(task_id)) {
             result.reason = .session_releasing;
             return result;
         }
-        var ids: [product_attachment.max_files_per_message]u64 = undefined;
-        const input: TaskRunInput = switch (retained.input) {
-            .text => |value| .{ .text = value },
-            .skill => |skill| .{ .skill = .{
-                .skill_id = skill.skill_id,
-                .catalog_revision = skill.catalog_revision,
-                .selection_revision = skill.selection_revision,
-                .argument_values = skill.argument_values,
-            } },
-            .multimodal => |media| blk: {
-                for (media.attachments, 0..) |part, index| ids[index] = part.resource_id;
-                break :blk .{ .multimodal = .{ .text = media.text, .attachment_ids = ids[0..media.attachments.len] } };
-            },
-        };
         if (self.taskMetaskInputBlocker(task_id)) |reason| if (reason != .models_catalog_loading) {
             result.reason = reason;
             return result;

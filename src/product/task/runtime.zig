@@ -229,6 +229,10 @@ pub const RunInput = task_state.RunInput;
 pub const Submission = task_state.Submission;
 pub const InputSubmission = task_state.InputSubmission;
 
+/// Shared bound on text kept for explicit resends, across failed
+/// submissions and batches a mutation retired.
+const retry_input_budget_bytes: usize = 4 * 1024 * 1024;
+
 pub const InputAction = union(enum) {
     none,
     wait,
@@ -1369,7 +1373,9 @@ pub const Runtime = struct {
         if (task.read_only_history != null) return error.TaskClosing;
         const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
         if (revision == task.durable.approval_revision) return revision;
-        _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
+        self.applyMutationImpact(task_id, .{ .approval_mode = .{
+            .profile_changes = task.durable.permission_profile != target.profile(),
+        } });
         task.runtime.permission_review.consecutive_denials = 0;
         task.runtime.permission_review.invalidate();
         if (target == .manual and task.runtime.pending_ui_request_id != 0) {
@@ -2492,7 +2498,13 @@ pub const Runtime = struct {
     pub fn inputAction(self: *Runtime, task_id: u64) InputAction {
         const task = self.find(task_id) orelse return .none;
         if (task.durable.archived or task.deletion != .idle) return .none;
-        if (self.inputContinuation(task_id)) |source| return .{ .continuation = source.id };
+        if (self.inputContinuation(task_id)) |source| {
+            // A mutation that holds queued input leaves the batch in place; it
+            // must not be consumed while the change is still in flight.
+            if (task_policy.approvalMutation(task)) |mutation|
+                if (task_policy.mutationImpact(mutation).queued_input == .held) return .wait;
+            return .{ .continuation = source.id };
+        }
         var next: ?usize = null;
         for (task.input_submissions.items, 0..) |record, index| if (record.state == .waiting and record.payload != null) {
             next = index;
@@ -2747,8 +2759,7 @@ pub const Runtime = struct {
             }
             input.multimodal.attachments = attachments[0..input.multimodal.attachments.len];
         }
-        const budget = 4 * 1024 * 1024;
-        const retry = task_state.OwnedRunInput.cloneSelected(self.allocator, input, budget - self.retry_input_bytes, original.skill_selection) catch return;
+        const retry = task_state.OwnedRunInput.cloneSelected(self.allocator, input, retry_input_budget_bytes - self.retry_input_bytes, original.skill_selection) catch return;
         self.retry_input_bytes += retry.bytes.len;
         record.retry_payload = retry;
     }
@@ -2778,15 +2789,24 @@ pub const Runtime = struct {
     }
 
     pub fn finishRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, submission: Submission) void {
-        const record = self.retrySubmission(task_id, operation_id).?;
+        if (self.retrySubmission(task_id, operation_id)) |record| {
+            record.retried_as = submission;
+            self.releaseRetryInput(task_id, record, null);
+            return;
+        }
+        const record = self.retainedInputRecord(task_id, operation_id).?;
         record.retried_as = submission;
-        self.releaseRetryInput(task_id, record, null);
+        self.releaseAdditionalRetryText(record);
     }
 
     pub fn discardRetrySubmission(self: *Runtime, task_id: u64, operation_id: []const u8, effects: ReleaseEffects) bool {
-        const record = self.retrySubmission(task_id, operation_id) orelse return false;
-        if (record.retry_payload == null) return false;
-        self.releaseRetryInput(task_id, record, effects);
+        if (self.retrySubmission(task_id, operation_id)) |record| {
+            if (record.retry_payload == null) return false;
+            self.releaseRetryInput(task_id, record, effects);
+            return true;
+        }
+        const record = self.retainedInputRecord(task_id, operation_id) orelse return false;
+        self.releaseAdditionalRetryText(record);
         return true;
     }
 
@@ -3086,6 +3106,79 @@ pub const Runtime = struct {
             }
         }
         return changed;
+    }
+
+    /// The single executor for a declared impact. Operations that disturb work
+    /// in progress call this instead of deciding inline what they may destroy.
+    fn applyMutationImpact(self: *Runtime, task_id: u64, mutation: task_policy.TaskMutation) void {
+        switch (task_policy.mutationImpact(mutation).queued_input) {
+            .held => {},
+            .resendable => |reason| _ = self.retainInputContinuationForResend(task_id, reason),
+        }
+    }
+
+    /// Retire the queued batch but hand its text to one explicit resend instead
+    /// of destroying it. Bytes move into the shared resend budget; the text is
+    /// never copied, and a batch that does not fit is released as before.
+    fn retainInputContinuationForResend(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
+        const task = self.find(task_id) orelse return false;
+        var changed = false;
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            var has_payload = false;
+            for (run.additional_inputs) |input| if (input) |record| {
+                has_payload = has_payload or record.raw_text != null;
+            };
+            if (!run.input_continuation_pending and !has_payload) continue;
+            run.noteProjectionChange();
+            run.input_continuation_cancelled = true;
+            run.input_continuation_pending = false;
+            run.input_continuation_failure = reason;
+            for (run.additional_inputs) |*input| if (input.*) |*record| {
+                const raw = record.raw_text orelse continue;
+                record.continuation_cancel_reason = reason;
+                record.raw_text = null;
+                if (self.moveIntoRetryBudget(raw)) record.retry_text = raw else self.releaseInputPayload(raw);
+            };
+            changed = true;
+        };
+        if (changed) task.skill_preparation = null;
+        return changed;
+    }
+
+    fn moveIntoRetryBudget(self: *Runtime, raw: []u8) bool {
+        if (raw.len > retry_input_budget_bytes - self.retry_input_bytes) return false;
+        std.debug.assert(self.pending_input_bytes >= raw.len);
+        self.pending_input_bytes -= raw.len;
+        self.retry_input_bytes += raw.len;
+        return true;
+    }
+
+    fn releaseAdditionalRetryText(self: *Runtime, record: *task_state.AdditionalInput) void {
+        const raw = record.retry_text orelse return;
+        std.debug.assert(self.retry_input_bytes >= raw.len);
+        self.retry_input_bytes -= raw.len;
+        std.crypto.secureZero(u8, raw);
+        self.allocator.free(raw);
+        record.retry_text = null;
+    }
+
+    /// Text a mutation retired and kept for one explicit resend.
+    pub const RetainedInput = struct { text: []const u8, retried_as: ?Submission };
+
+    pub fn retainedInputForRetry(self: *Runtime, task_id: u64, operation_id: []const u8) ?RetainedInput {
+        const record = self.retainedInputRecord(task_id, operation_id) orelse return null;
+        return .{ .text = record.retry_text.?, .retried_as = record.retried_as };
+    }
+
+    fn retainedInputRecord(self: *Runtime, task_id: u64, operation_id: []const u8) ?*task_state.AdditionalInput {
+        const task = self.find(task_id) orelse return null;
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            for (run.additional_inputs) |*input| if (input.*) |*record| {
+                if (record.retry_text == null) continue;
+                if (std.mem.eql(u8, record.operationId(), operation_id)) return record;
+            };
+        };
+        return null;
     }
 
     pub fn cancelInputContinuation(self: *Runtime, task_id: u64, source_id: ?u64, reason: SendInputReason) bool {
@@ -5200,6 +5293,7 @@ pub const Runtime = struct {
                 if (record.state != .adopted) continue;
                 if (record.raw_text) |raw| self.releaseInputPayload(raw);
                 record.raw_text = null;
+                self.releaseAdditionalRetryText(record);
             };
         }
         return switch (application_result) {
@@ -6389,7 +6483,14 @@ pub const Runtime = struct {
             const run = &(entry.* orelse continue);
             if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             count += 1;
-            try task_view.writeRun(writer, effects.text, run, task_state.runProjectionFacts(run), effects.now_ms);
+            try task_view.writeRun(
+                writer,
+                effects.text,
+                run,
+                task_state.runProjectionFacts(run),
+                task_view.resendAdmitted(task, effects.authority(projectionAuthorityQuery(task)).shutting_down),
+                effects.now_ms,
+            );
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
@@ -7084,11 +7185,15 @@ pub const Runtime = struct {
                 _ = self.cancelWaitingInputs(task.durable.id, .admission_failed);
             }
             for (run.additional_inputs) |*entry| if (entry.*) |*record| {
-                if (record.state == .adopted or record.state == .transferred) continue;
-                record.state = .unknown;
-                if (run.completed_input_counts) |counts| if (record.sequence) |sequence| {
-                    record.state = if (sequence <= counts.adopted) .adopted else .unadopted;
-                };
+                if (record.state != .adopted and record.state != .transferred) {
+                    record.state = .unknown;
+                    if (run.completed_input_counts) |counts| if (record.sequence) |sequence| {
+                        record.state = if (sequence <= counts.adopted) .adopted else .unadopted;
+                    };
+                }
+                // A resend is offered only for input the Run is confirmed not
+                // to have adopted.
+                if (record.state != .unadopted) self.releaseAdditionalRetryText(record);
             };
             task_policy.foldTerminalDisposition(
                 task,
@@ -10797,6 +10902,7 @@ fn deinitRun(
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     self.discardInputPayloads(run);
+    for (run.additional_inputs) |*entry| if (entry.*) |*record| self.releaseAdditionalRetryText(record);
     for (run.additional_inputs) |entry| if (entry) |record| {
         releaseProjectedSlice(self, effects, record.text);
         effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
