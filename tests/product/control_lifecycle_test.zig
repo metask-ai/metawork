@@ -8802,7 +8802,8 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     );
     defer restored.deinit();
     try installControlExecution(&restored);
-    _ = try restored.openWorkspace(productControlTaskInput());
+    const restored_workspace = try restored.openWorkspace(productControlTaskInput());
+    try settleWorkspaceSkillQueries(&restored, restored_workspace);
     try waitTaskSnapshot(
         &restored,
         "\"title\":\"continuation target\"",

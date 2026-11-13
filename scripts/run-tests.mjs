@@ -44,14 +44,18 @@ export async function runNodeTests(root = repositoryRoot) {
   });
 }
 
-export async function runNativeTests(root = repositoryRoot, target) {
-  if (!target) throw new Error("Native tests require a verified target");
+export async function runNativeTests(root, bundle) {
+  const ripgrep = path.join(
+    bundle.root,
+    bundle.manifest.runtime_assets[0].path,
+  );
   await runChild(
     process.execPath,
-    [nativeCli, "test", ".", "--yes", `-Dtarget=${target}`],
+    [nativeCli, "test", ".", "--yes", `-Dtarget=${bundle.target}`],
     {
       cwd: root,
       label: "Native test graph",
+      env: { ...process.env, RG_BIN: ripgrep },
       timeoutMs: null,
     },
   );
@@ -76,7 +80,7 @@ export async function runRepositoryTests(root = repositoryRoot) {
   await typecheckRenderer(root);
   await runTestPhases([
     () => runNodeTests(root),
-    () => runNativeTests(root, bundle.target),
+    () => runNativeTests(root, bundle),
   ]);
 }
 

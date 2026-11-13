@@ -193,7 +193,10 @@ test "default root checks reject links at either component" {
     var blocked = try discover(std.testing.io, std.testing.allocator, root, null);
     defer blocked.deinit();
     try std.testing.expectError(error.SourceUnavailable, blocked.additionalSources());
-    try tmp.dir.deleteFile(std.testing.io, ".agents");
+    if (builtin.os.tag == .windows)
+        try tmp.dir.deleteDir(std.testing.io, ".agents")
+    else
+        try tmp.dir.deleteFile(std.testing.io, ".agents");
     try tmp.dir.createDirPath(std.testing.io, ".agents");
     const skills = try tmp.dir.realPathFileAlloc(std.testing.io, "real/skills", std.testing.allocator);
     defer std.testing.allocator.free(skills);

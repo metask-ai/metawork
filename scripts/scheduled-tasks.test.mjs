@@ -1340,7 +1340,17 @@ test("calendar rules show their saved clock separately from the relative next ru
     );
     const countdown = document.querySelector(".scheduled-row-next");
     assert.match(countdown.textContent, /8小时后执行/);
-    assert.ok(countdown.title.includes("08:00"));
+    assert.equal(countdown.dateTime, new Date(next * 1000).toISOString());
+    assert.equal(
+      countdown.title,
+      new Intl.DateTimeFormat("zh-CN", {
+        month: "short",
+        day: "numeric",
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(next * 1000)),
+    );
     cleanup();
   }
 });

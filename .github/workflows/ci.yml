@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ZIG_VERSION: 0.16.0
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -36,11 +39,23 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
+          cache: npm
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
           use-cache: false
+
+      - name: Cache Zig compilation
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            .zig-cache
+            !.zig-cache/tmp
+            !.zig-cache/global/tmp
+          key: zig-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', 'build_support/agentcore-bundle.*.lock.json', 'package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', 'build_support/agentcore-bundle.*.lock.json', 'package-lock.json') }}-
 
       - name: Prepare Zig cache
         shell: pwsh
