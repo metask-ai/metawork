@@ -1,4 +1,5 @@
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const agent = @import("metawork_agent");
 const account_api = @import("metawork_account");
 const account_contract = @import("metawork_account_contract");
@@ -78,7 +79,7 @@ const ProbeJob = struct {
 
     fn start(self: *ProbeJob) std.Thread.SpawnError!void {
         std.debug.assert(self.execution != null);
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *ProbeJob) void {
@@ -174,7 +175,7 @@ const CatalogJob = struct {
     }
 
     fn start(self: *CatalogJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *CatalogJob) void {

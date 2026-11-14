@@ -1,5 +1,6 @@
 //! Product Account login-attempt lifecycle.
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
@@ -172,7 +173,7 @@ pub const LoginAttempt = struct {
         self.authorization_url_len = url.len;
         self.started = true;
         errdefer self.started = false;
-        self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch
+        self.thread = std.Thread.spawn(thread_stack.config, workerMain, .{self}) catch
             return error.ThreadSpawnFailed;
     }
 

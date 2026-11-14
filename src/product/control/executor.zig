@@ -1,4 +1,5 @@
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 
 pub const Error = error{
     ExecutorShuttingDown,
@@ -69,7 +70,7 @@ pub const Executor = struct {
             for (self.workers[0..started]) |thread| thread.join();
         }
         for (self.workers) |*worker| {
-            worker.* = try std.Thread.spawn(.{}, workerMain, .{self});
+            worker.* = try std.Thread.spawn(thread_stack.config, workerMain, .{self});
             started += 1;
         }
         return self;

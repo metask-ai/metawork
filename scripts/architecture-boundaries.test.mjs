@@ -210,6 +210,14 @@ test("permission reviewer is an isolated Completion consumer without approval au
       (edge) => edge.owner === "product_permission_review",
     ),
     [
+      // The Foundation thread stack size is a value, not an owner edge: it
+      // carries no product semantics and grants no authority, so the reviewer
+      // stays an isolated Completion consumer.
+      {
+        owner: "product_permission_review",
+        name: "metawork_thread_stack",
+        target: "metawork_thread_stack",
+      },
       {
         owner: "product_permission_review",
         name: "agent_completion",
@@ -226,7 +234,11 @@ test("permission reviewer is an isolated Completion consumer without approval au
   const imports = [...source.matchAll(/@import\("([^"]+)"\)/g)].map(
     (match) => match[1],
   );
-  assert.deepEqual(imports, ["std", "agent_completion"]);
+  assert.deepEqual(imports, [
+    "std",
+    "metawork_thread_stack",
+    "agent_completion",
+  ]);
   assert.doesNotMatch(
     source,
     /respondPermission|WorkerLease|@import\(".*(?:task|control|app|metask_agentcore)/,
@@ -985,6 +997,7 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
     "metawork_http_contract",
     "metawork_http_memory",
     "metawork_http_transport",
+    "metawork_thread_stack",
   ]);
   for (const edge of moduleImportEdges(build)) {
     if (!members.includes(edge.owner)) continue;

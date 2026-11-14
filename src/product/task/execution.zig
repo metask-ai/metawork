@@ -4,6 +4,7 @@
 //! never retain a composition aggregate or Task runtime pointer.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const credential_match = @import("product_credential_match");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
@@ -408,7 +409,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
         .title = &run.execution.?.automatic_title,
         .request_cancellation = &request_cancellation,
     };
-    const watchdog_thread = std.Thread.spawn(.{}, AutomaticTitleWatchdog.run, .{&watchdog}) catch {
+    const watchdog_thread = std.Thread.spawn(thread_stack.config, AutomaticTitleWatchdog.run, .{&watchdog}) catch {
         return;
     };
     var completion_outcome = owner.complete(.{

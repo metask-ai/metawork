@@ -258,6 +258,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.oauth_loopback_transport, "app_select_start") },
         .{ .name = "metawork-http-memory", .root_module = existingImport(test_modules.app, "metawork_http_memory") },
         .{ .name = "metawork-http-transport", .root_module = existingImport(test_modules.app, "metawork_http_transport") },
+        .{ .name = "metawork-thread-stack", .root_module = existingImport(test_modules.app, "metawork_thread_stack") },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
         .{ .name = "metawork-product-models-metask", .root_module = test_modules.models_metask },
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
@@ -1331,11 +1332,19 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    // Stack size for host-owned threads. Every product spawn site reads it, so
+    // the module is wired before the owners that spawn.
+    const metawork_thread_stack = b.createModule(.{
+        .root_source_file = b.path("src/foundation/thread_stack.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const app_single_instance_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/app_single_instance.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
+    app_single_instance_compat.addImport("metawork_thread_stack", metawork_thread_stack);
     if (target.result.os.tag == .macos)
         app_single_instance_compat.linkFramework("CoreFoundation", .{});
     const office_resource_publish_compat = b.createModule(.{
@@ -1424,6 +1433,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_permission_review.addImport("metawork_thread_stack", metawork_thread_stack);
     product_permission_review.addImport("agent_completion", agent_completion);
     const agent_file_delivery = b.createModule(.{
         .root_source_file = b.path("src/agent/deliver_file.zig"),
@@ -1523,6 +1533,7 @@ fn wireAgentCore(
     session.addImport("agent_protocol", agent_protocol);
     session.addImport("agent_model_binding", agent_model_binding);
     session.addImport("agent_http_transport", agent_http_transport);
+    session.addImport("metawork_thread_stack", metawork_thread_stack);
     session.addImport("image_container", image_container);
     session.addImport("event_pump", event_pump);
     session.addImport("agent_catalog", agent_catalog);
@@ -1547,6 +1558,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    agent_provider_probe.addImport("metawork_thread_stack", metawork_thread_stack);
     agent_provider_probe.addImport("agent_completion", agent_completion);
     agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
@@ -1668,6 +1680,7 @@ fn wireAgentCore(
     account_login_attempt.addImport("account_oauth", account_oauth);
     account_login_attempt.addImport("account_loopback", account_loopback);
     account_login_attempt.addImport("metask_client", metask_client);
+    account_login_attempt.addImport("metawork_thread_stack", metawork_thread_stack);
     const models_ports = b.createModule(.{
         .root_source_file = b.path("src/product/models/ports.zig"),
         .target = target,
@@ -1735,6 +1748,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    account_network_attempt.addImport("metawork_thread_stack", metawork_thread_stack);
     account_network_attempt.addImport("metawork_account_contract", account_contract);
     account_network_attempt.addImport("account_state", account_state);
     account_network_attempt.addImport("account_oauth", account_oauth);
@@ -1762,6 +1776,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    account_runtime.addImport("metawork_thread_stack", metawork_thread_stack);
     account_runtime.addImport("metawork_account_contract", account_contract);
     account_runtime.addImport("account_state", account_state);
     account_runtime.addImport("metask_client", metask_client);
@@ -1793,6 +1808,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    executor.addImport("metawork_thread_stack", metawork_thread_stack);
     const product_attachment = b.createModule(.{
         .root_source_file = b.path("src/product/attachment.zig"),
         .target = target,
@@ -2127,6 +2143,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_runtime.addImport("metawork_thread_stack", metawork_thread_stack);
     const credential_match = b.createModule(.{
         .root_source_file = b.path("src/product/credential_match.zig"),
         .target = target,
@@ -2160,6 +2177,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_execution.addImport("metawork_thread_stack", metawork_thread_stack);
     task_execution.addImport("product_credential_match", credential_match);
     task_execution.addImport("metawork_agent", agent);
     task_execution.addImport("product_task_checkpoint_record", checkpoint_record);
@@ -2358,6 +2376,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_control_runtime.addImport("metawork_thread_stack", metawork_thread_stack);
     product_control_runtime.addImport("product_credential_match", credential_match);
     product_control_runtime.addImport("metawork_agent", agent);
     product_control_runtime.addImport("metawork_product_update", product_update);
@@ -2528,6 +2547,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    models_coordinator.addImport("metawork_thread_stack", metawork_thread_stack);
     models_coordinator.addImport("metawork_agent", agent);
     models_coordinator.addImport("metawork_account", account);
     models_coordinator.addImport("metawork_account_contract", account_contract);
@@ -2546,6 +2566,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    app.addImport("metawork_thread_stack", metawork_thread_stack);
     product_control.addImport("product_control_history_schema", product_control_history_schema);
     app.addImport("storage", storage);
     app.addImport("runner", runner);

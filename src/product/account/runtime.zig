@@ -5,6 +5,7 @@
 //! selection, source resolution, and their persistence belong to Models.
 const std = @import("std");
 const builtin = @import("builtin");
+const thread_stack = @import("metawork_thread_stack");
 const contract = @import("metawork_account_contract");
 const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
@@ -63,7 +64,7 @@ const SummaryJob = struct {
     }
 
     fn start(self: *SummaryJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *SummaryJob) void {
