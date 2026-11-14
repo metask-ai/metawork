@@ -42,6 +42,7 @@ import {
   runAutomaticFirstSkillVertical,
   runSkillAutoRefreshVertical,
 } from "./skill-auto-refresh-vertical.mjs";
+import { runMemoryGrowthVertical } from "./memory-growth-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
@@ -484,6 +485,7 @@ const attachmentCapacityOnly =
   process.env.METAWORK_ATTACHMENT_CAPACITY_ONLY === "1" ||
   process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1";
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
+const memoryGrowthOnly = process.env.METAWORK_MEMORY_GROWTH_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
 const boundaryOnly = process.env.METAWORK_AGENT_BOUNDARY_ONLY === "1";
@@ -527,6 +529,29 @@ if (
   throw new Error(
     "Attachment capacity verification requires its own macOS scope",
   );
+if (memoryGrowthOnly && process.platform !== "win32")
+  throw new Error(
+    "The Task memory growth measurement requires Windows commit charge counters",
+  );
+if (
+  memoryGrowthOnly &&
+  [
+    attachmentCapacityOnly,
+    taskArchiveOnly,
+    skillAutoRefreshOnly,
+    activeInputOnly,
+    outputOnly,
+    builtinOfficeOnly,
+    approvalOnly,
+    boundaryOnly,
+    nativeDialogsOnly,
+    process.env.METAWORK_SCHEDULE_ONLY === "1",
+    process.env.METAWORK_MCP_ONLY === "1",
+    process.env.METAWORK_MODEL_SWITCH_ONLY === "1",
+    process.env.METAWORK_MODEL_ERROR_ONLY === "1",
+  ].some(Boolean)
+)
+  throw new Error("Task memory growth measurement requires its own scope");
 startApplication();
 
 desktopVertical: try {
@@ -678,6 +703,80 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (memoryGrowthOnly) {
+    const catalog = await poll(
+      async () => {
+        const current = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return current?.availability === "ready" ||
+          current?.availability === "degraded"
+          ? current
+          : null;
+      },
+      commandTimeoutMs,
+      "memory growth Workspace catalog",
+    );
+    // A smaller ceiling keeps the shape while shortening a repeat run; the
+    // published measurement uses the default.
+    const requestedTasks = Number(
+      process.env.METAWORK_MEMORY_GROWTH_TASKS ?? 50,
+    );
+    if (!Number.isInteger(requestedTasks) || requestedTasks < 1)
+      throw new Error(
+        `METAWORK_MEMORY_GROWTH_TASKS must be a positive integer, got ${process.env.METAWORK_MEMORY_GROWTH_TASKS}`,
+      );
+    const measurement = await runMemoryGrowthVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      pid: app.pid,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      catalog,
+      total: requestedTasks,
+      // Thread owners resolve against the pdb beside the artifact under test,
+      // whichever artifact this run was pointed at.
+      symbolPath: path.dirname(binary),
+    });
+    // Written before the restart as well, so a restart failure still leaves
+    // the growth record on disk.
+    const writeMemoryGrowthEvidence = () =>
+      writeFile(
+        join(root, ".zig-cache/memory-growth-vertical-evidence.json"),
+        JSON.stringify(
+          {
+            ...measurement.report,
+            binary,
+            core: bundle.manifest?.version ?? null,
+          },
+          null,
+          2,
+        ),
+      );
+    console.log(measurement.table());
+    await writeMemoryGrowthEvidence();
+    await stopApplication("memory growth cold restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    const restarted = await measurement.measureAfterRestart({ pid: app.pid });
+    console.log(
+      "after restart: " +
+        JSON.stringify({
+          tasks: restarted.tasks,
+          hostCommitMB: Math.round(restarted.hostCommitBytes / 1048576),
+          hostWorkingSetMB: Math.round(restarted.hostWorkingSetBytes / 1048576),
+          hostThreads: restarted.hostThreads,
+          treeCommitMB: Math.round(restarted.treeCommitBytes / 1048576),
+          treeWorkingSetMB: Math.round(restarted.treeWorkingSetBytes / 1048576),
+        }),
+    );
+    await writeMemoryGrowthEvidence();
+    break desktopVertical;
+  }
   if (attachmentCapacityOnly) {
     const catalog = await poll(
       async () => {
