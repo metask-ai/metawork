@@ -24,6 +24,7 @@ pub const max_mcp_installation_bytes = session_impl.max_mcp_installation_bytes;
 pub const FileDeliveryInput = session_impl.FileDeliveryInput;
 pub const FileDeliveryInspection = session_impl.FileDeliveryInspection;
 pub const max_file_deliveries_per_run = session_impl.max_file_deliveries_per_run;
+pub const stream_retry_budget = session_impl.stream_retry_budget;
 pub const Status = session_impl.Status;
 pub const StopReason = session_impl.StopReason;
 pub const PermissionRequest = session_impl.PermissionRequest;

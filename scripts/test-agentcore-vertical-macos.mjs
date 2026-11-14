@@ -949,6 +949,8 @@ desktopVertical: try {
       provider,
       textSse,
       toolSse,
+      droppedStreamSse,
+      droppedToolStreamSse,
       workspaceId,
       workspaceRoot: canonicalWorkspace,
       workspaceEpoch: expectedWorkspaceEpoch,
@@ -4590,6 +4592,81 @@ function textSse(messageId, text) {
       usage: { output_tokens: 1 },
     },
     { type: "message_stop" },
+  ]);
+}
+
+// An accepted stream that drops after visible output: the body ends with no
+// content_block_stop, message_delta or message_stop, so it never reaches its
+// stop report. This is the failure the Run stream retry budget covers, and it
+// only reaches the budget because the text delta already showed output.
+function droppedStreamSse(messageId, text) {
+  return sse([
+    {
+      type: "message_start",
+      message: {
+        id: messageId,
+        role: "assistant",
+        model: "fixture",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text },
+    },
+  ]);
+}
+
+// The same drop, but the stream completed a tool_use block first. Whether a
+// completed-but-unreported tool call counts as a started tool call for the
+// free per-request re-issue is a Core fact, so the vertical measures it.
+function droppedToolStreamSse(messageId, commentary, filePath) {
+  return sse([
+    {
+      type: "message_start",
+      message: {
+        id: messageId,
+        role: "assistant",
+        model: "fixture",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: commentary },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "content_block_start",
+      index: 1,
+      content_block: {
+        type: "tool_use",
+        id: `${messageId}-write`,
+        name: "Write",
+        input: {},
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 1,
+      delta: {
+        type: "input_json_delta",
+        partial_json: JSON.stringify({ file_path: filePath, content: "x" }),
+      },
+    },
+    { type: "content_block_stop", index: 1 },
   ]);
 }
 

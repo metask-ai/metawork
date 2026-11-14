@@ -497,6 +497,8 @@ call ABI
 
 Run admission 使用 SDK 的 `MAX_TURNS_V1`，不另设产品回合阈值；它是依赖执行边界，不是用户对话次数额度。受控停止后 Task 可等待新的用户意图，但 Run 保持 stopped，不因此产生同步 `waiting_ui` 请求。
 
+Run admission 同时显式授予 `stream_retry_budget`，由 Agent 单点选择并按 ABI 上限校验，不随模型、来源或 Run kind 分流。它只覆盖已接纳的流在已有可见输出后无答案中断——卡住、在 stop report 之前结束、连接断开；服务端声明的错误与本地解码失败不在范围内，仍按 `api_error` 收口。该预算独立于每个请求在尚未发起工具调用时本就有的那一次 re-issue：只发出可见文本便中断的请求由后者覆盖，已完成工具调用的中断取不到它，连续中断则已经用掉它，这两类才消耗预算。每次重新发起都会重新计费该请求的完整输入，因此取值保持保守，只随连续中断的证据调整。被丢弃的那次尝试由 `discarded` segment 原位清除、`thinking_discarded` 撤回思考，并由 `retry_notice` 通告；Product 不保留被丢弃的正文。
+
 每种 operation 按官方合同决定 result 的可读字段，不能从全局 status enum 推断合法性；已定义 Run 返回状态上的两个 input counts 均须验证。未知 status、其他 operation 的 status、未知 enum/flag 或跨字段矛盾均按 dependency contract failure 收口。
 
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
