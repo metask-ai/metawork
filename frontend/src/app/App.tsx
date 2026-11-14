@@ -580,7 +580,13 @@ export default function App() {
     running: boolean;
     pending: { snapshot: WorkbenchSnapshot; generation: string } | null;
     attempted: Map<string, string>;
-  }>({ running: false, pending: null, attempted: new Map() });
+    confirmed: Map<string, string>;
+  }>({
+    running: false,
+    pending: null,
+    attempted: new Map(),
+    confirmed: new Map(),
+  });
   function reconcileSubmissionProjection(
     next: WorkbenchSnapshot,
     generation: string,
@@ -615,6 +621,89 @@ export default function App() {
           for (const id of queue.attempted.keys())
             if (!pending.some((entry) => entry.taskId === id))
               queue.attempted.delete(id);
+          for (const id of queue.confirmed.keys())
+            if (!pending.some((entry) => entry.operationId === id))
+              queue.confirmed.delete(id);
+          // An unknown result owns a local record until the Host answers it,
+          // and the answer has both directions: observed proves receipt, its
+          // absence proves the submission reached neither the waiting queue
+          // nor this Task's execution history.
+          const unanswered = new Map<string, string[]>();
+          for (const entry of pending) {
+            if (
+              !entry.taskId ||
+              entry.state !== "unknown" ||
+              taskHasSubmission(
+                request.snapshot.tasks.find((task) => task.id === entry.taskId),
+                entry.operationId,
+              ) ||
+              request.snapshot.receipts.some(
+                (r) =>
+                  r.observed &&
+                  r.taskId === entry.taskId &&
+                  r.operationId === entry.operationId,
+              )
+            )
+              continue;
+            const key = `${request.generation}:${request.snapshot.securityEpoch}:${request.snapshot.revision}`;
+            if (queue.confirmed.get(entry.operationId) === key) continue;
+            queue.confirmed.set(entry.operationId, key);
+            const queries = unanswered.get(entry.taskId);
+            if (queries) queries.push(entry.operationId);
+            else unanswered.set(entry.taskId, [entry.operationId]);
+          }
+          for (const [taskId, operationIds] of unanswered) {
+            // One read at a time, at most one per submission/revision. The read
+            // is issued while the record already reads unknown, so the Host
+            // receives it after the submission whose reply was lost: a negative
+            // answer here can never be a reply from before that loss.
+            const answer = await client
+              .fetchSnapshot({
+                taskId,
+                beforeRunId: null,
+                runLimit: 1,
+                management: "none",
+                search: false,
+                searchQuery: "",
+                searchCursor: null,
+                receipts: operationIds.map((operationId) => ({
+                  taskId,
+                  operationId,
+                })),
+              })
+              .catch(() => null);
+            if (
+              !answer ||
+              bridgeGenerationRef.current !== request.generation ||
+              answer.securityEpoch !== request.snapshot.securityEpoch ||
+              answer.securityEpoch !==
+                latestSnapshotRef.current?.securityEpoch ||
+              answer.historyEpoch !== request.snapshot.historyEpoch ||
+              answer.historyEpoch !== latestSnapshotRef.current?.historyEpoch
+            )
+              continue;
+            const unexecuted = new Set(
+              operationIds.filter(
+                (operationId) =>
+                  !answer.receipts.some(
+                    (r) =>
+                      r.observed &&
+                      r.taskId === taskId &&
+                      r.operationId === operationId,
+                  ),
+              ),
+            );
+            if (unexecuted.size === 0) continue;
+            setLocalSubmissions((entries) =>
+              entries.map((entry) =>
+                entry.taskId === taskId &&
+                entry.state === "unknown" &&
+                unexecuted.has(entry.operationId)
+                  ? { ...entry, state: "failed" as const }
+                  : entry,
+              ),
+            );
+          }
           for (const taskId of ids) {
             const key = `${request.generation}:${request.snapshot.securityEpoch}:${request.snapshot.revision}`;
             if (queue.attempted.get(taskId) === key) continue;
@@ -2260,6 +2349,13 @@ export default function App() {
     searchHostQuery,
     searchCursor,
   ]);
+  // A record that turns unknown owns its own reconciliation: the snapshot that
+  // reveals it may already have been read, and an idle Host publishes no other.
+  useEffect(() => {
+    const snapshot = latestSnapshotRef.current;
+    if (snapshot) reconcileSubmissionProjection(snapshot, bridgeGeneration);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localSubmissions, bridgeGeneration]);
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;

@@ -1962,7 +1962,8 @@ test("App uncertain submission is retained as a message and never replays on com
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
   await fixture.settle(new Error("response lost"));
   assert.equal(fixture.textarea.value, "");
-  assert.ok(screen.getByText(/Submission is unconfirmed/));
+  await waitFor(() => assert.ok(screen.getByText("Not executed")));
+  assert.ok(screen.getByText("possibly submitted"));
   fixture.task.activeOperation = null;
   fixture.task.currentRunPhase = "completed";
   fixture.task.inputReady = false;
@@ -1995,7 +1996,7 @@ test("App resolves a late canonical input receipt without erasing a newer draft 
   fireEvent.keyDown(fixture.textarea, { key: "Enter" });
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
   await fixture.settle(new Error("response lost"));
-  await screen.findAllByText(/Submission is unconfirmed/);
+  await waitFor(() => assert.ok(screen.getByText("Not executed")));
   fireEvent.change(fixture.textarea, {
     target: { value: "newer unsent draft" },
   });
@@ -2019,7 +2020,11 @@ test("App resolves a late canonical input receipt without erasing a newer draft 
   ];
   await fixture.publish();
   await waitFor(() =>
-    assert.equal(screen.queryAllByText(/Submission is unconfirmed/).length, 0),
+    assert.equal(
+      document.querySelectorAll(".local-input-submissions .task-input-copy")
+        .length,
+      0,
+    ),
   );
   assert.equal(fixture.textarea.value, "newer unsent draft");
   assert.equal(fixture.inputs.length, 1);
@@ -2208,15 +2213,15 @@ test("late Workspace creation cannot attach old messages or selection to a newly
   ]);
 });
 
-test("App retains unknown messages across Tasks at local capacity and preserves the next draft until reconciliation", async (ctx) => {
+test("App retains accepted messages across Tasks at local capacity and preserves the next draft until reconciliation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { active: true });
-  await fixture.settle(new Error("response lost"));
-  async function sendUnknown(text) {
+  await fixture.settle({ accepted: true });
+  async function sendAccepted(text) {
     fireEvent.change(fixture.textarea, { target: { value: text } });
     fireEvent.keyDown(fixture.textarea, { key: "Enter" });
     await act(async () => {});
   }
-  for (let i = 0; i < 32; i++) await sendUnknown(`first-unknown-${i}`);
+  for (let i = 0; i < 32; i++) await sendAccepted(`first-accepted-${i}`);
   const secondTask = {
     ...structuredClone(fixture.task),
     id: "4",
@@ -2228,9 +2233,9 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
     (await screen.findAllByRole("button", { name: /Second task/ }))[0],
   );
   await screen.findByRole("button", { name: "Task information", exact: true });
-  for (let i = 0; i < 32; i++) await sendUnknown(`second-unknown-${i}`);
+  for (let i = 0; i < 32; i++) await sendAccepted(`second-accepted-${i}`);
 
-  await sendUnknown("draft kept at capacity");
+  await sendAccepted("draft kept at capacity");
   assert.equal(fixture.inputs.length, 64);
   assert.equal(fixture.textarea.value, "draft kept at capacity");
   assert.equal(fixture.textarea.disabled, false);
@@ -2245,7 +2250,7 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
   fireEvent.click(
     screen.getAllByRole("button", { name: /Submission task/ })[0],
   );
-  assert.ok(screen.getByText("first-unknown-0"));
+  assert.ok(screen.getByText("first-accepted-0"));
   assert.equal(
     document.querySelectorAll(".local-input-submissions .task-input-copy")
       .length,
@@ -2263,7 +2268,7 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
         anchorRunId: null,
         afterOutputCount: 0,
       },
-      input: { kind: "text", text: "first-unknown-0", redacted: false },
+      input: { kind: "text", text: "first-accepted-0", redacted: false },
       state: "waiting",
       reason: null,
     },
@@ -2282,6 +2287,110 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
   await act(async () => {});
   assert.equal(fixture.inputs.length, 65);
   assert.equal(fixture.inputs.at(-1)[2].text, "draft kept at capacity");
+});
+
+async function sendOne(fixture, text) {
+  fireEvent.change(fixture.textarea, { target: { value: text } });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await act(async () => {});
+}
+
+test("a lost submission reply resolves to Not executed once the Host answers its receipt", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  await sendOne(fixture, "lost reply");
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  await fixture.settle(new Error("response lost"));
+  await waitFor(() => assert.ok(screen.getByText("Not executed")));
+  // The same count owns the Stop control and the local submission capacity.
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  assert.ok(screen.getByRole("button", { name: "Send" }));
+  assert.equal(screen.queryByText(/Submission is unconfirmed/), null);
+  assert.equal(screen.queryByText(/Local submission storage is full/), null);
+  assert.ok(screen.getByText("lost reply"));
+  assert.ok(screen.getByRole("button", { name: "Copy to input box" }));
+});
+
+test("a lost reply whose submission the Host received is never marked Not executed", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  await sendOne(fixture, "received after all");
+  fixture.task.inputSubmissions = [
+    {
+      submission: {
+        operationId: fixture.operationIds[0],
+        receivedAtUnixMs: null,
+        presentationOrder: null,
+        anchorRunId: null,
+        afterOutputCount: 0,
+      },
+      input: { kind: "text", text: "received after all", redacted: false },
+      state: "waiting",
+      reason: null,
+    },
+  ];
+  await fixture.settle(new Error("response lost"));
+  await waitFor(() =>
+    assert.equal(
+      document.querySelectorAll(".local-input-submissions .task-input-copy")
+        .length,
+      0,
+    ),
+  );
+  assert.equal(screen.queryByText("Not executed"), null);
+  assert.ok(screen.getByText("received after all"));
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+});
+
+test("an unanswered receipt keeps a lost submission unknown while the Task still runs", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  // In this flow the receipt question is the only read of a single Run page.
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
+    if (scope.runLimit === 1 && scope.receipts.length)
+      throw new Error("receipt read unavailable");
+    return productStateFixture(fixture.snapshot, scope);
+  });
+  await sendOne(fixture, "never answered");
+  await fixture.settle(new Error("response lost"));
+  await fixture.publish();
+  assert.ok(screen.getByText(/Submission is unconfirmed/));
+  assert.equal(screen.queryByText("Not executed"), null);
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+});
+
+test("a receipt answer in flight when the reply is lost cannot deny the submission", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const reads = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "fetchSnapshot",
+    (scope) =>
+      new Promise((resolve) => {
+        reads.push({
+          scope,
+          release: () => resolve(productStateFixture(fixture.snapshot, scope)),
+        });
+      }),
+  );
+  // In this flow the receipt question is the only read of a single Run page.
+  const receiptRead = () =>
+    reads.find(
+      (read) => read.scope.runLimit === 1 && read.scope.receipts.length,
+    );
+  await sendOne(fixture, "lost after answer");
+  const inFlight = reads.find((read) => read.scope.receipts.length);
+  assert.ok(inFlight);
+  assert.equal(receiptRead(), undefined);
+  await fixture.settle(new Error("response lost"));
+  await act(async () => inFlight.release());
+  assert.equal(screen.queryByText("Not executed"), null);
+  assert.ok(screen.getByText(/Submission is unconfirmed/));
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  const answer = receiptRead();
+  assert.ok(answer);
+  await act(async () => answer.release());
+  await waitFor(() => assert.ok(screen.getByText("Not executed")));
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
 });
 
 test("App bounds rejected drafts without using another Task's send capacity", async (ctx) => {
