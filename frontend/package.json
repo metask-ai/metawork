@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "node ../scripts/generate-renderer-wire.mjs && vite build",
-    "check": "node ../scripts/generate-renderer-wire.mjs --check && tsc --noEmit"
+    "check": "node ../scripts/generate-renderer-wire.mjs --check && npm run typecheck",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "1.6.0",

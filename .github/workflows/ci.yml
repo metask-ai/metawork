@@ -16,65 +16,146 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: ${{ matrix.name }}
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - &checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - &setup-node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - &setup-zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - &npm-ci
+        name: Install npm dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Check Renderer TypeScript
+        run: npm --workspace @metawork/renderer run typecheck
+
+  node-tests:
+    name: Node tests (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
+    timeout-minutes: 25
+    env: &platform-env
+      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
+    strategy: &platforms
       fail-fast: false
       matrix:
         include:
           - name: Windows x64
             runner: windows-2022
             target: x86_64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-x86_64.lock.json
           - name: macOS arm64
             runner: macos-15
             target: aarch64-macos
+            lock: build_support/agentcore-bundle.macos-aarch64.lock.json
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
+      - *checkout
+      - *setup-node
+      - *setup-zig
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version: 24
-          cache: npm
-
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
-
-      - name: Cache Zig compilation
+      - &cache-zig-packages
+        name: Cache Zig dependency packages
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          path: |
-            .zig-cache
-            !.zig-cache/tmp
-            !.zig-cache/global/tmp
-          key: zig-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', 'build_support/agentcore-bundle.*.lock.json', 'package-lock.json') }}-${{ github.sha }}
-          restore-keys: |
-            zig-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', 'build_support/agentcore-bundle.*.lock.json', 'package-lock.json') }}-
+          path: .zig-cache/global/p
+          key: zig-packages-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
 
-      - name: Prepare Zig cache
+      - &prepare-zig-cache
+        name: Prepare Zig cache
         shell: pwsh
         run: |
           $cache = Join-Path $env:GITHUB_WORKSPACE '.zig-cache/global'
           New-Item -ItemType Directory -Force (Join-Path $cache 'tmp') | Out-Null
           "ZIG_GLOBAL_CACHE_DIR=$cache" >> $env:GITHUB_ENV
 
-      - name: Install npm dependencies
-        run: npm ci
+      - *npm-ci
 
-      - name: Stage locked AgentCore bundle
+      - &restore-agentcore
+        name: Restore AgentCore release download
+        id: agentcore-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
+
+      - &stage-agentcore
+        name: Stage locked AgentCore bundle
         run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
 
-      - name: Check formatting
-        run: npm run format:check
+      - &save-agentcore
+        name: Save verified AgentCore release download
+        if: steps.agentcore-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
 
-      - name: Check repository
-        run: npm run check
+      - name: Run Node tests
+        run: npm run test:node
 
-      - name: Run repository tests
-        run: npm test
+  native-tests:
+    name: Native tests (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env: *platform-env
+    strategy: *platforms
+    steps:
+      - *checkout
+      - *setup-node
+      - *setup-zig
+
+      - name: Restore Native compilation cache
+        id: native-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: &native-cache-path |
+            .zig-cache/b
+            .zig-cache/c
+            .zig-cache/h
+            .zig-cache/o
+            .zig-cache/z
+            .zig-cache/global/b
+            .zig-cache/global/c
+            .zig-cache/global/h
+            .zig-cache/global/o
+            .zig-cache/global/z
+          key: zig-native-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
+
+      - *cache-zig-packages
+      - *prepare-zig-cache
+      - *npm-ci
+      - *restore-agentcore
+      - *stage-agentcore
+      - *save-agentcore
+
+      - name: Run strict Native SDK checks
+        run: npm run check:sdk
+
+      - name: Run the full Native test graph
+        run: npm run test:native
+
+      - name: Save Native compilation cache on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: *native-cache-path
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
