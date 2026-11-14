@@ -61,6 +61,8 @@ pub const preview_workspace_file = "metawork.files.previewWorkspace";
 pub const read_preview_image = "metawork.files.preview.readImageChunk";
 pub const read_preview_video = "metawork.files.preview.readVideoChunk";
 pub const release_preview = "metawork.files.preview.release";
+pub const media_thumbnail = "metawork.media.thumbnail";
+pub const media_preview = "metawork.media.preview";
 pub const diff_file = "metawork.files.diff";
 pub const begin_attachment_add = "metawork.attachments.beginAdd";
 pub const append_attachment_add = "metawork.attachments.appendAdd";
@@ -177,6 +179,8 @@ pub const product = [_][]const u8{
     read_preview_image,
     read_preview_video,
     release_preview,
+    media_thumbnail,
+    media_preview,
     diff_file,
     begin_attachment_add,
     append_attachment_add,

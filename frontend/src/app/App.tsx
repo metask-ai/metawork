@@ -125,6 +125,10 @@ import {
   useWorkspaceFileTree,
 } from "../features/workspaces/WorkspaceFileTree.tsx";
 import { WorkspaceReferenceMenu } from "../features/workspaces/WorkspaceReferenceMenu.tsx";
+import {
+  MediaLightbox,
+  type MediaViewerTarget,
+} from "../features/media/MediaLightbox.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { TaskWorkspace } from "../features/tasks/NewTaskView.tsx";
 import {
@@ -500,6 +504,9 @@ export default function App() {
   );
   const attachmentBusy = attachmentView !== null || attachmentRemoving;
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentViewer, setAttachmentViewer] =
+    useState<MediaViewerTarget | null>(null);
+  const attachmentViewerOpener = useRef<HTMLButtonElement | null>(null);
   const attachmentBusyRef = useRef(false);
   const attachmentOperation = useRef<{
     cancelled: boolean;
@@ -1245,6 +1252,20 @@ export default function App() {
   const taskPanelTabIds = useMemo(
     () => new Set(taskPanel.session.tabs.map((tab) => tab.tabId)),
     [taskPanel.session.tabs],
+  );
+  const loadAttachmentThumbnail = useCallback(
+    (
+      token: string,
+      options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+    ) => client.attachmentThumbnail(token, options),
+    [client],
+  );
+  const loadAttachmentPreview = useCallback(
+    (
+      token: string,
+      options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+    ) => client.previewAttachment(token, options),
+    [client],
   );
   const loadFilePreview = useCallback(
     (
@@ -4767,6 +4788,14 @@ export default function App() {
             : undefined
         }
         onRemoveAttachment={(token) => void removeAttachment(token)}
+        loadAttachmentThumbnail={loadAttachmentThumbnail}
+        onOpenAttachment={(attachment, opener) => {
+          attachmentViewerOpener.current = opener;
+          setAttachmentViewer({
+            token: attachment.token,
+            name: attachment.displayName,
+          });
+        }}
         onSubmit={() => void submitRun()}
         onStop={() => void cancelRun()}
         onSlashCommand={runSlashCommand}
@@ -6073,6 +6102,18 @@ export default function App() {
           </AlertDialog.Portal>
         </AlertDialog.Root>
       )}
+      <MediaLightbox
+        target={attachmentViewer}
+        load={loadAttachmentPreview}
+        onClose={() => {
+          setAttachmentViewer(null);
+          const opener = attachmentViewerOpener.current;
+          attachmentViewerOpener.current = null;
+          // The draft and its attachments are untouched; focus returns to the
+          // chip the viewer was opened from.
+          if (opener?.isConnected) opener.focus();
+        }}
+      />
     </AppShell>
   );
 }

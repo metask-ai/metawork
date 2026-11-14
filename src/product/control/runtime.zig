@@ -12,6 +12,7 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const media_source = @import("product_control_media_source");
 const output_check = @import("output_check.zig");
 const permission_job = @import("permission_job.zig");
 const agent_protocol = @import("product_agent_protocol_adapter");
@@ -295,8 +296,12 @@ pub const AttachmentFileStore = product_attachment.FileStore;
 pub const AttachmentDescriptor = product_attachment.Descriptor;
 pub const AttachmentArchiveTool = product_attachment.ArchiveTool;
 pub const AttachmentImagePreparation = product_attachment.ImagePreparation;
+pub const AttachmentPreparedImage = product_attachment.PreparedImage;
 pub const max_attachment_preview_pixels = product_attachment.max_image_preview_pixels;
 pub const max_attachment_preview_bytes = product_attachment.max_image_preview_bytes;
+pub const max_attachment_thumbnail_bytes = product_attachment.max_image_thumbnail_bytes;
+pub const max_attachment_thumbnail_side = product_attachment.max_image_thumbnail_side;
+pub const attachmentThumbnailPixelBudget = product_attachment.thumbnailPixelBudget;
 
 pub const AttachmentAcceptance = struct {
     context: ?*anyopaque = null,
@@ -1085,6 +1090,24 @@ pub const FilePreviewResult = struct {
 pub const FilePreviewSink = struct {
     context: *anyopaque,
     complete_fn: *const fn (*anyopaque, FilePreviewResult) void,
+};
+
+pub const MediaKind = media_source.Kind;
+pub const MediaTier = media_source.Tier;
+
+/// Callback-scoped derived pixels for one chip. The bytes are borrowed from the
+/// owning aggregate and must not be retained after the caller's response.
+pub const MediaThumbnail = struct {
+    bytes: []const u8,
+    width: u32,
+    height: u32,
+    media_type: []const u8,
+    security_epoch: u64,
+};
+
+pub const MediaThumbnailResult = union(enum) {
+    ready: MediaThumbnail,
+    unavailable: FilePreviewState,
 };
 
 pub const AttachmentStagingRejection = attachment_staging.Rejection;
@@ -2007,6 +2030,93 @@ pub const Runtime = struct {
         return .queued;
     }
 
+    /// The draft still has to own this exact staged original, at delivery and
+    /// again at every chunk. A batch that was borrowed for a Task in the
+    /// meantime stops resolving, so the grant is released instead of reading a
+    /// file that now belongs to Task ownership.
+    fn attachmentOriginalAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+        var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
+        const resolution = media_source.resolve(
+            .{ .draft_attachment = raw.attachment_id },
+            .viewer,
+            &self.attachments,
+            &relative,
+        );
+        const stored = switch (resolution) {
+            .stored => |value| value,
+            .derived => unreachable,
+            .unavailable => |availability| return mediaUnavailableState(availability),
+        };
+        if (!std.mem.eql(u8, stored.directory, raw.workspace_root) or
+            !std.mem.eql(u8, stored.relative, raw.relative_path)) return .missing;
+        return .ready;
+    }
+
+    /// Derived pixels for one chip, answered on the main thread: no file read,
+    /// no original-image slot, and the bytes leave inside a single response.
+    pub fn attachmentThumbnail(self: *Runtime, attachment_id: u64) MediaThumbnailResult {
+        if (self.shutting_down or self.projection_security_epoch == 0) return .{ .unavailable = .failed };
+        var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
+        const resolution = media_source.resolve(
+            .{ .draft_attachment = attachment_id },
+            .thumbnail,
+            &self.attachments,
+            &relative,
+        );
+        const derived = switch (resolution) {
+            .derived => |value| value,
+            .stored => unreachable,
+            .unavailable => |availability| return .{ .unavailable = mediaUnavailableState(availability) },
+        };
+        const limit = media_source.policy(.thumbnail).max_delivered_bytes.?;
+        if (derived.bytes.len == 0 or derived.bytes.len > limit) return .{ .unavailable = .unsupported };
+        // Re-encoded pixels carry no container metadata out of the original, so
+        // the bytes being delivered are the only ones a scan can protect. One
+        // pass covers the whole item, which leaves no chunk boundary to cross.
+        if (self.containsKnownCredential(derived.bytes)) return .{ .unavailable = .restricted };
+        return .{ .ready = .{
+            .bytes = derived.bytes,
+            .width = derived.width,
+            .height = derived.height,
+            .media_type = derived.media_type,
+            .security_epoch = self.projection_security_epoch,
+        } };
+    }
+
+    /// The viewer tier for a staged draft image: the original, read inside the
+    /// existing bounded lane and charged to the existing original-image budget.
+    pub fn beginAttachmentPreview(self: *Runtime, completion_id: u64, attachment_id: u64) FilePreviewAdmission {
+        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
+        const resolution = media_source.resolve(
+            .{ .draft_attachment = attachment_id },
+            .viewer,
+            &self.attachments,
+            &relative,
+        );
+        const stored = switch (resolution) {
+            .stored => |value| value,
+            .derived => unreachable,
+            .unavailable => |availability| return .{ .immediate = mediaUnavailableState(availability) },
+        };
+        self.preview_lane.begin(.{
+            .source = .attachment,
+            .completion_id = completion_id,
+            .attachment_id = attachment_id,
+            .task_id = 0,
+            .run_id = 0,
+            .workspace_id = 0,
+            .workspace_epoch = 0,
+            .reference_id = "",
+            .workspace_root = stored.directory,
+            .relative_path = stored.relative,
+            .max_bytes = self.limits.max_file_preview_bytes,
+            .max_lines = self.limits.max_file_preview_lines,
+            .max_line_bytes = self.limits.max_file_preview_line_bytes,
+        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+        return .queued;
+    }
+
     pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
         if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
         if (task_id == 0 and !directory) return .{ .immediate = .restricted };
@@ -2029,6 +2139,14 @@ pub const Runtime = struct {
         return .queued;
     }
 
+    fn mediaUnavailableState(availability: media_source.Availability) FilePreviewState {
+        return switch (availability) {
+            .missing => .missing,
+            .restricted => .restricted,
+            .unsupported => .unsupported,
+        };
+    }
+
     fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
         if (task_id == 0) {
             const fact = self.workspace.facts(workspace_id) orelse return false;
@@ -2047,6 +2165,7 @@ pub const Runtime = struct {
     }
 
     fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+        if (raw.source == .attachment) return self.attachmentOriginalAuthority(raw);
         if (raw.source != .reference) return if (self.workspaceFileAuthorized(raw.task_id, raw.workspace_id, raw.workspace_epoch, raw.workspace_root) and !self.workspacePathHasCredential(raw.relative_path)) .ready else .restricted;
         const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
         if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
@@ -9750,6 +9869,10 @@ pub const TestSupport = if (builtin.is_test) struct {
         try testImagePreviewRuntime(control, root);
     }
 
+    pub fn attachmentMediaFixture(control: *Runtime, store: *AttachmentFileStore) !void {
+        try testAttachmentMediaRuntime(control, store);
+    }
+
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
     }
@@ -12216,8 +12339,8 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
 }
 
-fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
-    return allocator.dupe(u8, bytes);
+fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!AttachmentPreparedImage {
+    return .{ .bytes = try allocator.dupe(u8, bytes), .width = 8, .height = 4 };
 }
 
 test "Automatic Workspace snapshot exposes unavailable Skill authority with no query authorization" {
@@ -19489,6 +19612,115 @@ test "file preview immutable original transfer is sequential and revoked by secu
     try std.testing.expectError(error.StaleSecurityEpoch, control.readFilePreviewMedia(image.id, file_preview_chunk_bytes));
     try std.testing.expect(!control.hasFilePreviews());
     try std.testing.expect(control.releaseFilePreview(image.id));
+}
+
+fn testAttachmentMediaRuntime(control: *Runtime, store: *AttachmentFileStore) !void {
+    try initTestRuntimeWithLimits(control, testLimits(), .{
+        .attachment_store = store,
+        .attachment_images = .{ .prepare_fn = testAttachmentPreview },
+    });
+}
+
+const staged_jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+
+test "attachment chip thumbnails deliver derived pixels without a file preview slot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+
+    var output: [1]product_attachment.Descriptor = undefined;
+    const staged = try control.stageAttachments(&.{.{ .display_name = "shot.jpg", .bytes = staged_jpeg }}, &output);
+    const ready = control.attachmentThumbnail(staged[0].id).ready;
+    try std.testing.expectEqualStrings(staged_jpeg, ready.bytes);
+    try std.testing.expectEqualStrings("image/png", ready.media_type);
+    try std.testing.expectEqual(@as(u32, 8), ready.width);
+    try std.testing.expectEqual(@as(u32, 4), ready.height);
+    try std.testing.expectEqual(control.projectionSecurityEpoch(), ready.security_epoch);
+    // Derived pixels answer on the main thread: no lane job, no original-image
+    // slot, nothing held after the call.
+    try std.testing.expect(!control.hasFilePreviews());
+    try std.testing.expectEqual(FilePreviewState.missing, control.attachmentThumbnail(staged[0].id + 7).unavailable);
+    try std.testing.expectEqual(FilePreviewState.missing, control.attachmentThumbnail(0).unavailable);
+    // Every delivery is stamped with the current epoch, so a revocation makes
+    // the Renderer drop what it already holds and take the next answer.
+    const before = control.projectionSecurityEpoch();
+    control.invalidateProjectionSecurity();
+    const after = control.attachmentThumbnail(staged[0].id).ready.security_epoch;
+    try std.testing.expect(after != before);
+    try std.testing.expectEqual(control.projectionSecurityEpoch(), after);
+    try std.testing.expect(control.releaseAttachment(staged[0].id));
+}
+
+test "attachment chip thumbnails are refused when the derived pixels carry a known credential" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+
+    // "SECRET-KEY" is the fixture execution credential this Runtime installs.
+    var output: [2]product_attachment.Descriptor = undefined;
+    const staged = try control.stageAttachments(&.{
+        .{ .display_name = "clean.jpg", .bytes = staged_jpeg },
+        .{ .display_name = "secret.jpg", .bytes = staged_jpeg ++ "SECRET-KEY" },
+    }, &output);
+    try std.testing.expectEqualStrings(staged_jpeg, control.attachmentThumbnail(staged[0].id).ready.bytes);
+    try std.testing.expectEqual(FilePreviewState.restricted, control.attachmentThumbnail(staged[1].id).unavailable);
+    try std.testing.expect(control.releaseAttachment(staged[0].id));
+    try std.testing.expect(control.releaseAttachment(staged[1].id));
+}
+
+test "attachment file preview reads the staged original and loses authority with the draft" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+
+    var output: [1]product_attachment.Descriptor = undefined;
+    const staged = try control.stageAttachments(&.{.{ .display_name = "shot.jpg", .bytes = staged_jpeg }}, &output);
+    try std.testing.expectEqual(
+        Runtime.FilePreviewAdmission{ .immediate = .missing },
+        control.beginAttachmentPreview(80, staged[0].id + 7),
+    );
+    try std.testing.expectEqual(
+        Runtime.FilePreviewAdmission.queued,
+        control.beginAttachmentPreview(81, staged[0].id),
+    );
+    var capture: PreviewTestCapture = .{};
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    const image = capture.image.?;
+    try std.testing.expectEqual(staged_jpeg.len, image.size_bytes);
+    try std.testing.expectEqualStrings("image/jpeg", image.media_type);
+    try std.testing.expectEqualSlices(u8, staged_jpeg, try control.readFilePreviewMedia(image.id, 0));
+
+    // The draft owns this target: releasing the attachment revokes a delivered
+    // grant on the spot instead of reading a file the draft no longer owns.
+    try std.testing.expect(control.releaseAttachment(staged[0].id));
+    try std.testing.expectError(error.RestrictedPreview, control.readFilePreviewMedia(image.id, 0));
+    try std.testing.expect(!control.hasFilePreviews());
+    try std.testing.expectEqual(
+        Runtime.FilePreviewAdmission{ .immediate = .missing },
+        control.beginAttachmentPreview(82, staged[0].id),
+    );
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {

@@ -961,6 +961,70 @@ test("drafts that are not yet sendable never expose Stop instead", () => {
   }
 });
 
+test("image chips reserve a thumbnail box and only offer a viewer within the Host ceiling", () => {
+  const draft = {
+    kind: "multimodal",
+    text: "Check these",
+    attachments: [
+      {
+        kind: "image",
+        format: "png",
+        token: "a".repeat(48),
+        displayName: "small.png",
+        sizeBytes: "2048",
+      },
+      {
+        kind: "image",
+        format: "jpeg",
+        token: "b".repeat(48),
+        displayName: "huge.jpg",
+        sizeBytes: String(10 * 1024 * 1024 + 1),
+      },
+      {
+        kind: "file",
+        token: "c".repeat(48),
+        displayName: "notes.txt",
+        sizeBytes: "12",
+      },
+    ],
+  };
+  const markup = render({
+    draft,
+    attachmentsEnabled: true,
+    onOpenAttachment: () => {},
+  });
+  // Both images reserve the box; a plain file keeps the generic icon.
+  assert.equal(markup.match(/composer-attachment-media/g)?.length, 2);
+  assert.match(markup, /small\.png/);
+  assert.match(markup, /huge\.jpg/);
+  assert.match(markup, /lucide-file-text/);
+  // No viewer entry exists until a thumbnail has actually decoded, and the
+  // oversized original never gets one.
+  assert.doesNotMatch(markup, /composer-attachment-open/);
+  // Chips still carry no path, hash or upload progress.
+  assert.doesNotMatch(markup, /file:\/\/|\/Users\/|sha256|progress/);
+});
+
+test("image chips fall back to the format label with no thumbnail loader", () => {
+  const markup = render({
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          kind: "image",
+          format: "webp",
+          token: "d".repeat(48),
+          displayName: "shot.webp",
+          sizeBytes: "900",
+        },
+      ],
+    },
+    attachmentsEnabled: true,
+  });
+  assert.match(markup, /composer-attachment-kind[^>]*>WEBP</);
+});
+
 test("an unavailable workspace preserves editable text and offers folder reselection", () => {
   const markup = render({
     draft: { kind: "text", text: "Keep this draft" },

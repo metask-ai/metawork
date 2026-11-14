@@ -31,6 +31,7 @@ import type {
   TaskWorkspaceIntent,
   UiResponsePayload,
   WorkspaceChoice,
+  AttachmentThumbnailResult,
   FilePreview,
   FilePreviewLoadOptions,
   FileChangeDiffResult,
@@ -375,6 +376,20 @@ export class BridgeClient {
     options?: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     return this.previews.load(taskId, runId, fileReferenceId, options);
+  }
+  /// The viewer tier for a staged draft image.
+  previewAttachment(
+    attachmentToken: string,
+    options?: FilePreviewLoadOptions,
+  ): Promise<FilePreview> {
+    return this.previews.loadAttachment(attachmentToken, options);
+  }
+  /// The thumbnail tier for a staged draft image.
+  attachmentThumbnail(
+    attachmentToken: string,
+    options?: FilePreviewLoadOptions,
+  ): Promise<AttachmentThumbnailResult> {
+    return this.previews.loadThumbnail(attachmentToken, options);
   }
   async fileChangeDiff(
     taskId: string,

@@ -367,6 +367,10 @@ staging 状态精确为 `staging | ready | borrowed | consumed | released | fail
 
 受支持的 ZIP 与 Office 解包流程使用有界 helper：在库分配成员 metadata 前限制目录与真实成员数，校验路径、类型、碰撞和压缩方式，并对实际解压字节计数，不能只相信声明大小。默认在 Task 工作区操作；显式基目录与输出的路径关系由 helper 校验，该调用参数不取得不可篡改的 Task authority。输出为基目录中新建的数据子目录，不合并或覆盖既有目标。正常失败清理本次目录并保留原件；未完成标记只在完整校验成功后移除，强杀残留不能被报告为成功或覆盖复用，不增加后台回收或改变 Automatic 工作目录保留政策。归档中的 SKILL.md 是普通数据，不能被流程安装、执行或提升为授权来源；Automatic winner 授权继续遵守 §2.4。该流程不构成对任意 Bash 或完整进程资源隔离的安全承诺。
 
+Product Control 还拥有一层可预览媒体的来源注册：Run 文件引用、Host 生成媒体与用户附件各自有自己的身份与授权，File Preview 的 target key 假设字节由某个 Run 产出并位于已授权 Workspace 内，因此附件在结构上进不去——它的字节在 Product 私有 store 或内存里，Workspace id/epoch/root 对它并不存在。注册表把"有哪几类身份、各自由什么授权、字节从哪来、允许哪一档"收在一处，调用点不再各自决定；本阶段在册的是草稿 staged 图片附件，其授权依据是 Bridge 侧 grant，不涉及 Task identity。
+
+两档交付共用准入、凭据与授权合同，差别只在：缩略图档交付 staging 时派生的小图，字节已在内存，一次响应整件交付，不读原件、不预留原图额度、调用之间不持有字节，凭据检查扫描被交付的派生字节；查看器档交付原件，沿用既有有界读取 lane、原图槽位与额度、分块传输、完整原件凭据扫描与期限，并在交付前及每次分块重新证明草稿仍拥有同一 staged 原件。派生能力仍由 Application 注入并在主线程执行：staging 已为模型输入解码一次，派生物从那张有界 preview 再降一级，因此不为缩略图二次读取可能大两个数量级的原件；派生失败只让 chip 失去缩略图，不拒绝已接纳的图片。
+
 ### 2.7 Identity 与 credential redaction
 
 Product Task identity、Agent Session route identity、execution generation、Workspace identity、Skill policy identity 和 MCP server identity 各自属于对应 owner，不共享生成器，也不能依赖数值相等。跨边界只传递完成当前校验所需的稳定 identity 和 generation，不传递内部指针或 secret-bearing owner。

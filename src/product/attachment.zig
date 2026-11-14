@@ -18,9 +18,11 @@ pub const Candidate = struct {
     display_name: []const u8,
     bytes: []const u8 = &.{},
 };
+/// One bounded encode plus the dimensions the encoder actually produced.
+pub const PreparedImage = struct { bytes: []u8, width: u32, height: u32 };
 pub const ImagePreparation = struct {
     context: ?*anyopaque = null,
-    prepare_fn: ?*const fn (?*anyopaque, std.mem.Allocator, []const u8, usize) anyerror![]u8 = null,
+    prepare_fn: ?*const fn (?*anyopaque, std.mem.Allocator, []const u8, usize, usize) anyerror!PreparedImage = null,
 };
 /// Application-validated development resources. An ordinary Bash invocation,
 /// not a filesystem or shell authority grant.
@@ -46,11 +48,34 @@ pub const ArchiveTool = struct {
 // Eight encoded previews plus the user text fit the official prompt ceiling.
 pub const max_image_preview_bytes: usize = 1_400_000;
 pub const max_image_preview_pixels: usize = 2_100_000;
+// One chip-sized derivative per staged image, so a thumbnail never reads an
+// original or holds a preview slot. 256 px on the longest side is what a
+// 56-64 px chip and a 120 px inline thumbnail need at 2x device pixels; the
+// byte ceiling is the backstop for high-entropy photographs, since the only
+// available encoder is lossless PNG. Eight of them stay under 1.3 MiB next to
+// the model-input previews this staging already holds.
+pub const max_image_thumbnail_bytes: usize = 160 * 1024;
+pub const max_image_thumbnail_side: u32 = 256;
+
+/// Area budget that keeps the longest side at or below the thumbnail ceiling
+/// for the given source dimensions. The codec shrinks to fit an area while
+/// preserving the aspect ratio, so the area has to carry the side limit.
+pub fn thumbnailPixelBudget(width: u32, height: u32) usize {
+    const longest = @max(width, height);
+    if (longest == 0) return 1;
+    if (longest <= max_image_thumbnail_side) return @as(usize, width) * @as(usize, height);
+    const scaled_width = @as(usize, width) * max_image_thumbnail_side / longest;
+    const scaled_height = @as(usize, height) * max_image_thumbnail_side / longest;
+    return @max(1, scaled_width) * @max(1, scaled_height);
+}
 pub const WorkspaceReference = struct { id: u64, epoch: u64, task_id: u64, path: []const u8 = "" };
 pub const max_workspace_reference_bytes = 32 * 1024;
 pub const ReceiveFile = struct { display_name: []const u8, size_bytes: usize, workspace_reference: ?WorkspaceReference = null };
 const Receive = struct { id: u64, indices: []usize, file_index: usize = 0, offset: usize = 0 };
 pub const Descriptor = struct { id: u64, kind: Kind, format: ?Format, display_name: []const u8, size_bytes: u64 };
+pub const Thumbnail = struct { bytes: []const u8, width: u32, height: u32 };
+pub const Original = struct { directory: []const u8, relative: []const u8, size_bytes: usize };
+pub const max_original_relative_bytes = store.max_relative_bytes;
 pub const BorrowedPart = union(enum) {
     image: struct { id: u64, format: Format, bytes: []const u8, reference: []const u8 },
     text: struct { id: u64, bytes: []const u8 },
@@ -69,6 +94,9 @@ const Entry = struct {
     display_name: []u8,
     file: store.File,
     preview: []u8 = &.{},
+    thumbnail: []u8 = &.{},
+    thumbnail_width: u32 = 0,
+    thumbnail_height: u32 = 0,
     reference: []u8 = &.{},
     workspace_reference: ?WorkspaceReference = null,
     workspace_path: []u8 = &.{},
@@ -525,17 +553,72 @@ pub const Runtime = struct {
                 std.crypto.secureZero(u8, raw);
                 self.allocator.free(raw);
             }
-            const preview = prepare(self.images.context, self.allocator, raw, max_image_preview_bytes) catch return error.UnsupportedType;
-            if (preview.len == 0 or preview.len > max_image_preview_bytes) {
-                self.allocator.free(preview);
+            const preview = prepare(self.images.context, self.allocator, raw, max_image_preview_bytes, max_image_preview_pixels) catch return error.UnsupportedType;
+            if (preview.bytes.len == 0 or preview.bytes.len > max_image_preview_bytes or
+                preview.width == 0 or preview.height == 0)
+            {
+                self.allocator.free(preview.bytes);
                 return error.UnsupportedType;
             }
-            entry.preview = preview;
+            entry.preview = preview.bytes;
+            self.deriveThumbnail(entry, prepare, preview);
             entry.format = format;
             return;
         }
         if (entry.workspace_reference != null) return error.UnsupportedType;
     }
+
+    /// Derived from the bounded preview rather than the original: the preview is
+    /// already inside the pixel budget, so this replaces a second decode of an
+    /// original that can be two orders of magnitude larger. A failure here only
+    /// costs the chip its thumbnail; it must never reject an accepted image.
+    fn deriveThumbnail(
+        self: *Runtime,
+        entry: *Entry,
+        prepare: *const fn (?*anyopaque, std.mem.Allocator, []const u8, usize, usize) anyerror!PreparedImage,
+        preview: PreparedImage,
+    ) void {
+        const budget = thumbnailPixelBudget(preview.width, preview.height);
+        const thumbnail = prepare(
+            self.images.context,
+            self.allocator,
+            preview.bytes,
+            max_image_thumbnail_bytes,
+            budget,
+        ) catch return;
+        if (thumbnail.bytes.len == 0 or thumbnail.bytes.len > max_image_thumbnail_bytes or
+            thumbnail.width == 0 or thumbnail.height == 0)
+        {
+            std.crypto.secureZero(u8, thumbnail.bytes);
+            self.allocator.free(thumbnail.bytes);
+            return;
+        }
+        entry.thumbnail = thumbnail.bytes;
+        entry.thumbnail_width = thumbnail.width;
+        entry.thumbnail_height = thumbnail.height;
+    }
+
+    /// Chip-sized derived pixels for a staged draft image. Only a ready entry
+    /// answers: once the batch is borrowed the draft no longer owns it.
+    pub fn thumbnailFor(self: *const Runtime, id: u64) ?Thumbnail {
+        const entry = self.slots[self.findIndex(id) orelse return null].?;
+        if (entry.state != .ready or entry.format == null or entry.thumbnail.len == 0) return null;
+        return .{ .bytes = entry.thumbnail, .width = entry.thumbnail_width, .height = entry.thumbnail_height };
+    }
+
+    /// Store-relative identity of a staged image original, for a bounded read
+    /// inside the Product store. Physical paths stay inside the store module.
+    pub fn originalFor(self: *const Runtime, id: u64, buffer: []u8) ?Original {
+        const file_store = self.file_store orelse return null;
+        const entry = self.slots[self.findIndex(id) orelse return null].?;
+        if (entry.state != .ready or entry.format == null) return null;
+        return .{
+            .directory = file_store.directory,
+            .relative = store.relativePath(entry.file, buffer) catch return null,
+            .size_bytes = entry.file.size,
+        };
+    }
+
     fn descriptor(_: *const Runtime, entry: Entry) Descriptor {
         return .{ .id = entry.id, .kind = if (entry.format == null) .file else .image, .format = entry.format, .display_name = entry.display_name, .size_bytes = entry.file.size };
     }
@@ -555,7 +638,7 @@ pub const Runtime = struct {
         return true;
     }
     fn freeEntryMemory(self: *Runtime, entry: *Entry) void {
-        for ([_][]u8{ entry.display_name, entry.preview, entry.reference, entry.workspace_path, entry.workspace_text }) |bytes| {
+        for ([_][]u8{ entry.display_name, entry.preview, entry.thumbnail, entry.reference, entry.workspace_path, entry.workspace_text }) |bytes| {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);
         }
@@ -600,9 +683,15 @@ pub const Borrow = struct {
             entry.reference = &.{};
             entry.state = if (entry.retry_group == 0) .ready else .retry_owned;
             if (entry.state == .retry_owned) {
-                std.crypto.secureZero(u8, entry.preview);
-                self.runtime.allocator.free(entry.preview);
+                // A retry re-derives both from the original in `classify`.
+                for ([_][]u8{ entry.preview, entry.thumbnail }) |bytes| {
+                    std.crypto.secureZero(u8, bytes);
+                    self.runtime.allocator.free(bytes);
+                }
                 entry.preview = &.{};
+                entry.thumbnail = &.{};
+                entry.thumbnail_width = 0;
+                entry.thumbnail_height = 0;
                 if (!moved and self.runtime.destroyTaskInput(entry)) self.runtime.slots[index] = null;
             }
         }
@@ -625,11 +714,14 @@ pub const Borrow = struct {
             entry.state = .task_owned;
             entry.retry_group = 0;
             entry.retry_task_id = 0;
-            for ([_][]u8{ entry.preview, entry.reference }) |bytes| {
+            for ([_][]u8{ entry.preview, entry.thumbnail, entry.reference }) |bytes| {
                 std.crypto.secureZero(u8, bytes);
                 self.runtime.allocator.free(bytes);
             }
             entry.preview = &.{};
+            entry.thumbnail = &.{};
+            entry.thumbnail_width = 0;
+            entry.thumbnail_height = 0;
             entry.reference = &.{};
         }
         self.active = false;
@@ -735,6 +827,92 @@ test "staging validates signatures and rolls back a failed batch atomically" {
     try std.testing.expectError(error.UnsupportedType, runtime.stageBatch(&candidates, &output));
     try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
     for (runtime.slots) |slot| try std.testing.expect(slot == null);
+}
+
+test "a staged image owns a chip thumbnail and a readable original until it is borrowed" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var runtime = try Runtime.init(std.testing.allocator, testLimits(), &fixture.store, .{ .prepare_fn = TestStore.image }, null);
+    defer runtime.deinit();
+    var output: [1]Descriptor = undefined;
+    const staged = try runtime.stageBatch(
+        &.{.{ .display_name = "shot.png", .bytes = "\x89PNG\r\n\x1a\npayload" }},
+        &output,
+    );
+    const id = staged[0].id;
+    const thumbnail = runtime.thumbnailFor(id).?;
+    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\npayload", thumbnail.bytes);
+    try std.testing.expectEqual(@as(u32, 8), thumbnail.width);
+    try std.testing.expectEqual(@as(u32, 4), thumbnail.height);
+    // The derivative is its own allocation, never an alias of the model input.
+    try std.testing.expect(thumbnail.bytes.ptr != runtime.slots[runtime.findIndex(id).?].?.preview.ptr);
+    var relative: [max_original_relative_bytes]u8 = undefined;
+    const original = runtime.originalFor(id, &relative).?;
+    try std.testing.expectEqual(@as(usize, 15), original.size_bytes);
+    try std.testing.expect(std.mem.startsWith(u8, original.relative, "0/"));
+    try std.testing.expect(std.mem.endsWith(u8, original.relative, ".png"));
+    var contents: [15]u8 = undefined;
+    var root = try std.Io.Dir.openDirAbsolute(std.testing.io, original.directory, .{});
+    defer root.close(std.testing.io);
+    const file = try root.openFile(std.testing.io, original.relative, .{});
+    defer file.close(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 15), try file.readPositionalAll(std.testing.io, &contents, 0));
+    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\npayload", &contents);
+
+    var parts: [1]BorrowedPart = undefined;
+    var indices: [1]usize = undefined;
+    var borrowed = try runtime.borrow(&.{id}, &parts, &indices, 7);
+    // A borrowed original belongs to the Task, so the draft target is gone.
+    try std.testing.expect(runtime.thumbnailFor(id) == null);
+    try std.testing.expect(runtime.originalFor(id, &relative) == null);
+    borrowed.retainForTask();
+    try std.testing.expect(runtime.thumbnailFor(id) == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.slots[runtime.findIndex(id).?].?.thumbnail.len);
+    try runtime.settleTaskInput(id, 7, false);
+}
+
+test "a failed thumbnail derivation still accepts the image" {
+    const Images = struct {
+        calls: usize = 0,
+        fn prepare(context: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!PreparedImage {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls > 1) return error.ImageTooLarge;
+            return .{ .bytes = try allocator.dupe(u8, bytes), .width = 1200, .height = 900 };
+        }
+    };
+    var images: Images = .{};
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        testLimits(),
+        &fixture.store,
+        .{ .context = &images, .prepare_fn = Images.prepare },
+        null,
+    );
+    defer runtime.deinit();
+    var output: [1]Descriptor = undefined;
+    const staged = try runtime.stageBatch(
+        &.{.{ .display_name = "shot.png", .bytes = "\x89PNG\r\n\x1a\npayload" }},
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 2), images.calls);
+    try std.testing.expectEqual(Kind.image, staged[0].kind);
+    try std.testing.expect(runtime.thumbnailFor(staged[0].id) == null);
+    try std.testing.expect(runtime.slots[runtime.findIndex(staged[0].id).?].?.preview.len != 0);
+    try std.testing.expect(runtime.release(staged[0].id));
+}
+
+test "thumbnail budgets keep the longest side inside the chip ceiling" {
+    try std.testing.expectEqual(@as(usize, 256 * 192), thumbnailPixelBudget(1600, 1200));
+    try std.testing.expectEqual(@as(usize, 256 * 144), thumbnailPixelBudget(1920, 1080));
+    try std.testing.expectEqual(@as(usize, 256 * 256), thumbnailPixelBudget(2048, 2048));
+    // A source already inside the ceiling keeps its exact pixel count.
+    try std.testing.expectEqual(@as(usize, 200 * 120), thumbnailPixelBudget(200, 120));
+    // Extreme ratios still shrink to the side ceiling on their long axis.
+    try std.testing.expectEqual(@as(usize, 256 * 1), thumbnailPixelBudget(4000, 8));
+    try std.testing.expectEqual(@as(usize, 1), thumbnailPixelBudget(0, 0));
 }
 
 test "borrow rollback preserves ready entries and consume releases the batch" {
@@ -910,9 +1088,9 @@ const TestStore = struct {
         self.store.deinit();
         self.tmp.cleanup();
     }
-    fn image(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
+    fn image(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!PreparedImage {
         if (std.mem.endsWith(u8, bytes, "invalid")) return error.UnsupportedType;
-        return allocator.dupe(u8, bytes);
+        return .{ .bytes = try allocator.dupe(u8, bytes), .width = 8, .height = 4 };
     }
 };
 

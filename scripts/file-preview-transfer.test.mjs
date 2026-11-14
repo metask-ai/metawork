@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import {
+  decodeAttachmentThumbnail,
   decodeFilePreview,
   decodeWorkspaceDirectory,
 } from "../frontend/src/bridge/decode-contracts.ts";
@@ -108,7 +109,7 @@ class Host {
   );
   async invoke(command, payload) {
     this.calls.push({ command, payload });
-    if (command === commands.previewFile) {
+    if (command === commands.previewFile || command === commands.mediaPreview) {
       if (this.cancelled.has(payload.previewId))
         return { ...empty, state: "error" };
       if (payload.fileReferenceId === "text")
@@ -433,5 +434,157 @@ test("a text preview can finish while image receipt is blocked", async () => {
   read.resolve();
   const images = await Promise.all([first, second]);
   for (const image of images) image.release();
+  assert.equal(host.active.size, 0);
+});
+
+const token = "a".repeat(48);
+const thumbnailResponse = (overrides = {}) => ({
+  state: "ready",
+  thumbnail: {
+    mediaType: "image/png",
+    sizeBytes: String(png.length),
+    width: 1,
+    height: 1,
+    securityEpoch: "1",
+    dataBase64: png.toString("base64"),
+    ...overrides,
+  },
+});
+
+test("a derived thumbnail arrives in one response with no grant to release", async () => {
+  const calls = [];
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      assert.equal(command, commands.mediaThumbnail);
+      return thumbnailResponse();
+    },
+    () => "4",
+  );
+  const result = await loader.loadThumbnail(token);
+  assert.equal(result.state, "ready");
+  assert.equal(result.image.width, 1);
+  assert.equal(
+    result.image.src,
+    `data:image/png;base64,${png.toString("base64")}`,
+  );
+  // One request, one response: no previewId, no chunk read, no release.
+  assert.deepEqual(calls, [
+    {
+      command: commands.mediaThumbnail,
+      payload: {
+        generation: "4",
+        target: { kind: "draftAttachment", token },
+      },
+    },
+  ]);
+  result.release();
+  assert.equal(result.image.valid(), false);
+});
+
+test("thumbnail descriptors stay inside the published derived-item limits", () => {
+  assert.deepEqual(decodeAttachmentThumbnail(thumbnailResponse()), {
+    state: "ready",
+    thumbnail: { ...thumbnailResponse().thumbnail, sizeBytes: png.length },
+  });
+  for (const state of ["missing", "restricted", "unsupported", "error"])
+    assert.deepEqual(decodeAttachmentThumbnail({ state }), { state });
+  for (const invalid of [
+    { state: "ready" },
+    { state: "busy" },
+    { state: "missing", thumbnail: thumbnailResponse().thumbnail },
+  ])
+    assert.throws(() => decodeAttachmentThumbnail(invalid));
+  for (const overrides of [
+    { mediaType: "image/jpeg" },
+    { sizeBytes: String(160 * 1024 + 1) },
+    { width: 257 },
+    { height: 300 },
+    { width: 1.5 },
+    { securityEpoch: "0" },
+    { dataBase64: "not base64!" },
+    { sizeBytes: "3" },
+  ])
+    assert.throws(
+      () => decodeAttachmentThumbnail(thumbnailResponse(overrides)),
+      new RegExp("thumbnail|sizeBytes|mediaType|securityEpoch"),
+    );
+});
+
+test("a thumbnail from a stale security epoch is taken again after the new one", async () => {
+  let epoch = "1";
+  let served = 0;
+  const loader = new FilePreviewLoader(
+    async () => {
+      served++;
+      return thumbnailResponse({ securityEpoch: epoch });
+    },
+    () => "4",
+  );
+  const first = await loader.loadThumbnail(token);
+  assert.equal(first.state, "ready");
+  epoch = "2";
+  const pending = loader.loadThumbnail(token);
+  // The loader still believes epoch 1, so this answer is refused; it waits for
+  // a newer canonical epoch and asks exactly once more.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  loader.observeSecurityEpoch("2");
+  const second = await pending;
+  assert.equal(second.state, "ready");
+  assert.equal(second.image.securityEpoch, "2");
+  // The stale resource is dropped by the pool, not reported as a failure.
+  assert.equal(first.image.valid(), false);
+  assert.equal(served, 3);
+  second.release();
+});
+
+test("thumbnails queue rather than failing a whole chip grid", async () => {
+  let inflight = 0;
+  let peak = 0;
+  const gate = [];
+  const loader = new FilePreviewLoader(
+    () => {
+      inflight++;
+      peak = Math.max(peak, inflight);
+      return new Promise((resolve) => {
+        gate.push(() => {
+          inflight--;
+          resolve(thumbnailResponse());
+        });
+      });
+    },
+    () => "4",
+  );
+  const pending = Array.from({ length: 12 }, (_, index) =>
+    loader.loadThumbnail("b".repeat(47) + String(index % 10)),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(peak, 3);
+  while (gate.length) {
+    gate.shift()();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const results = await Promise.all(pending);
+  for (const result of results) {
+    assert.equal(result.state, "ready");
+    result.release();
+  }
+  assert.equal(peak, 3);
+});
+
+test("the attachment viewer tier uses the media command and the shared transfer", async () => {
+  const host = new Host();
+  const result = await host.loader.loadAttachment(token);
+  assert.equal(result.state, "ready");
+  assert.deepEqual(
+    host.calls.map((call) => call.command),
+    [commands.mediaPreview, commands.readPreviewImage, commands.releasePreview],
+  );
+  assert.deepEqual(host.calls[0].payload, {
+    generation: "1",
+    previewId: "1",
+    target: { kind: "draftAttachment", token },
+  });
+  result.release();
   assert.equal(host.active.size, 0);
 });

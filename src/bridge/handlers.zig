@@ -483,6 +483,11 @@ pub const WorkspaceFileRequest = struct {
     workspaceEpoch: []const u8,
     path: []const u8,
 };
+/// One registered media identity. `kind` is the registry's wire name and the
+/// fields a kind does not use are absent, not null: a target is exact.
+pub const MediaTarget = struct { kind: []const u8, token: []const u8 };
+pub const MediaThumbnailRequest = struct { generation: []const u8, target: MediaTarget };
+pub const MediaPreviewRequest = struct { generation: []const u8, previewId: []const u8, target: MediaTarget };
 pub const FilePreviewChunkRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8, offset: []const u8, securityEpoch: []const u8 };
 pub const FilePreviewRequest = struct {
     generation: []const u8,
@@ -1051,6 +1056,32 @@ test "file preview payload requires exact Task Run and reference identity" {
             \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
         ),
     );
+}
+
+test "media payloads require one exact registered target" {
+    const token = "a" ** 48;
+    const thumbnail_payload = "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"" ++ token ++ "\"}}";
+    const preview_payload = "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"" ++ token ++ "\"}}";
+    var thumbnail = try parsePayload(MediaThumbnailRequest, thumbnail_payload);
+    defer thumbnail.deinit();
+    try std.testing.expectEqualStrings("draftAttachment", thumbnail.value.target.kind);
+    try std.testing.expectEqualStrings(token, thumbnail.value.target.token);
+    var preview = try parsePayload(MediaPreviewRequest, preview_payload);
+    defer preview.deinit();
+    try std.testing.expectEqualStrings("4", preview.value.previewId);
+    // No previewId on the thumbnail tier, no extra or substitute target
+    // field, and no flat token outside the target.
+    for ([_][]const u8{
+        "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"aaa\"}}",
+        "{\"generation\":\"1\",\"token\":\"aaa\"}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"aaa\",\"taskId\":\"3\"}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\"}}",
+        "{\"target\":{\"kind\":\"draftAttachment\",\"token\":\"aaa\"}}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(MediaThumbnailRequest, payload));
+    try std.testing.expectError(error.InvalidBridgePayload, parsePayload(
+        MediaPreviewRequest,
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"aaa\"}}",
+    ));
 }
 
 test "file change diff payload requires exact Task Run and change identity" {

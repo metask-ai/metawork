@@ -1259,8 +1259,8 @@ fn expectOldTaskAdoptsLogin(wake_loop: *fixture.LifecycleWakeLoop, control: *con
     try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[sessions - 1].credential_digest);
 }
 
-fn copyTestImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
-    return allocator.dupe(u8, bytes);
+fn copyTestImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!control_api.AttachmentPreparedImage {
+    return .{ .bytes = try allocator.dupe(u8, bytes), .width = 8, .height = 4 };
 }
 
 fn relogin(runtime: *account.Runtime) !void {
