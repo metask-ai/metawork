@@ -94,7 +94,13 @@ jobs:
           key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
 
       - name: Run Node tests
-        run: npm run test:node
+        shell: pwsh
+        run: |
+          npm run test:node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:RUNNER_OS -eq 'Windows' -and $env:GITHUB_RUN_ATTEMPT -eq '1') {
+            throw 'CI probe: intentional first-attempt failure after Node tests'
+          }
 
   native-tests:
     name: Native tests (${{ matrix.name }})
