@@ -880,6 +880,8 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.drop": "拖放文件以添加",
   "attachment.selected": "已选择的附件",
   "attachment.remove": "移除 {name}",
+  "attachment.open": "预览 {name}",
+  "attachment.close_preview": "关闭图片预览",
   "attachment.type.image": "图片",
   "attachment.type.file": "文件",
   "attachment.reload_required":

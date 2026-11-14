@@ -303,6 +303,12 @@ export type FilePreviewVideo = {
   subscribe: (changed: () => void) => () => void;
 };
 export const maxPreviewVideoBytes = 64 * 1024 * 1024;
+// Host ceilings for the two media tiers. The viewer tier refuses an original
+// above its own limit, so a chip whose original is larger offers no viewer
+// entry at all instead of an entry that is certain to fail.
+export const maxPreviewImageBytes = 10 * 1024 * 1024;
+export const maxAttachmentThumbnailBytes = 160 * 1024;
+export const maxAttachmentThumbnailSide = 256;
 export type FilePreview = {
   image?: FilePreviewImage;
   video?: FilePreviewVideo;
@@ -337,6 +343,32 @@ export type FilePreviewResponse = Omit<
     securityEpoch: string;
   };
 };
+/// One synchronous answer per chip: the derived PNG arrives inline, so this
+/// tier has no grant, no chunk reader and nothing held between calls.
+export type AttachmentThumbnailResponse =
+  | {
+      state: "ready";
+      thumbnail: {
+        mediaType: PreviewMediaType;
+        sizeBytes: number;
+        width: number;
+        height: number;
+        securityEpoch: string;
+        dataBase64: string;
+      };
+    }
+  | {
+      state: "missing" | "restricted" | "unsupported" | "error";
+    };
+export type AttachmentThumbnailResult =
+  | {
+      state: "ready";
+      image: FilePreviewImage;
+      release: () => void;
+    }
+  | {
+      state: "missing" | "restricted" | "unsupported" | "error" | "capacity";
+    };
 export type FilePreviewLoadOptions = {
   signal?: AbortSignal;
   priority?: "interactive" | "prefetch";

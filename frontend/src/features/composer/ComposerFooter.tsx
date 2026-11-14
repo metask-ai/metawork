@@ -11,12 +11,17 @@ import {
 } from "react";
 
 import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
+import { maxPreviewImageBytes } from "../../bridge/contracts.ts";
 import { Composer } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
+import {
+  AttachmentThumbnail,
+  type AttachmentThumbnailLoader,
+} from "./AttachmentThumbnail.tsx";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
@@ -64,6 +69,13 @@ function formatAttachmentSize(value: string) {
   if (bytes < 1_000) return `${bytes} B`;
   if (bytes < 1_000_000) return `${Math.ceil(bytes / 1_000)} KB`;
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+/// The viewer tier refuses an original above the published Host ceiling, so a
+/// larger image keeps its thumbnail and offers no entry rather than an entry
+/// that is certain to fail.
+function attachmentViewable(attachment: ComposerAttachment) {
+  return BigInt(attachment.sizeBytes) <= BigInt(maxPreviewImageBytes);
 }
 
 function attachmentTypeLabel(
@@ -118,6 +130,8 @@ export function ComposerFooter({
   attachmentRemoving = false,
   attachmentError,
   attachmentModelWarning,
+  loadAttachmentThumbnail,
+  onOpenAttachment,
   skillCatalog,
   slashCommands,
   composeDisabled,
@@ -218,6 +232,13 @@ export function ComposerFooter({
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
+  loadAttachmentThumbnail?: AttachmentThumbnailLoader;
+  /// Absent for an attachment whose original the viewer tier cannot read, so
+  /// no chip offers an entry that is certain to fail.
+  onOpenAttachment?: (
+    attachment: ComposerAttachment,
+    opener: HTMLButtonElement,
+  ) => void;
   onSubmit: () => void;
   sendDisabledReason?: MessageId;
   onStop: () => void;
@@ -689,13 +710,26 @@ export function ComposerFooter({
                   role="listitem"
                   key={attachment.token}
                 >
-                  <span className="composer-attachment-kind" aria-hidden="true">
-                    {attachment.kind === "image" ? (
-                      attachment.format.toUpperCase()
-                    ) : (
+                  {attachment.kind === "image" ? (
+                    <AttachmentThumbnail
+                      token={attachment.token}
+                      label={attachment.displayName}
+                      formatLabel={attachment.format.toUpperCase()}
+                      load={loadAttachmentThumbnail}
+                      onOpen={
+                        onOpenAttachment && attachmentViewable(attachment)
+                          ? (opener) => onOpenAttachment(attachment, opener)
+                          : undefined
+                      }
+                    />
+                  ) : (
+                    <span
+                      className="composer-attachment-kind"
+                      aria-hidden="true"
+                    >
                       <Icon name="skill-file" />
-                    )}
-                  </span>
+                    </span>
+                  )}
                   <span className="composer-attachment-copy">
                     <strong
                       dir="auto"

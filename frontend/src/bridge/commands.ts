@@ -59,6 +59,8 @@ export const commands = {
   readPreviewImage: "metawork.files.preview.readImageChunk",
   readPreviewVideo: "metawork.files.preview.readVideoChunk",
   releasePreview: "metawork.files.preview.release",
+  mediaThumbnail: "metawork.media.thumbnail",
+  mediaPreview: "metawork.media.preview",
   fileChangeDiff: "metawork.files.diff",
   beginAttachmentAdd: "metawork.attachments.beginAdd",
   appendAttachmentAdd: "metawork.attachments.appendAdd",

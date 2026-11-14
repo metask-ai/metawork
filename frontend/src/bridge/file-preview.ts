@@ -6,6 +6,7 @@ import {
 import type { NativeSdkJson } from "@native-sdk/cli";
 import { maxPreviewVideoBytes } from "./contracts.ts";
 import type {
+  AttachmentThumbnailResult,
   FilePreview,
   FilePreviewLoadOptions,
   FilePreviewResponse,
@@ -14,6 +15,7 @@ import type {
 } from "./contracts.ts";
 import { commands } from "./commands.ts";
 import {
+  decodeAttachmentThumbnail,
   decodeFilePreview,
   decodePreviewChunk,
   decodePreviewRelease,
@@ -54,6 +56,9 @@ const failed = (reason?: "capacity"): FilePreview => ({
 
 export class FilePreviewLoader {
   private readonly preparations = new Slots(2, 8);
+  // Chips arrive by the dozen and each item is tiny, so the thumbnail tier
+  // queues instead of competing with the viewer tier's two preparations.
+  private readonly thumbnails = new Slots(3, 32);
   private session = new AbortController();
   private nextId = 1n;
   private epoch: string | null = null;
@@ -120,6 +125,90 @@ export class FilePreviewLoader {
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
     return this.loadTarget(taskId, { runId, fileReferenceId }, options);
+  }
+  /// The viewer tier for a staged draft image: the original, under the same
+  /// grant, chunk transfer, capacity and security rules as any other preview.
+  loadAttachment(
+    attachmentToken: string,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<FilePreview> {
+    return this.loadTarget(null, { attachmentToken }, options);
+  }
+  /// The thumbnail tier: one request, one response, no Host grant to release.
+  /// The derived pixels register in the same image pool, so the security epoch
+  /// and the window's decoded-image budget keep governing them.
+  async loadThumbnail(
+    attachmentToken: string,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<AttachmentThumbnailResult> {
+    const controller = new AbortController();
+    const sessionSignal = this.session.signal;
+    const abort = () => controller.abort();
+    sessionSignal.addEventListener("abort", abort, { once: true });
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (sessionSignal.aborted || options.signal?.aborted) abort();
+    const timer = setTimeout(abort, 30_000);
+    const signal = controller.signal;
+    const priority = options.priority === "interactive";
+    try {
+      const generation = this.generation();
+      if (!generation) throw abortError();
+      let securityRetry = false;
+      for (;;) {
+        check(signal);
+        const observed = this.epoch;
+        const release = await this.thumbnails.acquire(signal, priority);
+        let reservation: { release: () => void } | undefined;
+        try {
+          check(signal);
+          if (generation !== this.generation()) throw abortError();
+          const response = decodeAttachmentThumbnail(
+            await this.invoke(commands.mediaThumbnail, {
+              generation,
+              target: { kind: "draftAttachment", token: attachmentToken },
+            }),
+          );
+          check(signal);
+          if (response.state !== "ready") return { state: response.state };
+          const descriptor = response.thumbnail;
+          if (this.epoch === null) this.epoch = descriptor.securityEpoch;
+          if (this.epoch !== descriptor.securityEpoch)
+            throw new StaleSecurity();
+          const reserved = this.images.reserve(
+            { ...descriptor, id: `thumb:${generation}:${attachmentToken}` },
+            priority,
+          );
+          reservation = reserved;
+          reserved.setSource(
+            `data:${descriptor.mediaType};base64,${descriptor.dataBase64}`,
+          );
+          reservation = undefined;
+          return {
+            state: "ready",
+            image: reserved.image,
+            release: reserved.release,
+          };
+        } catch (error) {
+          if (error instanceof StaleSecurity && !securityRetry) {
+            securityRetry = true;
+            await this.waitForNewEpoch(observed, signal);
+            continue;
+          }
+          if (error instanceof Capacity) return { state: "capacity" };
+          throw error;
+        } finally {
+          reservation?.release();
+          release();
+        }
+      }
+    } catch (error) {
+      if (error instanceof Capacity) return { state: "capacity" };
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      sessionSignal.removeEventListener("abort", abort);
+      options.signal?.removeEventListener("abort", abort);
+    }
   }
   loadWorkspace(
     taskId: string,
@@ -197,10 +286,11 @@ export class FilePreviewLoader {
     }
   }
   private async loadTarget(
-    taskId: string,
+    taskId: string | null,
     target:
       | { runId: string; fileReferenceId: string }
-      | { workspaceId: string; workspaceEpoch: string; path: string },
+      | { workspaceId: string; workspaceEpoch: string; path: string }
+      | { attachmentToken: string },
     options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();
@@ -251,14 +341,24 @@ export class FilePreviewLoader {
         try {
           const response = decodeFilePreview(
             await this.invoke(
-              "runId" in target
-                ? commands.previewFile
-                : commands.previewWorkspaceFile,
-              {
-                ...key,
-                taskId,
-                ...target,
-              },
+              "attachmentToken" in target
+                ? commands.mediaPreview
+                : "runId" in target
+                  ? commands.previewFile
+                  : commands.previewWorkspaceFile,
+              "attachmentToken" in target
+                ? {
+                    ...key,
+                    target: {
+                      kind: "draftAttachment",
+                      token: target.attachmentToken,
+                    },
+                  }
+                : {
+                    ...key,
+                    taskId,
+                    ...target,
+                  },
             ),
           );
           releasePreparation();

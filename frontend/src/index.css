@@ -7901,6 +7901,49 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 760;
 }
 
+/* An image chip shows what was attached. The box is reserved before the
+   derived thumbnail arrives, so a chip never resizes under the pointer, and
+   the chip itself keeps its width: narrow windows still wrap instead of
+   scrolling sideways. */
+.composer-attachment-media {
+  display: block;
+  flex: none;
+  width: 56px;
+  height: 56px;
+}
+.composer-attachment-media .composer-attachment-kind {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  background: var(--ui-surface-panel-2);
+  box-shadow: inset 0 0 0 1px var(--ui-border);
+}
+.composer-attachment-open {
+  display: block;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 6px;
+  background: var(--ui-surface-panel-2);
+  cursor: pointer;
+}
+.composer-attachment-media .file-preview-decoded,
+.composer-attachment-media .file-preview-decoded > img {
+  width: 56px;
+  height: 56px;
+}
+.composer-attachment-media .file-preview-decoded > img {
+  border-radius: 6px;
+  object-fit: cover;
+}
+.composer-attachment-media .file-preview-image-feedback {
+  min-height: 0;
+}
+
 .composer-attachment-kind svg {
   display: block;
   width: 16px;
@@ -9771,6 +9814,42 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   justify-items: center;
   min-height: 100px;
+}
+
+.media-lightbox {
+  gap: 12px;
+  width: min(72rem, calc(100vw - 2rem));
+  padding: 16px;
+}
+.media-lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.media-lightbox-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media-lightbox-body {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  overflow: auto;
+}
+.media-lightbox-body .file-preview-decoded > img {
+  max-width: 100%;
+  max-height: calc(100dvh - 10rem);
+  object-fit: contain;
+}
+.media-lightbox-state {
+  margin: 0;
+  padding: 32px 0;
+  color: var(--ui-content-muted);
+  font-size: 13px;
 }
 
 .run-outputs {

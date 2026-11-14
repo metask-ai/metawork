@@ -5,6 +5,9 @@ import {
   skillImportPhases,
   outputActionStates,
   maxPreviewVideoBytes,
+  maxAttachmentThumbnailBytes,
+  maxAttachmentThumbnailSide,
+  type AttachmentThumbnailResponse,
   modelErrorCategories,
   runGuidances,
   runProviderReasons,
@@ -2147,6 +2150,64 @@ export function decodeFilePreview(value: unknown): FilePreviewResponse {
     ...(image ? { image } : {}),
     ...(video ? { video } : {}),
     ...(reason ? { reason } : {}),
+  };
+}
+export function decodeAttachmentThumbnail(
+  value: unknown,
+): AttachmentThumbnailResponse {
+  const raw = record(value, "$");
+  const state = enumValue(raw.state, "$.state", [
+    "ready",
+    "missing",
+    "restricted",
+    "unsupported",
+    "error",
+  ] as const);
+  if (state !== "ready") {
+    object(value, "$", ["state"]);
+    return { state };
+  }
+  const item = object(value, "$", ["state", "thumbnail"]);
+  const entry = object(item.thumbnail, "$.thumbnail", [
+    "mediaType",
+    "sizeBytes",
+    "width",
+    "height",
+    "securityEpoch",
+    "dataBase64",
+  ]);
+  const mediaType = enumValue(entry.mediaType, "$.thumbnail.mediaType", [
+    "image/png",
+  ] as const);
+  const sizeBytes = Number(
+    positiveU64WireId(entry.sizeBytes, "$.thumbnail.sizeBytes"),
+  );
+  const width = positiveNumber(entry.width, "$.thumbnail.width");
+  const height = positiveNumber(entry.height, "$.thumbnail.height");
+  const securityEpoch = positiveU64WireId(
+    entry.securityEpoch,
+    "$.thumbnail.securityEpoch",
+  );
+  const dataBase64 = stringValue(entry.dataBase64, "$.thumbnail.dataBase64");
+  if (
+    sizeBytes > maxAttachmentThumbnailBytes ||
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    Math.max(width, height) > maxAttachmentThumbnailSide ||
+    dataBase64.length !== Math.ceil(sizeBytes / 3) * 4 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)
+  )
+    fail("$.thumbnail", "invalid derived thumbnail descriptor");
+  return {
+    state,
+    thumbnail: {
+      mediaType,
+      sizeBytes,
+      width,
+      height,
+      securityEpoch,
+      dataBase64,
+    },
   };
 }
 export function decodePreviewChunk(value: unknown) {

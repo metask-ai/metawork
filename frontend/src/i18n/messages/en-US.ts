@@ -1025,6 +1025,8 @@ export const enUS = {
   "attachment.drop": "Drop files to add",
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
+  "attachment.open": "Preview {name}",
+  "attachment.close_preview": "Close image preview",
   "attachment.type.image": "Image",
   "attachment.type.file": "File",
   "attachment.reload_required":
