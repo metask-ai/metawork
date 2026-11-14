@@ -24,6 +24,7 @@ import {
   resolveInnoSetupCompiler,
   resolveWindowsSignTool,
   stageWindowsTrayIcon,
+  stageWindowsWindowIcon,
   verifyWindowsInstaller,
   verifyWindowsRuntimeStage,
   windowsFileVersion,
@@ -130,6 +131,20 @@ test("Windows packaging stages the canonical tray icon at its runtime path", () 
     const source = new URL("../assets/icons/tray-icon.ico", import.meta.url);
     const target = path.join(root, "assets", "icons", "tray-icon.ico");
     assert.equal(stageWindowsTrayIcon(root), target);
+    assert.deepEqual(readFileSync(target), readFileSync(source));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows packaging stages the canonical window icon at its runtime path", () => {
+  const root = mkdtempSync(
+    path.join(tmpdir(), "metawork-windows-window-icon-"),
+  );
+  try {
+    const source = new URL("../assets/icons/app-icon.ico", import.meta.url);
+    const target = path.join(root, "assets", "icons", "app-icon.ico");
+    assert.equal(stageWindowsWindowIcon(root), target);
     assert.deepEqual(readFileSync(target), readFileSync(source));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -343,6 +358,7 @@ test("Windows runtime gate requires the Native release package and GUI executabl
     );
     writeFileSync(path.join(root, "app-icon.ico"), "icon");
     stageWindowsTrayIcon(root);
+    stageWindowsWindowIcon(root);
     writeFileSync(
       path.join(root, "resources", "frontend", "dist", "index.html"),
       "<main></main>",
@@ -383,9 +399,21 @@ test("Windows runtime gate requires the Native release package and GUI executabl
     writeFileSync(trayIconPath, "not the canonical tray icon");
     assert.throws(
       () => verifyWindowsRuntimeStage(root, distribution, manifest),
-      /exact canonical ICO/u,
+      /tray icon is not the exact canonical ICO/u,
     );
     stageWindowsTrayIcon(root);
+    const windowIconPath = path.join(root, "assets", "icons", "app-icon.ico");
+    writeFileSync(windowIconPath, "not the canonical window icon");
+    assert.throws(
+      () => verifyWindowsRuntimeStage(root, distribution, manifest),
+      /window icon is not the exact canonical ICO/u,
+    );
+    rmSync(windowIconPath);
+    assert.throws(
+      () => verifyWindowsRuntimeStage(root, distribution, manifest),
+      /missing .*assets.*app-icon\.ico/u,
+    );
+    stageWindowsWindowIcon(root);
     writeFileSync(
       path.join(root, "bin", "WebView2Loader.dll"),
       guiExecutableBytes(512, 0xaa64),
