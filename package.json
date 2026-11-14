@@ -26,7 +26,7 @@
     "archive:check": "node scripts/check-archive-environment.mjs"
   },
   "devDependencies": {
-    "@native-sdk/cli": "npm:@zogien/native-sdk@0.11.1-fork.1",
+    "@native-sdk/cli": "npm:@zogien/native-sdk@0.11.1-fork.2",
     "prettier": "3.9.5"
   }
 }

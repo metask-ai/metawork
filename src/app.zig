@@ -1137,7 +1137,7 @@ test "notification activation follows SDK command routing into the real Task Bri
     try std.testing.expect(composition.platform.window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .task_id = 1, .title = "Completed", .kind = .completed }));
     try harness.runtime.dispatchCommand(app, .{ .name = "metawork.schedule.open.1", .source = .runtime, .window_id = 1 });
     try std.testing.expectEqual(@as(usize, 0), host.calls);
-    const activation = harness.null_platform.activateNotification("schedule-1-1-completed").?;
+    const activation = harness.null_platform.activateNotification("schedule-1-1-completed", .action).?;
     try harness.runtime.dispatchPlatformEvent(app, activation);
     try std.testing.expectEqual(@as(usize, 1), host.calls);
     try std.testing.expectEqual(before, control.currentRevision());
