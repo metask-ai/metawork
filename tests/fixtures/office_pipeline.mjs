@@ -231,7 +231,11 @@ const server = createServer(async (request, response) => {
       writeFileSync(join(workspace, "starvation-ready"), "ready");
       return;
     }
-    if (mode === "stream-interruption" && requests <= 2) {
+    // Every attempt is interrupted after visible output, so the Run exhausts
+    // the free per-request re-issue and the whole Host stream retry budget and
+    // still has to close as a clean provider failure. Interrupting a fixed
+    // count instead would stop failing whenever that budget grows.
+    if (mode === "stream-interruption") {
       response.writeHead(200, { "content-type": "text/event-stream" });
       for (const event of start()) response.write(send(event));
       const timer = setTimeout(() => response.destroy(), 100);
