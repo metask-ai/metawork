@@ -35,8 +35,14 @@ pub const Extension = struct {
         return result;
     }
 };
-const max_relative_bytes = 20 + 1 + 32 + 1 + Extension.max_bytes;
+pub const max_relative_bytes = 20 + 1 + 32 + 1 + Extension.max_bytes;
 const max_filename_bytes = 32 + 1 + Extension.max_bytes;
+
+/// Store-relative identity of an owned file. The only shape that leaves this
+/// module: a caller can read it beneath the store root, never an absolute path.
+pub fn relativePath(file: File, buffer: []u8) Error![]const u8 {
+    return std.fmt.bufPrint(buffer, "{d}/{s}.{s}", .{ file.task_id, file.name, file.extension.slice() }) catch error.WriteFailed;
+}
 
 pub const Source = struct {
     handle: std.Io.File,
@@ -75,7 +81,7 @@ pub const FileStore = struct {
     }
 
     fn relative(file: File, buffer: []u8) Error![]const u8 {
-        return std.fmt.bufPrint(buffer, "{d}/{s}.{s}", .{ file.task_id, file.name, file.extension.slice() }) catch error.WriteFailed;
+        return relativePath(file, buffer);
     }
 
     pub fn allocate(self: *FileStore, size: usize) Error!File {

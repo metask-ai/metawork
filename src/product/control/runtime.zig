@@ -295,8 +295,12 @@ pub const AttachmentFileStore = product_attachment.FileStore;
 pub const AttachmentDescriptor = product_attachment.Descriptor;
 pub const AttachmentArchiveTool = product_attachment.ArchiveTool;
 pub const AttachmentImagePreparation = product_attachment.ImagePreparation;
+pub const AttachmentPreparedImage = product_attachment.PreparedImage;
 pub const max_attachment_preview_pixels = product_attachment.max_image_preview_pixels;
 pub const max_attachment_preview_bytes = product_attachment.max_image_preview_bytes;
+pub const max_attachment_thumbnail_bytes = product_attachment.max_image_thumbnail_bytes;
+pub const max_attachment_thumbnail_side = product_attachment.max_image_thumbnail_side;
+pub const attachmentThumbnailPixelBudget = product_attachment.thumbnailPixelBudget;
 
 pub const AttachmentAcceptance = struct {
     context: ?*anyopaque = null,
@@ -12216,8 +12220,8 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
 }
 
-fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
-    return allocator.dupe(u8, bytes);
+fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!AttachmentPreparedImage {
+    return .{ .bytes = try allocator.dupe(u8, bytes), .width = 8, .height = 4 };
 }
 
 test "Automatic Workspace snapshot exposes unavailable Skill authority with no query authorization" {

@@ -3779,12 +3779,14 @@ const task_switch_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAA
 // The platform preview port receives one already encoded canonical PNG. Core,
 // Product staging, owned originals, checkpoints and all protocol codecs are real;
 // OS image decoding and preview generation belong to desktop acceptance.
-fn prepareTaskSwitchPng(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
+fn prepareTaskSwitchPng(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!product_control.AttachmentPreparedImage {
     var expected: [128]u8 = undefined;
     const size = try std.base64.standard.Decoder.calcSizeForSlice(task_switch_png_base64);
     try std.base64.standard.Decoder.decode(expected[0..size], task_switch_png_base64);
+    // The chip derivative re-encodes the preview, so both calls see the same
+    // canonical bytes in this port.
     try std.testing.expectEqualSlices(u8, expected[0..size], bytes);
-    return allocator.dupe(u8, bytes);
+    return .{ .bytes = try allocator.dupe(u8, bytes), .width = 1, .height = 1 };
 }
 
 const task_switch_protocols = [_]models_contract.Protocol{ .anthropic_messages, .openai_chat_completions, .openai_responses, .gemini_native };

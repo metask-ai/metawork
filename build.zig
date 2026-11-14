@@ -397,6 +397,10 @@ pub fn build(b: *std.Build) void {
         attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_control_runtime }) |module|
         attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{ "attachment", "Attachment", "unified add", "add debt" } })).step);
+    attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.app,
+        .filters = &.{ "previews reduce pixel count", "chip derivative" },
+    })).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
     const control_view_tests = b.addTest(.{
         .root_module = b.createModule(.{

@@ -3487,6 +3487,6 @@ pub fn shutdownOnThread(runtime: *lifecycle.Runtime) void {
     shutdownTestComposition(runtime) catch unreachable;
 }
 
-pub fn prepareTestAttachmentImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
-    return allocator.dupe(u8, bytes);
+pub fn prepareTestAttachmentImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize, _: usize) anyerror!product_control.AttachmentPreparedImage {
+    return .{ .bytes = try allocator.dupe(u8, bytes), .width = 8, .height = 4 };
 }
