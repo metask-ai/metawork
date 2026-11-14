@@ -2066,6 +2066,9 @@ pub fn sessionRunInput(
     const run_options = options orelse return wire.STATUS_INVALID_ARGUMENT;
     std.debug.assert(run_options.time_context_code == wire.TIME_CONTEXT_SYSTEM);
     std.debug.assert(run_options.utc_offset_minutes == 0);
+    // Every Run kind reaches Core through this entry, so one assertion covers
+    // the text, multimodal and Skill paths that share the Host's RunOptions.
+    std.debug.assert(run_options.stream_retry_budget == lifecycle.stream_retry_budget);
     if (run_options.struct_size != @sizeOf(wire.RunOptionsV1) or
         run_options.context_blocks != null or run_options.context_block_count != 0)
         return wire.STATUS_INVALID_ARGUMENT;

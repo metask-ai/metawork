@@ -81,6 +81,19 @@ pub const FileDeliveryInspection = deliver_file.Inspection;
 pub const max_file_deliveries_per_run = deliver_file.max_receipts_per_run;
 pub const MultimodalInputLimits = multimodal.InputLimits;
 pub const multimodal_input_limits = multimodal.input_limits;
+/// Extra same-turn re-issues this Host grants a Run whose accepted stream
+/// failed without an answer after it showed output: a stall, a stream that
+/// ended before its stop report, or a dropped connection. It never covers a
+/// server-declared error or a local decode failure, and it is additional to
+/// the one re-issue every request already has of its own while it started no
+/// tool call. Two matches the reference implementation's headless value; each
+/// spend re-bills that request's whole input, so the Host stays deliberately
+/// low until there is evidence about how often drops arrive consecutively.
+pub const stream_retry_budget: u32 = 2;
+comptime {
+    std.debug.assert(stream_retry_budget > 0);
+    std.debug.assert(stream_retry_budget <= wire.MAX_STREAM_RETRY_BUDGET_V1);
+}
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
 pub const HostFailure = session_control.HostFailure;
@@ -2159,6 +2172,7 @@ pub const Session = struct {
         // Core samples the process date and timezone at Run admission.
         // Skill Runs carry no date block under the same SYSTEM policy.
         options.time_context_code = wire.TIME_CONTEXT_SYSTEM;
+        options.stream_retry_budget = stream_retry_budget;
         self.core_call_in_progress = true;
         self.unlock();
         // A successful Core call must still populate and validate the complete
