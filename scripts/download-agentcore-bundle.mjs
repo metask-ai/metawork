@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -12,20 +20,20 @@ import {
 import { runChild } from "./run-child-process.mjs";
 import { stageAgentCoreBundle } from "./stage-agentcore-bundle.mjs";
 
-async function download(url, fetchResponse) {
-  const response = await fetchResponse(url, {
-    redirect: "error",
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!response.ok)
-    throw new Error(`AgentCore download failed (${response.status}): ${url}`);
-  return response;
-}
+const transientNetworkErrors = new Set([
+  "EAI_AGAIN",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
 
 export async function downloadAgentCoreArchive(
   lock,
   targetId,
-  fetchResponse = fetch,
+  { fetchResponse = fetch, cacheDir } = {},
 ) {
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(lock.version))
     throw new Error("AgentCore lock must specify a stable release version");
@@ -33,9 +41,46 @@ export async function downloadAgentCoreArchive(
   const releaseUrl = new URL(
     `https://downloads.metask-ai.com/agentcore/v${lock.version}/`,
   );
-  const release = await (
-    await download(new URL("manifest.json", releaseUrl), fetchResponse)
-  ).json();
+  let canRetry = true;
+  async function download(url) {
+    for (;;) {
+      try {
+        const response = await fetchResponse(url, {
+          redirect: "error",
+          signal: AbortSignal.timeout(120_000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return Buffer.from(await response.arrayBuffer());
+      } catch (error) {
+        if (
+          !canRetry ||
+          (error.name !== "TimeoutError" &&
+            !transientNetworkErrors.has(error.cause?.code ?? error.code))
+        )
+          throw new Error(
+            `AgentCore download failed: ${url}: ${error.message}`,
+            {
+              cause: error,
+            },
+          );
+        canRetry = false;
+        console.warn(
+          `Retrying AgentCore download after a network error: ${url}`,
+        );
+      }
+    }
+  }
+
+  const cacheExists =
+    cacheDir &&
+    (await stat(cacheDir).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }));
+  const manifestBytes = cacheExists
+    ? await readFile(path.join(cacheDir, "manifest.json"))
+    : await download(new URL("manifest.json", releaseUrl));
+  const release = JSON.parse(manifestBytes.toString("utf8"));
   if (
     release.schema_version !== 1 ||
     release.version !== lock.version ||
@@ -66,13 +111,20 @@ export async function downloadAgentCoreArchive(
     throw new Error(`Invalid AgentCore archive metadata for ${targetId}`);
 
   const archiveUrl = new URL(archivePath, releaseUrl);
-  const bytes = Buffer.from(
-    await (await download(archiveUrl, fetchResponse)).arrayBuffer(),
-  );
+  const bytes = cacheExists
+    ? await readFile(path.join(cacheDir, "bundle.archive"))
+    : await download(archiveUrl);
   if (bytes.length !== artifact.length)
     throw new Error(`AgentCore archive length mismatch: ${archiveUrl}`);
   if (createHash("sha256").update(bytes).digest("hex") !== digest)
     throw new Error(`AgentCore archive SHA-256 mismatch: ${archiveUrl}`);
+  if (cacheExists) {
+    console.log(`Verified cached AgentCore release for ${targetId}`);
+  } else if (cacheDir) {
+    await mkdir(cacheDir, { recursive: true });
+    await writeFile(path.join(cacheDir, "manifest.json"), manifestBytes);
+    await writeFile(path.join(cacheDir, "bundle.archive"), bytes);
+  }
   return bytes;
 }
 
@@ -96,7 +148,9 @@ if (isMain) {
     repositoryRoot,
     targetId,
   );
-  const bytes = await downloadAgentCoreArchive(lock, targetId);
+  const bytes = await downloadAgentCoreArchive(lock, targetId, {
+    cacheDir: process.env.METAWORK_AGENTCORE_DOWNLOAD_CACHE,
+  });
 
   const work = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-"));
   try {

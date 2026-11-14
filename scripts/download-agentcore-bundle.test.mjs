@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { downloadAgentCoreArchive } from "./download-agentcore-bundle.mjs";
 
@@ -46,7 +49,7 @@ for (const [target, [name, bytes]] of Object.entries(archives)) {
   test(`downloads only the archive declared for ${target}`, async () => {
     const { fetchResponse, requests } = fixture();
     assert.deepEqual(
-      await downloadAgentCoreArchive(lock, target, fetchResponse),
+      await downloadAgentCoreArchive(lock, target, { fetchResponse }),
       bytes,
     );
     assert.deepEqual(requests, [`${origin}manifest.json`, `${origin}${name}`]);
@@ -62,7 +65,7 @@ test("rejects release identity mismatches before requesting the archive", async 
     const { release, fetchResponse, requests } = fixture();
     Object.assign(release, changes);
     await assert.rejects(
-      downloadAgentCoreArchive(lock, "aarch64-macos", fetchResponse),
+      downloadAgentCoreArchive(lock, "aarch64-macos", { fetchResponse }),
       /release manifest does not match/,
     );
     assert.deepEqual(requests, [`${origin}manifest.json`]);
@@ -80,7 +83,7 @@ test("rejects missing, ambiguous, and escaping archive entries", async () => {
     if (path !== "duplicate.tar.gz") delete release.targets["core-mac.tar.gz"];
     if (path !== null) release.targets[path] = archive;
     await assert.rejects(
-      downloadAgentCoreArchive(lock, "aarch64-macos", fetchResponse),
+      downloadAgentCoreArchive(lock, "aarch64-macos", { fetchResponse }),
       error,
     );
     assert.deepEqual(requests, [`${origin}manifest.json`]);
@@ -92,7 +95,7 @@ test("rejects truncated and same-length corrupted archives", async () => {
   const { responses, fetchResponse } = fixture();
   responses.set(`${origin}${name}`, bytes.subarray(1));
   await assert.rejects(
-    downloadAgentCoreArchive(lock, "aarch64-macos", fetchResponse),
+    downloadAgentCoreArchive(lock, "aarch64-macos", { fetchResponse }),
     /archive length mismatch/,
   );
 
@@ -100,7 +103,85 @@ test("rejects truncated and same-length corrupted archives", async () => {
   corrupted[0] ^= 1;
   responses.set(`${origin}${name}`, corrupted);
   await assert.rejects(
-    downloadAgentCoreArchive(lock, "aarch64-macos", fetchResponse),
+    downloadAgentCoreArchive(lock, "aarch64-macos", { fetchResponse }),
     /archive SHA-256 mismatch/,
   );
+});
+
+test("uses an exact cached release offline and rejects corrupted cache contents", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-cache-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheDir = path.join(root, "cache");
+  const target = "aarch64-macos";
+  const [, bytes] = archives[target];
+  const { fetchResponse } = fixture();
+  await downloadAgentCoreArchive(lock, target, { cacheDir, fetchResponse });
+
+  const offline = {
+    cacheDir,
+    fetchResponse: () => assert.fail("cache hit attempted a network request"),
+  };
+  assert.deepEqual(
+    await downloadAgentCoreArchive(lock, target, offline),
+    bytes,
+  );
+
+  const archiveFile = path.join(cacheDir, "bundle.archive");
+  const corrupted = Buffer.from(bytes);
+  corrupted[0] ^= 1;
+  await writeFile(archiveFile, corrupted);
+  await assert.rejects(
+    downloadAgentCoreArchive(lock, target, offline),
+    /archive SHA-256 mismatch/,
+  );
+  await writeFile(archiveFile, bytes);
+  const manifestFile = path.join(cacheDir, "manifest.json");
+  const release = JSON.parse(await readFile(manifestFile, "utf8"));
+  release.source_commit = "b".repeat(40);
+  await writeFile(manifestFile, JSON.stringify(release));
+  await assert.rejects(
+    downloadAgentCoreArchive(lock, target, offline),
+    /release manifest does not match/,
+  );
+});
+
+test("allows one retry total for a transient error while fetching a release", async () => {
+  const target = "aarch64-macos";
+  const [name, bytes] = archives[target];
+  const transient = new TypeError("fetch failed", {
+    cause: { code: "UND_ERR_CONNECT_TIMEOUT" },
+  });
+  for (const failAgain of [false, true]) {
+    const { fetchResponse } = fixture();
+    const requests = [];
+    const download = downloadAgentCoreArchive(lock, target, {
+      fetchResponse: (url, options) => {
+        requests.push(url.href);
+        if (requests.length === 1 || (failAgain && requests.length === 3))
+          throw transient;
+        return fetchResponse(url, options);
+      },
+    });
+    if (failAgain) await assert.rejects(download, /AgentCore download failed/);
+    else assert.deepEqual(await download, bytes);
+    assert.deepEqual(requests, [
+      `${origin}manifest.json`,
+      `${origin}manifest.json`,
+      `${origin}${name}`,
+    ]);
+  }
+});
+
+test("does not retry a permanent HTTP failure", async () => {
+  let requests = 0;
+  await assert.rejects(
+    downloadAgentCoreArchive(lock, "aarch64-macos", {
+      fetchResponse: () => {
+        requests += 1;
+        return new Response(null, { status: 404 });
+      },
+    }),
+    /HTTP 404/,
+  );
+  assert.equal(requests, 1);
 });
