@@ -609,7 +609,7 @@ fn createAgentRuntime(
 }
 
 pub fn run(init: std.process.Init) !void {
-    var http_engine: @import("app_http_transport").Engine = undefined;
+    var http_engine: @import("metawork_http_transport").Engine = undefined;
     http_engine.init(std.heap.c_allocator, init.io);
     defer http_engine.deinit();
     var app = App{
@@ -1354,7 +1354,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
     defer harness.destroy(allocator);
     var credentials: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
     var host: Effects = .{};
-    var http_engine: @import("app_http_transport").Engine = undefined;
+    var http_engine: @import("metawork_http_transport").Engine = undefined;
     http_engine.init(allocator, std.testing.io);
     defer http_engine.deinit();
     var composition: App = .{

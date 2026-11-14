@@ -3,7 +3,7 @@
 //! preauthorized HTTP transport owners. It does not interpret MCP payloads.
 
 const std = @import("std");
-const http_execution = @import("app_http_transport");
+const http_execution = @import("metawork_http_transport");
 const select_start = @import("app_select_start");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");

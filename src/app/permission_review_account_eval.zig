@@ -174,7 +174,7 @@ const Host = struct {
         var trace: @import("permission_review_network_trace").Trace = undefined;
         try trace.init(self.init.io);
         defer trace.deinit();
-        var engine: @import("app_http_transport").Engine = undefined;
+        var engine: @import("metawork_http_transport").Engine = undefined;
         engine.init(self.init.gpa, trace.io());
         defer engine.deinit();
         var backend = CompletionHttp{ .http = &engine };
@@ -226,7 +226,7 @@ pub fn run(init: std.process.Init) !void {
     _ = try single_instance.init(init.io, init.gpa, init.minimal.args, paths.dataDir(), identity.runnerBundleId(), false, true);
     defer single_instance.deinit();
     try line(init, .{ .kind = "account_evaluation_stage", .stage = "primary_acquired" });
-    var engine: @import("app_http_transport").Engine = undefined;
+    var engine: @import("metawork_http_transport").Engine = undefined;
     engine.init(init.gpa, init.io);
     defer engine.deinit();
     var http = Http{ .http = &engine };

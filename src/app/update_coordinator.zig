@@ -26,8 +26,10 @@ const Job = struct {
     wake_fn: *const fn (?*anyopaque) anyerror!void,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
-    check_completion: update.CheckCompletion = .{ .failed = .unavailable },
+    check_completion: update.CheckCompletion = .{ .failed = .{ .kind = .unavailable } },
     head_result: update.HeadResult = .network,
+    /// Execution evidence for this attempt, absent once a response arrived.
+    diagnostic: ?update.CheckDiagnostic = null,
 
     fn run(self: *Job) void {
         defer {
@@ -39,27 +41,29 @@ const Job = struct {
             .check => .manifest,
             .download => |value| .{ .download = value.url },
         };
-        const response = self.transport.perform_fn(self.transport.context, request, &buffer, &self.cancellation) catch |err| {
-            self.check_completion = .{ .failed = switch (err) {
+        const response = self.transport.perform_fn(self.transport.context, request, &buffer, &self.cancellation, &self.diagnostic) catch |err| {
+            self.check_completion = .{ .failed = .{ .kind = switch (err) {
                 error.Timeout => .timeout,
                 error.InvalidResponse => .invalid_manifest,
                 else => .network,
-            } };
+            }, .diagnostic = self.diagnostic } };
             self.head_result = if (err == error.Timeout) .timeout else .network;
             return;
         };
         switch (self.work) {
             .check => |input| {
+                // A response arrived, so there is no execution evidence: the
+                // status or the body is the whole fact.
                 if (response.status != 200) {
-                    self.check_completion = .{ .failed = .network };
+                    self.check_completion = .{ .failed = .{ .kind = .network } };
                     return;
                 }
                 if (response.body_len > buffer.len) {
-                    self.check_completion = .{ .failed = .invalid_manifest };
+                    self.check_completion = .{ .failed = .{ .kind = .invalid_manifest } };
                     return;
                 }
                 const release = update.parseManifest(self.allocator, buffer[0..response.body_len], input.target) catch {
-                    self.check_completion = .{ .failed = .invalid_manifest };
+                    self.check_completion = .{ .failed = .{ .kind = .invalid_manifest } };
                     return;
                 };
                 self.check_completion = .{ .release = release };
@@ -118,7 +122,7 @@ pub const Coordinator = struct {
         if (self.check != null) return .accepted;
         const input = self.management.begin_check_fn(self.management.context, self.now()) orelse return .unavailable;
         self.check = self.startJob(.{ .check = input }) catch {
-            self.management.complete_check_fn(self.management.context, input.id, .{ .failed = .unavailable });
+            self.management.complete_check_fn(self.management.context, input.id, .{ .failed = .{ .kind = .unavailable } });
             return .unavailable;
         };
         self.reconcileTimer();
@@ -234,6 +238,9 @@ const TestHost = struct {
     last_url_len: usize = 0,
     requests: std.atomic.Value(u32) = .init(0),
     head_status: u16 = 200,
+    check_status: u16 = 200,
+    diagnostic: ?update.CheckDiagnostic = null,
+    fail_check: ?http.Error = null,
     block_download: bool = false,
     block_check: bool = false,
     body: []const u8 = "{\"version\":\"0.2.8\",\"downloads\":{\"macos\":{\"arm64\":\"https://downloads.metask-ai.com/metawork/new.dmg?release=0.2.8\"}}}",
@@ -304,16 +311,18 @@ const TestHost = struct {
     fn onMain(context: ?*anyopaque) bool {
         return owner(context.?).main_thread == std.Thread.getCurrentId();
     }
-    fn perform(context: *anyopaque, request: http.Request, output: []u8, cancellation: *const http.Cancellation) http.Error!http.Response {
+    fn perform(context: *anyopaque, request: http.Request, output: []u8, cancellation: *const http.Cancellation, diagnostic: *?update.CheckDiagnostic) http.Error!http.Response {
         const self = owner(context);
         _ = self.requests.fetchAdd(1, .release);
+        diagnostic.* = self.diagnostic;
         if ((request == .manifest and self.block_check) or (request == .download and self.block_download)) {
             while (cancellation.state.load(.acquire) == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return error.Cancelled;
             return error.Cancelled;
         }
         if (request == .download) return .{ .status = self.head_status };
+        if (self.fail_check) |failure| return failure;
         @memcpy(output[0..self.body.len], self.body);
-        return .{ .status = 200, .body_len = self.body.len };
+        return .{ .status = self.check_status, .body_len = self.body.len };
     }
     fn coordinator(self: *TestHost) Coordinator {
         return .{ .allocator = std.testing.allocator, .io = std.testing.io, .management = .{ .context = self, .start_fn = start, .next_check_fn = next, .begin_check_fn = beginCheck, .complete_check_fn = completeCheck, .begin_download_fn = beginDownload, .complete_download_fn = completeDownload, .browser_result_fn = browserResult, .cancel_download_fn = cancel, .stop_fn = stop }, .transport = .{ .context = self, .perform_fn = perform }, .host = .{ .context = self, .now_ns_fn = now, .wake_fn = wake, .start_timer_fn = arm, .cancel_timer_fn = disarm, .open_fn = open, .on_main_thread_fn = onMain } };
@@ -406,6 +415,53 @@ test "updates disconnect cancels only the pending download, while shutdown joins
     try std.testing.expectEqual(update.CheckState.unavailable, host.state.view().checkState);
     try std.testing.expectEqual(Outcome.unavailable, coordinator.requestCheck());
     try std.testing.expect(!coordinator.openWebsite());
+}
+
+test "updates publish execution evidence for transport failures and none for answered requests" {
+    const transport_failures = [_]struct { failure: http.Error, kind: update.CheckError }{
+        .{ .failure = error.Timeout, .kind = .timeout },
+        .{ .failure = error.Network, .kind = .network },
+        .{ .failure = error.InvalidResponse, .kind = .invalid_manifest },
+    };
+    const evidence: update.CheckDiagnostic = .{ .phase = .connect, .cause = .tls_failed, .elapsed = .under_5s };
+    for (transport_failures) |case| {
+        var host = try TestHost.init();
+        host.fail_check = case.failure;
+        host.diagnostic = evidence;
+        var coordinator = host.coordinator();
+        coordinator.start(false);
+        defer coordinator.shutdown();
+        try std.testing.expectEqual(Outcome.accepted, coordinator.requestCheck());
+        try TestHost.settle(&coordinator);
+        try std.testing.expectEqual(case.kind, host.state.view().checkError);
+        try std.testing.expectEqual(evidence.phase, host.state.view().checkDiagnostic.?.phase);
+        try std.testing.expectEqual(evidence.cause, host.state.view().checkDiagnostic.?.cause);
+    }
+    // A rejected status and an unusable manifest are answered requests: the
+    // execution layer did not fail, so there is no evidence to publish.
+    const answered = [_]struct { status: u16, body: []const u8, kind: update.CheckError }{
+        .{ .status = 503, .body = "{}", .kind = .network },
+        .{ .status = 200, .body = "not a manifest", .kind = .invalid_manifest },
+    };
+    for (answered) |case| {
+        var host = try TestHost.init();
+        host.check_status = case.status;
+        host.body = case.body;
+        var coordinator = host.coordinator();
+        coordinator.start(false);
+        defer coordinator.shutdown();
+        try std.testing.expectEqual(Outcome.accepted, coordinator.requestCheck());
+        try TestHost.settle(&coordinator);
+        try std.testing.expectEqual(case.kind, host.state.view().checkError);
+        try std.testing.expect(host.state.view().checkDiagnostic == null);
+    }
+    // No request at all leaves no evidence either.
+    var host = try TestHost.init();
+    var coordinator = host.coordinator();
+    coordinator.start(false);
+    coordinator.shutdown();
+    try std.testing.expectEqual(Outcome.unavailable, coordinator.requestCheck());
+    try std.testing.expect(host.state.view().checkDiagnostic == null);
 }
 
 test "updates timer failure closes the capability instead of starting a parallel scheduling path" {

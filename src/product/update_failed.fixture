@@ -1,0 +1,1 @@
+{"checkState":"failed","checkError":"network","checkDiagnostic":{"phase":"connect","cause":"tls_failed","elapsed":"under_5s"},"latestVersion":null,"updateAvailable":false,"downloadAvailable":false,"downloadState":"idle","downloadError":"none"}

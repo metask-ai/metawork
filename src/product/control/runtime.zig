@@ -9636,10 +9636,15 @@ test "updates Control publishes committed facts through the canonical live conte
     try std.testing.expectEqualStrings("999.0.0", view.get("latestVersion").?.string);
     try std.testing.expect(view.get("updateAvailable").?.bool);
     try std.testing.expect(!view.get("downloadAvailable").?.bool);
-    try std.testing.expectEqual(@as(usize, 7), view.count());
+    try std.testing.expectEqual(@as(usize, 8), view.count());
+    try std.testing.expectEqual(std.json.Value.null, view.get("checkDiagnostic").?);
     const failed = management.begin_check_fn(management.context, 50_000).?;
-    management.complete_check_fn(management.context, failed.id, .{ .failed = .timeout });
+    management.complete_check_fn(management.context, failed.id, .{ .failed = .{
+        .kind = .timeout,
+        .diagnostic = .{ .phase = .head, .cause = .deadline_exceeded, .elapsed = .under_15s },
+    } });
     try std.testing.expect(control.updates.view().updateAvailable);
+    try std.testing.expectEqual(update.Elapsed.under_15s, control.updates.view().checkDiagnostic.?.elapsed);
     control.beginShutdown();
     try std.testing.expect(management.begin_check_fn(management.context, 60_000) == null);
 }

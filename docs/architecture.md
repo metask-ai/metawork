@@ -32,6 +32,7 @@ flowchart TB
     PRODUCT["Product<br/>Account + Product Control"]
     AGENT["Agent<br/>Runtime / Session / Conversation"]
     STORAGE["Storage<br/>standalone SQL boundary"]
+    FOUNDATION["Foundation<br/>product-neutral mechanism"]
     AGENTCORE["Metask AgentCore<br/>external execution dependency"]
     NATIVE_RUNTIME["Native SDK Runtime API<br/>external desktop dependency"]
     NATIVE_COMPAT["Native SDK compatibility<br/>Application-owned seams"]
@@ -39,6 +40,7 @@ flowchart TB
     APPLICATION -. "compose" .-> BRIDGE
     APPLICATION -. "compose" .-> PRODUCT
     APPLICATION -. "compose / lifecycle" .-> AGENT
+    APPLICATION -->|"shared mechanism"| FOUNDATION
     BRIDGE <-->|"Renderer Bridge"| RENDERER
     BRIDGE <-->|"typed command / projection"| PRODUCT
     PRODUCT -->|"public execution surface"| AGENT
@@ -55,7 +57,8 @@ flowchart TB
 3. Product 包含 Account 与 Product Control 两个 named owner，不代表统一 module；Product Control 直接消费 Agent 公共执行能力；
 4. Agent 是独立于 Product 的 MetaWork-owned 执行边界，也是 AgentCore SDK/ABI 的唯一正式消费者；
 5. Native SDK compatibility 是 Application-owned 的受限消费路径，不是新的顶层 owner、平台层或 SDK 替代品；
-6. Storage 是独立基础边界；接入 Product 必须显式定义 schema owner、backend composition 和 shutdown，不因源码存在而自动取得业务职责。
+6. Storage 是独立基础边界；接入 Product 必须显式定义 schema owner、backend composition 和 shutdown，不因源码存在而自动取得业务职责；
+7. Foundation 只拥有无产品语义的执行机制，与 Application、Product、Agent、Storage 平级；它不得反向导入任何 owner，其纯合同可被任何 owner 精确导入，引擎只由 Application 组合。成员逐个按准入收取，不因目录位置取得身份。
 
 文档中的 Application 对应代码中的组合类型 `App`；“Product”只指产品逻辑边界；“Agent”只指 MetaWork 对 AgentCore 的产品化集成边界；“Host”在 wire 或依赖合同中泛指 Renderer 之外的可信侧，不能据此建立新的 owner。
 
@@ -191,9 +194,9 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 `fail closed` 只表示在缺少可靠 authority 时拒绝相应的危险 effect、无人值守执行或权限扩大，不等同于冻结整个应用，也不自动推出“禁止保存任何新状态”。decode 拒绝、数据证据保留、运行时可用性、mutation admission、commit certainty 和恢复可用性是不同事实，必须由 owner 分别建模；一个事实不能代替另一个事实。
 
-### 3.8 Application HTTP 执行
+### 3.8 Foundation HTTP 执行
 
-MetaWork 自有的出站 HTTP 由 Application 组合共享执行层；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。执行层对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
+MetaWork 自有的出站 HTTP 由 Foundation 拥有执行机制、Application 组合；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。执行层对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
 
 每个调用方显式给出整次调用的 deadline，或在由自身取消约束整次调用时给出 DNS、TCP 与 TLS 的连接预算。多地址连接最多两路并行，后一地址至少在前一次尝试开始 250 ms 后才启动；只有其后仍有地址的尝试才按剩余预算分摊设上限（不少于 2 秒），最后或唯一地址使用全部剩余预算。未尝试的地址不构成失败；对外报告的失败按 TLS、连接、DNS 的顺序取最具体者，诊断只记录各类尝试的计数。
 

@@ -3,7 +3,7 @@
 //! Workbench remains the owner of durable product state and operation markers.
 
 const std = @import("std");
-const http_execution = @import("app_http_transport");
+const http_execution = @import("metawork_http_transport");
 const oauth_mechanics = @import("oauth_mechanics");
 const oauth_loopback = @import("oauth_loopback");
 const oauth_loopback_transport = @import("oauth_loopback_transport");

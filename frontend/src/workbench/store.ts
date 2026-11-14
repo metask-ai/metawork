@@ -45,6 +45,7 @@ export const initialWorkbenchState: WorkbenchState = {
     updates: {
       checkState: "unavailable",
       checkError: "none",
+      checkDiagnostic: null,
       latestVersion: null,
       updateAvailable: false,
       downloadAvailable: false,

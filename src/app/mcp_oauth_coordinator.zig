@@ -3,7 +3,7 @@
 //! this owner only sequences platform time/credential/network capabilities.
 
 const std = @import("std");
-const http_execution = @import("app_http_transport");
+const http_execution = @import("metawork_http_transport");
 const control_ports = @import("metawork_product_control_ports");
 const mcp_types = @import("metawork_product_mcp");
 const mcp_oauth = @import("metawork_mcp_oauth");

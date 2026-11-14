@@ -1,8 +1,19 @@
 const std = @import("std");
 const http = @import("http_transport.zig");
+const contract = @import("metawork_http_contract");
 const Io = std.Io;
 
 const Reply = struct { status: u16, length: usize };
+
+/// A successful call carries no diagnostic, and every failure carries one
+/// naming the same cause, including a failure the called function returned.
+fn expectDiagnosedOutcome(result: anytype) !void {
+    const failure: ?http.Error = switch (result.outcome) {
+        .completed => |value| if (value) |_| null else |err| err,
+        .failed => |err| err,
+    };
+    if (failure) |err| try std.testing.expectEqual(http.causeOf(err), result.diagnostic.?.cause) else try std.testing.expect(result.diagnostic == null);
+}
 
 fn fetch(operation: *http.Operation, url: []const u8, body: ?[]const u8, output: []u8) http.Error!Reply {
     const uri = std.Uri.parse(url) catch return error.InvalidRequest;
@@ -55,7 +66,8 @@ test "HTTP fixed execution closes controls and consumes a real response" {
     const reply = try result.outcome.completed;
     try std.testing.expectEqual(@as(u16, 200), reply.status);
     try std.testing.expectEqualStrings("{}", output[0..reply.length]);
-    try std.testing.expectEqual(http.Send.may_have_been_sent, result.send);
+    try std.testing.expectEqual(contract.Send.may_have_been_sent, result.send);
+    try expectDiagnosedOutcome(result);
 }
 
 const Faults = struct {
@@ -237,7 +249,10 @@ test "HTTP cancellation closes send admission before a late connection returns" 
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
-    try std.testing.expectEqual(http.Send.not_sent, result.send);
+    try std.testing.expectEqual(contract.Send.not_sent, result.send);
+    try expectDiagnosedOutcome(result);
+    // The deadline fell while a connection was being established.
+    try std.testing.expectEqual(contract.Phase.connect, result.diagnostic.?.phase);
     try std.testing.expectEqual(@as(usize, 1), Faults.late.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), Faults.active.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), server.requests);
@@ -326,7 +341,7 @@ test "HTTP slow TLS rejection on the only address stays a TLS failure" {
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectError(error.TlsFailed, result.outcome.completed);
-    try std.testing.expectEqual(http.Send.not_sent, result.send);
+    try std.testing.expectEqual(contract.Send.not_sent, result.send);
     try std.testing.expect(elapsed >= 3500);
 }
 
@@ -396,7 +411,9 @@ test "HTTP connect budget ends DNS and TCP with their typed failures before any 
         var output: [8]u8 = undefined;
         const result = engine.run(.{ .consumer = .completion, .isolation = .public, .budget = .{ .connect = .fromMilliseconds(200) } }, fetch, .{ "http://fixture.test/post", "body", &output });
         try std.testing.expectEqual(@as(http.Error, if (mode == .slow_dns) error.DnsFailed else error.ConnectFailed), result.outcome.failed);
-        try std.testing.expectEqual(http.Send.not_sent, result.send);
+        try std.testing.expectEqual(contract.Send.not_sent, result.send);
+        try expectDiagnosedOutcome(result);
+        try std.testing.expectEqual(@as(contract.Phase, if (mode == .slow_dns) .resolve else .connect), result.diagnostic.?.phase);
         try std.testing.expectEqual(@as(usize, 0), Faults.dns_active.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), Faults.active.load(.acquire));
         try std.testing.expectEqual(@as(usize, if (mode == .slow_dns) 0 else 1), Faults.attempts.load(.acquire));
@@ -418,7 +435,9 @@ test "HTTP retains resolver capacity and borrowed inputs until canceled DNS join
     var output: [8]u8 = undefined;
     const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(20), .clock = .awake }) } }, fetch, .{ "http://fixture.test/post", "body", &output });
     try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
-    try std.testing.expectEqual(http.Send.not_sent, result.send);
+    try std.testing.expectEqual(contract.Send.not_sent, result.send);
+    try expectDiagnosedOutcome(result);
+    try std.testing.expectEqual(contract.Phase.resolve, result.diagnostic.?.phase);
     try std.testing.expectEqual(@as(usize, 1), Faults.late.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), Faults.dns_active.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), Faults.attempts.load(.acquire));
@@ -442,7 +461,10 @@ test "HTTP lost POST response is never replayed and retains may-sent evidence" {
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(@as(usize, 1), server.requests);
     try std.testing.expectError(error.ReadFailed, result.outcome.completed);
-    try std.testing.expectEqual(http.Send.may_have_been_sent, result.send);
+    try std.testing.expectEqual(contract.Send.may_have_been_sent, result.send);
+    // A failure the called function returned is diagnosed like a selected one.
+    try expectDiagnosedOutcome(result);
+    try std.testing.expectEqual(contract.Phase.head, result.diagnostic.?.phase);
 }
 
 test "HTTP no capacity and preexisting controls refuse work without sending" {
@@ -457,11 +479,11 @@ test "HTTP no capacity and preexisting controls refuse work without sending" {
         const control: http.Control = .{ .consumer = .completion, .isolation = .public, .cancellation = .atomic(&state), .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } };
         const result = engine.run(control, fetch, .{ "http://127.0.0.1:1/post", "body", &output });
         if (result.outcome == .completed) try std.testing.expectError(error.ResourceLimit, result.outcome.completed) else try std.testing.expectEqual(error.ResourceLimit, result.outcome.failed);
-        try std.testing.expectEqual(http.Send.not_sent, result.send);
+        try std.testing.expectEqual(contract.Send.not_sent, result.send);
         state.store(1, .release);
         const cancelled = engine.run(control, fetch, .{ "http://127.0.0.1:1/post", "body", &output });
         try std.testing.expectEqual(error.Cancelled, cancelled.outcome.failed);
-        try std.testing.expectEqual(http.Send.not_sent, cancelled.send);
+        try std.testing.expectEqual(contract.Send.not_sent, cancelled.send);
     }
 }
 
@@ -877,7 +899,7 @@ test "HTTP never retries once response bytes arrived, for POST, or on a new conn
         try std.testing.expectError(error.ReadFailed, result.outcome.completed);
         try std.testing.expect(!result.retried);
         try std.testing.expectEqual(case != .fresh, result.reused);
-        try std.testing.expectEqual(http.Send.may_have_been_sent, result.send);
+        try std.testing.expectEqual(contract.Send.may_have_been_sent, result.send);
         try std.testing.expectEqual(@as(usize, if (case == .fresh) 1 else 2), pool.requests.load(.acquire));
     }
 }
@@ -1231,7 +1253,10 @@ test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" 
     for (0..workers.len) |_| try held.entered.wait(engine.io);
     const refused = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) } }, Held.complete, .{});
     try std.testing.expectEqual(error.ResourceLimit, refused.outcome.failed);
-    try std.testing.expectEqual(http.Send.not_sent, refused.send);
+    try std.testing.expectEqual(contract.Send.not_sent, refused.send);
+    try std.testing.expectEqual(contract.Phase.admission, refused.diagnostic.?.phase);
+    try std.testing.expectEqual(contract.Cause.resource_limit, refused.diagnostic.?.cause);
     const continuation = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) }, .continuation = true }, Held.complete, .{});
     try std.testing.expectEqual(@as(u8, 42), continuation.outcome.completed);
+    try std.testing.expect(continuation.diagnostic == null);
 }

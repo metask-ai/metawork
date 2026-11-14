@@ -1,7 +1,8 @@
-//! Application-owned HTTP execution. Business owners retain retry, response and
+//! Foundation-owned HTTP execution. Business owners retain retry, response and
 //! shutdown policy. A returned result always means all borrowed inputs are idle.
 const std = @import("std");
-const memory = @import("app_http_memory");
+const memory = @import("metawork_http_memory");
+const contract = @import("metawork_http_contract");
 const idle_probe = @import("http_idle_probe.zig");
 const Io = std.Io;
 const Client = std.http.Client;
@@ -21,8 +22,36 @@ pub const Error = error{
     DeadlineExceeded,
 };
 pub const Consumer = enum { update, completion, metask, mcp_oauth, mcp };
-pub const Phase = enum { admission, resolve, connect, send, head, body, complete };
-pub const Send = enum { not_sent, may_have_been_sent };
+
+/// The data projection of `Error`. The switch is exhaustive and the counts
+/// must match, so neither vocabulary can gain or lose a member alone.
+pub fn causeOf(err: Error) contract.Cause {
+    return switch (err) {
+        error.InvalidRequest => .invalid_request,
+        error.DnsFailed => .dns_failed,
+        error.ConnectFailed => .connect_failed,
+        error.TlsFailed => .tls_failed,
+        error.WriteFailed => .write_failed,
+        error.ReadFailed => .read_failed,
+        error.InvalidResponse => .invalid_response,
+        error.ResponseTooLarge => .response_too_large,
+        error.OutOfMemory => .out_of_memory,
+        error.ResourceLimit => .resource_limit,
+        error.Cancelled => .cancelled,
+        error.DeadlineExceeded => .deadline_exceeded,
+    };
+}
+
+comptime {
+    if (@typeInfo(Error).error_set.?.len != @typeInfo(contract.Cause).@"enum".fields.len)
+        @compileError("every HTTP Error needs exactly one Cause");
+}
+
+/// Milliseconds since admission, saturating; a clock that went backwards is 0.
+fn elapsedMilliseconds(value: i64) u32 {
+    if (value <= 0) return 0;
+    return @intCast(@min(value, @as(i64, std.math.maxInt(u32))));
+}
 
 pub const Cancellation = struct {
     context: *const anyopaque,
@@ -94,12 +123,17 @@ pub const Control = struct {
 pub fn Result(comptime T: type) type {
     return struct {
         outcome: union(enum) { completed: T, failed: Error },
-        send: Send,
+        send: contract.Send,
         /// The request was attempted on a pooled idle connection.
         reused: bool = false,
         /// That attempt failed safely and the request ran once more on a new
         /// connection. Implies `reused`.
         retried: bool = false,
+        /// Present exactly when the engine recorded a failure, whether it
+        /// surfaced as `outcome.failed` or as an error the caller's own
+        /// function returned inside `outcome.completed`. The same facts the
+        /// engine logs, in a form the caller may store and publish.
+        diagnostic: ?contract.Diagnostic = null,
     };
 }
 
@@ -292,7 +326,7 @@ pub const Engine = struct {
         const T = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
         const Outcome = union(enum) { completed: T, cancelled: void, deadline: void, connect_budget: void };
         const started: Io.Clock.Timestamp = .now(self.io, .awake);
-        var operation: Operation = .{ .engine = self, .control = control, .connect_end = switch (control.budget) {
+        var operation: Operation = .{ .engine = self, .control = control, .started = started, .connect_end = switch (control.budget) {
             .deadline => |deadline| deadline,
             .connect => |duration| started.addDuration(.{ .raw = duration, .clock = .awake }),
         } };
@@ -310,12 +344,12 @@ pub const Engine = struct {
                 attempts.tls.load(.monotonic), attempts.connect.load(.monotonic), attempts.capped.load(.monotonic),
             });
         };
-        operation.check() catch |err| return .{ .outcome = .{ .failed = err }, .send = .not_sent };
+        operation.check() catch |err| return .{ .outcome = .{ .failed = err }, .send = .not_sent, .diagnostic = operation.diagnose(err) };
         const lane: usize = @intFromBool(control.continuation);
         self.mutex.lockUncancelable(self.io);
         if (self.active[lane] == request_limit) {
             self.mutex.unlock(self.io);
-            return .{ .outcome = .{ .failed = operation.fail(error.ResourceLimit) }, .send = .not_sent };
+            return .{ .outcome = .{ .failed = operation.fail(error.ResourceLimit) }, .send = .not_sent, .diagnostic = operation.diagnose(error.ResourceLimit) };
         }
         self.active[lane] += 1;
         self.mutex.unlock(self.io);
@@ -363,7 +397,7 @@ pub const Engine = struct {
         // won selection is never replaced by cancellation during this join.
         operation.stop();
         selection.cancelDiscard();
-        const result: Result(T) = .{
+        var result: Result(T) = .{
             .send = operation.sendFact(),
             .reused = operation.reused,
             .retried = operation.retried,
@@ -379,6 +413,10 @@ pub const Engine = struct {
             },
         };
         if (result.outcome == .failed) operation.failure = result.outcome.failed;
+        // The same condition the log line uses, so the returned facts and the
+        // logged ones can never disagree. A failure the caller's function
+        // returned is recorded here too, not only a selected terminal one.
+        if (operation.failure) |err| result.diagnostic = operation.diagnose(err);
         return result;
     }
 
@@ -506,10 +544,12 @@ pub const Engine = struct {
 pub const Operation = struct {
     engine: *Engine,
     control: Control,
+    /// Admission of this call; the origin of every elapsed measurement.
+    started: Io.Clock.Timestamp,
     // bit 0: first HTTP write admitted; bit 1: execution stopped.
     gate: std.atomic.Value(u8) = .init(0),
     slot: ?*Engine.Slot = null,
-    phase: Phase = .admission,
+    phase: contract.Phase = .admission,
     failure: ?Error = null,
     reused: bool = false,
     retried: bool = false,
@@ -546,11 +586,20 @@ pub const Operation = struct {
         return err;
     }
 
+    /// Read after the workers join: phase is no longer written concurrently.
+    fn diagnose(self: *const Operation, err: Error) contract.Diagnostic {
+        return .{
+            .phase = self.phase,
+            .cause = causeOf(err),
+            .elapsed_ms = elapsedMilliseconds(self.started.untilNow(self.engine.io).raw.toMilliseconds()),
+        };
+    }
+
     fn stop(self: *Operation) void {
         _ = self.gate.fetchOr(2, .acq_rel);
     }
 
-    pub fn sendFact(self: *const Operation) Send {
+    pub fn sendFact(self: *const Operation) contract.Send {
         return if (self.gate.load(.acquire) & 1 != 0) .may_have_been_sent else .not_sent;
     }
 
@@ -1185,4 +1234,15 @@ test "HTTP Keep-Alive timeout parsing keeps a one second margin under the defaul
 test {
     _ = @import("http_transport_test.zig");
     _ = @import("http_idle_probe.zig");
+    _ = @import("metawork_http_contract");
+}
+
+test "HTTP error and cause vocabularies are one to one" {
+    var seen: std.EnumSet(contract.Cause) = .initEmpty();
+    inline for (@typeInfo(Error).error_set.?) |field| {
+        const cause = causeOf(@field(anyerror, field.name));
+        try std.testing.expect(!seen.contains(cause));
+        seen.insert(cause);
+    }
+    try std.testing.expectEqual(@typeInfo(contract.Cause).@"enum".fields.len, seen.count());
 }

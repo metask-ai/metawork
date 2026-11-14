@@ -80,6 +80,12 @@ const updateAvailable = JSON.parse(
     "utf8",
   ),
 );
+const updateFailed = JSON.parse(
+  readFileSync(
+    new URL("../src/product/update_failed.fixture", import.meta.url),
+    "utf8",
+  ),
+);
 const updateControls = {
   disabled: false,
   generation: "1",
@@ -103,6 +109,7 @@ function identityElement(callbacks, accountView = account, locale = "en-US") {
       updates: {
         checkState: "unchecked",
         checkError: "none",
+        checkDiagnostic: null,
         latestVersion: null,
         updateAvailable: false,
         downloadAvailable: false,
@@ -589,4 +596,44 @@ test("update entry works signed out in Chinese and never depends on account comm
     false,
   );
   assert.ok(screen.getByRole("button", { name: "官网下载" }));
+});
+
+test("a failed check keeps one sentence and hides the technical detail behind a disclosure", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity({ updates: updateFailed });
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name: "About" }));
+  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  assert.match(
+    screen.getByRole("status").textContent,
+    /^Couldn.t check for updates\. Try again later\.$/u,
+  );
+  const details = dialog.querySelector("details.feedback-diagnostics");
+  assert.equal(details.open, false);
+  assert.equal(details.querySelector("summary").textContent, "Check details");
+  assert.equal(details.querySelector("pre"), null);
+  await user.click(details.querySelector("summary"));
+  await waitFor(() => assert.ok(details.querySelector("pre")));
+  const detail = details.querySelector("pre").textContent;
+  assert.match(detail, /Stage: connecting/u);
+  assert.match(detail, /Reason: the secure connection failed/u);
+  assert.match(detail, /Took: a few seconds/u);
+  assert.doesNotMatch(
+    detail,
+    /https?:|\/\/|\d+\.\d+\.\d+\.\d+|authorization|metask|manifest/iu,
+  );
+});
+
+test("a check that did not fail shows no diagnostics entry at all", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity({ updates: updateAvailable });
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name: "About" }));
+  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  assert.equal(dialog.querySelector("details.feedback-diagnostics"), null);
+  assert.doesNotMatch(dialog.textContent, /Check details/u);
 });

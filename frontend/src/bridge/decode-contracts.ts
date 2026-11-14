@@ -5504,6 +5504,8 @@ export function decodeUpdateView(value: unknown) {
     fail(path, "invalid release version");
   if ((result.checkState === "failed") !== (result.checkError !== "none"))
     fail(path, "inconsistent check outcome");
+  if (result.checkDiagnostic !== null && result.checkState !== "failed")
+    fail(path, "diagnostics without a failed check");
   if ((result.downloadState === "failed") !== (result.downloadError !== "none"))
     fail(path, "inconsistent download outcome");
   if (
