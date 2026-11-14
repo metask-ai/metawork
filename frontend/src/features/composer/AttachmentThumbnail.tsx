@@ -97,7 +97,9 @@ export function AttachmentThumbnail({
   const content = image ? (
     <PreviewImageView
       image={image}
-      alt={label}
+      // The chip already names the file in text, and the viewer entry carries
+      // its own label, so the thumbnail itself is decorative.
+      alt=""
       onFailure={() => setResult({ token, value: { state: "error" } })}
     />
   ) : (

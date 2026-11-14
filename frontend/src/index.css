@@ -7940,8 +7940,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-radius: 6px;
   object-fit: cover;
 }
+.composer-attachment-media .file-preview-decoded {
+  overflow: hidden;
+}
+/* The reserved box is the chip's loading state; preview prose does not fit in
+   56px, and a failure falls back to the format label instead. */
 .composer-attachment-media .file-preview-image-feedback {
-  min-height: 0;
+  display: none;
 }
 
 .composer-attachment-kind svg {
