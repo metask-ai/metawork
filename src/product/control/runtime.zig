@@ -9869,6 +9869,10 @@ pub const TestSupport = if (builtin.is_test) struct {
         try testImagePreviewRuntime(control, root);
     }
 
+    pub fn attachmentMediaFixture(control: *Runtime, store: *AttachmentFileStore) !void {
+        try testAttachmentMediaRuntime(control, store);
+    }
+
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
     }

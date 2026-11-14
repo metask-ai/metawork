@@ -20,7 +20,7 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 19;
+const async_product_handler_count = 20;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -420,6 +420,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
+            .{ .name = commands.media_thumbnail, .function = mediaThumbnail },
             .{ .name = commands.read_preview_video, .function = readPreviewVideo },
             .{ .name = commands.open_external_link, .function = openExternalLink },
             .{ .name = commands.updates_check, .function = checkUpdates },
@@ -548,6 +549,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[16] = .{ .name = commands.mcp_approve_connection, .context = self, .invoke_fn = approveMcpConnection };
         self.registered_async_handlers[17] = .{ .name = commands.mcp_probe_http_draft, .context = self, .invoke_fn = probeMcpHttpDraft };
         self.registered_async_handlers[18] = .{ .name = commands.mcp_verify_add_http_draft, .context = self, .invoke_fn = verifyAndAddMcpHttpDraft };
+        self.registered_async_handlers[19] = .{ .name = commands.media_preview, .context = self, .invoke_fn = mediaPreview };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -1468,6 +1470,121 @@ pub const Dispatcher = struct {
         respondPreviewRelease(responder, invocation.request.id, key.generation, key.preview_id);
         self.updatePreviewTimer();
     }
+    const MediaTargetResolution = union(enum) {
+        /// A staged draft attachment this connection and window still own.
+        attachment: u64,
+        /// The target decoded, but this connection no longer holds that grant.
+        missing,
+    };
+
+    /// A registered target resolves against the authority its kind declares.
+    /// A malformed token or an unregistered kind fails closed as a payload
+    /// error; a grant this connection does not hold is an ordinary `missing`,
+    /// because a draft that was sent or removed is not a protocol violation.
+    fn resolveMediaTarget(
+        self: *Dispatcher,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+        target: handlers.MediaTarget,
+    ) !MediaTargetResolution {
+        const kind = product_control.MediaKind.fromWire(target.kind) orelse return error.InvalidBridgePayload;
+        switch (kind) {
+            .draft_attachment => {
+                if (!handlers.validAttachmentToken(target.token)) return error.InvalidBridgePayload;
+                var ids: [1]u64 = undefined;
+                const resolved = self.attachment_grants.resolve(
+                    &.{target.token},
+                    generation,
+                    window_id,
+                    &ids,
+                ) catch return .missing;
+                return .{ .attachment = resolved[0] };
+            },
+        }
+    }
+
+    /// The thumbnail tier is a single synchronous answer: Product holds the
+    /// derived pixels already, so there is no queue, no grant and no chunk
+    /// reader, and nothing stays reserved after the response is written.
+    fn mediaThumbnail(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(handlers.MediaThumbnailRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const generation = try handlers.parseWireId(parsed.value.generation);
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        const control = try self.requireProductControl();
+        const target = try self.resolveMediaTarget(generation, invocation.source.window_id, parsed.value.target);
+        const attachment_id = switch (target) {
+            .attachment => |id| id,
+            .missing => return std.fmt.bufPrint(output, "{{\"state\":\"missing\"}}", .{}),
+        };
+        return switch (control.attachmentThumbnail(attachment_id)) {
+            .ready => |thumbnail| writeMediaThumbnail(output, thumbnail),
+            .unavailable => |state| std.fmt.bufPrint(output, "{{\"state\":\"{s}\"}}", .{filePreviewStateName(state)}),
+        };
+    }
+
+    fn writeMediaThumbnail(output: []u8, thumbnail: product_control.MediaThumbnail) ![]const u8 {
+        const prefix = try std.fmt.bufPrint(
+            output,
+            "{{\"state\":\"ready\",\"thumbnail\":{{\"mediaType\":\"{s}\",\"sizeBytes\":\"{d}\",\"width\":{d},\"height\":{d},\"securityEpoch\":\"{d}\",\"dataBase64\":\"",
+            .{ thumbnail.media_type, thumbnail.bytes.len, thumbnail.width, thumbnail.height, thumbnail.security_epoch },
+        );
+        const suffix = "\"}}";
+        const encoded_len = std.base64.standard.Encoder.calcSize(thumbnail.bytes.len);
+        if (encoded_len > output.len - prefix.len - suffix.len) return error.InvalidBridgePayload;
+        const encoded = std.base64.standard.Encoder.encode(output[prefix.len..][0..encoded_len], thumbnail.bytes);
+        @memcpy(output[prefix.len + encoded.len ..][0..suffix.len], suffix);
+        return output[0 .. prefix.len + encoded.len + suffix.len];
+    }
+
+    fn mediaPreview(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginMediaPreview(invocation, responder) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, null);
+        };
+    }
+
+    /// The viewer tier for a registered target. It shares the File Preview
+    /// in-flight table, grant issuance, chunk reader and release command; only
+    /// the target's authority and byte source differ.
+    fn beginMediaPreview(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.MediaPreviewRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
+        self.preview_high_water = key.preview_id;
+        const control = try self.requireProductControl();
+        const target = try self.resolveMediaTarget(key.generation, invocation.source.window_id, parsed.value.target);
+        const attachment_id = switch (target) {
+            .attachment => |id| id,
+            .missing => {
+                respondFilePreview(responder, invocation.request.id, .missing, "", false, false, null);
+                return;
+            },
+        };
+        const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
+            respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
+            return;
+        };
+        for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
+            slot.generation = key.generation;
+            slot.preview_id = key.preview_id;
+            slot.window_id = invocation.source.window_id;
+            break;
+        };
+        switch (control.beginAttachmentPreview(id, attachment_id)) {
+            .queued => self.updatePreviewTimer(),
+            .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
+        }
+    }
+
     fn readPreviewImage(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         return self.readPreviewMedia(invocation, output, false);
@@ -1571,10 +1688,8 @@ pub const Dispatcher = struct {
         };
         responder.success(request_id, writer.buffered()) catch {};
     }
-    fn respondFilePreview(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, content: []const u8, truncated: bool, redacted: bool, media: ?PreviewMedia) void {
-        var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        writer.print("{{\"state\":\"{s}\",\"content\":", .{switch (state) {
+    fn filePreviewStateName(state: product_control.FilePreviewState) []const u8 {
+        return switch (state) {
             .ready => "ready",
             .busy => "busy",
             .stale_security => "stale_security",
@@ -1583,7 +1698,13 @@ pub const Dispatcher = struct {
             .unsupported, .image_limit, .animated_image => "unsupported",
             .changing => "changing",
             .failed => "error",
-        }}) catch {
+        };
+    }
+
+    fn respondFilePreview(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, content: []const u8, truncated: bool, redacted: bool, media: ?PreviewMedia) void {
+        var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        writer.print("{{\"state\":\"{s}\",\"content\":", .{filePreviewStateName(state)}) catch {
             responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
             return;
         };
@@ -6431,6 +6552,174 @@ test "permission command ingress accepts AgentCore Session choices" {
             .permission = permission,
         }));
     }
+}
+
+test "attachment media commands bind the draft grant to this connection and window" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) bool {
+            @memset(bytes, 9);
+            return true;
+        }
+    };
+    const Capture = struct {
+        response: ?[]u8 = null,
+        calls: usize = 0,
+        control: *product_control.Runtime,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |old| std.testing.allocator.free(old);
+            self.response = try std.testing.allocator.dupe(u8, bytes);
+            self.calls += 1;
+        }
+        fn deinit(self: *@This()) void {
+            if (self.response) |bytes| std.testing.allocator.free(bytes);
+        }
+        fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, command: []const u8, payload: []const u8) !void {
+            const handler = native.async_registry.find(command).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "media-test", .command = command, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+        }
+        fn wait(self: *@This(), boundary: *Dispatcher, count: usize) !void {
+            for (0..5000) |_| {
+                self.control.drainFilePreviewCompletions(boundary.filePreviewSink());
+                if (self.calls >= count) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.PreviewDidNotComplete;
+        }
+    };
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.attachmentMediaFixture(control, &store);
+    defer control.deinit();
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer boundary.deinit();
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    const native = boundary.register(@import("policy.zig").product(.release));
+
+    var staged: [1]product_control.AttachmentDescriptor = undefined;
+    const ready = try control.stageAttachments(&.{.{ .display_name = "shot.jpg", .bytes = jpeg }}, &staged);
+    var issued: [1]attachment_grant.Issued = undefined;
+    const grants = try boundary.attachment_grants.issueBatch(1, 3, &.{ready[0].id}, &issued, null, Host.random);
+    // An issued token is borrowed from the grant table, so keep an owned copy:
+    // this test still formats requests after the grant is consumed.
+    var token_storage: [attachment_grant.token_text_bytes]u8 = undefined;
+    @memcpy(&token_storage, grants[0].token);
+    const token: []const u8 = &token_storage;
+
+    const output = try std.testing.allocator.alloc(u8, native_sdk.bridge.max_result_bytes);
+    defer std.testing.allocator.free(output);
+    const thumbnail = native.registry.find(commands.media_thumbnail).?;
+    const payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"1\",\"target\":{{\"kind\":\"draftAttachment\",\"token\":\"{s}\"}}}}", .{token});
+    defer std.testing.allocator.free(payload);
+    const request: native_sdk.bridge.Invocation = .{
+        .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = payload },
+        .source = .{ .origin = "zero://app", .window_id = 3 },
+    };
+    const foreign: native_sdk.bridge.Invocation = .{ .request = request.request, .source = .{ .origin = "zero://app", .window_id = 4 } };
+    if (thumbnail.invoke_fn(thumbnail.context, foreign, output)) |_| return error.ForeignWindowThumbnailAllowed else |_| {}
+    const result = try thumbnail.invoke_fn(thumbnail.context, request, output);
+    var decoded_result = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result, .{});
+    defer decoded_result.deinit();
+    const item = decoded_result.value.object.get("thumbnail").?.object;
+    try std.testing.expectEqualStrings("ready", decoded_result.value.object.get("state").?.string);
+    try std.testing.expectEqualStrings("image/png", item.get("mediaType").?.string);
+    try std.testing.expectEqual(@as(i64, 8), item.get("width").?.integer);
+    try std.testing.expectEqual(@as(i64, 4), item.get("height").?.integer);
+    const encoded = item.get("dataBase64").?.string;
+    const decoded = try std.testing.allocator.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded));
+    defer std.testing.allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, encoded);
+    // The chip receives the derived PNG, never the staged original's identity.
+    try std.testing.expectEqualStrings(jpeg, decoded);
+    try std.testing.expect(result.len < native_sdk.bridge.max_result_bytes);
+
+    // An unregistered kind or a malformed token fails closed; a token this
+    // connection does not hold is an ordinary missing state.
+    for ([_][]const u8{
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"inputAttachment\",\"token\":\"" ++ "a" ** 48 ++ "\"}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"nothex\"}}",
+    }) |invalid| {
+        const rejected: native_sdk.bridge.Invocation = .{
+            .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = invalid },
+            .source = request.source,
+        };
+        if (thumbnail.invoke_fn(thumbnail.context, rejected, output)) |_| return error.InvalidTargetAccepted else |_| {}
+    }
+    const unknown_payload = "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"" ++ "b" ** 48 ++ "\"}}";
+    const unknown: native_sdk.bridge.Invocation = .{
+        .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = unknown_payload },
+        .source = request.source,
+    };
+    try std.testing.expectEqualStrings("{\"state\":\"missing\"}", try thumbnail.invoke_fn(thumbnail.context, unknown, output));
+
+    // The viewer tier shares the File Preview grant, chunk reader and release.
+    var opened: Capture = .{ .control = control };
+    defer opened.deinit();
+    const preview_payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"1\",\"previewId\":\"1\",\"target\":{{\"kind\":\"draftAttachment\",\"token\":\"{s}\"}}}}", .{token});
+    defer std.testing.allocator.free(preview_payload);
+    try opened.invoke(native, commands.media_preview, preview_payload);
+    try opened.wait(&boundary, 1);
+    var response = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, opened.response.?, .{});
+    defer response.deinit();
+    const image = response.value.object.get("result").?.object.get("image").?.object;
+    try std.testing.expectEqualStrings("image/jpeg", image.get("mediaType").?.string);
+    const chunk_payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"1\",\"previewId\":\"1\",\"token\":\"{s}\",\"offset\":\"0\",\"securityEpoch\":\"{s}\"}}", .{ image.get("token").?.string, image.get("securityEpoch").?.string });
+    defer std.testing.allocator.free(chunk_payload);
+    const reader = native.registry.find(commands.read_preview_image).?;
+    const chunk_result = try reader.invoke_fn(reader.context, .{
+        .request = .{ .id = "read", .command = commands.read_preview_image, .payload = chunk_payload },
+        .source = request.source,
+    }, output);
+    var chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, chunk_result, .{});
+    defer chunk.deinit();
+    const original = try std.testing.allocator.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(chunk.value.object.get("dataBase64").?.string));
+    defer std.testing.allocator.free(original);
+    try std.base64.standard.Decoder.decode(original, chunk.value.object.get("dataBase64").?.string);
+    try std.testing.expectEqualStrings(jpeg, original);
+    var released: Capture = .{ .control = control };
+    defer released.deinit();
+    try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"1\"}");
+    try std.testing.expect(!control.hasFilePreviews());
+
+    // A consumed grant takes both tiers with it: the draft no longer owns it.
+    boundary.attachment_grants.consume(&.{token}, 1, 3);
+    try std.testing.expectEqualStrings("{\"state\":\"missing\"}", try thumbnail.invoke_fn(thumbnail.context, request, output));
+    const retry_payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"1\",\"previewId\":\"2\",\"target\":{{\"kind\":\"draftAttachment\",\"token\":\"{s}\"}}}}", .{token});
+    defer std.testing.allocator.free(retry_payload);
+    try opened.invoke(native, commands.media_preview, retry_payload);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"state\":\"missing\"") != null);
+    try std.testing.expect(control.releaseAttachment(ready[0].id));
 }
 
 test "file preview native grants bind authority and cancellation and expire without trapping capacity" {
