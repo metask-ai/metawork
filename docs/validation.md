@@ -324,7 +324,7 @@ Automatic Workspace root 设置的最小充分证据必须覆盖：schema 1 stri
 
 Agent 集成边界的验证按责任拆分：Agent 验证准入前终止意图、starting 上一次串行补发及 abort 成功单调性、首个真实 Host 故障、有限 terminal/fatal 约束和歧义失败的一次 describe（含 BUSY）；Product 验证实际终止效果的归因、checkpoint 后健康在两种通知顺序下优先于旧快照、段外文本的脱敏提交/输出槽位与 continued 尾部保留，以及四字段用量的原子更新和 Host 错误分类。协议规则不得由旧 Product 预期反向扩大。
 
-真实 Core 回归必须覆盖 starting callback 内 abort，以及 finalizing 接受 Stop 与 terminal 后 TOO_LATE 的不同结果；canonical 输出边界还需实际可由模型调用的 fork Skill、pending 追加输入锚点、continued 后取消/下一流失败/回合上限、后续 Session 复用和冷历史。桌面入口复用现有 vertical：Windows 在独立进程设置 `METAWORK_AGENT_BOUNDARY_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；输出交付和模型错误各自保持原专项入口。这些本地 Provider 证据不代表远程模型质量或其他平台验收。
+真实 Core 回归必须覆盖 starting callback 内 abort，以及 finalizing 接受 Stop 与 terminal 后 TOO_LATE 的不同结果；canonical 输出边界还需实际可由模型调用的 fork Skill、pending 追加输入锚点、continued 后取消/下一流失败/回合上限、后续 Session 复用和冷历史。已有可见输出后的断流还须分别覆盖：取不到免费 re-issue 的工具调用断流与已用掉该次的连续断流都被重新发起并正常完成且不保留被丢弃正文、预算耗尽后仍以 provider 失败收口、服务端声明的错误不被预算重新发起；请求次数须精确断言，这是该预算取值的端到端证据。桌面入口复用现有 vertical：Windows 在独立进程设置 `METAWORK_AGENT_BOUNDARY_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；输出交付和模型错误各自保持原专项入口。这些本地 Provider 证据不代表远程模型质量或其他平台验收。
 
 当前 Run 插话的最小充分证据必须覆盖：SDK receipt/event 先后竞争、定义内非 OK 终态的权威计数、采纳前缀、合同失败未知、未就绪/过期/停止/typed Skill 拒绝，以及登记提交调用与 Run 返回、checkpoint、destroy 的 barrier。Product 验证安全投影、有界原文预留与清零、真实采纳锚点、无锚点计数收口、历史持久化和 pending 恢复 unknown。接续覆盖正常终态的未采纳后缀一次合并、分隔符容量及整批拒绝、原文缺失/计数未知不执行、worker/checkpoint 收尾门禁、关联 Schedule 的结果写盘先于下一轮及分配/编码/写盘失败不复活、来源已 terminal 的 Stop 与其他有效取消、普通准入回滚及 enqueue 失败后的真实转入目标。停止、异常终态、重连和恢复不重发。审批测试覆盖 request 创建时的完整采纳前缀、prepare 与 allow_once 接纳两处阻止未采纳约束、deny 和人工回答不被插话替代。既有 executor queued Run、worker wake、shutdown 与其他 owner 的生命周期回归继续保留。
 
