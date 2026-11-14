@@ -432,7 +432,11 @@ fn providerGuidance(detail: *const task_state.RunModelError) RunGuidance {
         .output_limit => .revise_instruction,
         .rate_limited, .overloaded => .wait,
         .server_error, .timeout, .connection, .stream_interrupted => .prepare_retry,
-        .unknown => .model_settings,
+        // Unknown means this failure could not be classified at all. Settings
+        // advice belongs to the categories that name a configuration fault;
+        // an unclassified failure gets the same retry advice as every other
+        // outcome this table cannot explain.
+        .unknown => .prepare_retry,
     };
 }
 
@@ -537,7 +541,6 @@ test "model recovery advice respects exact source and primary cause without gran
         .{ .category = .permission, .guidance = .model_settings },
         .{ .category = .not_found, .guidance = .model_settings },
         .{ .category = .invalid_request, .guidance = .model_settings },
-        .{ .category = .unknown, .guidance = .model_settings },
         .{ .category = .output_limit, .guidance = .revise_instruction },
         .{ .category = .rate_limited, .guidance = .wait },
         .{ .category = .overloaded, .guidance = .wait },
@@ -545,11 +548,33 @@ test "model recovery advice respects exact source and primary cause without gran
         .{ .category = .timeout, .guidance = .prepare_retry },
         .{ .category = .connection, .guidance = .prepare_retry },
         .{ .category = .stream_interrupted, .guidance = .prepare_retry },
+        .{ .category = .unknown, .guidance = .prepare_retry },
     }) |case| {
         detail.detail.category = case.category;
         const feedback = runFeedback(.failed, .provider_failure, &detail);
         try std.testing.expectEqual(case.guidance, feedback.guidance);
         try std.testing.expectEqual(@as(?RunProviderReason, null), feedback.reason);
+        try std.testing.expect(feedback.offer_input_preparation);
+    }
+}
+
+test "an unclassified provider failure asks for a retry instead of a settings change" {
+    var detail: task_state.RunModelError = .{ .detail = try agent.ModelError.init(.{
+        .run_id = 1,
+        .category = .unknown,
+        .message = "provider failure",
+        .retry = .retryable,
+        .attempts = 1,
+    }) };
+    // The unknown category states only that the failure could not be
+    // classified, so the advice may never claim the model or the account is
+    // misconfigured, whichever provider the Run was served by.
+    for ([_]?task_state.RunModelError.Source{ .metask, .custom_provider, null }) |source| {
+        detail.source = source;
+        const feedback = runFeedback(.failed, .provider_failure, &detail);
+        try std.testing.expectEqual(.prepare_retry, feedback.guidance);
+        try std.testing.expectEqual(@as(?RunProviderReason, null), feedback.reason);
+        // The retry advice arrives with the input preparation that serves it.
         try std.testing.expect(feedback.offer_input_preparation);
     }
 }
