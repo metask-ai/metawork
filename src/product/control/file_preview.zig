@@ -11,7 +11,10 @@ pub const max_image_side: u32 = 8192;
 pub const media_chunk_bytes: usize = 262143;
 pub const max_media_slots: usize = max_image_slots + 1;
 pub const ImageInfo = image_container.Info;
-pub const Source = enum { reference, workspace, directory };
+/// Where the bytes come from. `attachment` is a Product-owned store read: no
+/// Workspace is involved, so its authority is the staged draft identity, not a
+/// Workspace id/epoch/root.
+pub const Source = enum { reference, workspace, directory, attachment };
 pub const max_directory_entries = 512;
 pub const DirectoryEntry = struct { name: []const u8, kind: enum { file, directory } };
 
@@ -70,6 +73,7 @@ pub const Input = struct {
     source: Source = .reference,
     generated_video: bool = false,
     completion_id: u64,
+    attachment_id: u64 = 0,
     task_id: u64,
     run_id: u64,
     workspace_id: u64,
@@ -87,6 +91,7 @@ pub const Completion = struct {
     generated_video: bool = false,
     entries: []const DirectoryEntry = &.{},
     completion_id: u64,
+    attachment_id: u64 = 0,
     task_id: u64,
     run_id: u64,
     workspace_id: u64,
@@ -145,6 +150,7 @@ const Job = struct {
     entry_count: usize = 0,
     lane: *Lane,
     completion_id: u64,
+    attachment_id: u64,
     task_id: u64,
     run_id: u64,
     workspace_id: u64,
@@ -216,7 +222,7 @@ const Job = struct {
         };
         defer root.close(self.lane.io);
         if (self.source == .directory) return self.readDirectory(root);
-        const relative = self.source == .workspace or self.generated_video;
+        const relative = self.source == .workspace or self.source == .attachment or self.generated_video;
         if (relative and !validWorkspacePath(self.relative_path, false)) {
             self.state = .restricted;
             return .completed;
@@ -276,6 +282,13 @@ const Job = struct {
             return .completed;
         }
         const image = isImage(header[0..header_read]);
+        // An attachment original was classified as an image when it was staged.
+        // If it no longer looks like one it has changed underneath us, and this
+        // source must never fall through to the text body path.
+        if (self.source == .attachment and !image) {
+            self.state = .unsupported;
+            return .completed;
+        }
         if (image and before.size > max_image_source_bytes) {
             self.state = .image_limit;
             return .completed;
@@ -500,6 +513,7 @@ pub const Lane = struct {
             .generated_video = input.generated_video,
             .lane = self,
             .completion_id = input.completion_id,
+            .attachment_id = input.attachment_id,
             .created_at = .now(self.io, .awake),
             .task_id = input.task_id,
             .run_id = input.run_id,
@@ -571,6 +585,7 @@ pub const Lane = struct {
                 .generated_video = job.generated_video,
                 .entries = job.entries[0..job.entry_count],
                 .completion_id = job.completion_id,
+                .attachment_id = job.attachment_id,
                 .task_id = job.task_id,
                 .run_id = job.run_id,
                 .workspace_id = job.workspace_id,

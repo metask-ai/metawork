@@ -288,6 +288,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
+        .{ .name = "metawork-product-control-media-source", .root_module = test_modules.product_control_media_source },
         .{ .name = "metawork-product-attachment-staging", .root_module = test_modules.product_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
@@ -401,6 +402,7 @@ pub fn build(b: *std.Build) void {
         .root_module = test_modules.app,
         .filters = &.{ "previews reduce pixel count", "chip derivative" },
     })).step);
+    attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_media_source })).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
     const control_view_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -419,6 +421,7 @@ pub fn build(b: *std.Build) void {
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.bridge, .filters = &.{"file preview"} })).step);
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_file_preview })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_media_source })).step);
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_runtime, .filters = &.{ "file preview", "File Preview" } })).step);
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_task_runtime, test_modules.product_control_runtime }) |module| {
         product_views_step.dependOn(&b.addRunArtifact(b.addTest(.{
@@ -849,6 +852,7 @@ const WiredModules = struct {
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
+    product_control_media_source: *std.Build.Module,
     product_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
@@ -1807,6 +1811,12 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     file_preview.addImport("image_container", image_container);
+    const media_source = b.createModule(.{
+        .root_source_file = b.path("src/product/control/media_source.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    media_source.addImport("metawork_product_attachment", product_attachment);
     const product_workspace_automatic_root = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/automatic_root.zig"),
         .target = target,
@@ -2368,6 +2378,7 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_attachment", product_attachment);
     product_control_runtime.addImport("product_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("product_control_media_source", media_source);
     product_control_runtime.addImport("product_permission_review", product_permission_review);
     product_control_runtime.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
     product_control_runtime.addImport("product_control_file_change_io", file_change_io);
@@ -2650,6 +2661,7 @@ fn wireAgentCore(
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
+        .product_control_media_source = media_source,
         .product_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
