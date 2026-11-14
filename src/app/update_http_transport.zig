@@ -267,9 +267,10 @@ test "updates report where a real check stopped and why" {
     try std.testing.expectEqual(Cause.dns_failed, unresolved.?.cause);
 
     // A plain HTTP listener answering an HTTPS request fails the handshake.
-    // std reports a peer that drops the handshake as a generic connection
-    // error, so the cause stays connect_failed here; the TLS-specific cause
-    // is covered by the engine's own injected handshake tests.
+    // How finely std classifies a peer that drops a handshake is platform
+    // dependent, so this case fixes only the phase, which is the fact a real
+    // request has to carry. Each cause is pinned one by one by the engine's
+    // own injected tests instead.
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
     defer listener.deinit(std.testing.io);
@@ -292,5 +293,5 @@ test "updates report where a real check stopped and why" {
     var handshake: ?update.CheckDiagnostic = null;
     try std.testing.expectError(error.Network, adapter.performAt(url, false, &buffer, &cancellation, .fromSeconds(5), &handshake));
     try std.testing.expectEqual(Phase.connect, handshake.?.phase);
-    try std.testing.expectEqual(Cause.connect_failed, handshake.?.cause);
+    try std.testing.expect(handshake.?.cause == .tls_failed or handshake.?.cause == .connect_failed);
 }
