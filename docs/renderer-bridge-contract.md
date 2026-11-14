@@ -195,6 +195,43 @@ Host 校验当前工作区 epoch 与授权。带 Task identity 时还校验其�
 
 Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安全代次；关闭 Task、工作区失效或换代后旧结果不可显示。隐藏视图可保留同一有效 Task 的目录数据，不自动轮询。每个 Task 会话最多缓存 64 个目录，超限明确提示用户刷新；刷新清空缓存及展开状态。目录与打开文件的请求共享准备并发和取消链路，不新增持久读取授权。
 
+## Attachment media commands
+
+可预览媒体按来源注册，每一类身份自带授权依据；wire 上既有 File preview command 的五字段 request 一字不改，新来源使用自己的 command 并精确接收一个 typed target。当前在册的 target 只有一种：
+
+```json
+{
+  "kind": "draftAttachment",
+  "token": "0c1d2e3f405162738495a6b7c8d9eafb0c1d2e3f40516273"
+}
+```
+
+`kind` 必填且只接受在册名称，字段集合精确，不接受省略、额外或替代字段（没有 `taskId`，也不接受 target 之外的扁平 token）。`token` 是文件 attachment commands 签发的同一 48 字符小写十六进制 grant，绑定当前 connection/window 且一次性。未在册的 kind 与格式非法的 token 一律 fail closed 为 Bridge error；本连接不持有的 token 返回 `missing`，因为草稿被发送或移除不是协议违规。草稿附件没有 Task identity，因此 New Task 也能请求；它的字节位于 Product 私有 store，没有 Workspace id/epoch/root 可校验，Host 不得为它虚构这些事实。
+
+`metawork.media.thumbnail` 是同步 command，精确接收 `{ generation, target }`。它交付 Host 在 staging 时从同一张图派生的小图，ready 精确返回：
+
+```json
+{
+  "state": "ready",
+  "thumbnail": {
+    "mediaType": "image/png",
+    "sizeBytes": "41234",
+    "width": 256,
+    "height": 171,
+    "securityEpoch": "7",
+    "dataBase64": "…"
+  }
+}
+```
+
+`mediaType` 固定为 `image/png`——Host 侧唯一可用的编码器是无损 PNG，这一档不承诺编码器做不到的格式。单件最长边不超过 256px、编码字节不超过 160 KiB；字节与安全代次是 canonical decimal u64 string，尺寸是正整数，`dataBase64` 是该字节数的标准 Base64。非 ready 精确返回 `{ state: "missing" | "restricted" | "unsupported" | "error" }` 且不得携带 `thumbnail`。
+
+这一档没有 `previewId`、没有 token、没有 chunk 读取，也没有 release：一次响应整件交付（160 KiB 的 Base64 远低于 SDK 响应上限），Host 在调用之间不持有字节，因此它结构上不占原图槽位，而不是靠额度记账留出空间。它的凭据检查扫描**被交付的派生字节**，一次扫完，没有跨块边界；派生是重新解码再编码，原件的容器 metadata（EXIF/XMP/文本块）不会进入结果，所以扫描未交付的原件保护不了任何东西。两档都不声称能识别画面内容里的密钥：截图里的 token 是字形而非字节，既有查看器档同样如此，这不是本能力引入的暴露面。
+
+`metawork.media.preview` 是异步 command，精确接收 `{ generation, previewId, target }`，`previewId` 与 File preview command 共享连接内单调递增空间。它是同一个查看器档：response shape、原图描述符、`metawork.files.preview.readImageChunk`、`metawork.files.preview.release`、2 份 / 20 MiB 原图生命周期、30 秒请求与 15 秒 grant 期限、单图 10 MiB / 16777216 像素 / 最长边 8192 全部沿用，只有 target 的授权依据与字节来源不同。Host 在交付前及每次分块时重新证明该草稿仍拥有同一 staged 原件：批次被 Task 借用或附件被移除后目标即不再解析，grant 当即释放而不是继续读一份已经改变归属的文件。原件被 staging 分类为图片，若读取时已不再是图片则返回 `unsupported`，这一来源不得回落到文本正文路径。
+
+Renderer 为缩略图档使用独立准入（最多 3 个在途、32 个排队），不与查看器档的 2 个准备名额竞争；派生资源登记在同一窗口图片池（32 张 / 40 MiB / 33554432 像素）并服从同一安全代次失效规则，离开保留区域即释放。原件字节数已随 chip 投影给 Renderer，因此超过上述单图 10 MiB 上限的附件不提供查看入口，只显示缩略图；像素与动图等只能在读取后判定的限制仍由查看器档的既有状态说明。
+
 ## File changes diff command
 
 `metawork.files.diff` 是 revision 1 command catalog 中的异步 command，不出现在同步 handler registry。request 精确为 `{ "taskId": "17", "runId": "23", "fileChangeId": "task:17:run:23:change:1" }`；三个字段均不可省略，Task/Run 必须是 canonical decimal `u64`，change id 必须是 1–128 bytes opaque identity。Renderer 不提交路径、artifact locator、digest、range 或读取上限；Host 只在精确 Task + Run 内解析 change id。
