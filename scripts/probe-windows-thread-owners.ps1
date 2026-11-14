@@ -1,3 +1,7 @@
+# Attributes every thread of a running Host process to the routine it was
+# created with, so a thread count can be read as "which spawn site owns these".
+# Emits one JSON object on the last stdout line: the thread total and the
+# per-start-address histogram with resolved symbol and source lines.
 param(
   [Parameter(Mandatory = $true)][int]$ProcessId,
   [Parameter(Mandatory = $true)][string]$SymbolPath
@@ -81,6 +85,9 @@ public static class Dbg {
 
     public static string Symbol(IntPtr process, ulong address) {
         SYMBOL_INFO info = new SYMBOL_INFO();
+        // SizeOfStruct must be sizeof(SYMBOL_INFO) as dbghelp declares it,
+        // whose Name is CHAR[1]; it is not Marshal.SizeOf of this managed
+        // mirror, which carries the 1024-byte receive buffer inline.
         info.SizeOfStruct = 88;
         info.MaxNameLen = 1024;
         ulong displacement = 0;
@@ -113,9 +120,17 @@ if (-not [Dbg]::SymInitialize($handle, $SymbolPath, $true)) {
 try {
   $threads = (Get-Process -Id $ProcessId).Threads
   $groups = @{}
+  $unattributed = 0
   foreach ($thread in $threads) {
     $address = [Dbg]::Win32StartAddress($thread.Id)
-    if ($address -eq 0) { $address = [uint64]$thread.StartAddress.ToInt64() }
+    if ($address -eq 0) {
+      # A thread that exited between enumeration and the query, or one this
+      # token cannot open, has no attribution. ProcessThread.StartAddress is
+      # not a substitute: it reports ntdll!RtlUserThreadStart for every thread,
+      # so taking it here would merge unrelated threads into one bogus group.
+      $unattributed += 1
+      continue
+    }
     $key = $address.ToString('x')
     if (-not $groups.ContainsKey($key)) {
       $groups[$key] = [pscustomobject]@{
@@ -136,10 +151,12 @@ try {
     $groups[$key].count += 1
   }
   [pscustomobject]@{
-    pid          = $ProcessId
-    threadCount  = $threads.Count
-    distinct     = $groups.Count
-    groups       = @($groups.Values | Sort-Object -Property count -Descending)
+    pid           = $ProcessId
+    threadCount   = $threads.Count
+    attributed    = ($threads.Count - $unattributed)
+    unattributed  = $unattributed
+    distinct      = $groups.Count
+    groups        = @($groups.Values | Sort-Object -Property count -Descending)
   } | ConvertTo-Json -Depth 5 -Compress
 } finally {
   [void][Dbg]::SymCleanup($handle)
