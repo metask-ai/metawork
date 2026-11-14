@@ -121,6 +121,7 @@ pub const ActiveOperation = task_attachment.ActiveOperation;
 /// Task-owned durable product cause.
 pub const RunCause = enum {
     user_cancel,
+    approval_mode_change,
     timeout,
     session_close,
     app_shutdown,
@@ -387,6 +388,9 @@ pub const PendingInterruption = enum(u8) {
     timeout,
     session_close,
     app_shutdown,
+    /// A Run stopped because an approval change crossed the Core profile
+    /// boundary. Core still observes a user cancellation.
+    approval_mode_change,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.
@@ -611,6 +615,10 @@ pub const AdditionalInput = struct {
     transferred_to_run_id: ?u64 = null,
     /// Execution-only owned text; never serialized or reconstructed from history.
     raw_text: ?[]u8 = null,
+    /// Text kept for one explicit resend after a mutation retired this batch.
+    /// Runtime-only, charged to the shared resend budget, never serialized.
+    retry_text: ?[]u8 = null,
+    retried_as: ?Submission = null,
     /// Cancellation belongs to this accepted input, not later sends in the Run.
     continuation_cancel_reason: ?SendInputReason = null,
     submission: ?Submission = null,
@@ -657,6 +665,7 @@ pub const SendInputReason = enum {
     checkpoint_budget_required,
     admission_failed,
     continuation_cancelled,
+    approval_mode_change,
     combined_input_too_large,
     checkpoint_failed,
     schedule_failed,
@@ -1417,6 +1426,7 @@ pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservati
         => true,
         .resource_limit => terminal.phase == .stopped,
         .user_cancel,
+        .approval_mode_change,
         .timeout,
         .session_close,
         .app_shutdown,

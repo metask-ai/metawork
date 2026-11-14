@@ -3760,6 +3760,59 @@ test("active input shared fixture preserves exact receipts and adoption history"
   );
 });
 
+test("a batch retired by an approval change decodes its explicit resend entry", () => {
+  const wire = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/active_input.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const snapshot = clone(fixture);
+  const task = snapshot.tasks[0];
+  task.id = "1";
+  task.currentRunId = "1";
+  task.activeOperation.id = "1";
+  task.runs[0].id = "1";
+  task.inputReady = true;
+  task.runs[0].additionalInputs = [
+    {
+      ...wire.history,
+      state: "unadopted",
+      adoptedTurn: null,
+      order: null,
+      continuationReason: "approval_mode_change",
+      retryAvailable: true,
+    },
+  ];
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(snapshot).tasks[0].runs[0].additionalInputs,
+    task.runs[0].additionalInputs,
+  );
+  for (const change of [
+    // A resend is offered only for input the Run did not adopt, and only
+    // together with the reason the batch was retired.
+    (input) => (input.retryAvailable = false),
+    (input) => (input.continuationReason = null),
+    (input) => {
+      input.state = "unknown";
+      input.sequence = null;
+    },
+    (input) => {
+      input.state = "adopted";
+      input.adoptedTurn = 2;
+      input.order = "3";
+      input.continuationReason = null;
+    },
+  ]) {
+    const bad = clone(snapshot);
+    change(bad.tasks[0].runs[0].additionalInputs[0]);
+    assert.throws(() => decodeWorkbenchSnapshot(bad));
+  }
+  const withoutResend = clone(snapshot);
+  delete withoutResend.tasks[0].runs[0].additionalInputs[0].retryAvailable;
+  assert.deepEqual(decodeWorkbenchSnapshot(withoutResend), withoutResend);
+});
+
 test("unavailable Host attachment fixture stays decodable without advertising image formats", () => {
   const value = clone(fixture);
   value.capabilities.attachments = JSON.parse(

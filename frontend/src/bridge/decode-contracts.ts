@@ -7675,6 +7675,9 @@ function decodeAdditionalInputs(
       "adoptedTurn",
       "order",
       "state",
+      ...(Object.hasOwn(record(raw, p), "retryAvailable")
+        ? ["retryAvailable"]
+        : []),
     ]);
     const id = positiveU64WireId(item.id, `${p}.id`);
     if (BigInt(id) <= previousId) fail(p, "input identities must increase");
@@ -7727,6 +7730,13 @@ function decodeAdditionalInputs(
     if (continuationReason !== null && state !== "unadopted")
       fail(p, "only an unadopted input can have a continuation failure");
     if (
+      Object.hasOwn(item, "retryAvailable") &&
+      (item.retryAvailable !== true ||
+        state !== "unadopted" ||
+        continuationReason === null)
+    )
+      fail(p, "Resend requires a retired unadopted input");
+    if (
       (adoptedTurn === null) !== (order === null) ||
       (adoptedTurn !== null &&
         (state !== "adopted" || adoptedTurn > 4294967295))
@@ -7739,6 +7749,9 @@ function decodeAdditionalInputs(
     if (afterOutputCount > maxCommentarySegmentsPerRun + 1)
       fail(`${p}.afterOutputCount`, "input anchor exceeds the output capacity");
     return {
+      ...(item.retryAvailable === true
+        ? { retryAvailable: true as const }
+        : {}),
       submission:
         item.submission === null
           ? null

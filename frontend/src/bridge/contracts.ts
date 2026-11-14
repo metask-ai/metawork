@@ -684,6 +684,7 @@ export type RunInputView =
     };
 export const runCauses = [
   "user_cancel",
+  "approval_mode_change",
   "timeout",
   "session_close",
   "app_shutdown",
@@ -1104,6 +1105,7 @@ export const sendInputReasons = [
   "checkpoint_budget_required",
   "admission_failed",
   "continuation_cancelled",
+  "approval_mode_change",
   "combined_input_too_large",
   "checkpoint_failed",
   "schedule_failed",
@@ -1156,6 +1158,7 @@ export type AdditionalInputView = {
     | "transferred";
   transferredToRunId: string | null;
   continuationReason: SendInputReason | null;
+  retryAvailable?: true;
 };
 export const taskNavigationSignals = [
   "attention",

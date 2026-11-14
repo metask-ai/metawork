@@ -1224,6 +1224,26 @@ export function TaskContent({
                         run.id === latestInputId &&
                         entry.input.id === run.additionalInputs.at(-1)?.id
                       }
+                      resend={
+                        entry.input.retryAvailable &&
+                        onRetryInput &&
+                        onDiscardInputRetry
+                          ? {
+                              retryDisabled:
+                                !synchronized ||
+                                task.sessionCloseRetryAvailable ||
+                                task.lifecycle === "closing",
+                              discardDisabled: !synchronized,
+                              onRetry: () =>
+                                onRetryInput(task.id, entry.input.operationId),
+                              onDiscard: () =>
+                                onDiscardInputRetry(
+                                  task.id,
+                                  entry.input.operationId,
+                                ),
+                            }
+                          : undefined
+                      }
                     />
                   ) : entry.kind === "local" ? (
                     <Fragment key={entry.identity}>

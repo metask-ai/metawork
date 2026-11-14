@@ -124,6 +124,8 @@ pub fn enqueuePumpOnThread(context: *PumpEnqueueContext) void {
 pub const Plan = enum {
     immediate,
     controlled,
+    /// A held Run that has already reported a tool in flight.
+    controlled_executing_tools,
     ui_wait,
     ui_wait_twice,
     ui_wait_repeated,
@@ -2432,8 +2434,17 @@ pub fn sessionRunInput(
             }
         }
     }
+    if (plan == .controlled_executing_tools) {
+        var tool_buffer: [256]u8 = undefined;
+        const tool_json = std.fmt.bufPrint(
+            &tool_buffer,
+            "{{\"run_state\":{{\"run_id\":{d},\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[{{\"tool_call_id\":\"fixture-tool\",\"name\":\"Read\"}}]}}}}",
+            .{run_id},
+        ) catch unreachable;
+        if (!emitInputEvent(session, handle, run_id, tool_json)) return wire.STATUS_CALLBACK_FAILED;
+    }
     session.lock();
-    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated or plan == .model_error_controlled) and
+    while ((plan == .controlled or plan == .controlled_executing_tools or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated or plan == .model_error_controlled) and
         !session.allow_finish and !session.abort_requested)
         session.wait();
     const aborted = session.abort_requested;

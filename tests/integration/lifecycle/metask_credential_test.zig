@@ -243,6 +243,14 @@ test "Metask original configuration restored across relogin is rebuilt with the 
     try characterizeCredentialExpiry(.rebind_original_relogin);
 }
 
+test "Metask manual compaction uses the credential of the current login" {
+    try characterizeCredentialExpiry(.compact_rotation);
+}
+
+test "Metask manual compaction after a restored original configuration rebinds before it compacts" {
+    try characterizeCredentialExpiry(.compact_rebind_original_relogin);
+}
+
 test "Metask logout blocks old Tasks until the next login" {
     try characterizeCredentialExpiry(.logout);
 }
@@ -328,7 +336,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
 }
 
-const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
 
 const CatalogRetryTimer = struct {
     id: ?u64 = null,
@@ -399,7 +407,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     defer fake_core.releaseControlledRestore();
     defer fake_core.releaseControlled();
 
-    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .responses_model = scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin, .rotate_token = scenario != .continuation_unchanged and scenario != .candidate_same_token_relogin };
+    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .responses_model = scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin or scenario == .compact_rebind_original_relogin, .rotate_token = scenario != .continuation_unchanged and scenario != .candidate_same_token_relogin };
     var account_runtime = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &network, .perform_fn = Network.refresh, .retire_fn = account.retireNothing }, account.TestSupport.loopbackEndpoint(), .{ .context = &network, .notify_fn = Network.wake });
     var platform: account.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account.TestSupport.attachPlatform(&account_runtime, &platform);
@@ -473,6 +481,31 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     try runAndExpect(&wake_loop, &control, old_id, "before-expiry", .completed);
     try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
     try std.testing.expectEqualDeep(fixture.credentialDigest(access_a), fake_core.sessions[0].credential_digest);
+    if (scenario == .compact_rotation) {
+        // An ordinary rotation is already renewed in place for an idle
+        // attached Task. Compaction must admit that Session unchanged: same
+        // binding, no second renewal and no rebuild.
+        platform.now_unix_seconds = 150;
+        try commitRefresh(&account_runtime, &control);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try drainCatalog(&coordinator);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.credential_updates);
+        _ = try control.compactTaskAtBinding(old_id, old_epoch);
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CompactDidNotSettle;
+        try std.testing.expectEqual(@as(usize, 1), fake_core.compact_calls);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.credential_updates);
+        try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
+        try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[0].credential_digest);
+        // The Session is reused; compaction renews in place, never rebuilds.
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        try std.testing.expectEqual(old_epoch, old.durable.binding_epoch);
+        return;
+    }
 
     const old_generation = old.durable.execution_generation;
     try std.testing.expect(old.durable.checkpoint != null);
@@ -619,7 +652,9 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try runAndExpect(&wake_loop, &control, new_id, "new-authorization", .completed);
         return;
     }
-    if (scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin) {
+    if (scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin or
+        scenario == .compact_rebind_original_relogin)
+    {
         // Switching to a Responses model needs a new Session. Its restore
         // fails, so the rebind restores the original configuration, and the
         // next login completes while that restore is still in progress.
@@ -667,6 +702,36 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         const restores = fake_core.checkpoint_restores;
         fake_core.unlock();
         try std.testing.expectEqual(@as(usize, 2), restores);
+        if (scenario == .compact_rebind_original_relogin) {
+            // Compaction is a model entry: the selected Responses model still
+            // differs from the restored Session, so this compaction is refused
+            // and starts the rebind it needs. The next one runs on the Session
+            // the current login rebuilt.
+            try std.testing.expectError(error.RestoreBusy, control.compactTaskAtBinding(old_id, old_epoch));
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (old.runtime.restore_job == null and !old.runtime.worker_leases.hasLive() and
+                    old.runtime.close_thread == null and old.runtime.active_operation == .none) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.RebindDidNotSettle;
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(old_epoch + 1, old.durable.binding_epoch);
+            try std.testing.expectEqualStrings(responses_model_id, old.durable.execution_model);
+            try std.testing.expectEqual(@as(usize, 0), fake_core.compact_calls);
+            _ = try control.compactTaskAtBinding(old_id, old.durable.binding_epoch);
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.CompactDidNotSettle;
+            try std.testing.expectEqual(@as(usize, 1), fake_core.compact_calls);
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[2].credential_digest);
+            // The rebind rebuilt the Session, so nothing was renewed in place.
+            try std.testing.expectEqual(@as(usize, 0), fake_core.credential_updates);
+            try std.testing.expectEqual(@as(usize, 1), runCalls());
+            return;
+        }
         if (scenario == .rebind_original_account_switch) {
             // Selecting the original model again admits the restored Session:
             // its next admission renews the credential in place.

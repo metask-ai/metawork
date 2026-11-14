@@ -990,6 +990,7 @@ pub const InputFailureReason = enum {
             .run_stopping,
             .too_late,
             .continuation_cancelled,
+            .approval_mode_change,
             .combined_input_too_large,
             .checkpoint_failed,
             .schedule_failed,
@@ -3947,6 +3948,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         }
         if (run.cause) |cause| if (!oneOf(cause, &.{
             "user_cancel",
+            "approval_mode_change",
             "timeout",
             "session_close",
             "app_shutdown",

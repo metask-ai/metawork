@@ -36,6 +36,13 @@ pub const compileSkillInput = runtime.compileSkillInput;
 pub const Submission = runtime.Submission;
 pub const InputSubmission = runtime.InputSubmission;
 pub const InputAction = runtime.InputAction;
+
+/// What a Task mutation affects, declared once in Task policy and read by
+/// every executor instead of being decided again at each call site.
+pub const TaskMutation = policy.TaskMutation;
+pub const MutationImpact = policy.MutationImpact;
+pub const mutationImpact = policy.mutationImpact;
+
 pub const OwnedImageExecution = state.OwnedImageExecution;
 pub const OwnedVideoExecution = state.OwnedVideoExecution;
 pub const OwnedFileDelivery = state.OwnedFileDelivery;

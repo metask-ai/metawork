@@ -832,6 +832,8 @@ export const zhCN: Record<MessageId, string> = {
     "本地提交记录容量已满，当前草稿已保留；请同步并核对之前的发送结果后再发送。",
   "input.continuation_wait": "正在处理已提交的消息；可编辑草稿或停止",
   "mutation.reason.continuation_cancelled": "已取消后续处理。",
+  "mutation.reason.approval_mode_change":
+    "审批模式切换已停止本次运行，消息已保留，可重新发送。",
   "mutation.reason.combined_input_too_large":
     "多条消息合并后超过单轮输入容量，请拆分发送。",
   "mutation.reason.checkpoint_failed": "本轮收尾未成功，未继续处理消息。",
@@ -1468,6 +1470,7 @@ export const zhCN: Record<MessageId, string> = {
   "outcome.failed": "失败",
   "outcome.dependency_contract_failure": "任务运行环境失败",
   "cause.user_cancel": "由你停止",
+  "cause.approval_mode_change": "为切换审批模式而停止",
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",
   "cause.app_shutdown": "MetaWork 已关闭",

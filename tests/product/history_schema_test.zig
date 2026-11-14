@@ -116,6 +116,28 @@ test "model error migration upgrades published v1 records to null and rejects th
     try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]));
 }
 
+test "run cause domain upgrade accepts an approval mode change stop in an existing store" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    {
+        // A store written before the Product cause existed rejects it.
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0 .. schema.migrations.len - 1]);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    try expectSame(a, database.capability(), state);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='unknown'" } }}));
+}
+
 test "Project removal survives SQL restart without changing Workspace or Task authority" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
