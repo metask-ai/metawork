@@ -30,6 +30,11 @@ const tray_icon_path = switch (builtin.os.tag) {
     else => "assets/icons/tray-icon.png",
 };
 
+const window_icon_path = switch (builtin.os.tag) {
+    .windows => "assets/icons/app-icon.ico",
+    else => "assets/icons/app-icon.png",
+};
+
 pub const State = struct {
     tray_installed: bool = false,
 
@@ -45,7 +50,7 @@ pub const State = struct {
     ) !void {
         var icon_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         try runtime.createTray(.{
-            .icon_path = resolveTrayIconPath(io, &icon_path_buffer),
+            .icon_path = resolvePackagedIconPath(io, tray_icon_path, &icon_path_buffer),
             .tooltip = "MetaWork",
             .items = &tray_items,
         });
@@ -165,29 +170,47 @@ pub const State = struct {
     }
 };
 
-fn resolveTrayIconPath(io: std.Io, output: []u8) []const u8 {
-    if (comptime builtin.os.tag != .windows) return tray_icon_path;
+/// The main window's icon: the Windows taskbar button, Alt+Tab, the window
+/// thumbnail and the caption, and the macOS dev-run Dock icon.
+pub fn resolveWindowIconPath(io: std.Io, output: []u8) []const u8 {
+    return resolvePackagedIconPath(io, window_icon_path, output);
+}
+
+/// A Windows packaged run resolves a relative icon path against the packaged
+/// `resources` directory and then the working directory, and the icons live in
+/// neither, so only an absolute path reaches them whatever directory the run
+/// starts from. The packaged icon tree sits next to the executable's own `bin`
+/// directory; a development run keeps the relative path.
+fn resolvePackagedIconPath(io: std.Io, relative_path: []const u8, output: []u8) []const u8 {
+    if (comptime builtin.os.tag != .windows) return relative_path;
 
     var executable_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const executable_len = std.process.executablePath(io, &executable_buffer) catch
-        return tray_icon_path;
-    const candidate = windowsPackagedTrayIconPath(
+        return relative_path;
+    const candidate = windowsPackagedIconPath(
         executable_buffer[0..executable_len],
+        relative_path,
         output,
-    ) orelse return tray_icon_path;
+    ) orelse return relative_path;
     const stat = std.Io.Dir.cwd().statFile(io, candidate, .{}) catch
-        return tray_icon_path;
-    return if (stat.kind == .file) candidate else tray_icon_path;
+        return relative_path;
+    return if (stat.kind == .file) candidate else relative_path;
 }
 
-fn windowsPackagedTrayIconPath(executable_path: []const u8, output: []u8) ?[]const u8 {
+fn windowsPackagedIconPath(
+    executable_path: []const u8,
+    relative_path: []const u8,
+    output: []u8,
+) ?[]const u8 {
     const executable_dir = std.fs.path.dirnameWindows(executable_path) orelse return null;
     const package_root = std.fs.path.dirnameWindows(executable_dir) orelse return null;
-    return std.fmt.bufPrint(
+    const packaged_path = std.fmt.bufPrint(
         output,
-        "{s}\\assets\\icons\\tray-icon.ico",
-        .{package_root},
-    ) catch null;
+        "{s}\\{s}",
+        .{ package_root, relative_path },
+    ) catch return null;
+    std.mem.replaceScalar(u8, packaged_path[package_root.len..], '/', '\\');
+    return packaged_path;
 }
 
 fn requireMainWindow(window_id: native_sdk.platform.WindowId) !void {
@@ -234,16 +257,28 @@ fn environment(
     };
 }
 
-test "Windows packaged tray icon resolves from the executable's package root" {
+test "Windows packaged icons resolve from the executable's package root" {
     var buffer: [256]u8 = undefined;
-    const resolved = windowsPackagedTrayIconPath(
-        "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\bin\\metawork.exe",
-        &buffer,
-    ).?;
     try std.testing.expectEqualStrings(
         "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\assets\\icons\\tray-icon.ico",
-        resolved,
+        windowsPackagedIconPath(
+            "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\bin\\metawork.exe",
+            "assets/icons/tray-icon.ico",
+            &buffer,
+        ).?,
     );
+    try std.testing.expectEqualStrings(
+        "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\assets\\icons\\app-icon.ico",
+        windowsPackagedIconPath(
+            "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\bin\\metawork.exe",
+            "assets/icons/app-icon.ico",
+            &buffer,
+        ).?,
+    );
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectEqualStrings("assets/icons/app-icon.ico", window_icon_path);
+        try std.testing.expectEqualStrings("assets/icons/tray-icon.ico", tray_icon_path);
+    }
 }
 
 test "Windows window controls consume current SDK window facts after platform events" {

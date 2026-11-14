@@ -889,11 +889,12 @@ pub fn run(init: std.process.Init) !void {
     app.dispatcher = &dispatcher;
     const mode = frontend.mode(init.environ_map);
 
+    var icon_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
         .window_title = "MetaWork",
         .bundle_id = product_identity.runnerBundleId(),
-        .icon_path = "assets/icons/app-icon.png",
+        .icon_path = app_window.resolveWindowIconPath(init.io, &icon_path_buffer),
         .bridge = app.bridge(mode),
         .builtin_bridge = app.automation.builtinPolicy(bridge_api.policy.builtin(mode)),
         .js_window_api = false,
