@@ -16,35 +16,96 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: ${{ matrix.name }}
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - &checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - &setup-node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - &setup-zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - &npm-ci
+        name: Install npm dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Check Renderer TypeScript
+        run: npm --workspace @metawork/renderer run typecheck
+
+  node-tests:
+    name: Node tests (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
+    timeout-minutes: 25
+    env: &platform-env
+      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
+    strategy: &platforms
       fail-fast: false
       matrix:
         include:
           - name: Windows x64
             runner: windows-2022
             target: x86_64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-x86_64.lock.json
           - name: macOS arm64
             runner: macos-15
             target: aarch64-macos
+            lock: build_support/agentcore-bundle.macos-aarch64.lock.json
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
+      - *checkout
+      - *setup-node
+      - *setup-zig
+      - *npm-ci
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - &restore-agentcore
+        name: Restore AgentCore release download
+        id: agentcore-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          node-version: 24
-          cache: npm
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
 
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - &stage-agentcore
+        name: Stage locked AgentCore bundle
+        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
+
+      - &save-agentcore
+        name: Save verified AgentCore release download
+        if: steps.agentcore-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
+
+      - name: Run Node tests
+        run: npm run test:node
+
+  native-tests:
+    name: Native tests (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env: *platform-env
+    strategy: *platforms
+    steps:
+      - *checkout
+      - *setup-node
+      - *setup-zig
 
       - name: Cache Zig compilation
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
@@ -64,17 +125,13 @@ jobs:
           New-Item -ItemType Directory -Force (Join-Path $cache 'tmp') | Out-Null
           "ZIG_GLOBAL_CACHE_DIR=$cache" >> $env:GITHUB_ENV
 
-      - name: Install npm dependencies
-        run: npm ci
+      - *npm-ci
+      - *restore-agentcore
+      - *stage-agentcore
+      - *save-agentcore
 
-      - name: Stage locked AgentCore bundle
-        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
+      - name: Run strict Native SDK checks
+        run: npm run check:sdk
 
-      - name: Check formatting
-        run: npm run format:check
-
-      - name: Check repository
-        run: npm run check
-
-      - name: Run repository tests
-        run: npm test
+      - name: Run the full Native test graph
+        run: npm run test:native

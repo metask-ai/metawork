@@ -87,4 +87,12 @@ export async function runRepositoryTests(root = repositoryRoot) {
 const isMain =
   process.argv[1] !== undefined &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (isMain) await runRepositoryTests();
+if (isMain) {
+  const args = process.argv.slice(2);
+  if (args.length === 0) await runRepositoryTests();
+  else if (args.length === 1 && args[0] === "--node") await runNodeTests();
+  else if (args.length === 1 && args[0] === "--native") {
+    const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
+    await runNativeTests(repositoryRoot, bundle);
+  } else throw new Error("usage: run-tests.mjs [--node | --native]");
+}

@@ -11,8 +11,11 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "office:check": "node scripts/build-office-skills.mjs --check",
-    "check": "node scripts/verify-staged-agentcore-bundle.mjs && npm --workspace @metawork/renderer run check && native check . --strict",
+    "check": "node scripts/verify-staged-agentcore-bundle.mjs && npm --workspace @metawork/renderer run check && npm run check:sdk",
+    "check:sdk": "native check . --strict",
     "test": "node scripts/run-tests.mjs",
+    "test:node": "node scripts/run-tests.mjs --node",
+    "test:native": "node scripts/run-tests.mjs --native",
     "build:debug": "node scripts/build.mjs debug",
     "build:release": "node scripts/build.mjs release",
     "format": "zig fmt build.zig build_support src tests app.zon && prettier --write frontend scripts package.json",
