@@ -39,6 +39,17 @@ const windowsTrayIconRelativePath = path.join(
   "icons",
   "tray-icon.ico",
 );
+const windowsWindowIconSourcePath = path.join(
+  repositoryRoot,
+  "assets",
+  "icons",
+  "app-icon.ico",
+);
+const windowsWindowIconRelativePath = path.join(
+  "assets",
+  "icons",
+  "app-icon.ico",
+);
 
 const windowsArchitecturePolicies = Object.freeze({
   x64: Object.freeze({
@@ -437,23 +448,17 @@ function requireRegularFile(filePath) {
   }
 }
 
-export function stageWindowsTrayIcon(
-  stagePath,
-  sourcePath = windowsTrayIconSourcePath,
-) {
+function stageWindowsIcon(stagePath, sourcePath, relativePath) {
   requireRegularFile(sourcePath);
-  const targetPath = path.join(stagePath, windowsTrayIconRelativePath);
+  const targetPath = path.join(stagePath, relativePath);
   mkdirSync(path.dirname(targetPath), { recursive: true });
   copyFileSync(sourcePath, targetPath);
   return targetPath;
 }
 
-function verifyWindowsTrayIcon(
-  stagePath,
-  sourcePath = windowsTrayIconSourcePath,
-) {
+function verifyWindowsIcon(stagePath, sourcePath, relativePath, label) {
   requireRegularFile(sourcePath);
-  const targetPath = path.join(stagePath, windowsTrayIconRelativePath);
+  const targetPath = path.join(stagePath, relativePath);
   requireRegularFile(targetPath);
   const source = readFileSync(sourcePath);
   const packaged = readFileSync(targetPath);
@@ -463,10 +468,26 @@ function verifyWindowsTrayIcon(
     packaged.readUInt16LE(4) === 0 ||
     !packaged.equals(source)
   ) {
-    throw new Error(
-      "packaged Windows tray icon is not the exact canonical ICO",
-    );
+    throw new Error(`packaged Windows ${label} is not the exact canonical ICO`);
   }
+}
+
+export function stageWindowsTrayIcon(
+  stagePath,
+  sourcePath = windowsTrayIconSourcePath,
+) {
+  return stageWindowsIcon(stagePath, sourcePath, windowsTrayIconRelativePath);
+}
+
+// The window icon the Host hands the WebView2 runtime for the taskbar button,
+// Alt+Tab, the window thumbnail and the caption. The installer's own
+// `app-icon.ico` at the package root belongs to the shortcuts and the
+// uninstaller, so the Host's packaged icon path needs this copy.
+export function stageWindowsWindowIcon(
+  stagePath,
+  sourcePath = windowsWindowIconSourcePath,
+) {
+  return stageWindowsIcon(stagePath, sourcePath, windowsWindowIconRelativePath);
 }
 
 export function verifyWindowsRuntimeStage(
@@ -488,7 +509,18 @@ export function verifyWindowsRuntimeStage(
   ]) {
     requireRegularFile(path.join(stagePath, relativePath));
   }
-  verifyWindowsTrayIcon(stagePath);
+  verifyWindowsIcon(
+    stagePath,
+    windowsTrayIconSourcePath,
+    windowsTrayIconRelativePath,
+    "tray icon",
+  );
+  verifyWindowsIcon(
+    stagePath,
+    windowsWindowIconSourcePath,
+    windowsWindowIconRelativePath,
+    "window icon",
+  );
   requireRegularFile(executablePath);
   const loaderPath = path.join(stagePath, "bin", "WebView2Loader.dll");
   if (readPortableExecutableSubsystem(executablePath) !== 2) {
@@ -620,6 +652,7 @@ async function packageWindows() {
     },
   );
   stageWindowsTrayIcon(distribution.runtimeStagePath);
+  stageWindowsWindowIcon(distribution.runtimeStagePath);
   verifyWindowsRuntimeStage(distribution.runtimeStagePath, distribution);
   await stageAgentCoreRuntimeAssets(
     bundle,
