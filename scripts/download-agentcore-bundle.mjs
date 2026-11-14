@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -44,17 +45,24 @@ export async function downloadAgentCoreArchive(
   let canRetry = true;
   async function download(url) {
     for (;;) {
+      let httpStatus;
       try {
         const response = await fetchResponse(url, {
           redirect: "error",
           signal: AbortSignal.timeout(120_000),
         });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+          httpStatus = response.status;
+          await response.body?.cancel().catch(() => {});
+          throw new Error(`HTTP ${httpStatus}`);
+        }
         return Buffer.from(await response.arrayBuffer());
       } catch (error) {
         if (
           !canRetry ||
-          (error.name !== "TimeoutError" &&
+          (httpStatus !== 429 &&
+            !(httpStatus >= 500 && httpStatus < 600) &&
+            error.name !== "TimeoutError" &&
             !transientNetworkErrors.has(error.cause?.code ?? error.code))
         )
           throw new Error(
@@ -64,9 +72,7 @@ export async function downloadAgentCoreArchive(
             },
           );
         canRetry = false;
-        console.warn(
-          `Retrying AgentCore download after a network error: ${url}`,
-        );
+        console.warn(`Retrying AgentCore download: ${url}: ${error.message}`);
       }
     }
   }
@@ -121,9 +127,18 @@ export async function downloadAgentCoreArchive(
   if (cacheExists) {
     console.log(`Verified cached AgentCore release for ${targetId}`);
   } else if (cacheDir) {
-    await mkdir(cacheDir, { recursive: true });
-    await writeFile(path.join(cacheDir, "manifest.json"), manifestBytes);
-    await writeFile(path.join(cacheDir, "bundle.archive"), bytes);
+    const parent = path.dirname(cacheDir);
+    await mkdir(parent, { recursive: true });
+    const temporary = await mkdtemp(
+      path.join(parent, `${path.basename(cacheDir)}.tmp-`),
+    );
+    try {
+      await writeFile(path.join(temporary, "manifest.json"), manifestBytes);
+      await writeFile(path.join(temporary, "bundle.archive"), bytes);
+      await rename(temporary, cacheDir);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
   }
   return bytes;
 }

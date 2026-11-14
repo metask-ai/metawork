@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -184,4 +191,96 @@ test("does not retry a permanent HTTP failure", async () => {
     /HTTP 404/,
   );
   assert.equal(requests, 1);
+});
+
+test("retries HTTP 429 and 5xx using the same budget as network errors", async () => {
+  const target = "aarch64-macos";
+  const [name, bytes] = archives[target];
+  for (const status of [429, 503]) {
+    const { fetchResponse } = fixture();
+    const requests = [];
+    assert.deepEqual(
+      await downloadAgentCoreArchive(lock, target, {
+        fetchResponse: (url, options) => {
+          requests.push(url.href);
+          if (requests.length === 2) return new Response("busy", { status });
+          return fetchResponse(url, options);
+        },
+      }),
+      bytes,
+    );
+    assert.deepEqual(requests, [
+      `${origin}manifest.json`,
+      `${origin}${name}`,
+      `${origin}${name}`,
+    ]);
+  }
+
+  const { fetchResponse } = fixture();
+  const requests = [];
+  await assert.rejects(
+    downloadAgentCoreArchive(lock, target, {
+      fetchResponse: (url, options) => {
+        requests.push(url.href);
+        if (requests.length === 1) return new Response(null, { status: 429 });
+        if (requests.length === 3) {
+          throw new TypeError("fetch failed", {
+            cause: { code: "UND_ERR_CONNECT_TIMEOUT" },
+          });
+        }
+        return fetchResponse(url, options);
+      },
+    }),
+    /AgentCore download failed/,
+  );
+  assert.deepEqual(requests, [
+    `${origin}manifest.json`,
+    `${origin}manifest.json`,
+    `${origin}${name}`,
+  ]);
+});
+
+test("publishes both cache files even when a previous write was interrupted", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-cache-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheDir = path.join(root, "cache");
+  const interrupted = await mkdtemp(`${cacheDir}.tmp-`);
+  await writeFile(path.join(interrupted, "manifest.json"), "incomplete");
+  const target = "aarch64-macos";
+  const { fetchResponse } = fixture();
+
+  await downloadAgentCoreArchive(lock, target, { cacheDir, fetchResponse });
+
+  assert.deepEqual((await readdir(cacheDir)).sort(), [
+    "bundle.archive",
+    "manifest.json",
+  ]);
+  assert.deepEqual((await readdir(root)).sort(), [
+    "cache",
+    path.basename(interrupted),
+  ]);
+});
+
+test("failed cache publication preserves the existing destination", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-cache-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheDir = path.join(root, "cache");
+  const target = "aarch64-macos";
+  const { fetchResponse } = fixture();
+
+  await assert.rejects(
+    downloadAgentCoreArchive(lock, target, {
+      cacheDir,
+      fetchResponse: async (url, options) => {
+        if (url.href === `${origin}${archives[target][0]}`) {
+          await mkdir(cacheDir);
+          await writeFile(path.join(cacheDir, "sentinel"), "existing");
+        }
+        return fetchResponse(url, options);
+      },
+    }),
+    { syscall: "rename" },
+  );
+  assert.deepEqual(await readdir(root), ["cache"]);
+  assert.deepEqual(await readdir(cacheDir), ["sentinel"]);
 });
