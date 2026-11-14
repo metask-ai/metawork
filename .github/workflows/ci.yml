@@ -72,16 +72,12 @@ jobs:
       - *setup-node
       - *setup-zig
 
-      - name: Restore Zig compilation cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with: &zig-cache
-          path: |
-            .zig-cache
-            !.zig-cache/tmp
-            !.zig-cache/global/tmp
-          key: zig-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', 'build_support/agentcore-bundle.*.lock.json', 'package-lock.json') }}-${{ github.sha }}
-          restore-keys: |
-            zig-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', 'build_support/agentcore-bundle.*.lock.json', 'package-lock.json') }}-
+      - &cache-zig-packages
+        name: Cache Zig dependency packages
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .zig-cache/global/p
+          key: zig-packages-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
 
       - &prepare-zig-cache
         name: Prepare Zig cache
@@ -127,10 +123,24 @@ jobs:
       - *setup-node
       - *setup-zig
 
-      - name: Cache Zig compilation
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with: *zig-cache
+      - name: Restore Native compilation cache
+        id: native-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: &native-cache-path |
+            .zig-cache/b
+            .zig-cache/c
+            .zig-cache/h
+            .zig-cache/o
+            .zig-cache/z
+            .zig-cache/global/b
+            .zig-cache/global/c
+            .zig-cache/global/h
+            .zig-cache/global/o
+            .zig-cache/global/z
+          key: zig-native-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
 
+      - *cache-zig-packages
       - *prepare-zig-cache
       - *npm-ci
       - *restore-agentcore
@@ -142,3 +152,10 @@ jobs:
 
       - name: Run the full Native test graph
         run: npm run test:native
+
+      - name: Save Native compilation cache on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: *native-cache-path
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}

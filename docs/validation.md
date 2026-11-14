@@ -206,7 +206,9 @@ npm test
 
 [CI](../.github/workflows/ci.yml) 在 PR 更新和 `main` 收到新提交时并行运行。Ubuntu 执行格式与 Renderer TypeScript 检查。Windows x64 和 macOS arm64 各自独立运行 `npm run test:node`（含 Bridge 生成一致性）以及 `npm run check:sdk` 和 `npm run test:native`（完整 Native 测试图）。
 
-Node 和 Native 作业按目标 lock 恢复原始[官方发布清单](agentcore-abi-v1.md#11-官方发布来源与手动更新)与压缩包的下载缓存，每次校验后经现有 stager 安装 bundle。缓存未命中时从官方地址下载，暂时性网络错误、HTTP 429 与 5xx 共用一次重试额度。校验或安装失败使对应作业失败。缓存未命中且安装成功时立即保存下载缓存。Node 作业只读恢复 Zig 编译缓存，Native 作业负责保存。
+Node 和 Native 作业按目标 lock 恢复原始[官方发布清单](agentcore-abi-v1.md#11-官方发布来源与手动更新)与压缩包的下载缓存，每次校验后经现有 stager 安装 bundle。缓存未命中时从官方地址下载，暂时性网络错误、HTTP 429 与 5xx 共用一次重试额度。校验或安装失败使对应作业失败。缓存未命中且安装成功时立即保存下载缓存。
+
+Node 和 Native 作业共用 Zig 依赖包缓存。Native 编译缓存按平台、工具链和依赖区分，由 `main` 上通过的 Native 作业填充，PR 的 Native 作业只读恢复。缓存未命中时由正常验证入口准备依赖并编译。
 
 `npm run dev` 先验证 canonical AgentCore bundle 与平台前置条件，在独立目录构建 Renderer 资源和 Debug Host，完成所需签名，再启动自有 Vite server 与新 primary Host。Host 通过 Native SDK 加载本次 Vite 地址，前端 UI 使用 HMR；Zig、Bridge wire/语义或构建配置变化后必须退出并重新运行该入口，不承诺运行中 Host 与已修改合同的 Renderer 兼容。Vite 仅使用已有的本机开发 origin；端口占用、构建、依赖、签名或服务启动失败必须明确失败，不连接其他实例或启动旧产物。Host 退出或启动失败后关闭本次 Vite server；正常退出清理自有运行目录，异常退出无法证明后代停止时保留资源。开发脚本的 Node 回归负责真实 HMR 消息、服务清理、端口冲突与开发/发布 CSP 隔离；真实 WebView 中的更新、Bridge 可达性和平台退出行为仍须由对应平台实测。
 
