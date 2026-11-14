@@ -4,6 +4,7 @@
 //! effects are supplied by composition; they are never retained here.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const credential_match = @import("product_credential_match");
 const search_casefold = @import("search_casefold.zig");
 const agent = @import("metawork_agent");
@@ -10267,7 +10268,7 @@ fn startCloseWorker(
     const binding = task.runtime.closingWorkerBinding() orelse unreachable;
     task.runtime.close_failed = false;
     task.runtime.close_completion.store(.running, .release);
-    task.runtime.close_thread = std.Thread.spawn(.{}, closeWorker, .{
+    task.runtime.close_thread = std.Thread.spawn(thread_stack.config, closeWorker, .{
         &task.runtime.close_completion,
         binding,
         notifier,

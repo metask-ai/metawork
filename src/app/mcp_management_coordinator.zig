@@ -4,6 +4,7 @@
 //! connection-test Runtimes around the Product Control transaction seams.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const http_execution = @import("metawork_http_transport");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
@@ -215,7 +216,7 @@ const Job = struct {
     thread: ?std.Thread = null,
 
     fn start(self: *Job) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *Job) void {
@@ -445,7 +446,7 @@ const ConnectionTestJob = struct {
     };
 
     fn start(self: *ConnectionTestJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *ConnectionTestJob) void {
@@ -561,7 +562,7 @@ const ConfigurationApplyJob = struct {
     thread: ?std.Thread = null,
 
     fn start(self: *ConfigurationApplyJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *ConfigurationApplyJob) void {
@@ -1378,7 +1379,7 @@ pub const Coordinator = struct {
                 job.* = .{ .http_engine = self.host_environment.http_engine, .allocator = self.allocator, .io = self.io, .host = self.host, .server = id, .revision = next.revision, .request = parsed, .transport_override = self.transport_override, .cancellation = .init(self.io) };
                 owned = false;
                 errdefer job.deinit();
-                job.thread = try std.Thread.spawn(.{}, InstallationJob.run, .{job});
+                job.thread = try std.Thread.spawn(thread_stack.config, InstallationJob.run, .{job});
                 self.installation_job = job;
                 return true;
             },

@@ -3,6 +3,7 @@
 //! this owner only sequences platform time/credential/network capabilities.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const http_execution = @import("metawork_http_transport");
 const control_ports = @import("metawork_product_control_ports");
 const mcp_types = @import("metawork_product_mcp");
@@ -105,7 +106,7 @@ const RefreshJob = struct {
     thread: ?std.Thread = null,
 
     fn start(self: *RefreshJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     fn run(self: *RefreshJob) void {

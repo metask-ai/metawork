@@ -1,6 +1,7 @@
 //! One-shot Provider validation over MetaWork-owned Completion.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const completion = @import("agent_completion");
 const model_binding = @import("agent_model_binding");
 const ModelBinding = model_binding.ModelBinding;
@@ -91,7 +92,7 @@ pub fn run(
         .request_cancellation = &request_cancellation,
         .external_cancellation = cancellation,
     };
-    const watchdog_thread = std.Thread.spawn(.{}, Watchdog.run, .{&watchdog}) catch
+    const watchdog_thread = std.Thread.spawn(thread_stack.config, Watchdog.run, .{&watchdog}) catch
         return .{ .failed = .run_failed };
     const messages = [_]completion.Message{.{
         .role = .user,

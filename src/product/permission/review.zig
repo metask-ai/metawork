@@ -3,6 +3,7 @@
 //! and runs this blocking function on a worker, never the main/Run thread.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const completion = @import("agent_completion");
 
 pub const max_input_bytes: usize = 32 * 1024;
@@ -299,7 +300,7 @@ pub fn review(
     if (cancellation.isRequested()) return .{ .failure = .cancelled };
     if (expired(io, deadline)) return .{ .failure = .timeout };
     var watchdog = Watchdog{ .io = io, .deadline = deadline, .cancellation = cancellation };
-    const thread = std.Thread.spawn(.{}, Watchdog.run, .{&watchdog}) catch
+    const thread = std.Thread.spawn(thread_stack.config, Watchdog.run, .{&watchdog}) catch
         return .{ .failure = .watchdog_unavailable };
     const messages = [_]completion.Message{.{ .role = .user, .text = encoded.bytes[0..encoded.len] }};
     var outcome = owner.complete(.{

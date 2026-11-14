@@ -3,6 +3,7 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const multimodal = @import("session/multimodal.zig");
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
@@ -2844,7 +2845,7 @@ pub const Session = struct {
             if (!call.sent) self.image_sends -= 1;
             self.unlock();
         }
-        const watchdog = std.Thread.spawn(.{}, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };
+        const watchdog = std.Thread.spawn(thread_stack.config, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };
         defer {
             call.finished.store(true, .release);
             watchdog.join();
@@ -2931,7 +2932,7 @@ pub const Session = struct {
             self.video_cancellation = null;
             self.unlock();
         }
-        const watchdog = std.Thread.spawn(.{}, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };
+        const watchdog = std.Thread.spawn(thread_stack.config, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };
         defer {
             call.finished.store(true, .release);
             watchdog.join();

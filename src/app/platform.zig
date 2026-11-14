@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const thread_stack = @import("metawork_thread_stack");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
@@ -29,7 +30,7 @@ const RequiredWake = struct {
     thread: ?std.Thread = null,
 
     fn start(self: *RequiredWake) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try std.Thread.spawn(thread_stack.config, run, .{self});
     }
 
     /// Any thread. Never blocks; false once closed.

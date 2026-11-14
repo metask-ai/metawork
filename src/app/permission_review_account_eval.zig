@@ -1,6 +1,7 @@
 //! Opt-in test composition. Account remains the sole refresh credential owner.
 //! No Product stores, task tools, Bridge, or credential export are started here.
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const native = @import("native_sdk");
 const runner = @import("runner");
 const account = @import("metawork_account");
@@ -132,7 +133,7 @@ const Host = struct {
             self.lease.?.deinit();
             self.lease = null;
         }
-        self.worker = try std.Thread.spawn(.{}, evaluate, .{self});
+        self.worker = try std.Thread.spawn(thread_stack.config, evaluate, .{self});
         self.phase = .evaluating;
     }
 

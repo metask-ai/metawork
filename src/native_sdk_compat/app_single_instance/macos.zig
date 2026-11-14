@@ -1,6 +1,7 @@
 //! macOS app-instance transport: current-user Unix Domain Socket and fixed prompt.
 
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const contract = @import("../app_single_instance.zig");
 
 const fd_t = c_int;
@@ -140,7 +141,7 @@ pub const Server = struct {
             .owner_uid = getuid(),
             .handler = handler,
         };
-        state.thread = try std.Thread.spawn(.{}, State.run, .{state});
+        state.thread = try std.Thread.spawn(thread_stack.config, State.run, .{state});
         return .{ .allocator = allocator, .state = state };
     }
 

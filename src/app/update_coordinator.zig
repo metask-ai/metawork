@@ -1,6 +1,7 @@
 //! Update-only lifecycle coordinator. Jobs hold owned requests and a narrow
 //! transport, never Product state, Account credentials or a Native Runtime.
 const std = @import("std");
+const thread_stack = @import("metawork_thread_stack");
 const update = @import("metawork_product_update");
 const http = @import("update_http_transport.zig");
 
@@ -112,7 +113,7 @@ pub const Coordinator = struct {
         const job = try self.allocator.create(Job);
         errdefer self.allocator.destroy(job);
         job.* = .{ .allocator = self.allocator, .transport = self.transport, .work = work, .cancellation = .{ .io = self.io }, .wake_context = self.host.context, .wake_fn = self.host.wake_fn };
-        job.thread = try std.Thread.spawn(.{}, Job.run, .{job});
+        job.thread = try std.Thread.spawn(thread_stack.config, Job.run, .{job});
         return job;
     }
 
