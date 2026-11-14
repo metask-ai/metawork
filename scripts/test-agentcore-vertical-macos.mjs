@@ -42,6 +42,10 @@ import {
   runAutomaticFirstSkillVertical,
   runSkillAutoRefreshVertical,
 } from "./skill-auto-refresh-vertical.mjs";
+import {
+  runMemoryGrowthVertical,
+  measureAfterRestart,
+} from "./memory-growth-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
@@ -678,6 +682,62 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (process.env.METAWORK_MEMORY_GROWTH_ONLY === "1") {
+    const catalog = await poll(
+      async () => {
+        const current = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return current?.availability === "ready" ||
+          current?.availability === "degraded"
+          ? current
+          : null;
+      },
+      commandTimeoutMs,
+      "memory growth Workspace catalog",
+    );
+    const report = await runMemoryGrowthVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      pid: app.pid,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      catalog,
+      total: Number(process.env.METAWORK_MEMORY_GROWTH_TASKS ?? 50),
+      threadProbeScript: process.env.METAWORK_THREAD_PROBE_SCRIPT ?? null,
+      symbolPath: join(root, "zig-out", "bin"),
+    });
+    await writeFile(
+      join(root, ".zig-cache/memory-growth-vertical.json"),
+      JSON.stringify({ ...report, binary, core: bundle.manifest?.version ?? null }, null, 2),
+    );
+    console.log(report.table);
+    await stopApplication("memory growth cold restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    const restarted = await measureAfterRestart({
+      pid: app.pid,
+      snapshot,
+      poll,
+      expectedTasks: report.samples.at(-1).tasks,
+    });
+    console.log(
+      "after restart: " +
+        JSON.stringify({
+          tasks: restarted.tasks,
+          hostCommitMB: Math.round(restarted.hostCommitBytes / 1048576),
+          hostWorkingSetMB: Math.round(restarted.hostWorkingSetBytes / 1048576),
+          hostThreads: restarted.hostThreads,
+          treeCommitMB: Math.round(restarted.treeCommitBytes / 1048576),
+          treeWorkingSetMB: Math.round(restarted.treeWorkingSetBytes / 1048576),
+        }),
+    );
+    break desktopVertical;
+  }
   if (attachmentCapacityOnly) {
     const catalog = await poll(
       async () => {
