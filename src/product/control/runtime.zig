@@ -9933,6 +9933,19 @@ pub const TestSupport = if (builtin.is_test) struct {
         try recordTestOutput(control, @splat(3), "results/年度报告.docx");
     }
 
+    /// The fact personal asset mutation admission is gated on: no personal
+    /// catalog query in flight. Init queues one as soon as a canonical home is
+    /// configured, so a case that mutates right after init waits for this.
+    /// A published snapshot is not the same fact, since `CatalogSlot` reports a
+    /// committed snapshot and ignores a refresh running behind it. No canonical
+    /// home at all is a fixture that never configured one, not a state to wait
+    /// for.
+    pub fn personalCatalogSettled(control: *const Runtime) error{MissingPersonalSource}!bool {
+        const discovery = control.skill.personalSourceDiscovery() orelse
+            return error.MissingPersonalSource;
+        return !discovery.checking;
+    }
+
     pub fn skillImportFixture(control: *Runtime, root: []const u8, store: *skill_runtime.testing.ManagementFileStore) !void {
         const Clock = struct {
             fn unixMs(_: ?*anyopaque) ?u64 {

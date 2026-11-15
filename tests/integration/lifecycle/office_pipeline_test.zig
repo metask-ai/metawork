@@ -447,6 +447,21 @@ test "Office canonical stream survives consumer backpressure and retains the ful
     try qualify("consumer-starvation");
 }
 
+/// Product init queues personal discovery as soon as a canonical home exists,
+/// and asset mutation is refused for as long as that query is in flight. Wait
+/// for the fact admission is gated on, and for a snapshot that holds what the
+/// previous step wrote.
+fn awaitPersonalCatalog(control: *control_api.Runtime) !void {
+    for (0..5000) |_| {
+        try control.drainAgentEvents();
+        const available = control.skillCatalog();
+        if (try control_api.TestSupport.personalCatalogSettled(control) and
+            (available.availability == .ready or available.availability == .degraded)) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.SkillCatalogTimeout;
+}
+
 // Same canonical runtime, Product executor and local Provider infrastructure;
 // the asset is the issue's relative-only definition, imported through Product.
 test "Skill resource context reads a managed import through tool and typed inputs" {
@@ -496,15 +511,11 @@ test "Skill resource context reads a managed import through tool and typed input
         try control.startCustomProviders(root, vault.capability());
         defer control.stopCustomProviders();
         try configureProvider(&control, provider.endpoint);
+        try awaitPersonalCatalog(&control);
         const preparation = try control.prepareSkillImport(source, .local_directory, .{ .scope = .personal });
         try control.preflightSkillImport(preparation.id, preparation.revision, preparation.effect);
         _ = try control.commitSkillImport(preparation.id, preparation.revision, preparation.effect);
-        for (0..5000) |_| {
-            try control.drainAgentEvents();
-            const available = control.skillCatalog();
-            if (available.availability == .ready or available.availability == .degraded) break;
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        } else return error.SkillCatalogTimeout;
+        try awaitPersonalCatalog(&control);
         const task_id = try control.createTask(.{ .workspace_root = work, .trust = .explicitly_trusted, .approval_mode = .full_access }, try control_api.TestSupport.fixtureModelSelection(&control));
         const task = control.testTask(task_id).?;
         const workspace_id = task.durable.workspace_id;
