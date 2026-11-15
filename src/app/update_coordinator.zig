@@ -60,7 +60,7 @@ const Job = struct {
                     return self.answered(response, .invalid_manifest);
                 self.check_completion = .{ .release = release };
             },
-            .download => self.head_result = update.headResult(response.status),
+            .download => self.prechecked(response.status),
         }
     }
 
@@ -74,6 +74,28 @@ const Job = struct {
         std.log.warn("update check consumer=update status={d} body_bytes={d} kind={s}", .{
             response.status, response.body_len, @tagName(kind),
         });
+    }
+
+    /// A download precheck the server answered with a status that rules the
+    /// link out. The same blind spot as an unusable check: the request itself
+    /// succeeded, so the execution layer never sees it, and the outcome lives
+    /// nowhere but in the Product's download error. Typed facts only, and no
+    /// part of the address: the download URL comes from the manifest, so it is
+    /// an external address this record must never carry.
+    fn prechecked(self: *Job, status: u16) void {
+        self.head_result = update.headResult(status);
+        const ruled_out = ruledOut(self.head_result) orelse return;
+        std.log.warn("update download consumer=update status={d} result={s}", .{ status, @tagName(ruled_out) });
+    }
+
+    /// The precheck answers worth recording. `accessible` and `unsupported`
+    /// both let the handoff proceed, so only the classes that stop it leave a
+    /// line; which status means what stays the Product's classification.
+    fn ruledOut(result: update.HeadResult) ?update.HeadResult {
+        return switch (result) {
+            .accessible, .unsupported => null,
+            .invalid_link, .network, .timeout => result,
+        };
     }
 
     fn join(self: *Job) void {
@@ -499,4 +521,32 @@ test "updates timer failure closes the capability instead of starting a parallel
     try std.testing.expectEqual(update.CheckState.unavailable, host.state.view().checkState);
     try std.testing.expectEqual(Outcome.unavailable, coordinator.requestCheck());
     try std.testing.expectEqual(@as(u32, 0), host.requests.load(.acquire));
+}
+
+test "updates record a download precheck the server answered but which rules the link out" {
+    // Which status means what stays the Product's classification: 404/410 are
+    // a link that is gone, a 503 or a redirect we refuse to follow are a
+    // network answer, and 200 or a server that will not do HEAD both let the
+    // handoff proceed with nothing to record.
+    try std.testing.expectEqual(update.HeadResult.invalid_link, Job.ruledOut(update.headResult(404)).?);
+    try std.testing.expectEqual(update.HeadResult.invalid_link, Job.ruledOut(update.headResult(410)).?);
+    try std.testing.expectEqual(update.HeadResult.network, Job.ruledOut(update.headResult(503)).?);
+    try std.testing.expectEqual(update.HeadResult.network, Job.ruledOut(update.headResult(302)).?);
+    try std.testing.expectEqual(@as(?update.HeadResult, null), Job.ruledOut(update.headResult(200)));
+    try std.testing.expectEqual(@as(?update.HeadResult, null), Job.ruledOut(update.headResult(405)));
+    try std.testing.expectEqual(@as(?update.HeadResult, null), Job.ruledOut(update.headResult(501)));
+
+    // A recorded precheck still reaches the Product as the same failure, and
+    // still hands nothing to the browser.
+    var host = try TestHost.init();
+    var coordinator = host.coordinator();
+    coordinator.start(false);
+    defer coordinator.shutdown();
+    try std.testing.expectEqual(Outcome.accepted, coordinator.requestCheck());
+    try TestHost.settle(&coordinator);
+    host.head_status = 503;
+    try std.testing.expectEqual(Outcome.accepted, coordinator.requestDownload("0.2.8"));
+    try TestHost.settle(&coordinator);
+    try std.testing.expectEqual(update.DownloadError.network, host.state.view().downloadError);
+    try std.testing.expectEqual(@as(usize, 0), host.opened);
 }
