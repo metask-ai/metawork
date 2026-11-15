@@ -150,6 +150,23 @@ export function windowsFileVersion(version) {
   return `${components.join(".")}.0`;
 }
 
+/**
+ * Every value the installer script requires of its package driver. The script
+ * refuses to compile without each of them, so they are built in one place that
+ * a test can hold against the script's own `#ifndef` list.
+ */
+export function windowsInstallerDefinitions(packageManifest, distribution) {
+  return [
+    `AppVersion=${packageManifest.metadata.version}`,
+    `AppDisplayName=${packageManifest.metadata.displayName}`,
+    `AppBundleId=${packageManifest.identity.bundleId}`,
+    `AppExecutableName=${packageManifest.identity.executableName}`,
+    `AppFileVersion=${windowsFileVersion(packageManifest.metadata.version)}`,
+    `AppArchitecture=${distribution.innoArchitecture}`,
+    `RuntimeStage=${distribution.runtimeStagePath}`,
+  ];
+}
+
 function uniquePaths(paths) {
   const seen = new Set();
   return paths.filter((candidate) => {
@@ -684,14 +701,10 @@ async function packageWindows() {
     0,
     -".exe".length,
   );
-  const definitions = [
-    `AppVersion=${packageManifest.metadata.version}`,
-    `AppDisplayName=${packageManifest.metadata.displayName}`,
-    `AppExecutableName=${packageManifest.identity.executableName}`,
-    `AppFileVersion=${windowsFileVersion(packageManifest.metadata.version)}`,
-    `AppArchitecture=${distribution.innoArchitecture}`,
-    `RuntimeStage=${distribution.runtimeStagePath}`,
-  ];
+  const definitions = windowsInstallerDefinitions(
+    packageManifest,
+    distribution,
+  );
   if (signing) definitions.push("AppSignTool=metawork");
   const signingCompilerArgument = signing
     ? [innoSignToolCompilerArgument(compilerMajor, signing)]
