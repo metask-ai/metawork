@@ -11,10 +11,18 @@ pub const max_image_side: u32 = 8192;
 pub const media_chunk_bytes: usize = 262143;
 pub const max_media_slots: usize = max_image_slots + 1;
 pub const ImageInfo = image_container.Info;
-/// Where the bytes come from. `attachment` is a Product-owned store read: no
-/// Workspace is involved, so its authority is the staged draft identity, not a
-/// Workspace id/epoch/root.
-pub const Source = enum { reference, workspace, directory, attachment };
+/// Where the bytes come from. `attachment` and `task_attachment` are both
+/// Product-owned store reads: no Workspace is involved, so their authority is
+/// the attachment's own identity, not a Workspace id/epoch/root. They differ in
+/// which identity that is -- a staged draft, or a message a Task accepted.
+pub const Source = enum { reference, workspace, directory, attachment, task_attachment };
+
+/// Whether this source reads the Product-owned attachment store rather than a
+/// Workspace, which decides both path handling and that the bytes must still
+/// be the image staging classified.
+pub fn storeOwned(source: Source) bool {
+    return source == .attachment or source == .task_attachment;
+}
 pub const max_directory_entries = 512;
 pub const DirectoryEntry = struct { name: []const u8, kind: enum { file, directory } };
 
@@ -222,7 +230,7 @@ const Job = struct {
         };
         defer root.close(self.lane.io);
         if (self.source == .directory) return self.readDirectory(root);
-        const relative = self.source == .workspace or self.source == .attachment or self.generated_video;
+        const relative = self.source == .workspace or storeOwned(self.source) or self.generated_video;
         if (relative and !validWorkspacePath(self.relative_path, false)) {
             self.state = .restricted;
             return .completed;
@@ -285,7 +293,7 @@ const Job = struct {
         // An attachment original was classified as an image when it was staged.
         // If it no longer looks like one it has changed underneath us, and this
         // source must never fall through to the text body path.
-        if (self.source == .attachment and !image) {
+        if (storeOwned(self.source) and !image) {
             self.state = .unsupported;
             return .completed;
         }
