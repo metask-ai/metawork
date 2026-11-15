@@ -29,6 +29,7 @@ import {
   verifyWindowsRuntimeStage,
   windowsFileVersion,
   windowsDistributionForArchitecture,
+  windowsInstallerDefinitions,
   windowsSignArguments,
   windowsSigningConfiguration,
   windowsSignToolCandidates,
@@ -158,6 +159,52 @@ test("Windows installer force closes a tray-resident old Host before replacement
   );
   assert.match(installer, /^CloseApplications=force$/mu);
   assert.match(installer, /^RestartApplications=no$/mu);
+});
+
+test("Windows uninstall takes away the notification identity key without ever writing it", () => {
+  const installer = readFileSync(
+    new URL("../packaging/windows/metawork.iss", import.meta.url),
+    "utf8",
+  );
+  const entries = installer
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith("Root: "));
+  assert.equal(entries.length, 1);
+  const [identity] = entries;
+  assert.match(
+    identity,
+    /^Root: HKCU; Subkey: "Software\\Classes\\AppUserModelId\\\{#AppBundleId\}"; Flags: dontcreatekey uninsdeletekey$/u,
+  );
+  // The runtime owns every value under the key. An installer that wrote one
+  // would be a second owner, and a development run — which has no installer —
+  // would disagree with an install.
+  assert.doesNotMatch(identity, /Value(Type|Name|Data):/u);
+  // The automation identity is a separate AppUserModelID that no install ever
+  // carries, so the installer has nothing to say about it.
+  assert.doesNotMatch(installer, /\.automation/u);
+});
+
+test("Windows installer definitions supply exactly what the installer script requires", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const manifest = readNativePackageManifest(root);
+  const distribution = windowsDistributionForArchitecture("x64");
+  const definitions = windowsInstallerDefinitions(manifest, distribution);
+  const supplied = definitions.map((definition) => definition.split("=")[0]);
+  const installer = readFileSync(
+    new URL("../packaging/windows/metawork.iss", import.meta.url),
+    "utf8",
+  );
+  const required = [...installer.matchAll(/^#ifndef (\w+)$/gmu)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(supplied.slice().sort(), required.slice().sort());
+  assert.ok(definitions.includes(`AppBundleId=${manifest.identity.bundleId}`));
+  for (const name of required) {
+    assert.match(
+      installer,
+      new RegExp(`^  #error ${name} must be supplied`, "mu"),
+    );
+  }
 });
 
 test("Inno Setup compiler discovery prefers an explicit absolute path", () => {

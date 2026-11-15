@@ -4,6 +4,9 @@
 #ifndef AppDisplayName
   #error AppDisplayName must be supplied by the package driver
 #endif
+#ifndef AppBundleId
+  #error AppBundleId must be supplied by the package driver
+#endif
 #ifndef AppExecutableName
   #error AppExecutableName must be supplied by the package driver
 #endif
@@ -62,6 +65,16 @@ Source: "{#RuntimeStage}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdi
 [Icons]
 Name: "{autoprograms}\{#AppDisplayName}"; Filename: "{app}\bin\{#AppExecutableName}.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app-icon.ico"
 Name: "{autodesktop}\{#AppDisplayName}"; Filename: "{app}\bin\{#AppExecutableName}.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app-icon.ico"; Tasks: desktopicon
+
+[Registry]
+; The app's notification identity (the display name, icon and toast activator
+; Windows reads to attribute a toast) lives under this key. The Native SDK
+; runtime writes it on the first notification and owns every value in it, so
+; the installer writes nothing here and only takes the key away with the app:
+; that is what dontcreatekey is for. A value written here would make the
+; installer a second owner of an identity that a development run, which has no
+; installer at all, already gets right without one.
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\{#AppBundleId}"; Flags: dontcreatekey uninsdeletekey
 
 [Run]
 Filename: "{app}\bin\{#AppExecutableName}.exe"; Description: "{cm:LaunchProgram,{#StringChange(AppDisplayName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
