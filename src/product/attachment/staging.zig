@@ -57,6 +57,9 @@ const Job = struct {
     sources: []attachment.store.Source = &.{},
     source_count: usize = 0,
     targets: []attachment.store.File = &.{},
+    /// A copy of the batch's open destination handle, for `.written` only.
+    /// The batch owns closing it; a job never does.
+    writer: ?attachment.store.Writer = null,
     chunk: []u8 = &.{},
     offset: usize = 0,
     limits: attachment.Limits = undefined,
@@ -120,7 +123,8 @@ const Job = struct {
                 try self.file_store.create(file);
             },
             .written => {
-                try self.file_store.append(self.targets[0], self.offset, self.chunk);
+                const writer = self.writer orelse return error.InvalidInput;
+                try writer.append(self.file_store.io, self.offset, self.chunk);
             },
             .validated => for (self.targets) |file| {
                 try self.check();
@@ -218,13 +222,13 @@ pub const Lane = struct {
         errdefer _ = runtime.cancelReceive(id);
         var storage: [attachment.max_files_per_message]attachment.store.File = undefined;
         const targets = try runtime.writeFiles(id, &storage);
-        try self.beginFiles(completion_id, runtime.file_store.?, .initialized, targets, 0, &.{});
+        try self.beginFiles(completion_id, runtime.file_store.?, .initialized, targets, 0, &.{}, null);
         self.operation = .{ .completion_id = completion_id, .product_id = id };
     }
     pub fn appendBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, index: usize, offset: usize, bytes: []const u8) Error!void {
         if (self.operation != null) return error.InputBusy;
-        const target = try runtime.writeTarget(id, index, offset, bytes.len);
-        try self.beginFiles(completion_id, runtime.file_store.?, .written, &.{target}, offset, bytes);
+        const writer = try runtime.writeHandle(id, index, offset, bytes.len);
+        try self.beginFiles(completion_id, runtime.file_store.?, .written, &.{writer.file}, offset, bytes, writer);
         self.operation = .{ .completion_id = completion_id, .product_id = id, .file_index = index, .offset = offset, .count = bytes.len };
     }
     pub fn finishBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64) Error!void {
@@ -232,7 +236,7 @@ pub const Lane = struct {
         try runtime.validateComplete(id);
         var storage: [attachment.max_files_per_message]attachment.store.File = undefined;
         const targets = try runtime.writeFiles(id, &storage);
-        try self.beginFiles(completion_id, runtime.file_store.?, .validated, targets, 0, &.{});
+        try self.beginFiles(completion_id, runtime.file_store.?, .validated, targets, 0, &.{}, null);
         self.operation = .{ .completion_id = completion_id, .product_id = id };
     }
 
@@ -399,13 +403,14 @@ pub const Lane = struct {
         job.phase = .validated;
         try self.enqueue(job);
     }
-    fn beginFiles(self: *Lane, id: u64, store: *attachment.FileStore, phase: Phase, files: []const attachment.store.File, offset: usize, bytes: []const u8) Error!void {
-        if (phase == .probed or phase == .copied or files.len == 0 or bytes.len > 128 * 1024 or (phase == .written and (files.len != 1 or bytes.len == 0))) return error.InvalidInput;
+    fn beginFiles(self: *Lane, id: u64, store: *attachment.FileStore, phase: Phase, files: []const attachment.store.File, offset: usize, bytes: []const u8, writer: ?attachment.store.Writer) Error!void {
+        if (phase == .probed or phase == .copied or files.len == 0 or bytes.len > 128 * 1024 or (phase == .written and (files.len != 1 or bytes.len == 0 or writer == null))) return error.InvalidInput;
         const job = try self.allocate(id, store);
         errdefer self.release(.{ .job = job, .completion = undefined });
         job.phase = phase;
         job.targets = try self.allocator.dupe(attachment.store.File, files);
         job.offset = offset;
+        job.writer = writer;
         job.chunk = try self.allocator.dupe(u8, bytes);
         try self.enqueue(job);
     }
