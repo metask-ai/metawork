@@ -15,10 +15,17 @@ function runPowerShell(script) {
     ),
     [
       "-NoProfile",
+      "-NonInteractive",
       "-EncodedCommand",
       Buffer.from(script, "utf16le").toString("base64"),
     ],
-    { encoding: "utf8", timeout: 15_000, windowsHide: true },
+    // The budget is a backstop against a child that never exits, not a bound on
+    // how fast Windows PowerShell starts: these cases assert what the selectors
+    // decide, never how long the parse takes. A healthy run spends 0.6 s to
+    // 3.4 s here, while a runner saturated by the rest of the suite has needed
+    // more than 17 s for the same work, so the backstop stays an order of
+    // magnitude above the healthy cost and only a hang can reach it.
+    { encoding: "utf8", timeout: 60_000, windowsHide: true },
   );
 }
 
