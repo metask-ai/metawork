@@ -237,8 +237,14 @@ pub const Runtime = struct {
         var runtime: ?*wire.RuntimeHandle = null;
         const status = api.runtime().create()(&runtime_config, null, &runtime, &diagnostic);
         defer releaseOwned(api, &diagnostic);
-        const typed_status = sdk.Status.fromCode(status) catch return error.CoreCallFailed;
-        if (typed_status != .ok or runtime == null) return error.CoreCallFailed;
+        const typed_status = sdk.Status.fromCode(status) catch {
+            logRuntimeCreateFailure(status, null, diagnostic);
+            return error.CoreCallFailed;
+        };
+        if (typed_status != .ok or runtime == null) {
+            logRuntimeCreateFailure(status, typed_status, diagnostic);
+            return error.CoreCallFailed;
+        }
         errdefer {
             var destroy_diagnostic = emptyOwnedBytes();
             _ = api.runtime().destroy()(runtime, &destroy_diagnostic);
@@ -1701,7 +1707,59 @@ fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
     if (buffer.ptr != null or buffer.len != 0) api.bufferRelease()(buffer);
 }
 
+/// AgentCore's own bytes, not one of our closed vocabularies, so a record of
+/// them is bounded and reduced to printable ASCII: it can neither flood the
+/// log nor forge a second line in it.
+const max_logged_diagnostic_bytes: usize = 512;
+
+fn loggedDiagnostic(out: *[max_logged_diagnostic_bytes]u8, diagnostic: wire.OwnedBytesV1) []const u8 {
+    const bytes = sdk.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len }) catch return "";
+    const len = @min(bytes.len, out.len);
+    for (bytes[0..len], out[0..len]) |byte, *slot|
+        slot.* = if (byte >= 0x20 and byte < 0x7f) byte else '.';
+    return out[0..len];
+}
+
+/// AgentCore explains a refused Runtime creation in its diagnostic out
+/// parameter. `CoreCallFailed` cannot carry that sentence, and releasing it
+/// unread turns a stated reason back into a guess, so the failure path records
+/// it alongside the raw and typed status. `diagnostic_bytes` is the length
+/// AgentCore returned, so a bounded record still shows what it left out.
+fn logRuntimeCreateFailure(status: u32, typed: ?sdk.Status, diagnostic: wire.OwnedBytesV1) void {
+    var line: [max_logged_diagnostic_bytes]u8 = undefined;
+    std.log.err("agent.runtime_create_failed status={d} typed={s} diagnostic_bytes={d} diagnostic=\"{s}\"", .{
+        status,
+        if (typed) |value| @tagName(value) else "unknown",
+        diagnostic.len,
+        loggedDiagnostic(&line, diagnostic),
+    });
+}
+
 const max_core_session_id_bytes: usize = @intCast(wire.MAX_SESSION_ID_BYTES_V1);
+
+test "a recorded Core diagnostic stays one bounded printable line" {
+    var line: [max_logged_diagnostic_bytes]u8 = undefined;
+    // Control bytes are the injection risk: a newline in AgentCore's
+    // sentence would otherwise show up in the log as a second, forged
+    // record. The bytes are numeric so the case cannot be read as text.
+    var sentence = [_]u8{ 'r', 'g', 10, 'f', 'o', 'r', 'g', 'e', 'd', 9, 'x', 0, 'y' };
+    try std.testing.expectEqualStrings(
+        "rg.forged.x.y",
+        loggedDiagnostic(&line, .{ .ptr = &sentence, .len = sentence.len }),
+    );
+
+    // An oversized diagnostic is cut to the ceiling instead of printed whole.
+    var flood: [max_logged_diagnostic_bytes * 2]u8 = undefined;
+    @memset(&flood, 'x');
+    try std.testing.expectEqual(
+        max_logged_diagnostic_bytes,
+        loggedDiagnostic(&line, .{ .ptr = &flood, .len = flood.len }).len,
+    );
+
+    // An absent or malformed buffer records nothing rather than reading it.
+    try std.testing.expectEqualStrings("", loggedDiagnostic(&line, emptyOwnedBytes()));
+    try std.testing.expectEqualStrings("", loggedDiagnostic(&line, .{ .ptr = null, .len = 7 }));
+}
 
 test "image capability consumer limit matches the canonical ABI" {
     try std.testing.expectEqual(@as(u64, 256), wire.MAX_MODEL_CAPABILITIES_V1);

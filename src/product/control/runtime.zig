@@ -9776,16 +9776,16 @@ pub const Runtime = struct {
         const self: *Runtime = @ptrCast(@alignCast(context));
         return if (self.shutting_down) null else self.updates.next_check_ms;
     }
-    fn updateBeginCheck(context: *anyopaque, now_ms: u64) ?update.CheckPreparation {
+    fn updateBeginCheck(context: *anyopaque) ?update.CheckPreparation {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.shutting_down) return null;
-        const id = self.updates.beginCheck(now_ms) orelse return null;
+        const id = self.updates.beginCheck() orelse return null;
         self.updateChanged();
         return .{ .id = id, .target = self.updates.target };
     }
-    fn updateCompleteCheck(context: *anyopaque, id: u64, completion: update.CheckCompletion) void {
+    fn updateCompleteCheck(context: *anyopaque, now_ms: u64, id: u64, completion: update.CheckCompletion) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (self.updates.completeCheck(id, completion)) self.updateChanged();
+        if (self.updates.completeCheck(now_ms, id, completion)) self.updateChanged();
     }
     fn updateBeginDownload(context: *anyopaque, expected_version: []const u8) ?update.DownloadPreparation {
         const self: *Runtime = @ptrCast(@alignCast(context));
@@ -9838,9 +9838,9 @@ test "updates Control publishes committed facts through the canonical live conte
     const management = control.updateManagement();
     const initial = control.currentRevision();
     management.start_fn(management.context, 1, true);
-    const check = management.begin_check_fn(management.context, 30_001).?;
-    try std.testing.expect(management.begin_check_fn(management.context, 30_002) == null);
-    management.complete_check_fn(management.context, check.id, .{ .release = .{
+    const check = management.begin_check_fn(management.context).?;
+    try std.testing.expect(management.begin_check_fn(management.context) == null);
+    management.complete_check_fn(management.context, 30_001, check.id, .{ .release = .{
         .version = try update.Version.parse("999.0.0"),
         .download = null,
     } });
@@ -9856,15 +9856,15 @@ test "updates Control publishes committed facts through the canonical live conte
     try std.testing.expect(!view.get("downloadAvailable").?.bool);
     try std.testing.expectEqual(@as(usize, 8), view.count());
     try std.testing.expectEqual(std.json.Value.null, view.get("checkDiagnostic").?);
-    const failed = management.begin_check_fn(management.context, 50_000).?;
-    management.complete_check_fn(management.context, failed.id, .{ .failed = .{
+    const failed = management.begin_check_fn(management.context).?;
+    management.complete_check_fn(management.context, 50_000, failed.id, .{ .failed = .{
         .kind = .timeout,
         .diagnostic = .{ .phase = .head, .cause = .deadline_exceeded, .elapsed = .under_15s },
     } });
     try std.testing.expect(control.updates.view().updateAvailable);
     try std.testing.expectEqual(update.Elapsed.under_15s, control.updates.view().checkDiagnostic.?.elapsed);
     control.beginShutdown();
-    try std.testing.expect(management.begin_check_fn(management.context, 60_000) == null);
+    try std.testing.expect(management.begin_check_fn(management.context) == null);
 }
 
 pub const TestSupport = if (builtin.is_test) struct {

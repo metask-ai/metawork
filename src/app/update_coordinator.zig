@@ -54,22 +54,48 @@ const Job = struct {
             .check => |input| {
                 // A response arrived, so there is no execution evidence: the
                 // status or the body is the whole fact.
-                if (response.status != 200) {
-                    self.check_completion = .{ .failed = .{ .kind = .network } };
-                    return;
-                }
-                if (response.body_len > buffer.len) {
-                    self.check_completion = .{ .failed = .{ .kind = .invalid_manifest } };
-                    return;
-                }
-                const release = update.parseManifest(self.allocator, buffer[0..response.body_len], input.target) catch {
-                    self.check_completion = .{ .failed = .{ .kind = .invalid_manifest } };
-                    return;
-                };
+                if (response.status != 200) return self.answered(response, .network);
+                if (response.body_len > buffer.len) return self.answered(response, .invalid_manifest);
+                const release = update.parseManifest(self.allocator, buffer[0..response.body_len], input.target) catch
+                    return self.answered(response, .invalid_manifest);
                 self.check_completion = .{ .release = release };
             },
-            .download => self.head_result = update.headResult(response.status),
+            .download => self.prechecked(response.status),
         }
+    }
+
+    /// A check the server answered with something this client cannot use. The
+    /// execution layer logs every request that failed on its way out, and this
+    /// is the one failure it cannot see, because the request itself succeeded.
+    /// Typed facts only: a status, a byte count and the resulting class, so
+    /// the record carries no endpoint, header or response body.
+    fn answered(self: *Job, response: http.Response, kind: update.CheckError) void {
+        self.check_completion = .{ .failed = .{ .kind = kind } };
+        std.log.warn("update check consumer=update status={d} body_bytes={d} kind={s}", .{
+            response.status, response.body_len, @tagName(kind),
+        });
+    }
+
+    /// A download precheck the server answered with a status that rules the
+    /// link out. The same blind spot as an unusable check: the request itself
+    /// succeeded, so the execution layer never sees it, and the outcome lives
+    /// nowhere but in the Product's download error. Typed facts only, and no
+    /// part of the address: the download URL comes from the manifest, so it is
+    /// an external address this record must never carry.
+    fn prechecked(self: *Job, status: u16) void {
+        self.head_result = update.headResult(status);
+        const ruled_out = ruledOut(self.head_result) orelse return;
+        std.log.warn("update download consumer=update status={d} result={s}", .{ status, @tagName(ruled_out) });
+    }
+
+    /// The precheck answers worth recording. `accessible` and `unsupported`
+    /// both let the handoff proceed, so only the classes that stop it leave a
+    /// line; which status means what stays the Product's classification.
+    fn ruledOut(result: update.HeadResult) ?update.HeadResult {
+        return switch (result) {
+            .accessible, .unsupported => null,
+            .invalid_link, .network, .timeout => result,
+        };
     }
 
     fn join(self: *Job) void {
@@ -120,9 +146,9 @@ pub const Coordinator = struct {
         self.assertMain();
         if (self.stopped) return .unavailable;
         if (self.check != null) return .accepted;
-        const input = self.management.begin_check_fn(self.management.context, self.now()) orelse return .unavailable;
+        const input = self.management.begin_check_fn(self.management.context) orelse return .unavailable;
         self.check = self.startJob(.{ .check = input }) catch {
-            self.management.complete_check_fn(self.management.context, input.id, .{ .failed = .{ .kind = .unavailable } });
+            self.management.complete_check_fn(self.management.context, self.now(), input.id, .{ .failed = .{ .kind = .unavailable } });
             return .unavailable;
         };
         self.reconcileTimer();
@@ -165,7 +191,7 @@ pub const Coordinator = struct {
         if (self.stopped) return;
         if (self.check) |job| if (job.finished.load(.acquire)) {
             job.join();
-            self.management.complete_check_fn(self.management.context, job.work.check.id, job.check_completion);
+            self.management.complete_check_fn(self.management.context, self.now(), job.work.check.id, job.check_completion);
             job.destroy();
             self.check = null;
         };
@@ -257,14 +283,14 @@ const TestHost = struct {
     fn next(context: *anyopaque) ?u64 {
         return owner(context).state.next_check_ms;
     }
-    fn beginCheck(context: *anyopaque, ms: u64) ?update.CheckPreparation {
+    fn beginCheck(context: *anyopaque) ?update.CheckPreparation {
         const self = owner(context);
-        return .{ .id = self.state.beginCheck(ms) orelse return null, .target = self.state.target };
+        return .{ .id = self.state.beginCheck() orelse return null, .target = self.state.target };
     }
-    fn completeCheck(context: *anyopaque, id: u64, completion: update.CheckCompletion) void {
+    fn completeCheck(context: *anyopaque, ms: u64, id: u64, completion: update.CheckCompletion) void {
         const self = owner(context);
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
-        _ = self.state.completeCheck(id, completion);
+        _ = self.state.completeCheck(ms, id, completion);
     }
     fn beginDownload(context: *anyopaque, version: []const u8) ?update.DownloadPreparation {
         return owner(context).state.beginDownload(version);
@@ -361,6 +387,28 @@ test "updates lifecycle starts after delay, coalesces requests and recovers a mi
     try TestHost.settle(&coordinator);
     try std.testing.expectEqual(@as(u32, 1), host.requests.load(.acquire));
     try std.testing.expect(host.state.view().updateAvailable);
+    try std.testing.expectEqual(update.Limits.interval_ms * std.time.ns_per_ms, host.timer_ns.?);
+}
+
+test "updates arm the short interval after a failed check and the ordinary one after a success" {
+    var host = try TestHost.init();
+    host.fail_check = error.Network;
+    var coordinator = host.coordinator();
+    coordinator.start(true);
+    defer coordinator.shutdown();
+    host.now_ms = 30_000;
+    coordinator.onTimer();
+    try TestHost.settle(&coordinator);
+    try std.testing.expectEqual(update.CheckState.failed, host.state.view().checkState);
+    // The result, not the attempt, decides the next automatic check, so the
+    // failure is already armed at the short interval rather than a whole day.
+    try std.testing.expectEqual(update.Limits.retry_interval_ms * std.time.ns_per_ms, host.timer_ns.?);
+    host.fail_check = null;
+    host.now_ms += update.Limits.retry_interval_ms;
+    coordinator.onTimer();
+    try TestHost.settle(&coordinator);
+    try std.testing.expectEqual(@as(u32, 2), host.requests.load(.acquire));
+    try std.testing.expectEqual(update.CheckState.succeeded, host.state.view().checkState);
     try std.testing.expectEqual(update.Limits.interval_ms * std.time.ns_per_ms, host.timer_ns.?);
 }
 
@@ -473,4 +521,32 @@ test "updates timer failure closes the capability instead of starting a parallel
     try std.testing.expectEqual(update.CheckState.unavailable, host.state.view().checkState);
     try std.testing.expectEqual(Outcome.unavailable, coordinator.requestCheck());
     try std.testing.expectEqual(@as(u32, 0), host.requests.load(.acquire));
+}
+
+test "updates record a download precheck the server answered but which rules the link out" {
+    // Which status means what stays the Product's classification: 404/410 are
+    // a link that is gone, a 503 or a redirect we refuse to follow are a
+    // network answer, and 200 or a server that will not do HEAD both let the
+    // handoff proceed with nothing to record.
+    try std.testing.expectEqual(update.HeadResult.invalid_link, Job.ruledOut(update.headResult(404)).?);
+    try std.testing.expectEqual(update.HeadResult.invalid_link, Job.ruledOut(update.headResult(410)).?);
+    try std.testing.expectEqual(update.HeadResult.network, Job.ruledOut(update.headResult(503)).?);
+    try std.testing.expectEqual(update.HeadResult.network, Job.ruledOut(update.headResult(302)).?);
+    try std.testing.expectEqual(@as(?update.HeadResult, null), Job.ruledOut(update.headResult(200)));
+    try std.testing.expectEqual(@as(?update.HeadResult, null), Job.ruledOut(update.headResult(405)));
+    try std.testing.expectEqual(@as(?update.HeadResult, null), Job.ruledOut(update.headResult(501)));
+
+    // A recorded precheck still reaches the Product as the same failure, and
+    // still hands nothing to the browser.
+    var host = try TestHost.init();
+    var coordinator = host.coordinator();
+    coordinator.start(false);
+    defer coordinator.shutdown();
+    try std.testing.expectEqual(Outcome.accepted, coordinator.requestCheck());
+    try TestHost.settle(&coordinator);
+    host.head_status = 503;
+    try std.testing.expectEqual(Outcome.accepted, coordinator.requestDownload("0.2.8"));
+    try TestHost.settle(&coordinator);
+    try std.testing.expectEqual(update.DownloadError.network, host.state.view().downloadError);
+    try std.testing.expectEqual(@as(usize, 0), host.opened);
 }
