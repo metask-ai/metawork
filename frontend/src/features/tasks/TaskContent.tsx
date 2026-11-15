@@ -232,7 +232,7 @@ function outcomeState(
 /// Addresses the attachments of one sent message. A message that has already
 /// become a Run is addressed by that Run; one still waiting for its turn is
 /// addressed by its submission, because it does not have a Run yet.
-export type SentInputMedia =
+type SentInputMedia =
   { taskId: string; runId: string } | { taskId: string; operationId: string };
 
 function sentAttachmentTarget(
