@@ -5,6 +5,8 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
+import { enUS } from "../frontend/src/i18n/messages/en-US.ts";
+import { zhCN } from "../frontend/src/i18n/messages/zh-CN.ts";
 
 test("Attachment owns staging operations through completion and shutdown", () => {
   const control = read("src/product/control/runtime.zig");
@@ -3310,4 +3312,62 @@ test("Host URL handoff preserves denied WebView navigation", () => {
     read("src/app.zig"),
     /external_links\s*=|allowed_urls\s*=/u,
   );
+});
+
+test("system notification text is one closed vocabulary across Host and Renderer", () => {
+  const contract = read("src/bridge/notification_text.zig");
+  const wire = read("frontend/src/bridge/contracts.ts");
+  const binding = read("frontend/src/features/tasks/notification-text.ts");
+  const window = read("src/app/window.zig");
+
+  const slotBlock = contract.slice(
+    contract.indexOf("pub const Slot = enum {"),
+    contract.indexOf("pub const count"),
+  );
+  const slots = [...slotBlock.matchAll(/^\s{4}([a-z][a-z0-9_]*),$/gmu)].map(
+    (match) => match[1],
+  );
+  assert.ok(slots.length >= 8, "the Host must publish its notification slots");
+  const camel = (name) =>
+    name.replace(/_([a-z0-9])/gu, (_, character) => character.toUpperCase());
+
+  // The Renderer's wire record carries exactly one required key per Host
+  // slot, in the same order, so neither side can grow a slot alone.
+  const registration = wire.slice(
+    wire.indexOf("export type NotificationTextRegistration = {"),
+    wire.indexOf(
+      "};",
+      wire.indexOf("export type NotificationTextRegistration"),
+    ),
+  );
+  const keys = [
+    ...registration.matchAll(/^\s{2}([A-Za-z][A-Za-z0-9]*): string;$/gmu),
+  ].map((match) => match[1]);
+  assert.deepEqual(keys, slots.map(camel));
+
+  // Every slot is bound to a catalog message that exists in both languages.
+  const bound = [
+    ...binding.matchAll(/^\s{2}([A-Za-z][A-Za-z0-9]*): "([^"]+)",$/gmu),
+  ];
+  assert.deepEqual(
+    bound.map((match) => match[1]),
+    slots.map(camel),
+  );
+  for (const [, key, id] of bound) {
+    assert.ok(Object.hasOwn(enUS, id), `${key} has no English message (${id})`);
+    assert.ok(Object.hasOwn(zhCN, id), `${key} has no Chinese message (${id})`);
+  }
+
+  // The Host owns no notification copy of its own: the only strings it puts
+  // in a banner are the manifest display name and the Product Task title.
+  // (That an unregistered table drops the body rather than falling back to
+  // English is proven by window.zig's own tests.)
+  const presentation = window.slice(
+    window.indexOf("pub fn notifyScheduledTask("),
+    window.indexOf("pub fn connectWindows("),
+  );
+  assert.ok(presentation.includes("showTaskNotification"));
+  assert.match(presentation, /\.title = app_manifest\.display_name,/u);
+  assert.doesNotMatch(presentation, /"[A-Z][a-z]+ [a-z]/u);
+  assert.doesNotMatch(presentation, /Scheduled task|View task|MetaWork/u);
 });

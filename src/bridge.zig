@@ -9,6 +9,12 @@ const revision_delivery_impl = @import("bridge/revision_delivery.zig");
 const snapshot_delivery_impl = @import("bridge/snapshot_delivery.zig");
 const workspace_grant_impl = @import("bridge/workspace_grant.zig");
 const dispatcher_impl = @import("bridge/dispatcher.zig");
+const notification_text_impl = @import("bridge/notification_text.zig");
+
+/// Closed-vocabulary system-notification strings the Renderer registers and
+/// the Application formats with. See the module for why the catalog cannot
+/// live in the Host.
+pub const notification_text = notification_text_impl;
 
 pub const CallbackGate = callback_gate_impl.State;
 pub const Dispatcher = dispatcher_impl.Dispatcher;

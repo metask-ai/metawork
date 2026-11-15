@@ -4,6 +4,27 @@ import {
   type UpdateViewWire,
 } from "./generated-wire.ts";
 export type UpdateView = UpdateViewWire;
+/**
+ * The system-notification strings the Host holds on our behalf. It raises the
+ * banners but does not know the application language, so it keeps no copy of
+ * this text: we hand it one already-translated string per slot and register
+ * again whenever the language changes.
+ *
+ * The keys mirror `Slot` in `src/bridge/notification_text.zig` exactly, and
+ * every one is required: the Host refuses a partial table rather than showing
+ * a banner with no words, so a slot the Host adds without a message here is a
+ * type error at the call site instead.
+ */
+export type NotificationTextRegistration = {
+  scheduleCompleted: string;
+  scheduleFailed: string;
+  scheduleSkipped: string;
+  scheduleNeedsAttention: string;
+  runCompleted: string;
+  runFailed: string;
+  runNeedsApproval: string;
+  openTaskAction: string;
+};
 export { approvalFailureReasons };
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";

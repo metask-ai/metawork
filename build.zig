@@ -2551,6 +2551,9 @@ fn wireAgentCore(
     app.addImport("runner", runner);
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
+    // `window.zig` titles notifications with the manifest display name
+    // instead of repeating it as a literal.
+    app.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);

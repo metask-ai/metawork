@@ -49,6 +49,7 @@ import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
 import { runMcpLifecycleVertical } from "./mcp-lifecycle-vertical.mjs";
 import { runNativeDialogsVertical } from "./native-dialogs-vertical.mjs";
 import { runScheduledTasksVertical } from "./scheduled-tasks-vertical.mjs";
+import { runNotificationPresentationVertical } from "./notification-presentation-vertical.mjs";
 import {
   runOutputDeliveryVertical,
   runOfficeDeliveryHostProbe,
@@ -496,6 +497,30 @@ const approvalReadabilityOnly =
   process.env.METAWORK_APPROVAL_READABILITY_ONLY === "1";
 const approvalOnly =
   process.env.METAWORK_APPROVAL_ONLY === "1" || approvalReadabilityOnly;
+const notificationOnly = process.env.METAWORK_NOTIFICATION_ONLY === "1";
+if (notificationOnly && process.platform !== "win32")
+  throw new Error(
+    "Notification presentation verification reads Windows toast banners",
+  );
+if (
+  notificationOnly &&
+  [
+    taskArchiveOnly,
+    skillAutoRefreshOnly,
+    activeInputOnly,
+    outputOnly,
+    builtinOfficeOnly,
+    approvalOnly,
+    boundaryOnly,
+    nativeDialogsOnly,
+    memoryGrowthOnly,
+    process.env.METAWORK_SCHEDULE_ONLY === "1",
+    process.env.METAWORK_MCP_ONLY === "1",
+    process.env.METAWORK_MODEL_SWITCH_ONLY === "1",
+    process.env.METAWORK_MODEL_ERROR_ONLY === "1",
+  ].some(Boolean)
+)
+  throw new Error("Notification presentation verification needs its own scope");
 if (
   skillAutoRefreshOnly &&
   (activeInputOnly ||
@@ -817,6 +842,38 @@ desktopVertical: try {
       },
     });
     await stopApplication("attachment capacity verification complete");
+    break desktopVertical;
+  }
+
+  if (notificationOnly) {
+    const catalog = await poll(
+      async () => {
+        const scope = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return scope?.availability === "ready" ||
+          scope?.availability === "degraded"
+          ? scope
+          : null;
+      },
+      commandTimeoutMs,
+      "Notification presentation Workspace catalog",
+    );
+    await runNotificationPresentationVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      catalog,
+      repositoryRoot: root,
+      evidenceDir: path.join(root, ".zig-cache", "notification-presentation"),
+      pid: app.pid,
+      hostLog: () => output,
+    });
+    await stopApplication("notification presentation complete");
     break desktopVertical;
   }
 

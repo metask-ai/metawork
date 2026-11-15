@@ -18,6 +18,7 @@ const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
+const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
 const async_product_handler_count = 20;
@@ -64,6 +65,8 @@ pub const DirectoryOpenResult = union(enum) {
 fn unavailableDialog(_: ?*anyopaque, _: u64, _: u64, _: product_control.NativeDialog.Options, _: *const product_control.NativeDialog.Completion) anyerror!u64 {
     return error.UnsupportedService;
 }
+/// A composition without a window system has no banner to label.
+fn ignoreNotificationText(_: ?*anyopaque, _: *const notification_text.Table) void {}
 fn cancelUnavailableDialog(_: ?*anyopaque, _: u64) void {}
 
 pub const Platform = struct {
@@ -100,6 +103,13 @@ pub const Platform = struct {
         native_sdk.platform.WindowId,
         WindowChromeControlAction,
     ) anyerror!void,
+    /// Installs the Renderer's localized system-notification strings. The
+    /// table is bounded and owned by value, so nothing of the Renderer's
+    /// request outlives this call.
+    register_notification_text_fn: *const fn (
+        ?*anyopaque,
+        *const notification_text.Table,
+    ) void = ignoreNotificationText,
     open_external_url_fn: *const fn (
         ?*anyopaque,
         []const u8,
@@ -423,6 +433,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.media_thumbnail, .function = mediaThumbnail },
             .{ .name = commands.read_preview_video, .function = readPreviewVideo },
             .{ .name = commands.open_external_link, .function = openExternalLink },
+            .{ .name = commands.register_notification_text, .function = registerNotificationText },
             .{ .name = commands.updates_check, .function = checkUpdates },
             .{ .name = commands.updates_open_download, .function = openUpdateDownload },
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
@@ -978,6 +989,36 @@ pub const Dispatcher = struct {
             parsed.value.url,
         ) catch return encodeExternalLinkOutcome(output, "unavailable");
         return encodeExternalLinkOutcome(output, "opened");
+    }
+
+    /// Installs the Renderer's localized notification strings. Admitted on
+    /// the bootstrap window like the other presentation bindings: the Host
+    /// must be able to label a banner before the Product event stream opens.
+    fn registerNotificationText(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        // The Application reads the table while raising a notification, which
+        // only ever happens on the main thread.
+        if (!self.platform.on_main_thread_fn(self.platform.context))
+            return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayloadWithLimit(
+            notification_text.Registration,
+            invocation.request.payload,
+            notification_text.Slot.count * (notification_text.max_slot_bytes + 64),
+        );
+        defer parsed.deinit();
+        // A registration missing a slot never decodes, so a partial table
+        // cannot reach the Application and leave one banner wordless.
+        const table = notification_text.decode(parsed.value) orelse
+            return error.InvalidBridgePayload;
+        self.platform.register_notification_text_fn(self.platform.context, &table);
+        return std.fmt.bufPrint(output, "{{\"registered\":{d}}}", .{notification_text.Slot.count});
     }
 
     fn encodeExternalLinkOutcome(output: []u8, outcome: []const u8) ![]const u8 {
@@ -7703,6 +7744,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
         chrome_connect_calls: usize = 0,
         chrome_refresh_calls: usize = 0,
         chrome_control_calls: usize = 0,
+        notification_text_calls: usize = 0,
+        notification_text: ?notification_text.Table = null,
         external_link_calls: usize = 0,
         external_link_error: ?anyerror = null,
         chrome_error: ?anyerror = null,
@@ -7794,6 +7837,15 @@ test "Dispatcher validates authority before domain calls and preserves committed
             if (self.chrome_error) |err| return err;
             self.chrome_refresh_calls += 1;
             return chromeEnvironment();
+        }
+
+        fn registerNotificationText(
+            context: ?*anyopaque,
+            table: *const notification_text.Table,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.notification_text_calls += 1;
+            self.notification_text = table.*;
         }
 
         fn controlWindowChrome(
@@ -7905,6 +7957,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_refresh_fn = Harness.refreshWindowChrome,
             .window_chrome_control_fn = Harness.controlWindowChrome,
+            .register_notification_text_fn = Harness.registerNotificationText,
             .open_external_url_fn = Harness.openExternalUrl,
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
@@ -7982,6 +8035,38 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(std.mem.indexOf(u8, chrome_control, "\"handled\":true") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_control_calls);
+
+    // Notification text is a presentation binding like window chrome: a
+    // complete table installs, and the Host answers with the slot count it
+    // now holds.
+    const registered = native_dispatcher.dispatch(
+        "{\"id\":\"notification-text\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"查看任务\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, registered, "\"registered\":8") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.notification_text_calls);
+    try std.testing.expectEqualStrings("任务已完成", harness.notification_text.?.get(.run_completed));
+    try std.testing.expectEqualStrings("查看任务", harness.notification_text.?.get(.open_task_action));
+    // A registration missing a slot is refused whole, so the Host keeps the
+    // table it already had rather than losing one banner's words.
+    for ([_][]const u8{
+        "{\"id\":\"missing-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"a\"}}",
+        "{\"id\":\"empty-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"\"}}",
+        "{\"id\":\"unknown-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"查看任务\",\"runPaused\":\"x\"}}",
+    }) |request| {
+        const refused = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, refused, "\"handler_failed\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), harness.notification_text_calls);
+    // A window that is not the bootstrap window cannot relabel its banners.
+    const foreign_notification_text = native_dispatcher.dispatch(
+        "{\"id\":\"foreign-notification-text\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"查看任务\"}}",
+        native_sdk.bridge.Source{ .origin = source.origin, .window_id = source.window_id + 1 },
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, foreign_notification_text, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.notification_text_calls);
     const foreign_bootstrap_window = native_sdk.bridge.Source{
         .origin = source.origin,
         .window_id = source.window_id + 1,

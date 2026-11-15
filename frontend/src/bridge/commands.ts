@@ -10,6 +10,7 @@ export const commands = {
   windowChromeControl: "metawork.host.windowChrome.control",
   windowChromeDisconnect: "metawork.host.windowChrome.disconnect",
   openExternalLink: "metawork.host.links.openExternal",
+  registerNotificationText: "metawork.host.notifications.registerText",
   updatesCheck: "metawork.updates.check",
   updatesOpenDownload: "metawork.updates.openDownload",
   updatesOpenWebsite: "metawork.updates.openWebsite",
