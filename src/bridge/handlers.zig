@@ -485,7 +485,83 @@ pub const WorkspaceFileRequest = struct {
 };
 /// One registered media identity. `kind` is the registry's wire name and the
 /// fields a kind does not use are absent, not null: a target is exact.
-pub const MediaTarget = struct { kind: []const u8, token: []const u8 };
+/// One registered media target, exactly in the shape its kind declares. Every
+/// kind names its own fields: nothing is optional, nothing is substituted, and
+/// an unregistered kind fails closed rather than resolving to a default.
+pub const MediaTarget = union(product_control.MediaKind) {
+    draft_attachment: struct { token: []const u8 },
+    run_attachment: struct { task_id: u64, run_id: u64, index: u32 },
+    submission_attachment: struct { task_id: u64, operation_id: []const u8, index: u32 },
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const value = try std.json.innerParse(std.json.Value, allocator, source, options);
+        const object = switch (value) {
+            .object => |fields| fields,
+            else => return error.UnexpectedToken,
+        };
+        const kind_text = switch (object.get("kind") orelse return error.UnexpectedToken) {
+            .string => |text| text,
+            else => return error.UnexpectedToken,
+        };
+        const kind = product_control.MediaKind.fromWire(kind_text) orelse return error.UnexpectedToken;
+        switch (kind) {
+            .draft_attachment => {
+                if (object.count() != 2) return error.UnexpectedToken;
+                return .{ .draft_attachment = .{ .token = try mediaTargetText(object, "token") } };
+            },
+            .run_attachment => {
+                if (object.count() != 4) return error.UnexpectedToken;
+                return .{ .run_attachment = .{
+                    .task_id = try mediaTargetId(object, "taskId"),
+                    .run_id = try mediaTargetId(object, "runId"),
+                    .index = try mediaTargetIndex(object),
+                } };
+            },
+            .submission_attachment => {
+                if (object.count() != 4) return error.UnexpectedToken;
+                return .{ .submission_attachment = .{
+                    .task_id = try mediaTargetId(object, "taskId"),
+                    .operation_id = try mediaTargetText(object, "operationId"),
+                    .index = try mediaTargetIndex(object),
+                } };
+            },
+        }
+    }
+
+    /// The Product-side target, once the Bridge has proved the shape. A draft
+    /// token resolves against its grant instead, so it is not a Product target
+    /// until the dispatcher has exchanged it.
+    pub fn product(self: @This()) ?product_control.MediaTarget {
+        return switch (self) {
+            .draft_attachment => null,
+            .run_attachment => |value| .{ .run_attachment = .{ .task_id = value.task_id, .run_id = value.run_id, .index = value.index } },
+            .submission_attachment => |value| .{ .submission_attachment = .{ .task_id = value.task_id, .operation_id = value.operation_id, .index = value.index } },
+        };
+    }
+};
+
+fn mediaTargetText(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
+    return switch (object.get(name) orelse return error.UnexpectedToken) {
+        .string => |text| text,
+        else => error.UnexpectedToken,
+    };
+}
+
+fn mediaTargetId(object: std.json.ObjectMap, name: []const u8) !u64 {
+    return parseWireId(try mediaTargetText(object, name)) catch error.UnexpectedToken;
+}
+
+/// The position inside the message that owns the attachment, as a number
+/// bounded by the attachments one message can carry.
+fn mediaTargetIndex(object: std.json.ObjectMap) !u32 {
+    const value = switch (object.get("index") orelse return error.UnexpectedToken) {
+        .integer => |number| number,
+        else => return error.UnexpectedToken,
+    };
+    if (value < 0 or value > product_control.max_media_index) return error.UnexpectedToken;
+    return @intCast(value);
+}
+
 pub const MediaThumbnailRequest = struct { generation: []const u8, target: MediaTarget };
 pub const MediaPreviewRequest = struct { generation: []const u8, previewId: []const u8, target: MediaTarget };
 pub const FilePreviewChunkRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8, offset: []const u8, securityEpoch: []const u8 };
@@ -1064,8 +1140,8 @@ test "media payloads require one exact registered target" {
     const preview_payload = "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"" ++ token ++ "\"}}";
     var thumbnail = try parsePayload(MediaThumbnailRequest, thumbnail_payload);
     defer thumbnail.deinit();
-    try std.testing.expectEqualStrings("draftAttachment", thumbnail.value.target.kind);
-    try std.testing.expectEqualStrings(token, thumbnail.value.target.token);
+    try std.testing.expectEqualStrings(token, thumbnail.value.target.draft_attachment.token);
+    try std.testing.expect(thumbnail.value.target.product() == null);
     var preview = try parsePayload(MediaPreviewRequest, preview_payload);
     defer preview.deinit();
     try std.testing.expectEqualStrings("4", preview.value.previewId);
@@ -1082,6 +1158,41 @@ test "media payloads require one exact registered target" {
         MediaPreviewRequest,
         "{\"generation\":\"1\",\"target\":{\"kind\":\"draftAttachment\",\"token\":\"aaa\"}}",
     ));
+}
+
+test "a Task-owned attachment media target carries exactly its own message identity" {
+    var run = try parsePayload(
+        MediaThumbnailRequest,
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2}}",
+    );
+    defer run.deinit();
+    const run_target = run.value.target.product().?.run_attachment;
+    try std.testing.expectEqual(@as(u64, 3), run_target.task_id);
+    try std.testing.expectEqual(@as(u64, 9), run_target.run_id);
+    try std.testing.expectEqual(@as(u32, 2), run_target.index);
+    var waiting = try parsePayload(
+        MediaPreviewRequest,
+        "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"submissionAttachment\",\"taskId\":\"3\",\"operationId\":\"op-7\",\"index\":0}}",
+    );
+    defer waiting.deinit();
+    const waiting_target = waiting.value.target.product().?.submission_attachment;
+    try std.testing.expectEqual(@as(u64, 3), waiting_target.task_id);
+    try std.testing.expectEqualStrings("op-7", waiting_target.operation_id);
+    // A kind takes its own fields and no others: no draft token, no mixing the
+    // two message identities, no index beyond what one message can carry, and
+    // no id in a shape wire ids are never written in.
+    for ([_][]const u8{
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\"}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2,\"token\":\"aa\"}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"operationId\":\"op-7\",\"index\":2}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":8}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":-1}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":\"2\"}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":3,\"runId\":\"9\",\"index\":2}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"03\",\"runId\":\"9\",\"index\":2}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"submissionAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"taskAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2}}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(MediaThumbnailRequest, payload));
 }
 
 test "file change diff payload requires exact Task Run and change identity" {

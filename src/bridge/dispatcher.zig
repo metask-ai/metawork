@@ -1471,8 +1471,8 @@ pub const Dispatcher = struct {
         self.updatePreviewTimer();
     }
     const MediaTargetResolution = union(enum) {
-        /// A staged draft attachment this connection and window still own.
-        attachment: u64,
+        /// A registered target this connection and window may ask for.
+        target: product_control.MediaTarget,
         /// The target decoded, but this connection no longer holds that grant.
         missing,
     };
@@ -1487,18 +1487,35 @@ pub const Dispatcher = struct {
         window_id: native_sdk.platform.WindowId,
         target: handlers.MediaTarget,
     ) !MediaTargetResolution {
-        const kind = product_control.MediaKind.fromWire(target.kind) orelse return error.InvalidBridgePayload;
-        switch (kind) {
-            .draft_attachment => {
-                if (!handlers.validAttachmentToken(target.token)) return error.InvalidBridgePayload;
+        switch (target) {
+            .draft_attachment => |draft| {
+                if (!handlers.validAttachmentToken(draft.token)) return error.InvalidBridgePayload;
                 var ids: [1]u64 = undefined;
                 const resolved = self.attachment_grants.resolve(
-                    &.{target.token},
+                    &.{draft.token},
                     generation,
                     window_id,
                     &ids,
                 ) catch return .missing;
-                return .{ .attachment = resolved[0] };
+                return .{ .target = .{ .draft_attachment = resolved[0] } };
+            },
+            // A Task-owned target needs no grant: its authority is that this
+            // window may read that Task, which the connection check above
+            // already establishes, and that Product still holds the identity
+            // its message persisted. Product decides the latter, so a target
+            // that names nothing is an ordinary `missing` from there.
+            .run_attachment, .submission_attachment => {
+                const value = target.product().?;
+                const task_id = switch (value) {
+                    .draft_attachment => unreachable,
+                    .run_attachment => |run| run.task_id,
+                    .submission_attachment => |waiting| waiting.task_id,
+                };
+                if (task_id == 0) return error.InvalidBridgePayload;
+                if (value == .run_attachment and value.run_attachment.run_id == 0) return error.InvalidBridgePayload;
+                if (value == .submission_attachment)
+                    try handlers.validateInputOperationId(value.submission_attachment.operation_id);
+                return .{ .target = value };
             },
         }
     }
@@ -1517,12 +1534,16 @@ pub const Dispatcher = struct {
         const generation = try handlers.parseWireId(parsed.value.generation);
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         const control = try self.requireProductControl();
-        const target = try self.resolveMediaTarget(generation, invocation.source.window_id, parsed.value.target);
-        const attachment_id = switch (target) {
-            .attachment => |id| id,
+        const resolution = try self.resolveMediaTarget(generation, invocation.source.window_id, parsed.value.target);
+        const target = switch (resolution) {
+            .target => |value| value,
             .missing => return std.fmt.bufPrint(output, "{{\"state\":\"missing\"}}", .{}),
         };
-        return switch (control.attachmentThumbnail(attachment_id)) {
+        // A Task-owned chip is one bounded read of an already derived item;
+        // this frame lends that read its buffer, and nothing is held once the
+        // response is written.
+        var derivative: [product_control.max_attachment_thumbnail_bytes]u8 = undefined;
+        return switch (control.mediaThumbnail(target, &derivative)) {
             .ready => |thumbnail| writeMediaThumbnail(output, thumbnail),
             .unavailable => |state| std.fmt.bufPrint(output, "{{\"state\":\"{s}\"}}", .{filePreviewStateName(state)}),
         };
@@ -1561,9 +1582,9 @@ pub const Dispatcher = struct {
         if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
         self.preview_high_water = key.preview_id;
         const control = try self.requireProductControl();
-        const target = try self.resolveMediaTarget(key.generation, invocation.source.window_id, parsed.value.target);
-        const attachment_id = switch (target) {
-            .attachment => |id| id,
+        const resolution = try self.resolveMediaTarget(key.generation, invocation.source.window_id, parsed.value.target);
+        const target = switch (resolution) {
+            .target => |value| value,
             .missing => {
                 respondFilePreview(responder, invocation.request.id, .missing, "", false, false, null);
                 return;
@@ -1579,7 +1600,7 @@ pub const Dispatcher = struct {
             slot.window_id = invocation.source.window_id;
             break;
         };
-        switch (control.beginAttachmentPreview(id, attachment_id)) {
+        switch (control.beginMediaPreview(id, target)) {
             .queued => self.updatePreviewTimer(),
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
@@ -6682,6 +6703,30 @@ test "attachment media commands bind the draft grant to this connection and wind
         .source = request.source,
     };
     try std.testing.expectEqualStrings("{\"state\":\"missing\"}", try thumbnail.invoke_fn(thumbnail.context, unknown, output));
+
+    // A Task-owned target needs no grant: the Bridge proves the shape and the
+    // window, and Product answers for the message. This Task's message has no
+    // image attachment, so it is an ordinary missing state rather than an
+    // error, and another window cannot ask at all.
+    const sent_payload = "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"7\",\"index\":0}}";
+    const sent: native_sdk.bridge.Invocation = .{
+        .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = sent_payload },
+        .source = request.source,
+    };
+    try std.testing.expectEqualStrings("{\"state\":\"missing\"}", try thumbnail.invoke_fn(thumbnail.context, sent, output));
+    const sent_foreign: native_sdk.bridge.Invocation = .{ .request = sent.request, .source = .{ .origin = "zero://app", .window_id = 4 } };
+    if (thumbnail.invoke_fn(thumbnail.context, sent_foreign, output)) |_| return error.ForeignWindowThumbnailAllowed else |_| {}
+    for ([_][]const u8{
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"0\",\"runId\":\"7\",\"index\":0}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"0\",\"index\":0}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"submissionAttachment\",\"taskId\":\"3\",\"operationId\":\"\",\"index\":0}}",
+    }) |invalid| {
+        const rejected: native_sdk.bridge.Invocation = .{
+            .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = invalid },
+            .source = request.source,
+        };
+        if (thumbnail.invoke_fn(thumbnail.context, rejected, output)) |_| return error.InvalidTargetAccepted else |_| {}
+    }
 
     // The viewer tier shares the File Preview grant, chunk reader and release.
     var opened: Capture = .{ .control = control };
