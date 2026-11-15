@@ -2031,5 +2031,14 @@ export const enUS = {
     "The task stopped because permission was required. Review the instruction and permissions, then edit and confirm.",
   "scheduled.notification_unavailable":
     "The task from this notification is unavailable. Refresh and check your tasks.",
+  "notification.schedule.completed": "Scheduled task completed",
+  "notification.schedule.failed": "Scheduled task failed",
+  "notification.schedule.skipped":
+    "A run was skipped because the previous run is still active",
+  "notification.schedule.needs_attention": "Scheduled task needs attention",
+  "notification.run.completed": "Task finished",
+  "notification.run.failed": "Task failed",
+  "notification.run.needs_approval": "Task is waiting for your approval",
+  "notification.open_task": "View task",
 } as const;
 export type MessageId = keyof typeof enUS;

@@ -376,6 +376,8 @@ pub const ScheduleHost = struct {
 
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
+pub const RunNotificationKind = product_task.RunNotificationKind;
+pub const RunNotification = product_task.RunNotification;
 
 pub const McpHostOutcome = enum { saved, saved_recovery_required, stale_generation, rejected, indeterminate, cancelled, capability_unavailable };
 pub const McpApproval = struct {

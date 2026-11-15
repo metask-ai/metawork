@@ -3,6 +3,7 @@ import {
   type LocalReadingInput,
 } from "../features/tasks/assistant-output.ts";
 import { editCustomModel } from "./edit-custom-model.ts";
+import { notificationTextRegistration } from "../features/tasks/notification-text.ts";
 import {
   SkillMessageBody,
   UserInputMessage,
@@ -2062,6 +2063,18 @@ export default function App() {
       setNotificationTarget(target);
     }, notificationUnavailable);
   }, [client]);
+  // System notifications are written here and shown by the Host, which does
+  // not know the language. Register before connection bootstrap, so the first
+  // notification of the session is already in the user's language, and again
+  // on every change: `t` is a new function for each locale. A refused
+  // registration leaves the Host with no table, and it then sends the title
+  // and the task name alone rather than an English body.
+  useEffect(() => {
+    if (!client.available()) return;
+    client
+      .registerNotificationText(notificationTextRegistration(t))
+      .catch(() => undefined);
+  }, [client, t]);
   useEffect(() => {
     if (!notificationTarget) return;
     if (BigInt(notificationTarget.generation) < BigInt(bridgeGeneration)) {

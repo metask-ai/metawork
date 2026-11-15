@@ -1755,4 +1755,12 @@ export const zhCN: Record<MessageId, string> = {
     "任务因权限不足停止，请核对内容和权限后编辑确认。",
   "scheduled.notification_unavailable":
     "通知中的任务当前不可用，请刷新并查看任务列表。",
+  "notification.schedule.completed": "定时任务已完成",
+  "notification.schedule.failed": "定时任务失败",
+  "notification.schedule.skipped": "上一次运行仍在进行，本次运行已跳过",
+  "notification.schedule.needs_attention": "定时任务需要处理",
+  "notification.run.completed": "任务已完成",
+  "notification.run.failed": "任务失败",
+  "notification.run.needs_approval": "任务正在等待你的确认",
+  "notification.open_task": "查看任务",
 };

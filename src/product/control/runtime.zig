@@ -447,6 +447,7 @@ pub const Configuration = struct {
     attachment_images: product_attachment.ImagePreparation = .{},
     attachment_archive_tool: ?AttachmentArchiveTool = null,
     schedule_notifier: ScheduleNotifier = .{},
+    run_notifier: RunNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
     builtin_skill_root: ?[]const u8 = null,
@@ -529,6 +530,9 @@ pub const PersistenceRecoveryOutcome = enum {
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
 pub const ScheduleNotifier = product_schedule.Notifier;
+pub const RunNotificationKind = task_runtime.RunNotificationKind;
+pub const RunNotification = task_runtime.RunNotification;
+pub const RunNotifier = task_runtime.RunNotifier;
 
 const json_string_expansion: usize = 6;
 // A pending request's raw JSON already contains the escaped arguments string.
@@ -1317,6 +1321,7 @@ pub const Runtime = struct {
     schedule: product_schedule.Runtime,
     skill: skill_runtime.Runtime,
     change_notifier: ChangeNotifier,
+    run_notifier: RunNotifier,
     executor: *executor_impl.Executor,
     approval_executor: *executor_impl.Executor,
     mcp_executor: ?*executor_impl.Executor = null,
@@ -1614,6 +1619,7 @@ pub const Runtime = struct {
             .schedule = schedule,
             .skill = skill,
             .change_notifier = configuration.change_notifier,
+            .run_notifier = configuration.run_notifier,
             .run_clock = configuration.run_clock,
             .updates = update.Runtime.init(product_identity.version, .{
                 .os = if (builtin.os.tag == .windows) .windows else .macos,
@@ -5657,12 +5663,25 @@ pub const Runtime = struct {
             );
         }
         if (self.schedule.takeChanged()) changed = true;
+        // Every owner's facts have settled by here, so each observation is of
+        // a published state: a Run that is terminal stays terminal, and the
+        // scheduled-task notifications for this wake have already gone out.
+        self.task_runtime.notifyRunAttention(
+            self.run_notifier,
+            &self.schedule,
+            scheduleOwnsTerminalNotification,
+        );
         // Required history commits get this wake before an opportunistic projection.
         // A confirmed full snapshot already includes the ordinary lifecycle facts.
         if (durable_changed and self.approval_history_dirty) self.commitTaskStateNoFail();
         self.flushApprovalProjectionNoFail();
         if (changed) self.bumpRevision();
         return task_sync.mcp_refresh_needed;
+    }
+
+    fn scheduleOwnsTerminalNotification(context: *const anyopaque, task_id: u64) bool {
+        const schedule: *const product_schedule.Runtime = @ptrCast(@alignCast(context));
+        return schedule.ownsTerminalNotification(task_id);
     }
 
     fn scheduleHasPendingContinuation(context: *const anyopaque, task_id: u64) bool {

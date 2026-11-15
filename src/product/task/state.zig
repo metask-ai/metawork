@@ -1354,9 +1354,23 @@ pub const Task = struct {
     /// records. Further checkpoint transitions wait for this batch to enqueue.
     pending_checkpoint_retirements: [4]?@FieldType(checkpoint_record.Record, "blob") = @splat(null),
     deletion: task_deletion.State = .idle,
+    /// What this process has already announced to the user as a system
+    /// notification. `null` until the first lifecycle observation, which
+    /// seeds the marks from current facts and announces nothing: a Run that
+    /// ended before launch is history, not news, so restoring it must never
+    /// replay a banner. Deliberately runtime-only for the same reason — a
+    /// completion is worth announcing when it happens or not at all.
+    notification_marks: ?NotificationMarks = null,
     /// Original history frame of a Task restored by ignoring unknown fields.
     /// Such a Task is read-only and commits write this frame back unchanged.
     read_only_history: ?ReadOnlyHistory = null,
+
+    pub const NotificationMarks = struct {
+        /// Highest Run id already announced as having reached a terminal phase.
+        terminal_run_id: u64 = 0,
+        /// Pending UI request already announced as waiting for the user.
+        approval_request_id: u64 = 0,
+    };
 
     pub const ReadOnlyHistory = struct {
         recent_order: u64,

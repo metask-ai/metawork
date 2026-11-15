@@ -37,6 +37,7 @@ import type {
   MediaTarget,
   FileChangeDiffResult,
   ModelMetadata,
+  NotificationTextRegistration,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -293,6 +294,16 @@ export class BridgeClient {
     return decodeExternalLinkOpenResult(
       await this.invoke(commands.openExternalLink, { url }),
     );
+  }
+  /**
+   * Hands the Host the notification strings in the current language. Called
+   * again on every language change; the Host replaces the whole table, and
+   * refuses one that is missing a slot rather than showing a wordless banner.
+   */
+  async registerNotificationText(
+    registration: NotificationTextRegistration,
+  ): Promise<void> {
+    await this.invoke(commands.registerNotificationText, { ...registration });
   }
   async outputAction(
     taskId: string,

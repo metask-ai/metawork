@@ -835,6 +835,21 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// Whether a scheduled task owns the terminal announcement for this Task.
+    /// Its own occurrence notification already names the schedule and opens
+    /// the Task, so the same Run must not also be announced as a plain Run.
+    /// Occurrence history is bounded: once a Task's occurrence ages out, a
+    /// later Run of that Task is the user's own work and is announced again.
+    pub fn ownsTerminalNotification(self: *const Runtime, task_id: u64) bool {
+        if (task_id == 0) return false;
+        for (self.store.items) |entry| {
+            const item = entry orelse continue;
+            for (item.occurrences()) |occurrence|
+                if (occurrence.task_id == task_id) return true;
+        }
+        return false;
+    }
+
     pub const ContinuationConfirmation = enum { confirmed, pending, failed };
 
     /// Observe after reconciliation, for a continuation already gated by an occurrence.

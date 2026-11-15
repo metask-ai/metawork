@@ -264,6 +264,7 @@ pub const Adapter = struct {
             .window_chrome_connect_fn = windowChromeConnect,
             .window_chrome_refresh_fn = windowChromeRefresh,
             .window_chrome_control_fn = windowChromeControl,
+            .register_notification_text_fn = registerNotificationText,
             .open_external_url_fn = openExternalUrl,
             .open_directory_fn = openDirectory,
             .now_fn = now,
@@ -451,6 +452,23 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
         const runtime = self.native_runtime orelse return false;
         return self.window.notifyScheduledTask(runtime, notification);
+    }
+
+    pub fn notifyRunAttention(
+        context: ?*anyopaque,
+        notification: control_ports.RunNotification,
+    ) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
+        const runtime = self.native_runtime orelse return false;
+        return self.window.notifyRunAttention(runtime, notification);
+    }
+
+    pub fn registerNotificationText(
+        context: ?*anyopaque,
+        table: *const bridge_api.notification_text.Table,
+    ) void {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return));
+        self.window.setNotificationText(table.*);
     }
 
     fn wake(context: ?*anyopaque) anyerror!void {

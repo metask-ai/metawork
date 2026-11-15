@@ -370,6 +370,38 @@ pub const WorkspaceOrderEffect = struct {
 
 /// Run timing is a display-only observation supplied by Application. It never
 /// schedules work or determines liveness, cancellation, or terminal outcome.
+/// Why a Run is worth telling the user about away from the window. A closed
+/// vocabulary: the Host turns each one into a catalog string, so a new reason
+/// has to be given words before it can be announced.
+pub const RunNotificationKind = enum { completed, failed, needs_approval };
+
+pub const RunNotification = struct {
+    task_id: u64,
+    run_id: u64,
+    /// The Task title, which Product has already localized.
+    title: []const u8,
+    kind: RunNotificationKind,
+};
+
+/// Composition's chance to show a Run notification. Returning false means
+/// nothing was shown — because no window system is attached, or because the
+/// application was in front and a banner would have said nothing. Either way
+/// the mark still advances: a moment the user was present for is not news
+/// later.
+pub const RunNotifier = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    notify_fn: *const fn (?*anyopaque, RunNotification) bool = noRunNotification,
+
+    fn notify(self: RunNotifier, value: RunNotification) bool {
+        return self.enabled and self.notify_fn(self.context, value);
+    }
+};
+
+fn noRunNotification(_: ?*anyopaque, _: RunNotification) bool {
+    return false;
+}
+
 pub const RunClock = struct {
     context: ?*anyopaque = null,
     now_ms_fn: ?*const fn (?*anyopaque) ?u64 = null,
@@ -4912,6 +4944,103 @@ pub const Runtime = struct {
             return false;
         task.durable.completion_seen_run_id = run_id;
         return true;
+    }
+
+    /// Announces Runs that have just reached a point worth telling the user
+    /// about. Called once per lifecycle sync, after Task facts have settled,
+    /// so every observation is of a published state rather than a transition
+    /// in progress.
+    ///
+    /// Separate from `markCompletionSeen`, which records that the user has
+    /// acknowledged a completion inside the application. These marks record
+    /// only what has been announced, so dismissing an in-application reminder
+    /// never re-arms a banner and vice versa.
+    /// `schedule_owns_terminal` answers whether another owner already
+    /// announces a Task's terminal Run, so the same Run is not announced
+    /// twice. It does not cover a Run waiting on the user: no other owner
+    /// says anything about that.
+    pub fn notifyRunAttention(
+        self: *Runtime,
+        notifier: RunNotifier,
+        schedule_context: *const anyopaque,
+        schedule_owns_terminal: *const fn (*const anyopaque, u64) bool,
+    ) void {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const terminal = announceableTerminal(task);
+            const observed: task_state.Task.NotificationMarks = .{
+                .terminal_run_id = if (terminal) |value| value.run_id else 0,
+                .approval_request_id = announceableApprovalRequestId(task) orelse 0,
+            };
+            const previous = task.notification_marks;
+            // Marks follow the facts whether or not a banner is allowed, so
+            // archiving a Task and restoring it cannot make an old Run new.
+            task.notification_marks = observed;
+            // First sight of this Task in this process: adopt what is already
+            // true and announce none of it.
+            const marks = previous orelse continue;
+            if (!announceable(task)) continue;
+            // Run ids only grow within a Task, and history trimming can drop
+            // the Run that was announced, so compare by order rather than by
+            // difference: a shorter history must not re-announce.
+            if (terminal) |value| {
+                if (value.run_id > marks.terminal_run_id and
+                    !schedule_owns_terminal(schedule_context, task.durable.id))
+                    _ = notifier.notify(.{
+                        .task_id = task.durable.id,
+                        .run_id = value.run_id,
+                        .title = task.durable.title,
+                        .kind = value.kind,
+                    });
+            }
+            // Request ids restart with each agent session, so here any change
+            // away from the announced one is a new request for the user.
+            if (observed.approval_request_id != 0 and
+                observed.approval_request_id != marks.approval_request_id)
+                _ = notifier.notify(.{
+                    .task_id = task.durable.id,
+                    .run_id = task.runtime.active_run_id,
+                    .title = task.durable.title,
+                    .kind = .needs_approval,
+                });
+        }
+    }
+
+    /// The latest terminal Run whose outcome is worth announcing, with the
+    /// reason, so the caller never has to resolve the outcome a second time.
+    fn announceableTerminal(
+        task: *const task_state.Task,
+    ) ?struct { run_id: u64, kind: RunNotificationKind } {
+        const run = task_policy.latestTerminalRun(task.durable.runs) orelse return null;
+        return .{
+            .run_id = run.id,
+            .kind = switch (task_state.productTerminalFacts(run).?.outcome) {
+                .completed => .completed,
+                .failed, .dependency_contract_failure => .failed,
+                // The user ended these themselves, or the process died
+                // mid-Run: neither is a result to announce.
+                .stopped, .cancelled, .interrupted => return null,
+            },
+        };
+    }
+
+    /// The pending UI request that is waiting on the user, if any. A request
+    /// the automatic reviewer still holds is not waiting on anyone, so it is
+    /// not announced; if the reviewer hands it back, that same request id
+    /// becomes announceable then.
+    fn announceableApprovalRequestId(task: *const task_state.Task) ?u64 {
+        if (task.runtime.pending_ui_request_id == 0) return null;
+        if (task.permissionReviewPhase() == .reviewing) return null;
+        return task.runtime.pending_ui_request_id;
+    }
+
+    /// A Task the user cannot be sent to is never announced: an archived or
+    /// deleting Task has no destination to open, and a read-only history
+    /// frame records nothing about this process at all.
+    fn announceable(task: *const task_state.Task) bool {
+        return !task.durable.archived and
+            task.deletion == .idle and
+            task.read_only_history == null;
     }
 
     pub fn isAdvancingInputs(self: *const Runtime) bool {
@@ -12686,4 +12815,256 @@ test "Schedule terminal observation stays with the initial Run after later Runs 
     try std.testing.expectEqual(@as(?task_policy.NavigationSignal, .failed), task_policy.navigationSignal(&task));
     first.event_stream_finalized = false;
     try std.testing.expect(runtime.initialRunTerminalSummary(1) == null);
+}
+
+/// Collects what the Host would have been asked to announce.
+const RunNotificationSpy = struct {
+    const max_seen = 8;
+    seen: [max_seen]RunNotification = undefined,
+    count: usize = 0,
+    /// Standing in for a window that is in front: the Host refuses, and the
+    /// marks must still advance so the moment is not announced later.
+    refuse: bool = false,
+
+    fn record(context: ?*anyopaque, value: RunNotification) bool {
+        const self: *RunNotificationSpy = @ptrCast(@alignCast(context.?));
+        if (self.count < max_seen) {
+            self.seen[self.count] = value;
+            self.count += 1;
+        }
+        return !self.refuse;
+    }
+
+    fn notifier(self: *RunNotificationSpy) RunNotifier {
+        return .{ .context = self, .enabled = true, .notify_fn = record };
+    }
+
+    fn take(self: *RunNotificationSpy) []const RunNotification {
+        return self.seen[0..self.count];
+    }
+
+    fn reset(self: *RunNotificationSpy) void {
+        self.count = 0;
+    }
+};
+
+fn noScheduledOwner(_: *const anyopaque, _: u64) bool {
+    return false;
+}
+
+fn everyTaskScheduled(_: *const anyopaque, _: u64) bool {
+    return true;
+}
+
+fn publishTerminalTestRun(run: *task_state.RunRecord, outcome: task_state.RunOutcome) void {
+    run.event_stream_finalized = true;
+    run.terminal_payload = .{
+        .exclude_on_product_terminal = false,
+        .phase = if (outcome == .completed) .completed else .failed,
+        .outcome = outcome,
+        .cause = null,
+        .session_disposition_at_completion = .reusable,
+    };
+    run.terminal_publication.store(.published, .release);
+    run.terminal_observed = true;
+}
+
+test "Run announcements adopt restored history silently and then follow new terminal Runs" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "restored"), null, null };
+    task.durable.runs = &runs;
+    publishTerminalTestRun(&runs[0].?, .completed);
+    var spy: RunNotificationSpy = .{};
+    const context: u8 = 0;
+
+    // A Run that ended before this process started is history, not news.
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+    // Observing the same facts again announces nothing either.
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+
+    // A Run that reaches a terminal phase here is announced exactly once.
+    runs[1] = reviewHistoryTestRun(2, "live");
+    publishTerminalTestRun(&runs[1].?, .completed);
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+    try std.testing.expectEqual(@as(u64, 1), spy.take()[0].task_id);
+    try std.testing.expectEqual(@as(u64, 2), spy.take()[0].run_id);
+    try std.testing.expectEqual(RunNotificationKind.completed, spy.take()[0].kind);
+    try std.testing.expectEqualStrings("title", spy.take()[0].title);
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+
+    // A failure is its own reason, announced on its own.
+    spy.reset();
+    runs[2] = reviewHistoryTestRun(3, "failing");
+    publishTerminalTestRun(&runs[2].?, .failed);
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+    try std.testing.expectEqual(@as(u64, 3), spy.take()[0].run_id);
+    try std.testing.expectEqual(RunNotificationKind.failed, spy.take()[0].kind);
+}
+
+test "a Run the user ended, or a Task they cannot be sent to, is never announced" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "seed"), null };
+    task.durable.runs = &runs;
+    var spy: RunNotificationSpy = .{};
+    const context: u8 = 0;
+    // Seed the marks against an empty history.
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+
+    // Stopping, cancelling and losing a Run are not results to announce.
+    for ([_]task_state.RunOutcome{ .stopped, .cancelled, .interrupted }) |outcome| {
+        publishTerminalTestRun(&runs[0].?, outcome);
+        runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+        try std.testing.expectEqual(@as(usize, 0), spy.count);
+    }
+
+    // An archived Task has no destination to open, so it stays silent even on
+    // a completion — and un-archiving it does not make that Run new again.
+    publishTerminalTestRun(&runs[0].?, .completed);
+    task.durable.archived = true;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+    task.durable.archived = false;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+}
+
+test "a scheduled task owns its Task's terminal announcement but not its approval wait" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "scheduled"), null };
+    task.durable.runs = &runs;
+    var spy: RunNotificationSpy = .{};
+    const context: u8 = 0;
+    runtime.notifyRunAttention(spy.notifier(), &context, everyTaskScheduled);
+
+    // The scheduled-task notification already names the schedule and opens
+    // this Task, so the same Run must not be announced a second time.
+    runs[1] = reviewHistoryTestRun(2, "live");
+    publishTerminalTestRun(&runs[1].?, .completed);
+    runtime.notifyRunAttention(spy.notifier(), &context, everyTaskScheduled);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+
+    // Nothing else announces a Run waiting on the user, so that one stands.
+    task.runtime.active_run_id = 2;
+    task.runtime.pending_ui_request_id = 11;
+    runtime.notifyRunAttention(spy.notifier(), &context, everyTaskScheduled);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+    try std.testing.expectEqual(RunNotificationKind.needs_approval, spy.take()[0].kind);
+    try std.testing.expectEqual(@as(u64, 2), spy.take()[0].run_id);
+}
+
+test "an approval wait is announced once per request and never while the reviewer holds it" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(1, "live")};
+    task.durable.runs = &runs;
+    task.runtime.active_run_id = 1;
+    var spy: RunNotificationSpy = .{};
+    const context: u8 = 0;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+
+    // Automatic review holds this request: it is not waiting on anyone yet.
+    task.durable.permission_review_delegated = true;
+    task.runtime.pending_ui_request_id = 4;
+    const review: PermissionReviewIdentity = .{
+        .task_id = 1,
+        .run_id = 1,
+        .run_generation = 1,
+        .execution_generation = 1,
+        .binding_epoch = 1,
+        .workspace_epoch = 1,
+        .route_id = 1,
+        .request_id = 4,
+        .policy_generation = 1,
+        .delegation_generation = task.runtime.permission_review.generation,
+    };
+    task.runtime.permission_review.phase = .reviewing;
+    task.runtime.permission_review.identity = review;
+    try std.testing.expectEqual(
+        task_attachment.PermissionReviewState.Phase.reviewing,
+        task.permissionReviewPhase(),
+    );
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+
+    // Handed back to the user, the same request becomes announceable, once.
+    task.runtime.permission_review.phase = .needs_user;
+    task.runtime.permission_review.settled_request_id = 4;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+    // The banner opens the Run that is waiting, named by the active Run id;
+    // the request id is the Task's own bookkeeping and never reaches it.
+    try std.testing.expectEqual(@as(u64, 1), spy.take()[0].run_id);
+    try std.testing.expectEqual(RunNotificationKind.needs_approval, spy.take()[0].kind);
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+
+    // Answering it and asking again is a new wait, even at the same id.
+    spy.reset();
+    task.runtime.pending_ui_request_id = 0;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 0), spy.count);
+    task.runtime.pending_ui_request_id = 4;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+}
+
+test "a refused announcement is not retried once the moment has passed" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "seed"), null };
+    task.durable.runs = &runs;
+    var spy: RunNotificationSpy = .{ .refuse = true };
+    const context: u8 = 0;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+
+    // The window was in front, so the Host showed nothing. The user was
+    // there to see it; a banner later would be stale.
+    runs[1] = reviewHistoryTestRun(2, "live");
+    publishTerminalTestRun(&runs[1].?, .completed);
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+    spy.refuse = false;
+    runtime.notifyRunAttention(spy.notifier(), &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(usize, 1), spy.count);
+}
+
+test "a composition with no window system announces nothing and costs nothing" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    runtime.tasks[0] = &task;
+    defer runtime.tasks[0] = null;
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(1, "live")};
+    task.durable.runs = &runs;
+    const context: u8 = 0;
+    // The default notifier is disabled; publishing a terminal Run under it
+    // must stay a no-op rather than reach an absent port.
+    runtime.notifyRunAttention(.{}, &context, noScheduledOwner);
+    publishTerminalTestRun(&runs[0].?, .completed);
+    runtime.notifyRunAttention(.{}, &context, noScheduledOwner);
+    try std.testing.expectEqual(@as(u64, 1), task.notification_marks.?.terminal_run_id);
 }
