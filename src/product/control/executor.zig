@@ -1,4 +1,59 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Stack size for a Control worker thread.
+///
+/// `std.Thread.SpawnConfig` defaults to 16 MiB, and on Windows Zig hands that
+/// value to `NtCreateThreadEx` as `StackCommit`: the whole amount is charged to
+/// the system-wide commit limit the moment the thread starts, touched or not,
+/// and running that limit down fails allocations in unrelated processes. Every
+/// executor pool Control builds is spawned from the one call below -- the fixed
+/// 16-worker host pool (`host_worker_count` in `src/app.zig`), plus the one-
+/// and two-worker approval, preview, attachment-staging, file and output-check
+/// pools -- which makes it the host's largest single class of threads and, at a
+/// zero-task idle, almost all of its commit charge.
+///
+/// 4 MiB is measured, not reasoned. A Windows build with the commit lowered to
+/// the 64 KiB floor lets each worker report its own high-water mark from its
+/// TEB (`StackBase - StackLimit`, which Windows never gives back); across the
+/// native test graph, 6621 worker samples peaked at 2100 KiB, reaching
+/// 1.8 MiB or more in five unrelated test binaries. What fills the stack is
+/// frame size rather than recursion: one worker job nests several of
+/// `runtime.zig`'s 96-256 KiB snapshot buffers along a single callback chain.
+///
+/// The two platforms read this number differently, and both sides were
+/// measured. On Windows it is only a commit hint -- the executable header keeps
+/// a 16 MiB reserve and the stack grows through its guard page -- and the peak
+/// above leaves 1.95x. POSIX maps exactly this much, which is the one place the
+/// number is a hard ceiling; measured there on macOS arm64 with a stack canary
+/// in place of a TEB, 6624 samples off the same test graph peaked at 450 KiB,
+/// none of them above 1 MiB, so the ceiling carries 9.1x. 4 MiB is sized by the
+/// higher of the two peaks, on the platform that would not have crashed.
+///
+/// Other host threads keep the default. The same probe sampled their paths 2 to
+/// 17 times, or never, which is too little to bound a hard ceiling, and each is
+/// a single short-lived thread whose charge does not show at idle.
+pub const worker_stack_bytes: usize = 4 * 1024 * 1024;
+
+/// Windows-only, and only in test builds: a worker's own stack high-water mark.
+/// Windows never decommits a thread stack, so `StackBase - StackLimit` is the
+/// deepest this thread has been. Because the executable header keeps a 16 MiB
+/// reserve, a worker that outgrows `worker_stack_bytes` keeps running here
+/// instead of faulting -- which is what makes the check worth having: it names
+/// the regression on Windows before POSIX turns it into a crash on a platform
+/// where the same number is a hard ceiling.
+const WorkerPeak = if (builtin.is_test and builtin.os.tag == .windows) struct {
+    fn check() void {
+        const tib = std.os.windows.teb().NtTib;
+        const peak = @intFromPtr(tib.StackBase) - @intFromPtr(tib.StackLimit);
+        if (peak > worker_stack_bytes) std.debug.panic(
+            "control worker stack reached {d} bytes, past the {d} this pool spawns with",
+            .{ peak, worker_stack_bytes },
+        );
+    }
+} else struct {
+    fn check() void {}
+};
 
 pub const Error = error{
     ExecutorShuttingDown,
@@ -69,7 +124,7 @@ pub const Executor = struct {
             for (self.workers[0..started]) |thread| thread.join();
         }
         for (self.workers) |*worker| {
-            worker.* = try std.Thread.spawn(.{}, workerMain, .{self});
+            worker.* = try std.Thread.spawn(.{ .stack_size = worker_stack_bytes }, workerMain, .{self});
             started += 1;
         }
         return self;
@@ -165,6 +220,7 @@ pub const Executor = struct {
             const next = self.popLocked();
             self.unlock();
             next.execute();
+            WorkerPeak.check();
         }
     }
 
@@ -357,4 +413,23 @@ test "queued cancellation separates owner identity from executor payload" {
     try std.testing.expect(executor.cancel(&identity));
     try std.testing.expect(payload.cancelled);
     blocker.release.store(true, .release);
+}
+
+test "the worker stack clears the measured peak and stays under the default" {
+    // Measured high-water mark of a Control worker across the native test
+    // graph. The value has to clear it with room to spare because POSIX treats
+    // it as a hard ceiling, and has to stay under the default for the commit
+    // charge to drop at all.
+    const measured_peak: usize = 2100 * 1024;
+    try std.testing.expect(worker_stack_bytes > measured_peak);
+    try std.testing.expect(worker_stack_bytes - measured_peak > measured_peak / 2);
+    try std.testing.expect(worker_stack_bytes < std.Thread.SpawnConfig.default_stack_size);
+}
+
+test "a worker reports its own stack peak where the platform allows it" {
+    // On Windows the executable header's reserve outlives the commit, so
+    // `WorkerPeak.check()` runs after every job in every Control test and
+    // trips on a job that outgrows the pool's stack. Elsewhere it compiles
+    // away; this only pins that it stays callable on both.
+    WorkerPeak.check();
 }
