@@ -54,22 +54,26 @@ const Job = struct {
             .check => |input| {
                 // A response arrived, so there is no execution evidence: the
                 // status or the body is the whole fact.
-                if (response.status != 200) {
-                    self.check_completion = .{ .failed = .{ .kind = .network } };
-                    return;
-                }
-                if (response.body_len > buffer.len) {
-                    self.check_completion = .{ .failed = .{ .kind = .invalid_manifest } };
-                    return;
-                }
-                const release = update.parseManifest(self.allocator, buffer[0..response.body_len], input.target) catch {
-                    self.check_completion = .{ .failed = .{ .kind = .invalid_manifest } };
-                    return;
-                };
+                if (response.status != 200) return self.answered(response, .network);
+                if (response.body_len > buffer.len) return self.answered(response, .invalid_manifest);
+                const release = update.parseManifest(self.allocator, buffer[0..response.body_len], input.target) catch
+                    return self.answered(response, .invalid_manifest);
                 self.check_completion = .{ .release = release };
             },
             .download => self.head_result = update.headResult(response.status),
         }
+    }
+
+    /// A check the server answered with something this client cannot use. The
+    /// execution layer logs every request that failed on its way out, and this
+    /// is the one failure it cannot see, because the request itself succeeded.
+    /// Typed facts only: a status, a byte count and the resulting class, so
+    /// the record carries no endpoint, header or response body.
+    fn answered(self: *Job, response: http.Response, kind: update.CheckError) void {
+        self.check_completion = .{ .failed = .{ .kind = kind } };
+        std.log.warn("update check consumer=update status={d} body_bytes={d} kind={s}", .{
+            response.status, response.body_len, @tagName(kind),
+        });
     }
 
     fn join(self: *Job) void {
