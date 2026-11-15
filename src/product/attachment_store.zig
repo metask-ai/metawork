@@ -3,8 +3,12 @@
 const std = @import("std");
 
 pub const Error = std.mem.Allocator.Error || error{ DirectoryUnavailable, ReadFailed, WriteFailed, UnsupportedType, FileChanged, FileTooLarge, DeleteFailed };
+/// Hex text of the 16 random bytes that name an owned file. It is the whole
+/// identity of a store file: unguessable, so it can be persisted with a message
+/// and resolved again without becoming a user-visible path.
+pub const name_text_bytes = 32;
 pub const File = struct {
-    name: [32]u8,
+    name: [name_text_bytes]u8,
     task_id: u64 = 0,
     size: usize,
     extension: Extension = .{},
@@ -35,8 +39,8 @@ pub const Extension = struct {
         return result;
     }
 };
-pub const max_relative_bytes = 20 + 1 + 32 + 1 + Extension.max_bytes;
-const max_filename_bytes = 32 + 1 + Extension.max_bytes;
+pub const max_relative_bytes = 20 + 1 + name_text_bytes + 1 + Extension.max_bytes;
+const max_filename_bytes = name_text_bytes + 1 + Extension.max_bytes;
 
 /// Store-relative identity of an owned file. The only shape that leaves this
 /// module: a caller can read it beneath the store root, never an absolute path.
