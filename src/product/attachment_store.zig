@@ -52,6 +52,25 @@ pub const Source = struct {
     }
 };
 
+/// One destination handle held for a whole transfer. Opening the original
+/// again for every chunk is what made a large attachment cost seconds: the
+/// per-open cost is paid outside this process and grows with the original's
+/// current size, while the write itself is a fraction of a millisecond.
+/// The handle carries no authority of its own; the owner of the transfer
+/// decides when it opens and closes.
+pub const Writer = struct {
+    handle: std.Io.File,
+    file: File,
+
+    pub fn append(self: Writer, io: std.Io, offset: usize, bytes: []const u8) Error!void {
+        if (offset > self.file.size or bytes.len > self.file.size - offset) return error.WriteFailed;
+        self.handle.writePositionalAll(io, bytes, offset) catch return error.WriteFailed;
+    }
+    pub fn close(self: Writer, io: std.Io) void {
+        self.handle.close(io);
+    }
+};
+
 pub const FileStore = struct {
     io: std.Io,
     root: std.Io.Dir,
@@ -105,13 +124,20 @@ pub const FileStore = struct {
         return value;
     }
 
-    pub fn append(self: *FileStore, value: File, offset: usize, bytes: []const u8) Error!void {
-        if (offset > value.size or bytes.len > value.size - offset) return error.WriteFailed;
+    pub fn openWriter(self: *FileStore, value: File) Error!Writer {
         var buffer: [max_relative_bytes]u8 = undefined;
         const path = try relative(value, &buffer);
         const file = positionalHandle(self.root.openFile(self.io, path, .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed);
-        defer file.close(self.io);
-        file.writePositionalAll(self.io, bytes, offset) catch return error.WriteFailed;
+        return .{ .handle = file, .file = value };
+    }
+
+    /// The single-chunk form. Callers that write a whole original hold one
+    /// `Writer` instead of paying an open per chunk.
+    pub fn append(self: *FileStore, value: File, offset: usize, bytes: []const u8) Error!void {
+        if (offset > value.size or bytes.len > value.size - offset) return error.WriteFailed;
+        const writer = try self.openWriter(value);
+        defer writer.close(self.io);
+        try writer.append(self.io, offset, bytes);
     }
 
     pub fn finish(self: *FileStore, value: File) Error!void {
@@ -179,15 +205,20 @@ pub const FileStore = struct {
     pub fn copySource(self: *FileStore, source: Source, value: File, cancelled: ?*const std.atomic.Value(bool)) (Error || error{Cancelled})!void {
         var bytes: [64 * 1024]u8 = undefined;
         defer std.crypto.secureZero(u8, &bytes);
-        var offset: usize = 0;
-        while (offset < value.size) {
-            if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
-            const chunk = bytes[0..@min(bytes.len, value.size - offset)];
-            const count = source.handle.readPositionalAll(self.io, chunk, offset) catch return error.ReadFailed;
-            if (count != chunk.len) return error.FileChanged;
-            if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
-            try self.append(value, offset, chunk);
-            offset += count;
+        {
+            // The destination handle closes before `finish` syncs it.
+            const writer = try self.openWriter(value);
+            defer writer.close(self.io);
+            var offset: usize = 0;
+            while (offset < value.size) {
+                if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
+                const chunk = bytes[0..@min(bytes.len, value.size - offset)];
+                const count = source.handle.readPositionalAll(self.io, chunk, offset) catch return error.ReadFailed;
+                if (count != chunk.len) return error.FileChanged;
+                if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
+                try writer.append(self.io, offset, chunk);
+                offset += count;
+            }
         }
         const after = source.handle.stat(self.io) catch return error.ReadFailed;
         const before = source.before;

@@ -71,7 +71,16 @@ pub fn thumbnailPixelBudget(width: u32, height: u32) usize {
 pub const WorkspaceReference = struct { id: u64, epoch: u64, task_id: u64, path: []const u8 = "" };
 pub const max_workspace_reference_bytes = 32 * 1024;
 pub const ReceiveFile = struct { display_name: []const u8, size_bytes: usize, workspace_reference: ?WorkspaceReference = null };
-const Receive = struct { id: u64, indices: []usize, file_index: usize = 0, offset: usize = 0 };
+const Receive = struct {
+    id: u64,
+    indices: []usize,
+    file_index: usize = 0,
+    offset: usize = 0,
+    /// Open for as long as the current original is being written. It lives
+    /// with the batch because a byte transfer spans several commands, and it
+    /// closes whenever the batch does.
+    writer: ?store.Writer = null,
+};
 pub const Descriptor = struct { id: u64, kind: Kind, format: ?Format, display_name: []const u8, size_bytes: u64 };
 pub const Thumbnail = struct { bytes: []const u8, width: u32, height: u32 };
 pub const Original = struct { directory: []const u8, relative: []const u8, size_bytes: usize };
@@ -254,21 +263,37 @@ pub const Runtime = struct {
         batch.offset = 0;
     }
     pub fn appendReceive(self: *Runtime, id: u64, file_index: usize, offset: usize, bytes: []const u8) Error!void {
-        const receive = if (self.receiving) |*value| value else return error.StaleTransfer;
-        if (receive.id != id) return error.StaleTransfer;
-        if (file_index != receive.file_index or offset != receive.offset or file_index >= receive.indices.len or bytes.len == 0) return error.InvalidTransfer;
-        const entry = &self.slots[receive.indices[file_index]].?;
-        if (offset > entry.file.size or bytes.len > entry.file.size - offset) return error.InvalidTransfer;
-        try self.file_store.?.append(entry.file, offset, bytes);
+        const writer = try self.writeHandle(id, file_index, offset, bytes.len);
+        try writer.append(self.file_store.?.io, offset, bytes);
         try self.acknowledgeWrite(id, file_index, offset, bytes.len);
     }
-    pub fn writeTarget(self: *const Runtime, id: u64, index: usize, offset: usize, count: usize) Error!store.File {
+    fn writeTarget(self: *const Runtime, id: u64, index: usize, offset: usize, count: usize) Error!store.File {
         const batch = self.receiving orelse return error.StaleTransfer;
         if (batch.id != id) return error.StaleTransfer;
         if (index != batch.file_index or offset != batch.offset or index >= batch.indices.len or count == 0) return error.InvalidTransfer;
         const file = self.slots[batch.indices[index]].?.file;
         if (offset > file.size or count > file.size - offset) return error.InvalidTransfer;
         return file;
+    }
+    /// Admits the same write as `writeTarget` and hands back the batch's open
+    /// handle, opening it on the first chunk of each original. The returned
+    /// value is a copy, so a worker writing through it is unaffected by later
+    /// batch state changes; closing stays with the batch.
+    pub fn writeHandle(self: *Runtime, id: u64, index: usize, offset: usize, count: usize) Error!store.Writer {
+        const file = try self.writeTarget(id, index, offset, count);
+        const batch = &self.receiving.?;
+        if (batch.writer) |writer| {
+            if (std.meta.eql(writer.file, file)) return writer;
+            self.closeWriter(batch);
+        }
+        const writer = try (self.file_store orelse return error.StagingCapacity).openWriter(file);
+        batch.writer = writer;
+        return writer;
+    }
+    fn closeWriter(self: *Runtime, batch: *Receive) void {
+        const writer = batch.writer orelse return;
+        batch.writer = null;
+        if (self.file_store) |backend| writer.close(backend.io);
     }
     pub fn validateComplete(self: *const Runtime, id: u64) Error!void {
         const batch = self.receiving orelse return error.StaleTransfer;
@@ -284,6 +309,7 @@ pub const Runtime = struct {
         if (receive.offset == entry.file.size) {
             receive.file_index += 1;
             receive.offset = 0;
+            self.closeWriter(receive);
         }
     }
     pub fn finishReceive(self: *Runtime, id: u64, output: []Descriptor) Error![]const Descriptor {
@@ -327,6 +353,7 @@ pub const Runtime = struct {
             output[index] = self.descriptor(entry.*);
         }
         const count = receive.indices.len;
+        self.closeWriter(&self.receiving.?);
         self.allocator.free(receive.indices);
         self.receiving = null;
         return output[0..count];
@@ -339,6 +366,12 @@ pub const Runtime = struct {
             return false;
         };
         if (receive.id != id) return false;
+        // The original cannot be removed while this process still holds a
+        // handle to it, so the writer closes before any destroy. Every caller
+        // reaches this with the staging lane quiet — a deferred cancel waits
+        // for the in-flight job, and the rest run after a completion — so no
+        // worker is writing through its copy of the handle.
+        self.closeWriter(&self.receiving.?);
         var cleaned = true;
         for (receive.indices) |slot| {
             if (self.destroyEntry(&self.slots[slot].?, false)) self.slots[slot] = null else cleaned = false;
@@ -1114,6 +1147,61 @@ test "binary originals cross receive chunks without content loss" {
     try std.testing.expectEqualSlices(u8, &first, bytes[0..first.len]);
     try std.testing.expectEqualStrings("\xa0\x80", bytes[first.len..]);
     try std.testing.expect(runtime.release(ready[0].id));
+}
+
+test "one destination handle spans a transfer's chunks and closes with it" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    const limits: Limits = .{ .max_files = 2, .max_display_name_bytes = 64, .max_file_bytes = 16, .max_staged_bytes = 64 };
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    var output: [2]Descriptor = undefined;
+    const id = try runtime.beginReceive(&.{
+        .{ .display_name = "first.bin", .size_bytes = 4 },
+        .{ .display_name = "second.bin", .size_bytes = 3 },
+    });
+    const first = runtime.slots[runtime.receiving.?.indices[0]].?.file;
+    const second = runtime.slots[runtime.receiving.?.indices[1]].?.file;
+    try std.testing.expect(runtime.receiving.?.writer == null);
+
+    // The handle opens on the first chunk and the next chunk reuses it.
+    try runtime.appendReceive(id, 0, 0, "\xff\x00");
+    try std.testing.expect(std.meta.eql(first, runtime.receiving.?.writer.?.file));
+    const reused = runtime.receiving.?.writer.?.handle.handle;
+    try runtime.appendReceive(id, 0, 2, "\x01");
+    try std.testing.expectEqual(reused, runtime.receiving.?.writer.?.handle.handle);
+
+    // Completing an original closes its handle; the next original opens its own.
+    try runtime.appendReceive(id, 0, 3, "\x02");
+    try std.testing.expect(runtime.receiving.?.writer == null);
+    try runtime.appendReceive(id, 1, 0, "\x03\x04");
+    try std.testing.expect(std.meta.eql(second, runtime.receiving.?.writer.?.file));
+    try runtime.appendReceive(id, 1, 2, "\x05");
+    try std.testing.expect(runtime.receiving.?.writer == null);
+
+    const ready = try runtime.finishReceive(id, &output);
+    try std.testing.expectEqual(@as(usize, 2), ready.len);
+    try std.testing.expect(runtime.receiving == null);
+    const bytes = try fixture.store.readAlloc(std.testing.allocator, first);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xff\x00\x01\x02", bytes);
+    for (ready) |descriptor| try std.testing.expect(runtime.release(descriptor.id));
+}
+
+test "cancelling mid-transfer deletes the original it was still writing" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    const limits: Limits = .{ .max_files = 1, .max_display_name_bytes = 64, .max_file_bytes = 16, .max_staged_bytes = 64 };
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    const id = try runtime.beginReceive(&.{.{ .display_name = "partial.bin", .size_bytes = 8 }});
+    try runtime.appendReceive(id, 0, 0, "\xff\x00\x01");
+    try std.testing.expect(runtime.receiving.?.writer != null);
+    // Deleting an original this process still holds open fails on Windows, so
+    // a clean cancel is the proof that the handle was released first.
+    try std.testing.expect(try runtime.cancelReceiveChecked(id));
+    try std.testing.expect(runtime.receiving == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
 }
 
 test "rejected image preparation releases its renamed original" {

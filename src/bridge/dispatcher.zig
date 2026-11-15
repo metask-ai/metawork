@@ -8473,6 +8473,143 @@ test "window chrome environment and action ack match the shared Renderer wire fi
     try std.testing.expectEqualStrings(expected_ack, try Dispatcher.encodeWindowChromeHandled(&output, 7));
 }
 
+test "a dropped path stages a whole original without a byte round trip" {
+    const fixture = @import("lifecycle_fixture");
+    var staging = std.testing.tmpDir(.{});
+    defer staging.cleanup();
+    var sources = std.testing.tmpDir(.{});
+    defer sources.cleanup();
+    var staging_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staging_len = try staging.dir.realPath(std.testing.io, &staging_buffer);
+    var store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, staging_buffer[0..staging_len]);
+    defer store.deinit();
+    // Large enough to cross the copy loop's chunk boundary several times, so
+    // the staged original proves the held destination handle wrote every
+    // chunk at the right offset.
+    const original = "x" ** (200 * 1024);
+    try sources.dir.writeFile(std.testing.io, .{ .sub_path = "dropped.txt", .data = original });
+    var dropped_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dropped_len = try sources.dir.realPathFile(std.testing.io, "dropped.txt", &dropped_buffer);
+    const dropped = dropped_buffer[0..dropped_len];
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const Host = struct {
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancel(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            std.Io.randomSecure(std.testing.io, out) catch return false;
+            return true;
+        }
+    };
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var configuration = fixture.productControlConfiguration();
+    configuration.attachment_store = &store;
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
+        .attachment_input = .native_paths,
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        // Paths and bytes are the only inputs here; no OS effect is reached.
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer {
+        dispatcher.deinit();
+        workbench.shutdownExecutor();
+        runtime.shutdown() catch unreachable;
+        workbench.deinit();
+        runtime.deinit();
+    }
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [16 * 1024]u8 = undefined;
+    const connect_request = "{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(connect_request, source, &output), "\"mode\":\"native_paths\"") != null);
+    const Capture = struct {
+        response: ?[]u8 = null,
+        calls: usize = 0,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, response: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |previous| std.testing.allocator.free(previous);
+            self.response = try std.testing.allocator.dupe(u8, response);
+            self.calls += 1;
+        }
+        fn deinit(self: *@This()) void {
+            if (self.response) |value| std.testing.allocator.free(value);
+        }
+        fn invoke(self: *@This(), n: native_sdk.bridge.Dispatcher, source_value: native_sdk.bridge.Source, command: []const u8, payload: []const u8) !void {
+            const handler = n.async_registry.find(command).?;
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "drop-test", .command = command, .payload = payload }, .source = source_value }, .{ .context = self, .source = source_value, .respond_fn = receive });
+        }
+        fn wait(self: *@This(), control: *product_control.Runtime, boundary: *Dispatcher, count: usize) !void {
+            var attempts: usize = 0;
+            while (self.calls < count and attempts < 4000) : (attempts += 1) {
+                control.drainAttachmentStagingCompletions(boundary.attachmentStagingSink());
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            }
+            try std.testing.expectEqual(count, self.calls);
+        }
+        fn expect(self: *@This(), text: []const u8) !void {
+            if (std.mem.indexOf(u8, self.response.?, text) == null) {
+                std.debug.print("expected {s} in drop response {s}\n", .{ text, self.response.? });
+                return error.TestUnexpectedResult;
+            }
+        }
+    };
+    var capture = Capture{};
+    defer capture.deinit();
+
+    // The path entry stages the batch entirely inside the Host: one add, no
+    // byte command, and the staged original matches the source exactly.
+    const path_begin = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{
+        .generation = "1",
+        .batchId = "1",
+        .source = .{ .kind = "native_paths", .paths = [_][]const u8{dropped} },
+    }, .{});
+    try capture.invoke(native, source, commands.begin_attachment_add, path_begin);
+    try capture.wait(&workbench, &dispatcher, 1);
+    try capture.expect("\"status\":\"ready\"");
+    try capture.expect("\"displayName\":\"dropped.txt\"");
+    try capture.expect("\"sizeBytes\":\"204800\"");
+    try std.testing.expectEqual(@as(usize, original.len), workbench.attachments.used_bytes);
+    const staged = for (workbench.attachments.slots) |slot| {
+        if (slot) |entry| break entry.file;
+    } else return error.TestUnexpectedResult;
+    const copied = try store.readAlloc(std.testing.allocator, staged);
+    defer std.testing.allocator.free(copied);
+    try std.testing.expectEqualStrings(original, copied);
+
+    // A paste has no path on any platform, so the byte entry stays open on
+    // the very same connection that takes its drops as paths.
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"2\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"pasted.bin\",\"sizeBytes\":\"3\"}]}}");
+    try capture.wait(&workbench, &dispatcher, 2);
+    try capture.expect("\"status\":\"accepted\"");
+    try capture.invoke(native, source, commands.append_attachment_add, "{\"generation\":\"1\",\"batchId\":\"2\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"/wBi\"}");
+    try capture.wait(&workbench, &dispatcher, 3);
+    try capture.expect("\"status\":\"accepted\"");
+    try capture.invoke(native, source, commands.finish_attachment_add, "{\"generation\":\"1\",\"batchId\":\"2\"}");
+    try capture.wait(&workbench, &dispatcher, 4);
+    try capture.expect("\"status\":\"ready\"");
+    try capture.expect("\"displayName\":\"pasted.bin\"");
+}
+
 test "unified add async jobs join cancellation and freeze their protocol producer" {
     const fixture = @import("lifecycle_fixture");
     var tmp = std.testing.tmpDir(.{});
