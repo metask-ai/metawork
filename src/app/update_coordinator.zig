@@ -120,9 +120,9 @@ pub const Coordinator = struct {
         self.assertMain();
         if (self.stopped) return .unavailable;
         if (self.check != null) return .accepted;
-        const input = self.management.begin_check_fn(self.management.context, self.now()) orelse return .unavailable;
+        const input = self.management.begin_check_fn(self.management.context) orelse return .unavailable;
         self.check = self.startJob(.{ .check = input }) catch {
-            self.management.complete_check_fn(self.management.context, input.id, .{ .failed = .{ .kind = .unavailable } });
+            self.management.complete_check_fn(self.management.context, self.now(), input.id, .{ .failed = .{ .kind = .unavailable } });
             return .unavailable;
         };
         self.reconcileTimer();
@@ -165,7 +165,7 @@ pub const Coordinator = struct {
         if (self.stopped) return;
         if (self.check) |job| if (job.finished.load(.acquire)) {
             job.join();
-            self.management.complete_check_fn(self.management.context, job.work.check.id, job.check_completion);
+            self.management.complete_check_fn(self.management.context, self.now(), job.work.check.id, job.check_completion);
             job.destroy();
             self.check = null;
         };
@@ -257,14 +257,14 @@ const TestHost = struct {
     fn next(context: *anyopaque) ?u64 {
         return owner(context).state.next_check_ms;
     }
-    fn beginCheck(context: *anyopaque, ms: u64) ?update.CheckPreparation {
+    fn beginCheck(context: *anyopaque) ?update.CheckPreparation {
         const self = owner(context);
-        return .{ .id = self.state.beginCheck(ms) orelse return null, .target = self.state.target };
+        return .{ .id = self.state.beginCheck() orelse return null, .target = self.state.target };
     }
-    fn completeCheck(context: *anyopaque, id: u64, completion: update.CheckCompletion) void {
+    fn completeCheck(context: *anyopaque, ms: u64, id: u64, completion: update.CheckCompletion) void {
         const self = owner(context);
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
-        _ = self.state.completeCheck(id, completion);
+        _ = self.state.completeCheck(ms, id, completion);
     }
     fn beginDownload(context: *anyopaque, version: []const u8) ?update.DownloadPreparation {
         return owner(context).state.beginDownload(version);
@@ -361,6 +361,28 @@ test "updates lifecycle starts after delay, coalesces requests and recovers a mi
     try TestHost.settle(&coordinator);
     try std.testing.expectEqual(@as(u32, 1), host.requests.load(.acquire));
     try std.testing.expect(host.state.view().updateAvailable);
+    try std.testing.expectEqual(update.Limits.interval_ms * std.time.ns_per_ms, host.timer_ns.?);
+}
+
+test "updates arm the short interval after a failed check and the ordinary one after a success" {
+    var host = try TestHost.init();
+    host.fail_check = error.Network;
+    var coordinator = host.coordinator();
+    coordinator.start(true);
+    defer coordinator.shutdown();
+    host.now_ms = 30_000;
+    coordinator.onTimer();
+    try TestHost.settle(&coordinator);
+    try std.testing.expectEqual(update.CheckState.failed, host.state.view().checkState);
+    // The result, not the attempt, decides the next automatic check, so the
+    // failure is already armed at the short interval rather than a whole day.
+    try std.testing.expectEqual(update.Limits.retry_interval_ms * std.time.ns_per_ms, host.timer_ns.?);
+    host.fail_check = null;
+    host.now_ms += update.Limits.retry_interval_ms;
+    coordinator.onTimer();
+    try TestHost.settle(&coordinator);
+    try std.testing.expectEqual(@as(u32, 2), host.requests.load(.acquire));
+    try std.testing.expectEqual(update.CheckState.succeeded, host.state.view().checkState);
     try std.testing.expectEqual(update.Limits.interval_ms * std.time.ns_per_ms, host.timer_ns.?);
 }
 

@@ -12,6 +12,14 @@ pub const Limits = struct {
     pub const json_depth = 8;
     pub const initial_delay_ms = 30_000;
     pub const interval_ms = 24 * 60 * 60 * 1000;
+    /// A failed check waits this long instead of a whole interval, so one
+    /// transient failure cannot strand the user in `failed` for a day.
+    pub const retry_interval_ms = 5 * 60 * 1000;
+    /// How many consecutive failures may take the short interval. A short
+    /// interval repeated without end is itself the retry loop this schedule
+    /// exists to avoid, so a host that stays unreachable returns to the
+    /// ordinary interval rather than asking every five minutes forever.
+    pub const retry_attempts = 3;
 };
 
 fn Text(comptime capacity: usize) type {
@@ -211,8 +219,8 @@ pub const Management = struct {
     context: *anyopaque,
     start_fn: *const fn (*anyopaque, u64, bool) void,
     next_check_fn: *const fn (*anyopaque) ?u64,
-    begin_check_fn: *const fn (*anyopaque, u64) ?CheckPreparation,
-    complete_check_fn: *const fn (*anyopaque, u64, CheckCompletion) void,
+    begin_check_fn: *const fn (*anyopaque) ?CheckPreparation,
+    complete_check_fn: *const fn (*anyopaque, u64, u64, CheckCompletion) void,
     begin_download_fn: *const fn (*anyopaque, []const u8) ?DownloadPreparation,
     complete_download_fn: *const fn (*anyopaque, u64, HeadResult) ?Url,
     browser_result_fn: *const fn (*anyopaque, bool) void,
@@ -233,6 +241,9 @@ pub const Runtime = struct {
     check_state: CheckState = .unavailable,
     check_error: CheckError = .none,
     check_diagnostic: ?CheckDiagnostic = null,
+    /// Consecutive failed checks. Bounds how long the short retry interval
+    /// applies; reset by a success and by a fresh start.
+    check_failures: u8 = 0,
     download_state: DownloadState = .idle,
     download_error: DownloadError = .none,
 
@@ -247,42 +258,55 @@ pub const Runtime = struct {
         self.check_state = .unchecked;
         self.check_error = .none;
         self.check_diagnostic = null;
+        self.check_failures = 0;
     }
 
     pub fn due(self: *const Runtime, now_ms: u64) bool {
         return self.available and self.check_id == null and if (self.next_check_ms) |at| now_ms >= at else false;
     }
 
-    pub fn beginCheck(self: *Runtime, now_ms: u64) ?u64 {
+    pub fn beginCheck(self: *Runtime) ?u64 {
         if (!self.available or self.check_id != null or self.sequence == std.math.maxInt(u64)) return null;
         self.sequence += 1;
         self.check_id = self.sequence;
         self.check_state = .checking;
         self.check_error = .none;
         self.check_diagnostic = null;
-        if (self.automatic) self.next_check_ms = now_ms +| Limits.interval_ms;
         return self.sequence;
     }
 
-    pub fn completeCheck(self: *Runtime, id: u64, completion: CheckCompletion) bool {
+    /// The next automatic check is scheduled here, from the result, rather
+    /// than when the attempt started: a failure takes the short interval so
+    /// one bad moment does not cost a day, a success the ordinary one. Both
+    /// are fixed delays measured from this completion, so no result can bring
+    /// the next attempt closer than the interval it earned.
+    pub fn completeCheck(self: *Runtime, now_ms: u64, id: u64, completion: CheckCompletion) bool {
         if (!self.available or self.check_id != id) return false;
         self.check_id = null;
-        switch (completion) {
-            .release => |release| {
+        const wait: u64 = switch (completion) {
+            .release => |release| wait: {
                 self.release = release;
                 self.check_state = .succeeded;
                 self.check_error = .none;
                 self.check_diagnostic = null;
                 self.download_error = .none;
+                self.check_failures = 0;
                 if (self.download == null) self.download_state = .idle;
+                break :wait Limits.interval_ms;
             },
-            .failed => |failure| {
+            .failed => |failure| wait: {
                 std.debug.assert(failure.kind != .none);
                 self.check_state = .failed;
                 self.check_error = failure.kind;
                 self.check_diagnostic = failure.diagnostic;
+                self.check_failures +|= 1;
+                break :wait if (self.check_failures <= Limits.retry_attempts)
+                    Limits.retry_interval_ms
+                else
+                    Limits.interval_ms;
             },
-        }
+        };
+        if (self.automatic) self.next_check_ms = now_ms +| wait;
         return true;
     }
 
@@ -424,40 +448,80 @@ fn startedRuntime(automatic: bool) !Runtime {
 }
 
 fn installFixture(runtime: *Runtime) !void {
-    const id = runtime.beginCheck(40_000).?;
-    try std.testing.expect(runtime.completeCheck(id, .{ .release = try parseManifest(std.testing.allocator, fixture, runtime.target) }));
+    const id = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(40_000, id, .{ .release = try parseManifest(std.testing.allocator, fixture, runtime.target) }));
 }
 
-test "updates coalesce checks and schedule from attempts without persistence or retry loops" {
+test "updates coalesce checks and schedule from results without persistence or retry loops" {
     var runtime = try startedRuntime(true);
     try std.testing.expect(!runtime.due(30_999));
     try std.testing.expect(runtime.due(31_000));
-    const id = runtime.beginCheck(31_000).?;
-    try std.testing.expect(runtime.beginCheck(31_001) == null);
-    try std.testing.expect(!runtime.due(32_000));
-    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .{ .kind = .network } }));
+    const id = runtime.beginCheck().?;
+    try std.testing.expect(runtime.beginCheck() == null);
+    try std.testing.expect(!runtime.due(32_000)); // an attempt in flight is never due
+    try std.testing.expect(runtime.completeCheck(32_000, id, .{ .failed = .{ .kind = .network } }));
     try std.testing.expectEqual(CheckState.failed, runtime.view().checkState);
     try std.testing.expect(!runtime.view().updateAvailable);
-    try std.testing.expect(!runtime.due(31_001));
-    try std.testing.expect(runtime.due(31_000 + Limits.interval_ms));
-    try std.testing.expect(runtime.beginCheck(32_000) != null); // explicit retry
+    // The failure earns its interval from the completion, never an immediate
+    // re-attempt, so the schedule cannot become a retry loop.
+    try std.testing.expect(!runtime.due(32_000 + Limits.retry_interval_ms - 1));
+    try std.testing.expect(runtime.due(32_000 + Limits.retry_interval_ms));
+    try std.testing.expect(runtime.beginCheck() != null); // explicit retry
     var manual = try startedRuntime(false);
     try std.testing.expect(!manual.due(std.math.maxInt(u64)));
-    try std.testing.expect(manual.beginCheck(1) != null);
+    try std.testing.expect(manual.beginCheck() != null);
     const restarted = try startedRuntime(true);
     try std.testing.expect(restarted.due(31_000));
+}
+
+test "updates retry a failed check sooner for a bounded run of attempts only" {
+    var runtime = try startedRuntime(true);
+    var at: u64 = 31_000;
+    // Every attempt in the run earns the same short interval: it never grows
+    // into an unbounded backoff and never collapses into an instant retry.
+    for (0..Limits.retry_attempts) |_| {
+        const id = runtime.beginCheck().?;
+        try std.testing.expect(runtime.completeCheck(at, id, .{ .failed = .{ .kind = .network } }));
+        try std.testing.expect(!runtime.due(at));
+        try std.testing.expect(!runtime.due(at + Limits.retry_interval_ms - 1));
+        try std.testing.expect(runtime.due(at + Limits.retry_interval_ms));
+        at += Limits.retry_interval_ms;
+    }
+    // The run is bounded, so a host that stays unreachable returns to the
+    // ordinary interval instead of asking every few minutes forever.
+    const exhausted = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(at, exhausted, .{ .failed = .{ .kind = .network } }));
+    try std.testing.expect(!runtime.due(at + Limits.retry_interval_ms));
+    try std.testing.expect(runtime.due(at + Limits.interval_ms));
+
+    // A manual retry is never starved by the schedule, and one success both
+    // restores the ordinary interval and refills the short-retry run.
+    const recovered = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(at, recovered, .{ .release = .{ .version = try Version.parse("0.2.9"), .download = null } }));
+    try std.testing.expect(!runtime.due(at + Limits.retry_interval_ms));
+    try std.testing.expect(runtime.due(at + Limits.interval_ms));
+    const again = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(at, again, .{ .failed = .{ .kind = .timeout } }));
+    try std.testing.expect(runtime.due(at + Limits.retry_interval_ms));
+
+    // Without automatic checks a result schedules nothing at all.
+    var unattended = try startedRuntime(false);
+    const once = unattended.beginCheck().?;
+    try std.testing.expect(unattended.completeCheck(1000, once, .{ .failed = .{ .kind = .network } }));
+    try std.testing.expect(unattended.next_check_ms == null);
+    try std.testing.expect(!unattended.due(std.math.maxInt(u64)));
 }
 
 test "updates keep last confirmed release on failure and replace it on valid checks" {
     var runtime = try startedRuntime(false);
     try installFixture(&runtime);
-    const id = runtime.beginCheck(50_000).?;
-    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .{ .kind = .timeout } }));
+    const id = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(50_000, id, .{ .failed = .{ .kind = .timeout } }));
     try std.testing.expect(runtime.view().updateAvailable);
     try std.testing.expectEqual(CheckError.timeout, runtime.view().checkError);
     try std.testing.expectEqualStrings("0.2.10", runtime.view().latestVersion.?);
-    const retry = runtime.beginCheck(60_000).?;
-    try std.testing.expect(runtime.completeCheck(retry, .{ .release = .{ .version = try Version.parse("0.2.7"), .download = null } }));
+    const retry = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(60_000, retry, .{ .release = .{ .version = try Version.parse("0.2.7"), .download = null } }));
     try std.testing.expect(!runtime.view().updateAvailable);
     try std.testing.expect(runtime.beginDownload("0.2.10") == null);
 }
@@ -477,8 +541,8 @@ test "updates reject stale download intent and consume browser authorization onc
     try std.testing.expectEqual(DownloadState.opened, runtime.view().downloadState);
     try std.testing.expect(runtime.view().updateAvailable); // handoff is not installation
     const changed = runtime.beginDownload("0.2.10").?;
-    const check = runtime.beginCheck(60_000).?;
-    try std.testing.expect(runtime.completeCheck(check, .{ .release = .{ .version = try Version.parse("0.2.11"), .download = null } }));
+    const check = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(60_000, check, .{ .release = .{ .version = try Version.parse("0.2.11"), .download = null } }));
     try std.testing.expect(runtime.completeDownload(changed.id, .accessible) == null);
     try std.testing.expectEqual(DownloadError.stale_version, runtime.view().downloadError);
 }
@@ -511,12 +575,12 @@ test "updates disconnect and shutdown revoke pending browser effects and stale c
     const pending = runtime.beginDownload("0.2.10").?;
     runtime.cancelDownload();
     try std.testing.expect(runtime.completeDownload(pending.id, .accessible) == null);
-    const check = runtime.beginCheck(70_000).?;
+    const check = runtime.beginCheck().?;
     runtime.stop();
     runtime.browserResult(true);
     try std.testing.expectEqual(DownloadState.idle, runtime.view().downloadState);
-    try std.testing.expect(!runtime.completeCheck(check, .{ .failed = .{ .kind = .network } }));
-    try std.testing.expect(runtime.beginCheck(80_000) == null);
+    try std.testing.expect(!runtime.completeCheck(80_000, check, .{ .failed = .{ .kind = .network } }));
+    try std.testing.expect(runtime.beginCheck() == null);
     try std.testing.expect(runtime.beginDownload("0.2.10") == null);
     try std.testing.expect(!runtime.due(std.math.maxInt(u64)));
 }
@@ -529,8 +593,8 @@ test "updates keep the failing phase and cause of the latest attempt only" {
 
     var runtime = try startedRuntime(false);
     try installFixture(&runtime);
-    const failed = runtime.beginCheck(50_000).?;
-    try std.testing.expect(runtime.completeCheck(failed, .{ .failed = .{
+    const failed = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(50_000, failed, .{ .failed = .{
         .kind = .network,
         .diagnostic = .{ .phase = .connect, .cause = .tls_failed, .elapsed = .under_5s },
     } }));
@@ -540,15 +604,15 @@ test "updates keep the failing phase and cause of the latest attempt only" {
     try std.testing.expectEqual(Elapsed.under_5s, runtime.view().checkDiagnostic.?.elapsed);
 
     // A new attempt owns the evidence; the last confirmed release survives it.
-    const retry = runtime.beginCheck(60_000).?;
+    const retry = runtime.beginCheck().?;
     try std.testing.expect(runtime.view().checkDiagnostic == null);
     try std.testing.expect(runtime.view().updateAvailable);
-    try std.testing.expect(runtime.completeCheck(retry, .{ .release = try parseManifest(std.testing.allocator, fixture, runtime.target) }));
+    try std.testing.expect(runtime.completeCheck(60_000, retry, .{ .release = try parseManifest(std.testing.allocator, fixture, runtime.target) }));
     try std.testing.expect(runtime.view().checkDiagnostic == null);
 
     // A completed request that returned an unusable manifest has no evidence.
-    const invalid = runtime.beginCheck(70_000).?;
-    try std.testing.expect(runtime.completeCheck(invalid, .{ .failed = .{ .kind = .invalid_manifest } }));
+    const invalid = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(70_000, invalid, .{ .failed = .{ .kind = .invalid_manifest } }));
     try std.testing.expectEqual(CheckError.invalid_manifest, runtime.view().checkError);
     try std.testing.expect(runtime.view().checkDiagnostic == null);
 
@@ -558,8 +622,8 @@ test "updates keep the failing phase and cause of the latest attempt only" {
 
 test "updates publish the failed check diagnostic without any endpoint or address" {
     var runtime = try startedRuntime(false);
-    const id = runtime.beginCheck(40_000).?;
-    try std.testing.expect(runtime.completeCheck(id, .{ .failed = .{
+    const id = runtime.beginCheck().?;
+    try std.testing.expect(runtime.completeCheck(40_000, id, .{ .failed = .{
         .kind = .network,
         .diagnostic = .{ .phase = .connect, .cause = .tls_failed, .elapsed = .under_5s },
     } }));
