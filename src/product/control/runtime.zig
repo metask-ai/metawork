@@ -4743,6 +4743,17 @@ pub const Runtime = struct {
                                 .jpeg => .jpeg,
                                 .webp => .webp,
                             },
+                            // The logical identity of the bytes this Task is
+                            // accepting. It is read while the batch is still
+                            // borrowed, because retaining it wipes the draft's
+                            // own copy of the derivative.
+                            .media = if (self.attachments.acceptedMedia(image.id)) |media| .{
+                                .original_name = media.original_name,
+                                .thumbnail_name = media.thumbnail_name,
+                                .thumbnail_size_bytes = media.thumbnail_size_bytes,
+                                .thumbnail_width = media.thumbnail_width,
+                                .thumbnail_height = media.thumbnail_height,
+                            } else null,
                         },
                         .text => |text| .{
                             .resource_id = text.id,

@@ -5863,7 +5863,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"media\":true,\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"media\":true,\"redacted\":false}],\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "attachmentTokens") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "PNG\\r\\n") == null);
@@ -5893,7 +5893,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         pure_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"media\":true,\"redacted\":false}],\"redacted\":false}",
     ) != null);
 
     const text_files = [_]product_control.AttachmentCandidate{.{

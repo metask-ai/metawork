@@ -126,7 +126,7 @@ test "run cause domain upgrade accepts an approval mode change stop in an existi
     const state = try history.fixture(a);
     {
         // A store written before the Product cause existed rejects it.
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0 .. schema.migrations.len - 1]);
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..7]);
         defer database.destroy() catch unreachable;
         _ = try save(a, database.capability(), state);
         try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
@@ -136,6 +136,33 @@ test "run cause domain upgrade accepts an approval mode change stop in an existi
     try expectSame(a, database.capability(), state);
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
     try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='unknown'" } }}));
+}
+
+test "a store written before the attachment media identity keeps its plain chips" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    for (state.tasks[0].runs) |*run| {
+        if (run.input.attachments) |items| for (items) |*item| {
+            item.media = null;
+        };
+    }
+    {
+        // Written at the version before the identity existed.
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..8]);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    // The upgrade adds no column and invents no identity: those attachments
+    // still have none, which is what keeps their history chips plain.
+    try expectSame(a, database.capability(), state);
+    try std.testing.expectEqual(@as(u32, schema.migrations.len), database.schemaVersion());
 }
 
 test "Project removal survives SQL restart without changing Workspace or Task authority" {
@@ -310,6 +337,13 @@ test "history schema preserves null empty and nonterminal history variants" {
                 const attachments = try allocator.dupe(history.wire.AttachmentWire, &.{
                     .{ .kind = "image", .format = "png", .display_name = "image 世", .size_bytes = 123, .redacted = true },
                     .{ .kind = "file", .format = null, .display_name = "text\x00file", .size_bytes = std.math.maxInt(u64), .redacted = false },
+                    .{ .kind = "image", .format = "jpeg", .display_name = "sent 世.jpg", .size_bytes = 4096, .redacted = false, .media = .{
+                        .original_name = "0123456789abcdef0123456789abcdef",
+                        .thumbnail_name = "fedcba9876543210fedcba9876543210",
+                        .thumbnail_size_bytes = 2048,
+                        .thumbnail_width = 256,
+                        .thumbnail_height = 171,
+                    } },
                 });
                 run.input = .{ .kind = "multimodal", .text = null, .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .attachments = attachments, .redacted = false };
                 run.file_change_observation = "complete";

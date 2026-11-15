@@ -11,6 +11,7 @@ pub const migrations: []const sql.Migration = &.{
     .{ .version = 6, .name = "input_admission_failure_categories", .sql = @embedFile("migrations/0006_input_admission_failure_categories.sql") },
     .{ .version = 7, .name = "input_failure_history_domain", .sql = @embedFile("migrations/0007_input_failure_history_domain.sql") },
     .{ .version = 8, .name = "run_cause_approval_mode_change", .sql = @embedFile("migrations/0008_run_cause_approval_mode_change.sql") },
+    .{ .version = 9, .name = "attachment_media_identity", .sql = @embedFile("migrations/0009_attachment_media_identity.sql") },
 };
 
 pub const codec = @import("codec.zig");

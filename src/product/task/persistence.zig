@@ -1046,6 +1046,21 @@ pub const AttachmentWire = struct {
     display_name: []const u8,
     size_bytes: u64,
     redacted: bool,
+    /// Present only for an accepted image whose derivative was stored. Absent
+    /// in every row written before this identity existed, which is why it
+    /// carries a default: those rows still decode, and their chips stay plain.
+    media: ?AttachmentMediaWire = null,
+};
+
+/// The logical identity of an accepted image's Product-owned bytes. These are
+/// store names and the derivative's own facts, never a user-visible path, the
+/// message body or the model-input preview.
+pub const AttachmentMediaWire = struct {
+    original_name: []const u8,
+    thumbnail_name: []const u8,
+    thumbnail_size_bytes: u32,
+    thumbnail_width: u32,
+    thumbnail_height: u32,
 };
 
 pub const ToolWire = struct {
@@ -1460,12 +1475,21 @@ fn projectInput(allocator: std.mem.Allocator, record: task_state.RunInputRecord)
         },
         .multimodal => |multimodal| input: {
             const items = try allocator.alloc(AttachmentWire, multimodal.attachments.len);
-            for (items, multimodal.attachments) |*target, item| target.* = .{
+            // The record outlives this projection, so the stored names are
+            // borrowed from it rather than copied into the wire's allocation.
+            for (items, multimodal.attachments) |*target, *item| target.* = .{
                 .kind = @tagName(item.kind),
                 .format = if (item.format) |format| @tagName(format) else null,
                 .display_name = item.display_name,
                 .size_bytes = item.size_bytes,
                 .redacted = item.redacted,
+                .media = if (item.media) |*media| .{
+                    .original_name = &media.original_name,
+                    .thumbnail_name = &media.thumbnail_name,
+                    .thumbnail_size_bytes = media.thumbnail_size_bytes,
+                    .thumbnail_width = media.thumbnail_width,
+                    .thumbnail_height = media.thumbnail_height,
+                } else null,
             };
             attachments = items;
             break :input .{
@@ -2344,6 +2368,24 @@ fn legacyCompletionSeenRunId(runs: []?task_state.RunRecord) u64 {
         0;
 }
 
+/// A stored identity is decoded strictly or the row is corrupt: only MetaWork
+/// writes these names, so a shape that is not the one it mints is not something
+/// to repair, round down or guess at. A row that simply has no identity is not
+/// a corrupt row -- every attachment written before it existed is like that.
+fn restoreAttachmentMedia(
+    kind: task_state.AttachmentKind,
+    wire: AttachmentMediaWire,
+) RestoreError!task_state.AttachmentMedia {
+    if (kind != .image) return error.TaskStoreCorrupt;
+    return task_state.AttachmentMedia.decode(
+        wire.original_name,
+        wire.thumbnail_name,
+        wire.thumbnail_size_bytes,
+        wire.thumbnail_width,
+        wire.thumbnail_height,
+    ) catch error.TaskStoreCorrupt;
+}
+
 fn restoreRunInput(
     projection: RestoreProjection,
     wire: RunInputWire,
@@ -2373,6 +2415,10 @@ fn restoreRunInput(
             else
                 null;
             if ((kind == .image) != (format != null)) return error.TaskStoreCorrupt;
+            const media = if (wire_item.media) |wire_media|
+                try restoreAttachmentMedia(kind, wire_media)
+            else
+                null;
             item.* = .{
                 .kind = kind,
                 .format = format,
@@ -2382,6 +2428,7 @@ fn restoreRunInput(
                 ),
                 .size_bytes = wire_item.size_bytes,
                 .redacted = wire_item.redacted,
+                .media = media,
             };
             initialized += 1;
         }
@@ -5706,6 +5753,142 @@ test "permission review absent fields preserve previous user history without del
     try std.testing.expect(record.reviewReason() == null);
     parsed.value.state = "cancelled";
     try std.testing.expect(restoreUiRecord(parsed.value).answered_by == null);
+}
+
+/// Restores into a caller-owned arena, the way framed recovery validation
+/// does, so a test can read the restored facts back.
+fn restoreTestTask(arena: *std.heap.ArenaAllocator, wire: TaskWire) RestoreError!task_state.Task {
+    const restore = try arena.allocator().create(Restore);
+    restore.* = .{ .allocator = arena.allocator() };
+    return restoreTask(.{
+        .context = restore,
+        .allocator = restore.allocator,
+        .limits = testLimits(),
+        .copy_fn = Restore.copy,
+        .copy_receipt_fn = Restore.copy,
+        .alloc_fn = Restore.alloc,
+        .append_text_fn = Restore.append,
+        .free_fn = Restore.free,
+        .free_text_fn = Restore.freeText,
+        .reserve_bytes_fn = Restore.reserveBytes,
+        .release_bytes_fn = Restore.releaseBytes,
+    }, wire);
+}
+
+fn mediaTestTask(attachments: []AttachmentWire) TaskWire {
+    return .{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "sent an image",
+        .title_redacted = false,
+        .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
+        .next_run_generation = 2,
+        .active_operation = null,
+        .runs = mediaTestRuns(attachments),
+        .compacts = &.{},
+        .ui_history = &.{},
+    };
+}
+
+fn mediaTestRuns(attachments: []AttachmentWire) []RunWire {
+    media_test_runs = [_]RunWire{.{
+        .id = 1,
+        .coverage = "covered",
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = "openai_chat_completions",
+        .execution_model = "m",
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .input = .{
+            .kind = "multimodal",
+            .text = "look at this",
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .attachments = attachments,
+            .redacted = false,
+        },
+        .assistant = "done",
+        .assistant_redacted = false,
+        .commentary_ends = &.{},
+        .assistant_output_kind = "final",
+        .assistant_output_start = 0,
+        .phase = "completed",
+        .outcome = "completed",
+        .cause = null,
+        .usage = .{ .input_tokens = 0, .output_tokens = 0, .cache_read_input_tokens = 0, .cache_creation_input_tokens = 0 },
+        .tools = &.{},
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+        .event_projection_failure = null,
+        .next_activity_order = 1,
+    }};
+    return &media_test_runs;
+}
+
+var media_test_runs: [1]RunWire = undefined;
+
+const accepted_media_wire: AttachmentMediaWire = .{
+    .original_name = "0123456789abcdef0123456789abcdef",
+    .thumbnail_name = "fedcba9876543210fedcba9876543210",
+    .thumbnail_size_bytes = 2048,
+    .thumbnail_width = 256,
+    .thumbnail_height = 171,
+};
+
+test "an accepted image keeps its stored identity across a restore" {
+    var attachments = [_]AttachmentWire{
+        .{ .kind = "image", .format = "jpeg", .display_name = "shot.jpg", .size_bytes = 4096, .redacted = false, .media = accepted_media_wire },
+        .{ .kind = "file", .format = null, .display_name = "notes.txt", .size_bytes = 12, .redacted = false },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const restored = try restoreTestTask(&arena, mediaTestTask(&attachments));
+    const items = restored.durable.runs[0].?.input.multimodal.attachments;
+    const media = items[0].media.?;
+    // The names come back byte for byte: this is what a restarted app uses to
+    // address the original and its derivative, where `resource_id` cannot.
+    try std.testing.expectEqualStrings(accepted_media_wire.original_name, &media.original_name);
+    try std.testing.expectEqualStrings(accepted_media_wire.thumbnail_name, &media.thumbnail_name);
+    try std.testing.expectEqual(@as(u32, 2048), media.thumbnail_size_bytes);
+    try std.testing.expectEqual(@as(u32, 256), media.thumbnail_width);
+    try std.testing.expectEqual(@as(u32, 171), media.thumbnail_height);
+    // A file attachment never carries one, and the identity never reaches the
+    // projection as text, so there is nothing to redact in it.
+    try std.testing.expect(items[1].media == null);
+    try std.testing.expect(!try security.contains(std.testing.allocator, accepted_media_wire, "0123456789abcdef0123456789abcdef"));
+}
+
+test "a stored identity that MetaWork would not mint is a corrupt record" {
+    for ([_]AttachmentMediaWire{
+        .{ .original_name = "0123456789ABCDEF0123456789abcdef", .thumbnail_name = accepted_media_wire.thumbnail_name, .thumbnail_size_bytes = 2048, .thumbnail_width = 256, .thumbnail_height = 171 },
+        .{ .original_name = "0123456789abcdef0123456789abcde", .thumbnail_name = accepted_media_wire.thumbnail_name, .thumbnail_size_bytes = 2048, .thumbnail_width = 256, .thumbnail_height = 171 },
+        .{ .original_name = accepted_media_wire.original_name, .thumbnail_name = "../../etc/passwd0123456789abcdef", .thumbnail_size_bytes = 2048, .thumbnail_width = 256, .thumbnail_height = 171 },
+        .{ .original_name = accepted_media_wire.original_name, .thumbnail_name = accepted_media_wire.thumbnail_name, .thumbnail_size_bytes = 0, .thumbnail_width = 256, .thumbnail_height = 171 },
+        .{ .original_name = accepted_media_wire.original_name, .thumbnail_name = accepted_media_wire.thumbnail_name, .thumbnail_size_bytes = task_state.attachment_media_max_thumbnail_bytes + 1, .thumbnail_width = 256, .thumbnail_height = 171 },
+        .{ .original_name = accepted_media_wire.original_name, .thumbnail_name = accepted_media_wire.thumbnail_name, .thumbnail_size_bytes = 2048, .thumbnail_width = 0, .thumbnail_height = 171 },
+        .{ .original_name = accepted_media_wire.original_name, .thumbnail_name = accepted_media_wire.thumbnail_name, .thumbnail_size_bytes = 2048, .thumbnail_width = task_state.attachment_media_max_thumbnail_side + 1, .thumbnail_height = 171 },
+    }) |media| {
+        var attachments = [_]AttachmentWire{.{ .kind = "image", .format = "jpeg", .display_name = "shot.jpg", .size_bytes = 4096, .redacted = false, .media = media }};
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, mediaTestTask(&attachments)));
+    }
+    // A file attachment cannot own an image identity either.
+    var mismatched = [_]AttachmentWire{.{ .kind = "file", .format = null, .display_name = "notes.txt", .size_bytes = 12, .redacted = false, .media = accepted_media_wire }};
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, mediaTestTask(&mismatched)));
 }
 
 fn testLimits() Limits {

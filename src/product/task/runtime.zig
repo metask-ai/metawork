@@ -225,6 +225,9 @@ pub const TextProjection = struct {
 pub const AttachmentKind = task_state.AttachmentKind;
 pub const AttachmentFormat = task_state.AttachmentFormat;
 pub const MultimodalAttachment = task_state.MultimodalAttachment;
+pub const AttachmentMedia = task_state.AttachmentMedia;
+pub const attachment_media_max_thumbnail_bytes = task_state.attachment_media_max_thumbnail_bytes;
+pub const attachment_media_max_thumbnail_side = task_state.attachment_media_max_thumbnail_side;
 pub const RunInput = task_state.RunInput;
 pub const Submission = task_state.Submission;
 pub const InputSubmission = task_state.InputSubmission;
@@ -4582,6 +4585,63 @@ pub const Runtime = struct {
             };
         }
         return null;
+    }
+
+    /// Which message owns an accepted attachment: a Run input, or a message
+    /// that is still waiting for its turn.
+    pub const AttachmentMessage = union(enum) { run: u64, submission: []const u8 };
+
+    /// What addressing an accepted image needs: the identity persisted with its
+    /// message plus the facts that name the stored original. The format is the
+    /// source format, which is also the suffix the store gave the file.
+    pub const AcceptedAttachment = struct {
+        media: task_state.AttachmentMedia,
+        format: task_state.AttachmentFormat,
+        size_bytes: u64,
+    };
+
+    /// Whether this Task can still serve its own media. A Task that accepted a
+    /// delete is already releasing those originals, so it stops answering
+    /// rather than racing the release.
+    pub fn mediaReadable(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.deletion == .idle;
+    }
+
+    /// The accepted image at this position of this message, if it is one. Only
+    /// an image whose record still carries a persisted identity and was not
+    /// redacted answers; a file attachment, a redacted record and a message
+    /// sent before the identity existed all resolve to nothing, and history
+    /// keeps the plain metadata chip for them.
+    pub fn acceptedAttachment(
+        self: *const Runtime,
+        task_id: u64,
+        message: AttachmentMessage,
+        index: usize,
+    ) ?AcceptedAttachment {
+        if (!self.mediaReadable(task_id)) return null;
+        const task = self.findConst(task_id).?;
+        const input = switch (message) {
+            .run => |run_id| (task_state.findRun(task.durable.runs, run_id) orelse return null).input,
+            .submission => |operation_id| blk: {
+                if (operation_id.len == 0) return null;
+                for (task.input_submissions.items) |*record| {
+                    if (std.mem.eql(u8, operation_id, record.submission.operationId()))
+                        break :blk record.input;
+                }
+                return null;
+            },
+        };
+        if (input != .multimodal) return null;
+        const attachments = input.multimodal.attachments;
+        if (index >= attachments.len) return null;
+        const record = attachments[index];
+        if (record.kind != .image or record.redacted) return null;
+        return .{
+            .media = record.media orelse return null,
+            .format = record.format orelse return null,
+            .size_bytes = record.size_bytes,
+        };
     }
 
     pub fn fileReference(
@@ -9647,6 +9707,7 @@ fn copyRunInput(
                     .display_name = display.value,
                     .size_bytes = item.size_bytes orelse item.bytes.len,
                     .redacted = display.redacted,
+                    .media = item.media,
                 };
                 initialized += 1;
                 redacted = redacted or display.redacted;
