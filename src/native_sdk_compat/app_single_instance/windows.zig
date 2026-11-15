@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const thread_stack = @import("metawork_thread_stack");
 const contract = @import("../app_single_instance.zig");
 
 const HANDLE = ?*anyopaque;
@@ -192,7 +191,7 @@ pub const Server = struct {
             .pipe = pipe,
             .handler = handler,
         };
-        state.thread = try std.Thread.spawn(thread_stack.config, State.run, .{state});
+        state.thread = try std.Thread.spawn(.{}, State.run, .{state});
         return .{ .allocator = allocator, .state = state };
     }
 

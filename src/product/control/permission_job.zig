@@ -1,6 +1,5 @@
 //! One independently owned, bounded-lifetime review. No Task/Run references.
 const std = @import("std");
-const thread_stack = @import("metawork_thread_stack");
 const agent = @import("metawork_agent");
 const task = @import("metawork_product_task");
 const reviewer = @import("product_permission_review");
@@ -23,7 +22,7 @@ pub const Job = struct {
     outcome: reviewer.Outcome = .{ .failure = .cancelled },
 
     pub fn start(self: *Job) !void {
-        self.thread = try std.Thread.spawn(thread_stack.config, execute, .{self});
+        self.thread = try std.Thread.spawn(.{}, execute, .{self});
     }
 
     fn execute(self: *Job) void {
