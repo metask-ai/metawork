@@ -319,7 +319,16 @@ test "HTTP only address keeps the whole remaining budget beyond three seconds" {
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
         try std.testing.expectEqual(@as(usize, 1), Faults.attempts.load(.acquire));
-        try std.testing.expect(elapsed >= 3500);
+        // The fixture's own 3500 ms connect is not a clock contract. What this
+        // case holds is that an only address is never cut down to a share of the
+        // budget: `ConnectRace.cap` splits what remains among the addresses not
+        // yet started, so one more address behind this one would have left it
+        // this fixture's share of 6 s / 2 = 3 s, above the two-second floor.
+        // Outliving that share, with the completed 200 and the single attempt,
+        // is the proof. Demanding the fixture's exact delay instead compares the
+        // kernel timer that ends the sleep against the QPC the clock reads, with
+        // no margin.
+        try std.testing.expect(elapsed >= 3000);
     }
 }
 
