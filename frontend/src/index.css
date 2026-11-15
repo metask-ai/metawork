@@ -2732,6 +2732,12 @@ summary::-webkit-details-marker {
   font-weight: 600;
 }
 
+/* A sent image chip holds the same box as the draft chip, in the cell the
+   format label used to occupy. */
+.task-input-attachment > .attachment-thumbnail {
+  font-weight: inherit;
+}
+
 .task-input-attachment strong,
 .task-input-attachment small {
   overflow: hidden;
@@ -7901,29 +7907,31 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 760;
 }
 
-/* An image chip shows what was attached. The box is reserved before the
-   derived thumbnail arrives, so a chip never resizes under the pointer, and
-   the chip itself keeps its width: narrow windows still wrap instead of
-   scrolling sideways. */
-.composer-attachment-media {
+/* An image chip shows what was attached, in the draft and in the transcript
+   alike. The box is reserved before the derived thumbnail arrives, so a chip
+   never resizes under the pointer, and the chip itself keeps its width:
+   narrow windows still wrap instead of scrolling sideways. */
+.attachment-thumbnail {
+  /* The chip that holds the box owns its size. */
+  --attachment-thumbnail-size: 56px;
   display: block;
   flex: none;
-  width: 56px;
-  height: 56px;
+  width: var(--attachment-thumbnail-size);
+  height: var(--attachment-thumbnail-size);
 }
-.composer-attachment-media .composer-attachment-kind {
+.attachment-thumbnail .composer-attachment-kind {
   display: grid;
   place-items: center;
-  width: 56px;
-  height: 56px;
+  width: var(--attachment-thumbnail-size);
+  height: var(--attachment-thumbnail-size);
   border-radius: 6px;
   background: var(--ui-surface-panel-2);
   box-shadow: inset 0 0 0 1px var(--ui-border);
 }
-.composer-attachment-open {
+.attachment-thumbnail-open {
   display: block;
-  width: 56px;
-  height: 56px;
+  width: var(--attachment-thumbnail-size);
+  height: var(--attachment-thumbnail-size);
   padding: 0;
   overflow: hidden;
   border: 0;
@@ -7931,21 +7939,21 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-panel-2);
   cursor: pointer;
 }
-.composer-attachment-media .file-preview-decoded,
-.composer-attachment-media .file-preview-decoded > img {
-  width: 56px;
-  height: 56px;
+.attachment-thumbnail .file-preview-decoded,
+.attachment-thumbnail .file-preview-decoded > img {
+  width: var(--attachment-thumbnail-size);
+  height: var(--attachment-thumbnail-size);
 }
-.composer-attachment-media .file-preview-decoded > img {
+.attachment-thumbnail .file-preview-decoded > img {
   border-radius: 6px;
   object-fit: cover;
 }
-.composer-attachment-media .file-preview-decoded {
+.attachment-thumbnail .file-preview-decoded {
   overflow: hidden;
 }
 /* The reserved box is the chip's loading state; preview prose does not fit in
-   56px, and a failure falls back to the format label instead. */
-.composer-attachment-media .file-preview-image-feedback {
+   a chip box, and a failure falls back to the format label instead. */
+.attachment-thumbnail .file-preview-image-feedback {
   display: none;
 }
 

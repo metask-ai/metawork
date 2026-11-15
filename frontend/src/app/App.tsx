@@ -1344,16 +1344,16 @@ export default function App() {
   );
   const loadAttachmentThumbnail = useCallback(
     (
-      token: string,
+      target: import("../bridge/contracts.ts").MediaTarget,
       options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
-    ) => client.attachmentThumbnail(token, options),
+    ) => client.attachmentThumbnail(target, options),
     [client],
   );
   const loadAttachmentPreview = useCallback(
     (
-      token: string,
+      target: import("../bridge/contracts.ts").MediaTarget,
       options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
-    ) => client.previewAttachment(token, options),
+    ) => client.previewAttachment(target, options),
     [client],
   );
   const loadFilePreview = useCallback(
@@ -4888,7 +4888,7 @@ export default function App() {
         onOpenAttachment={(attachment, opener) => {
           attachmentViewerOpener.current = opener;
           setAttachmentViewer({
-            token: attachment.token,
+            media: { kind: "draftAttachment", token: attachment.token },
             name: attachment.displayName,
           });
         }}
@@ -5947,6 +5947,11 @@ export default function App() {
                     : undefined
                 }
                 loadFilePreview={loadFilePreview}
+                loadAttachmentThumbnail={loadAttachmentThumbnail}
+                onOpenSentAttachment={(target, name, opener) => {
+                  attachmentViewerOpener.current = opener;
+                  setAttachmentViewer({ media: target, name });
+                }}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}
                 renderPendingUi={(props) => {

@@ -1086,6 +1086,7 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
         format: "png",
         displayName: "diagram.png",
         sizeBytes: "128",
+        media: true,
         redacted: false,
       },
       {
@@ -1093,6 +1094,7 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
         format: "webp",
         displayName: "brief.webp",
         sizeBytes: "256",
+        media: false,
         redacted: false,
       },
     ],
@@ -1103,6 +1105,21 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
   const leaked = clone(snapshot);
   leaked.tasks[0].runs[0].input.attachments[0].path = "/tmp/diagram.png";
   assert.throws(() => decodeWorkbenchSnapshot(leaked), /expected keys/);
+
+  // Whether a chip has media to ask for is a required fact, and it is a fact
+  // about an image: a file attachment never carries it, and neither carries
+  // the identity itself.
+  const unstated = clone(snapshot);
+  delete unstated.tasks[0].runs[0].input.attachments[0].media;
+  assert.throws(() => decodeWorkbenchSnapshot(unstated), /expected keys/);
+  const identity = clone(snapshot);
+  identity.tasks[0].runs[0].input.attachments[0].media = {
+    originalName: "0".repeat(32),
+  };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(identity),
+    /attachments\[0\].media: expected boolean/,
+  );
 
   const retiredPdf = clone(snapshot);
   retiredPdf.tasks[0].runs[0].input.attachments[1].kind = "pdf";

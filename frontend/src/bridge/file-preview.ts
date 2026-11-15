@@ -10,6 +10,7 @@ import type {
   FilePreview,
   FilePreviewLoadOptions,
   FilePreviewResponse,
+  MediaTarget,
   FilePreviewVideo,
   WorkspaceDirectory,
 } from "./contracts.ts";
@@ -46,6 +47,19 @@ function delay(ms: number, signal: AbortSignal) {
 type Invoke = (command: string, payload: NativeSdkJson) => Promise<unknown>;
 type MediaDescriptor = NonNullable<FilePreviewResponse["video" | "image"]>;
 type PreviewKey = { generation: string; previewId: string };
+/// A stable per-window key for one target's decoded resource. Its parts are
+/// already the identity the Host resolves, so no two targets collide.
+function mediaKey(target: MediaTarget): string {
+  switch (target.kind) {
+    case "draftAttachment":
+      return `draft:${target.token}`;
+    case "runAttachment":
+      return `run:${target.taskId}:${target.runId}:${target.index}`;
+    case "submissionAttachment":
+      return `submission:${target.taskId}:${target.operationId}:${target.index}`;
+  }
+}
+
 const failed = (reason?: "capacity"): FilePreview => ({
   state: "error",
   content: "",
@@ -126,19 +140,19 @@ export class FilePreviewLoader {
   ): Promise<FilePreview> {
     return this.loadTarget(taskId, { runId, fileReferenceId }, options);
   }
-  /// The viewer tier for a staged draft image: the original, under the same
+  /// The viewer tier for a registered image: the original, under the same
   /// grant, chunk transfer, capacity and security rules as any other preview.
   loadAttachment(
-    attachmentToken: string,
+    target: MediaTarget,
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
-    return this.loadTarget(null, { attachmentToken }, options);
+    return this.loadTarget(null, { media: target }, options);
   }
   /// The thumbnail tier: one request, one response, no Host grant to release.
   /// The derived pixels register in the same image pool, so the security epoch
   /// and the window's decoded-image budget keep governing them.
   async loadThumbnail(
-    attachmentToken: string,
+    target: MediaTarget,
     options: FilePreviewLoadOptions = {},
   ): Promise<AttachmentThumbnailResult> {
     const controller = new AbortController();
@@ -165,7 +179,7 @@ export class FilePreviewLoader {
           const response = decodeAttachmentThumbnail(
             await this.invoke(commands.mediaThumbnail, {
               generation,
-              target: { kind: "draftAttachment", token: attachmentToken },
+              target,
             }),
           );
           check(signal);
@@ -175,7 +189,7 @@ export class FilePreviewLoader {
           if (this.epoch !== descriptor.securityEpoch)
             throw new StaleSecurity();
           const reserved = this.images.reserve(
-            { ...descriptor, id: `thumb:${generation}:${attachmentToken}` },
+            { ...descriptor, id: `thumb:${generation}:${mediaKey(target)}` },
             priority,
           );
           reservation = reserved;
@@ -290,7 +304,7 @@ export class FilePreviewLoader {
     target:
       | { runId: string; fileReferenceId: string }
       | { workspaceId: string; workspaceEpoch: string; path: string }
-      | { attachmentToken: string },
+      | { media: MediaTarget },
     options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();
@@ -341,24 +355,14 @@ export class FilePreviewLoader {
         try {
           const response = decodeFilePreview(
             await this.invoke(
-              "attachmentToken" in target
+              "media" in target
                 ? commands.mediaPreview
                 : "runId" in target
                   ? commands.previewFile
                   : commands.previewWorkspaceFile,
-              "attachmentToken" in target
-                ? {
-                    ...key,
-                    target: {
-                      kind: "draftAttachment",
-                      token: target.attachmentToken,
-                    },
-                  }
-                : {
-                    ...key,
-                    taskId,
-                    ...target,
-                  },
+              "media" in target
+                ? { ...key, target: target.media }
+                : { ...key, taskId, ...target },
             ),
           );
           releasePreparation();

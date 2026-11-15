@@ -1,45 +1,57 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  AttachmentThumbnailResult,
-  FilePreviewLoadOptions,
-} from "../../bridge/contracts.ts";
-import { PreviewImageView } from "../../components/PreviewImageView.tsx";
-import { useI18n } from "../../i18n/context.ts";
+import {
+  PreviewImageView,
+  type PreviewImageResource,
+} from "./PreviewImageView.tsx";
+import { useI18n } from "../i18n/context.ts";
 
-export type AttachmentThumbnailLoader = (
-  attachmentToken: string,
-  options?: FilePreviewLoadOptions,
-) => Promise<AttachmentThumbnailResult>;
+/// What a loader hands back for one chip. The Host contract's own result is
+/// assignable to this; stating it structurally keeps this primitive reusable
+/// and off the Host client boundary.
+export type AttachmentThumbnailOutcome =
+  | { state: "ready"; image: PreviewImageResource; release: () => void }
+  | { state: "missing" | "restricted" | "unsupported" | "error" | "capacity" };
 
-/// A staged image's chip thumbnail. It loads near the viewport, releases its
-/// decoded resource when it leaves, and falls back to the format label the chip
-/// has always shown when the Host has no derivative to give.
-export function AttachmentThumbnail({
-  token,
+/// The target is opaque here: this primitive forwards it and uses it only to
+/// tell one chip's image from another's.
+export type AttachmentThumbnailLoader<Target> = (
+  target: Target,
+  options?: { signal?: AbortSignal; priority?: "interactive" | "prefetch" },
+) => Promise<AttachmentThumbnailOutcome>;
+
+/// An image chip's thumbnail, for a staged draft and for an image a message
+/// was already sent with. It loads near the viewport, releases its decoded
+/// resource when it leaves, and falls back to the format label the chip has
+/// always shown when the Host has no derivative to give.
+export function AttachmentThumbnail<Target>({
+  target,
   label,
   formatLabel,
   load,
   onOpen,
 }: {
-  token: string;
+  target: Target;
   label: string;
   formatLabel: string;
-  load?: AttachmentThumbnailLoader;
+  load?: AttachmentThumbnailLoader<Target>;
   /// Absent when this original cannot be opened in the viewer tier at all, so
   /// the chip shows the thumbnail without an entry that is certain to fail.
   onOpen?: (opener: HTMLButtonElement) => void;
 }) {
   const { t } = useI18n();
   const root = useRef<HTMLSpanElement | null>(null);
+  // The identity the Host resolves, flattened so an effect re-runs when the
+  // chip starts standing for a different image.
+  const key = JSON.stringify(target);
   const [result, setResult] = useState<{
-    token: string;
-    value: AttachmentThumbnailResult;
+    key: string;
+    value: AttachmentThumbnailOutcome;
   } | null>(null);
-  const loaded = result?.token === token ? result.value : null;
+  const loaded = result?.key === key ? result.value : null;
 
   useEffect(() => {
     let current = true;
-    let owned: AttachmentThumbnailResult | undefined;
+    let owned: AttachmentThumbnailOutcome | undefined;
     let controller = new AbortController();
     let version = 0;
     let started = false;
@@ -50,19 +62,19 @@ export function AttachmentThumbnail({
       started = true;
       controller = new AbortController();
       const requested = ++version;
-      void load!(token, {
+      void load!(JSON.parse(key) as Target, {
         signal: controller.signal,
         priority: "prefetch",
       }).then(
         (value) => {
           if (current && requested === version) {
             owned = value;
-            setResult({ token, value });
+            setResult({ key, value });
           } else if (value.state === "ready") value.release();
         },
         () => {
           if (current && requested === version)
-            setResult({ token, value: { state: "error" } });
+            setResult({ key, value: { state: "error" } });
         },
       );
     }
@@ -91,7 +103,7 @@ export function AttachmentThumbnail({
       if (owned?.state === "ready") owned.release();
       observer?.disconnect();
     };
-  }, [token, load]);
+  }, [key, load]);
 
   const image = loaded?.state === "ready" ? loaded.image : undefined;
   const content = image ? (
@@ -100,7 +112,7 @@ export function AttachmentThumbnail({
       // The chip already names the file in text, and the viewer entry carries
       // its own label, so the thumbnail itself is decorative.
       alt=""
-      onFailure={() => setResult({ token, value: { state: "error" } })}
+      onFailure={() => setResult({ key, value: { state: "error" } })}
     />
   ) : (
     <span className="composer-attachment-kind" aria-hidden="true">
@@ -108,11 +120,11 @@ export function AttachmentThumbnail({
     </span>
   );
   return (
-    <span ref={root} className="composer-attachment-media">
+    <span ref={root} className="attachment-thumbnail">
       {image && onOpen ? (
         <button
           type="button"
-          className="composer-attachment-open focus-ring"
+          className="attachment-thumbnail-open focus-ring"
           aria-label={t("attachment.open", { name: label })}
           onClick={(event) => onOpen(event.currentTarget)}
         >

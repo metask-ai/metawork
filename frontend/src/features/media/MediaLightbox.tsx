@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type {
   FilePreview,
   FilePreviewLoadOptions,
+  MediaTarget,
 } from "../../bridge/contracts.ts";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -10,16 +11,17 @@ import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export type MediaViewerLoader = (
-  attachmentToken: string,
+  target: MediaTarget,
   options?: FilePreviewLoadOptions,
 ) => Promise<FilePreview>;
 
-export type MediaViewerTarget = { token: string; name: string };
+export type MediaViewerTarget = { media: MediaTarget; name: string };
 
-/// The one viewer surface for an attachment, used from the draft chip. It is an
-/// overlay rather than a Task Panel tab: an attachment original is immutable,
-/// has no user-visible path to title a tab with and no refresh to offer, and a
-/// draft has no Task identity at all. Closing it leaves the draft untouched.
+/// The one viewer surface for an attachment, used from the draft chip and from
+/// a sent message's chip. It is an overlay rather than a Task Panel tab: an
+/// attachment original is immutable, has no user-visible path to title a tab
+/// with and no refresh to offer, and a draft has no Task identity at all.
+/// Closing it leaves the draft, or the transcript, untouched.
 export function MediaLightbox({
   target,
   load,
@@ -31,19 +33,19 @@ export function MediaLightbox({
 }) {
   const { t } = useI18n();
   const [result, setResult] = useState<{
-    token: string;
+    key: string;
     value: FilePreview;
   } | null>(null);
-  const token = target?.token ?? null;
-  const preview = result?.token === token ? result.value : null;
+  const key = target ? JSON.stringify(target.media) : null;
+  const preview = result?.key === key ? result.value : null;
 
   useEffect(() => {
     let current = true;
     let owned: FilePreview | undefined;
     const controller = new AbortController();
     setResult(null);
-    if (!token || !load) return;
-    void load(token, {
+    if (!key || !load) return;
+    void load(JSON.parse(key) as MediaTarget, {
       signal: controller.signal,
       priority: "interactive",
     }).then(
@@ -53,12 +55,12 @@ export function MediaLightbox({
           return;
         }
         owned = value;
-        setResult({ token, value });
+        setResult({ key, value });
       },
       () => {
         if (current)
           setResult({
-            token,
+            key,
             value: {
               state: "error",
               content: "",
@@ -73,7 +75,7 @@ export function MediaLightbox({
       controller.abort();
       owned?.release?.();
     };
-  }, [token, load]);
+  }, [key, load]);
 
   const image = preview?.state === "ready" ? preview.image : undefined;
   const failure = preview?.state === "ready" ? undefined : preview?.state;
@@ -111,9 +113,9 @@ export function MediaLightbox({
                 alt={target?.name ?? ""}
                 onFailure={() =>
                   setResult(
-                    token
+                    key
                       ? {
-                          token,
+                          key,
                           value: {
                             state: "error",
                             content: "",

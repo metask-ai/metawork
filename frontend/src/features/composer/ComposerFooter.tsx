@@ -10,7 +10,11 @@ import {
   type ReactNode,
 } from "react";
 
-import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
+import type {
+  MediaTarget,
+  SkillCatalogView,
+  TaskView,
+} from "../../bridge/contracts.ts";
 import { maxPreviewImageBytes } from "../../bridge/contracts.ts";
 import { Composer } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -21,7 +25,7 @@ import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
 import {
   AttachmentThumbnail,
   type AttachmentThumbnailLoader,
-} from "./AttachmentThumbnail.tsx";
+} from "../../components/AttachmentThumbnail.tsx";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
@@ -232,7 +236,7 @@ export function ComposerFooter({
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
-  loadAttachmentThumbnail?: AttachmentThumbnailLoader;
+  loadAttachmentThumbnail?: AttachmentThumbnailLoader<MediaTarget>;
   /// Absent for an attachment whose original the viewer tier cannot read, so
   /// no chip offers an entry that is certain to fail.
   onOpenAttachment?: (
@@ -712,7 +716,10 @@ export function ComposerFooter({
                 >
                   {attachment.kind === "image" ? (
                     <AttachmentThumbnail
-                      token={attachment.token}
+                      target={{
+                        kind: "draftAttachment",
+                        token: attachment.token,
+                      }}
                       label={attachment.displayName}
                       formatLabel={attachment.format.toUpperCase()}
                       load={loadAttachmentThumbnail}
