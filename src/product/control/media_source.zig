@@ -5,14 +5,14 @@
 //! references, Host-generated media, and user attachments. The File Preview
 //! target key assumes a Run produced the bytes and that they live inside an
 //! authorized Workspace, which is why an attachment cannot enter it: its bytes
-//! live in the Product-private store (or, for a chip derivative, only in
-//! memory), so Workspace id/epoch/root are facts that simply do not exist for
-//! it. This module keeps "which identity, which authority, which bytes, which
-//! tier" in one place instead of letting each call site decide.
+//! live in the Product-private store, or in memory while the draft still holds
+//! them, so Workspace id/epoch/root are facts that simply do not exist for it.
+//! This module keeps "which identity, which authority, which bytes, which tier"
+//! in one place instead of letting each call site decide.
 //!
-//! Registered kinds are the ones that are actually served. Adding the sent-side
-//! and reference sources later is a change here plus their own authority, not a
-//! change to the target shape.
+//! Registered kinds are the ones that are actually served. Adding the reference
+//! sources later is a change here plus their own authority, not a change to the
+//! target shape.
 
 const std = @import("std");
 const attachment = @import("metawork_product_attachment");
@@ -22,15 +22,57 @@ pub const Kind = enum {
     /// issued its token: connection- and window-bound, one shot. No Task
     /// identity is involved, which is what lets New Task serve a draft chip.
     draft_attachment,
+    /// An image a Run took as its input. Authority is that this window may read
+    /// this Task and that the Run record still carries the identity Product
+    /// persisted for it, not a draft grant: that grant was consumed when the
+    /// message was sent.
+    run_attachment,
+    /// The same, for a message that was accepted but is still waiting for its
+    /// turn. It is addressed by its submission rather than by a Run, because it
+    /// does not have one yet.
+    submission_attachment,
 
     pub fn fromWire(text: []const u8) ?Kind {
         if (std.mem.eql(u8, text, "draftAttachment")) return .draft_attachment;
+        if (std.mem.eql(u8, text, "runAttachment")) return .run_attachment;
+        if (std.mem.eql(u8, text, "submissionAttachment")) return .submission_attachment;
         return null;
     }
 };
 
+/// Highest position an attachment can occupy inside the message that owns it.
+/// A message record is immutable once accepted, so the position is a stable
+/// identity for the attachment at it.
+pub const max_index: u32 = attachment.max_files_per_message - 1;
+
 pub const Target = union(Kind) {
     draft_attachment: u64,
+    run_attachment: struct { task_id: u64, run_id: u64, index: u32 },
+    submission_attachment: struct { task_id: u64, operation_id: []const u8, index: u32 },
+};
+
+/// What a Task-owned target resolved to: the identity history persisted for an
+/// accepted image, plus the facts that name its stored original. The owner of
+/// the message record looks this up and hands it in, so this registry never
+/// reaches into Task state itself.
+pub const Accepted = struct {
+    task_id: u64,
+    media: attachment.Media,
+    format: attachment.Format,
+    size_bytes: u64,
+};
+
+/// Everything a resolution may read from, injected by Product Control.
+pub const Sources = struct {
+    staging: *attachment.Runtime,
+    /// The record a Task-owned target named, or null when there is none to
+    /// serve: a Task that is gone or being deleted, a message or position that
+    /// is not there, an attachment that is not an image, a redacted record, or
+    /// an image sent before this identity was persisted.
+    accepted: ?Accepted = null,
+    /// Scratch for one bounded derivative read. A Task-owned thumbnail needs
+    /// `attachment.max_image_thumbnail_bytes` of it.
+    thumbnail_buffer: []u8 = &.{},
 };
 
 pub const Tier = enum {
@@ -120,19 +162,49 @@ pub const Resolution = union(enum) {
 pub fn resolve(
     target: Target,
     tier: Tier,
-    staging: *const attachment.Runtime,
+    sources: Sources,
     relative_buffer: []u8,
 ) Resolution {
     switch (target) {
         .draft_attachment => |id| {
             if (id == 0) return .{ .unavailable = .missing };
             return switch (tier) {
-                .thumbnail => if (staging.thumbnailFor(id)) |thumbnail| .{ .derived = .{
+                .thumbnail => if (sources.staging.thumbnailFor(id)) |thumbnail| .{ .derived = .{
                     .bytes = thumbnail.bytes,
                     .width = thumbnail.width,
                     .height = thumbnail.height,
                 } } else .{ .unavailable = .missing },
-                .viewer => if (staging.originalFor(id, relative_buffer)) |original| .{ .stored = .{
+                .viewer => if (sources.staging.originalFor(id, relative_buffer)) |original| .{ .stored = .{
+                    .directory = original.directory,
+                    .relative = original.relative,
+                    .size_bytes = original.size_bytes,
+                } } else .{ .unavailable = .missing },
+            };
+        },
+        // The two Task-owned kinds differ only in which message record names
+        // the identity; once its owner resolved that, the bytes are addressed
+        // the same way. The derivative is read rather than re-derived: staging
+        // encoded it when the message was sent, so a history chip never reads
+        // an original and never decodes an image to show itself.
+        .run_attachment, .submission_attachment => {
+            const accepted = sources.accepted orelse return .{ .unavailable = .missing };
+            return switch (tier) {
+                .thumbnail => if (sources.staging.readAcceptedThumbnail(
+                    accepted.media,
+                    accepted.task_id,
+                    sources.thumbnail_buffer,
+                )) |thumbnail| .{ .derived = .{
+                    .bytes = thumbnail.bytes,
+                    .width = thumbnail.width,
+                    .height = thumbnail.height,
+                } } else .{ .unavailable = .missing },
+                .viewer => if (sources.staging.acceptedOriginal(
+                    accepted.media,
+                    accepted.task_id,
+                    accepted.format,
+                    accepted.size_bytes,
+                    relative_buffer,
+                )) |original| .{ .stored = .{
                     .directory = original.directory,
                     .relative = original.relative,
                     .size_bytes = original.size_bytes,
@@ -144,7 +216,9 @@ pub fn resolve(
 
 test "only registered wire kinds resolve to a target" {
     try std.testing.expectEqual(Kind.draft_attachment, Kind.fromWire("draftAttachment").?);
-    for ([_][]const u8{ "", "draft_attachment", "draftattachment", "inputAttachment", "fileReference", "workspacePath" }) |text|
+    try std.testing.expectEqual(Kind.run_attachment, Kind.fromWire("runAttachment").?);
+    try std.testing.expectEqual(Kind.submission_attachment, Kind.fromWire("submissionAttachment").?);
+    for ([_][]const u8{ "", "draft_attachment", "draftattachment", "run_attachment", "inputAttachment", "fileReference", "workspacePath" }) |text|
         try std.testing.expect(Kind.fromWire(text) == null);
 }
 
@@ -173,10 +247,36 @@ test "an unknown or unstaged draft identity resolves to missing in both tiers" {
     }, null, .{}, null);
     defer staging.deinit();
     var relative: [attachment.max_original_relative_bytes]u8 = undefined;
+    var thumbnail: [attachment.max_image_thumbnail_bytes]u8 = undefined;
+    const sources: Sources = .{ .staging = &staging, .thumbnail_buffer = &thumbnail };
     for ([_]Tier{ .thumbnail, .viewer }) |tier| {
         for ([_]u64{ 0, 1, 99 }) |id| {
-            const resolution = resolve(.{ .draft_attachment = id }, tier, &staging, &relative);
+            const resolution = resolve(.{ .draft_attachment = id }, tier, sources, &relative);
             try std.testing.expectEqual(Availability.missing, resolution.unavailable);
         }
+    }
+}
+
+test "a Task-owned target with no record resolves to missing in both tiers" {
+    var staging = try attachment.Runtime.init(std.testing.allocator, .{
+        .max_files = 2,
+        .max_records = 2,
+        .max_display_name_bytes = 32,
+        .max_file_bytes = 1024,
+        .max_staged_bytes = 2048,
+    }, null, .{}, null);
+    defer staging.deinit();
+    var relative: [attachment.max_original_relative_bytes]u8 = undefined;
+    var thumbnail: [attachment.max_image_thumbnail_bytes]u8 = undefined;
+    // A deleted Task, a message that is not there, a position that is not an
+    // image, a redacted record and an image sent before the identity existed
+    // all arrive here as the same absent record.
+    const sources: Sources = .{ .staging = &staging, .thumbnail_buffer = &thumbnail };
+    for ([_]Target{
+        .{ .run_attachment = .{ .task_id = 3, .run_id = 4, .index = 0 } },
+        .{ .submission_attachment = .{ .task_id = 3, .operation_id = "op-1", .index = max_index } },
+    }) |target| {
+        for ([_]Tier{ .thumbnail, .viewer }) |tier|
+            try std.testing.expectEqual(Availability.missing, resolve(target, tier, sources, &relative).unavailable);
     }
 }

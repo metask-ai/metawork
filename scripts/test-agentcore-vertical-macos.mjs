@@ -271,6 +271,9 @@ const attachmentMetadata = [
   },
 ];
 let retainedAttachmentPaths = [];
+// Viewer-tier preview ids share the connection's monotonic space, and this
+// check opens previews on both sides of the restart.
+let sentMediaPreviewId = 0;
 
 const windowsClipboard70 = clipboardMarkdownFixture(
   70 * 1024,
@@ -2125,10 +2128,11 @@ desktopVertical: try {
     throw new Error(
       `Multimodal Run did not complete: ${JSON.stringify(multimodalTerminal.run)}`,
     );
-  assertMultimodalHistory(
+  await assertMultimodalHistory(
     multimodalTerminal,
     attachmentTokens,
     attachmentMetadata,
+    taskId,
   );
   await probeWindowsClipboard({
     taskId,
@@ -2408,10 +2412,14 @@ desktopVertical: try {
   );
   if (!restoredMultimodalRun)
     throw new Error("checkpoint restart lost the multimodal Run");
-  assertMultimodalHistory(
+  // The same media assertions as before the restart. A runtime correlation
+  // passes every in-process check and fails exactly here, so this repetition
+  // is what proves the identity is persisted.
+  await assertMultimodalHistory(
     { current: restoredSnapshot, run: restoredMultimodalRun },
     attachmentTokens,
     attachmentMetadata,
+    taskId,
   );
   await assertRetainedOriginals(retainedAttachmentPaths);
   await poll(
@@ -2805,16 +2813,35 @@ async function assertRetainedOriginals(originalPaths) {
   }
 }
 
-function assertMultimodalHistory(result, attachmentTokens, expected) {
-  assert.deepEqual(result.run.input, {
-    kind: "multimodal",
-    text: multimodalInstruction,
-    attachments: expected.map((attachment) => ({
-      ...attachment,
+async function assertMultimodalHistory(
+  result,
+  attachmentTokens,
+  expected,
+  taskId,
+) {
+  assert.deepEqual(
+    {
+      ...result.run.input,
+      attachments: result.run.input.attachments.map(
+        ({ media: _media, ...rest }) => rest,
+      ),
+    },
+    {
+      kind: "multimodal",
+      text: multimodalInstruction,
+      attachments: expected.map((attachment) => ({
+        ...attachment,
+        redacted: false,
+      })),
       redacted: false,
-    })),
-    redacted: false,
-  });
+    },
+  );
+  // Only an image chip carries the media fact at all.
+  assert.deepEqual(
+    result.run.input.attachments.map((chip) => typeof chip.media),
+    ["boolean", "boolean", "undefined"],
+  );
+  await assertSentAttachmentMedia(taskId, result.run);
   const encoded = JSON.stringify(result.run);
   assert.equal(
     encoded.includes(attachmentLogPath),
@@ -2982,6 +3009,99 @@ async function invokePreparedRun(payload) {
     commandTimeoutMs,
     "fresh catalog before direct Run",
   );
+}
+
+// A sent image stays viewable from history: the chip is served the derivative
+// that was stored with the message, and the viewer tier opens the original the
+// Task retains. The identity behind both is persisted, so this holds after a
+// cold restart, where the runtime correlation it replaced would not.
+async function assertSentAttachmentMedia(taskId, run) {
+  const identity = JSON.stringify(run.input.attachments);
+  for (const leaked of ["originalName", "thumbnailName", 'media":{'])
+    assert.equal(
+      identity.includes(leaked),
+      false,
+      "the stored identity reached the transcript",
+    );
+  for (const [index, original] of [
+    [0, attachmentPngBytes],
+    [1, attachmentJpegBytes],
+  ]) {
+    const answer = await invokeBridge("metawork.media.thumbnail", {
+      generation: "1",
+      target: { kind: "runAttachment", taskId, runId: run.id, index },
+    });
+    // What the chip claims and what the tier answers must agree. A derivative
+    // is bounded in bytes as well as in pixels, so a high-entropy original can
+    // legitimately end up without one; the chip then says so and stays plain.
+    assert.equal(
+      answer?.state === "ready",
+      run.input.attachments[index].media,
+      `sent image ${index} disagrees with its chip: ${JSON.stringify(answer)}`,
+    );
+    if (answer.state !== "ready") {
+      assert.notEqual(
+        index,
+        1,
+        "the small JPEG must always have a chip derivative",
+      );
+      continue;
+    }
+    const chip = answer.thumbnail;
+    const bytes = Buffer.from(chip.dataBase64, "base64");
+    assert.equal(chip.mediaType, "image/png");
+    assert.equal(String(bytes.length), chip.sizeBytes);
+    assert.ok(bytes.length > 0 && bytes.length <= 160 * 1024);
+    assert.ok(Math.max(chip.width, chip.height) <= 256);
+    assert.ok(
+      bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")),
+      "the chip derivative is not a PNG",
+    );
+    // A derivative, not the original: the original is orders of magnitude
+    // larger for the PNG and a JPEG for the other.
+    assert.equal(bytes.equals(original.subarray(0, bytes.length)), false);
+  }
+  // The text file at the last position has no media at all, and neither does
+  // a position that is not in the message.
+  for (const index of [2, 3])
+    assert.equal(
+      (
+        await invokeBridge("metawork.media.thumbnail", {
+          generation: "1",
+          target: { kind: "runAttachment", taskId, runId: run.id, index },
+        })
+      )?.state,
+      "missing",
+    );
+  // The viewer tier reads the retained original. Reaching `ready` means the
+  // file was located, read and recognised as the image it was staged as; the
+  // 100 MB PNG is refused by the published single-image ceiling instead.
+  const viewer = await invokeBridge("metawork.media.preview", {
+    generation: "1",
+    previewId: String(++sentMediaPreviewId),
+    target: { kind: "runAttachment", taskId, runId: run.id, index: 1 },
+  });
+  assert.equal(
+    viewer?.state,
+    "ready",
+    `the retained original did not open: ${JSON.stringify(viewer)}`,
+  );
+  assert.equal(viewer.image.mediaType, "image/jpeg");
+  assert.equal(viewer.image.sizeBytes, String(attachmentJpegBytes.length));
+  await invokeBridge("metawork.files.preview.release", {
+    generation: "1",
+    previewId: String(sentMediaPreviewId),
+  });
+  // The viewer tier refuses an original above its published single-image
+  // ceiling, which the Bridge reports as the unsupported state plus the exact
+  // reason -- reaching it still proves the retained original was located.
+  const oversized = await invokeBridge("metawork.media.preview", {
+    generation: "1",
+    previewId: String(++sentMediaPreviewId),
+    target: { kind: "runAttachment", taskId, runId: run.id, index: 0 },
+  });
+  assert.equal(oversized?.state, "unsupported");
+  assert.equal(oversized?.reason, "image_limit");
 }
 
 async function invokeBridge(command, payload) {

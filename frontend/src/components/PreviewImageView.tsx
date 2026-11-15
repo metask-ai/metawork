@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useI18n } from "../i18n/context.ts";
 
 // Image lifetime is supplied by the caller; this primitive owns DOM decoding only.
-interface PreviewImageResource {
+export interface PreviewImageResource {
   id: string;
   width: number;
   height: number;

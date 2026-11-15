@@ -460,6 +460,7 @@ pub const MultimodalAttachment = struct {
     size_bytes: ?u64 = null,
     source_format: ?AttachmentFormat = null,
     workspace_reference_path: ?[]const u8 = null,
+    media: ?AttachmentMedia = null,
 };
 
 /// Borrowed command input. An accepted submission owns its slices separately.
@@ -700,6 +701,61 @@ pub const InputAcceptance = struct {
 
 pub const AttachmentKind = enum { image, file };
 pub const AttachmentFormat = enum { png, jpeg, webp };
+pub const attachment_media_name_bytes = 32;
+/// History's own copy of the two derivative ceilings. The aggregate that
+/// derives a thumbnail owns the real numbers; Product Control asserts at
+/// compile time that these are the same, so a record is never accepted into
+/// history describing something that aggregate could not have produced.
+pub const attachment_media_max_thumbnail_bytes: u32 = 160 * 1024;
+pub const attachment_media_max_thumbnail_side: u32 = 256;
+
+/// Logical identity of the Product-owned bytes behind an accepted image: the
+/// store names of the retained original and of the bounded derivative written
+/// when the message was sent, plus the derivative's own facts. Unlike
+/// `resource_id` this is persisted with the message, which is what lets a
+/// restarted app still show and open what the user attached. It names nothing
+/// outside the Product-private store: no user-visible path, no message body,
+/// and no model-input preview.
+pub const AttachmentMedia = struct {
+    original_name: [attachment_media_name_bytes]u8,
+    thumbnail_name: [attachment_media_name_bytes]u8,
+    thumbnail_size_bytes: u32,
+    thumbnail_width: u32,
+    thumbnail_height: u32,
+
+    /// Strict decode of a persisted identity. Only MetaWork writes these, so a
+    /// shape it does not mint is a corrupt record rather than something to
+    /// repair, round down or guess at.
+    pub fn decode(
+        original_name: []const u8,
+        thumbnail_name: []const u8,
+        thumbnail_size_bytes: u32,
+        thumbnail_width: u32,
+        thumbnail_height: u32,
+    ) error{InvalidAttachmentMedia}!AttachmentMedia {
+        if (thumbnail_size_bytes == 0 or thumbnail_size_bytes > attachment_media_max_thumbnail_bytes or
+            thumbnail_width == 0 or thumbnail_height == 0 or
+            @max(thumbnail_width, thumbnail_height) > attachment_media_max_thumbnail_side)
+            return error.InvalidAttachmentMedia;
+        return .{
+            .original_name = try decodeMediaName(original_name),
+            .thumbnail_name = try decodeMediaName(thumbnail_name),
+            .thumbnail_size_bytes = thumbnail_size_bytes,
+            .thumbnail_width = thumbnail_width,
+            .thumbnail_height = thumbnail_height,
+        };
+    }
+};
+
+fn decodeMediaName(text: []const u8) error{InvalidAttachmentMedia}![attachment_media_name_bytes]u8 {
+    if (text.len != attachment_media_name_bytes) return error.InvalidAttachmentMedia;
+    var name: [attachment_media_name_bytes]u8 = undefined;
+    for (text, &name) |byte, *target| {
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidAttachmentMedia;
+        target.* = byte;
+    }
+    return name;
+}
 pub const AttachmentRecord = struct {
     /// Runtime-only ownership correlation with the attachment aggregate.
     resource_id: u64 = 0,
@@ -708,6 +764,10 @@ pub const AttachmentRecord = struct {
     display_name: []u8,
     size_bytes: u64,
     redacted: bool = false,
+    /// Present only for an image this Task accepted and whose derivative was
+    /// stored. Absent for every file attachment, for an image sent before the
+    /// identity was recorded, and whenever the derivative could not be written.
+    media: ?AttachmentMedia = null,
 };
 
 /// Immutable checkpoint description facts captured before executor handoff.

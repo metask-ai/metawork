@@ -711,10 +711,16 @@ pub fn writeInput(writer: *std.Io.Writer, text_projection: TextProjection, input
                     return error.SnapshotTooLarge;
                 writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
                 try text_projection.writeJson(writer, item.display_name);
-                writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{
-                    item.size_bytes,
-                    item.redacted,
+                writer.print(",\"sizeBytes\":\"{d}\"", .{item.size_bytes}) catch
+                    return error.SnapshotTooLarge;
+                // Whether this image chip has media to ask for. The identity
+                // itself stays inside Product: the Renderer addresses it by the
+                // Task, the message and the position it already displays.
+                if (item.kind == .image) writer.print(",\"media\":{}", .{
+                    item.media != null and !item.redacted,
                 }) catch return error.SnapshotTooLarge;
+                writer.print(",\"redacted\":{}}}", .{item.redacted}) catch
+                    return error.SnapshotTooLarge;
             }
             writer.print("],\"redacted\":{}}}", .{multimodal.redacted}) catch
                 return error.SnapshotTooLarge;

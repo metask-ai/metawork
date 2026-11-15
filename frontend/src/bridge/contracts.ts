@@ -343,6 +343,19 @@ export type FilePreviewResponse = Omit<
     securityEpoch: string;
   };
 };
+/// A registered media target, in the shape its kind declares. A draft is owned
+/// by the staged grant that issued its token; a sent image is owned by the
+/// message it was accepted with, which is addressed by the Task, the message
+/// and the position the transcript already shows.
+export type MediaTarget =
+  | { kind: "draftAttachment"; token: string }
+  | { kind: "runAttachment"; taskId: string; runId: string; index: number }
+  | {
+      kind: "submissionAttachment";
+      taskId: string;
+      operationId: string;
+      index: number;
+    };
 /// One synchronous answer per chip: the derived PNG arrives inline, so this
 /// tier has no grant, no chunk reader and nothing held between calls.
 export type AttachmentThumbnailResponse =
@@ -703,6 +716,10 @@ export type RunInputView =
             format: "png" | "jpeg" | "webp";
             displayName: string;
             sizeBytes: string;
+            /// Whether the Host still has media to serve for this chip. False
+            /// for an image sent before its identity was recorded, so that
+            /// chip keeps the metadata form it has always had.
+            media: boolean;
             redacted: boolean;
           }
         | {

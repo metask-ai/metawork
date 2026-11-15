@@ -228,6 +228,8 @@ function renderCompletedSurface(
     outputsEnabled = false,
     onOutputAction,
     onPrepareOutputEdit,
+    loadAttachmentThumbnail,
+    onOpenSentAttachment,
   } = {},
 ) {
   const task = {
@@ -318,6 +320,8 @@ function renderCompletedSurface(
         onPrepareOutputEdit,
         onPrepareRetry() {},
         onPreviewFile() {},
+        loadAttachmentThumbnail,
+        onOpenSentAttachment,
         onReviewFileChanges() {},
         onRespond() {},
         renderPendingUi() {
@@ -749,6 +753,7 @@ test("Task content renders multimodal history as metadata-only attachment chips"
         displayName: "diagram.png",
         mediaType: "image/png",
         sizeBytes: "2048",
+        media: false,
         redacted: false,
       },
       {
@@ -757,6 +762,7 @@ test("Task content renders multimodal history as metadata-only attachment chips"
         displayName: "brief.webp",
         mediaType: "image/webp",
         sizeBytes: "4096",
+        media: false,
         redacted: false,
       },
     ],
@@ -767,7 +773,64 @@ test("Task content renders multimodal history as metadata-only attachment chips"
   assert.match(markup, /diagram\.png/);
   assert.match(markup, /brief\.webp/);
   assert.match(markup, /2 KB/);
+  // An image sent before its identity was recorded keeps the format label and
+  // stays static: no box is reserved and nothing is offered to click.
+  assert.doesNotMatch(markup, /attachment-thumbnail/);
+  assert.match(markup, />PNG</);
   assert.doesNotMatch(markup, /attachmentToken|token|file:\/\/|\/Users\//);
+});
+
+test("a sent image chip reserves the same box and keeps the rest static", () => {
+  const attachment = (overrides) => ({
+    kind: "image",
+    format: "png",
+    displayName: "diagram.png",
+    sizeBytes: "2048",
+    media: true,
+    redacted: false,
+    ...overrides,
+  });
+  const markup = renderCompletedSurface(
+    "Analysis complete",
+    {
+      kind: "multimodal",
+      text: "Inspect these files",
+      attachments: [
+        attachment({}),
+        // Above the published viewer ceiling: the chip still shows what was
+        // attached but offers no entry that is certain to fail.
+        attachment({
+          displayName: "huge.jpg",
+          format: "jpeg",
+          sizeBytes: String(10 * 1024 * 1024 + 1),
+        }),
+        // No media to ask for, a redacted record, and a plain file each keep
+        // the static chip.
+        attachment({ displayName: "legacy.png", media: false }),
+        attachment({ displayName: "secret.png", redacted: true }),
+        {
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "12",
+          redacted: false,
+        },
+      ],
+      redacted: false,
+    },
+    [],
+    {
+      loadAttachmentThumbnail: () => Promise.resolve({ state: "error" }),
+      onOpenSentAttachment() {},
+    },
+  );
+  assert.equal(markup.match(/attachment-thumbnail/g)?.length, 2);
+  // The viewer entry appears only once a thumbnail has actually decoded.
+  assert.doesNotMatch(markup, /attachment-thumbnail-open/);
+  assert.match(markup, /diagram\.png/);
+  assert.match(markup, /legacy\.png/);
+  assert.match(markup, /lucide-file-text/);
+  // The identity itself never reaches the transcript.
+  assert.doesNotMatch(markup, /originalName|thumbnailName|file:\/\/|\/Users\//);
 });
 
 test("Task content marks redacted Text and Skill inputs consistently", () => {
@@ -994,13 +1057,13 @@ test("image chips reserve a thumbnail box and only offer a viewer within the Hos
     onOpenAttachment: () => {},
   });
   // Both images reserve the box; a plain file keeps the generic icon.
-  assert.equal(markup.match(/composer-attachment-media/g)?.length, 2);
+  assert.equal(markup.match(/attachment-thumbnail/g)?.length, 2);
   assert.match(markup, /small\.png/);
   assert.match(markup, /huge\.jpg/);
   assert.match(markup, /lucide-file-text/);
   // No viewer entry exists until a thumbnail has actually decoded, and the
   // oversized original never gets one.
-  assert.doesNotMatch(markup, /composer-attachment-open/);
+  assert.doesNotMatch(markup, /attachment-thumbnail-open/);
   // Chips still carry no path, hash or upload progress.
   assert.doesNotMatch(markup, /file:\/\/|\/Users\/|sha256|progress/);
 });

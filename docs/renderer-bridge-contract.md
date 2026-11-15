@@ -197,18 +197,22 @@ Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安
 
 ## Attachment media commands
 
-可预览媒体按来源注册，每一类身份自带授权依据；wire 上既有 File preview command 的五字段 request 一字不改，新来源使用自己的 command 并精确接收一个 typed target。当前在册的 target 只有一种：
+可预览媒体按来源注册，每一类身份自带授权依据；wire 上既有 File preview command 的五字段 request 一字不改，新来源使用自己的 command 并精确接收一个 typed target。在册的 target 有三种，分别对应草稿、已进入 Run 的消息和仍在等待的提交：
 
 ```json
 {
   "kind": "draftAttachment",
   "token": "0c1d2e3f405162738495a6b7c8d9eafb0c1d2e3f40516273"
 }
+{ "kind": "runAttachment", "taskId": "3", "runId": "9", "index": 2 }
+{ "kind": "submissionAttachment", "taskId": "3", "operationId": "op-7", "index": 0 }
 ```
 
-`kind` 必填且只接受在册名称，字段集合精确，不接受省略、额外或替代字段（没有 `taskId`，也不接受 target 之外的扁平 token）。`token` 是文件 attachment commands 签发的同一 48 字符小写十六进制 grant，绑定当前 connection/window 且一次性。未在册的 kind 与格式非法的 token 一律 fail closed 为 Bridge error；本连接不持有的 token 返回 `missing`，因为草稿被发送或移除不是协议违规。草稿附件没有 Task identity，因此 New Task 也能请求；它的字节位于 Product 私有 store，没有 Workspace id/epoch/root 可校验，Host 不得为它虚构这些事实。
+`kind` 必填且只接受在册名称，每种 kind 的字段集合精确，不接受省略、额外或替代字段：草稿 target 没有 `taskId`，Task 侧 target 没有 `token`，两种消息身份不能混用，也不接受 target 之外的扁平 token。`token` 是文件 attachment commands 签发的同一 48 字符小写十六进制 grant，绑定当前 connection/window 且一次性。`taskId`／`runId` 是 canonical decimal u64 string，`operationId` 是既有 1–64 字节可打印 ASCII 操作标识，`index` 是该消息内附件的位置，必须是 0 到单条消息附件上限减一之间的整数。未在册的 kind、格式非法的 token、缺失或多余的字段一律 fail closed 为 Bridge error；本连接不持有的 token 返回 `missing`，因为草稿被发送或移除不是协议违规。
 
-`metawork.media.thumbnail` 是同步 command，精确接收 `{ generation, target }`。它交付 Host 在 staging 时从同一张图派生的小图，ready 精确返回：
+草稿附件没有 Task identity，因此 New Task 也能请求；它的字节位于 Product 私有 store，没有 Workspace id/epoch/root 可校验，Host 不得为它虚构这些事实。Task 侧 target 不交换 grant：授权依据就是 command 本身已经校验的 connection/window，加上 Product 侧该消息记录仍登记着可解码的持久化标识且未被脱敏；Host 不据此开放下载或重新发送。记录不存在、位置不是图片、记录已脱敏、Task 正在删除，或该图片是登记标识之前发送的，一律返回 `missing`——Task 里没有那张图片不是协议违规。附件位置是 Renderer 已经显示的顺序，标识本身始终留在 Product 内，不进入投影。
+
+`metawork.media.thumbnail` 是同步 command，精确接收 `{ generation, target }`。它交付 Host 在 staging 时从同一张图派生的小图——草稿来自内存，已发送的来自随消息写入 Product store 的同一份派生物，一次有界读取，两者都不读原件、不解码图片、不占原图槽位。ready 精确返回：
 
 ```json
 {
@@ -228,9 +232,11 @@ Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安
 
 这一档没有 `previewId`、没有 token、没有 chunk 读取，也没有 release：一次响应整件交付（160 KiB 的 Base64 远低于 SDK 响应上限），Host 在调用之间不持有字节，因此它结构上不占原图槽位，而不是靠额度记账留出空间。它的凭据检查扫描**被交付的派生字节**，一次扫完，没有跨块边界；派生是重新解码再编码，原件的容器 metadata（EXIF/XMP/文本块）不会进入结果，所以扫描未交付的原件保护不了任何东西。两档都不声称能识别画面内容里的密钥：截图里的 token 是字形而非字节，既有查看器档同样如此，这不是本能力引入的暴露面。
 
-`metawork.media.preview` 是异步 command，精确接收 `{ generation, previewId, target }`，`previewId` 与 File preview command 共享连接内单调递增空间。它是同一个查看器档：response shape、原图描述符、`metawork.files.preview.readImageChunk`、`metawork.files.preview.release`、2 份 / 20 MiB 原图生命周期、30 秒请求与 15 秒 grant 期限、单图 10 MiB / 16777216 像素 / 最长边 8192 全部沿用，只有 target 的授权依据与字节来源不同。Host 在交付前及每次分块时重新证明该草稿仍拥有同一 staged 原件：批次被 Task 借用或附件被移除后目标即不再解析，grant 当即释放而不是继续读一份已经改变归属的文件。原件被 staging 分类为图片，若读取时已不再是图片则返回 `unsupported`，这一来源不得回落到文本正文路径。
+`metawork.media.preview` 是异步 command，精确接收 `{ generation, previewId, target }`，`previewId` 与 File preview command 共享连接内单调递增空间。它是同一个查看器档：response shape、原图描述符、`metawork.files.preview.readImageChunk`、`metawork.files.preview.release`、2 份 / 20 MiB 原图生命周期、30 秒请求与 15 秒 grant 期限、单图 10 MiB / 16777216 像素 / 最长边 8192 全部沿用，只有 target 的授权依据与字节来源不同。Host 在交付前及每次分块时重新证明该目标仍成立：草稿 target 要求该草稿仍拥有同一 staged 原件，批次被 Task 借用或附件被移除后目标即不再解析，grant 当即释放而不是继续读一份已经改变归属的文件；Task 侧 target 要求该 Task 仍可读，已接收的原件不再易手，而记录被脱敏或期间安装新 credential 都会推进安全代次，交付与分块本来就据此拒绝。原件被 staging 分类为图片，若读取时已不再是图片则返回 `unsupported`，这一来源不得回落到文本正文路径。
 
-Renderer 为缩略图档使用独立准入（最多 3 个在途、32 个排队），不与查看器档的 2 个准备名额竞争；派生资源登记在同一窗口图片池（32 张 / 40 MiB / 33554432 像素）并服从同一安全代次失效规则，离开保留区域即释放。原件字节数已随 chip 投影给 Renderer，因此超过上述单图 10 MiB 上限的附件不提供查看入口，只显示缩略图；像素与动图等只能在读取后判定的限制仍由查看器档的既有状态说明。
+Renderer 为缩略图档使用独立准入（最多 3 个在途、32 个排队），不与查看器档的 2 个准备名额竞争；派生资源登记在同一窗口图片池（32 张 / 40 MiB / 33554432 像素）并服从同一安全代次失效规则，离开保留区域即释放。池内资源按 target 自身的身份区分，同一条消息内的两张图片是两份资源。原件字节数已随 chip 投影给 Renderer，因此超过上述单图 10 MiB 上限的附件不提供查看入口，只显示缩略图；像素与动图等只能在读取后判定的限制仍由查看器档的既有状态说明。
+
+已发送消息的每个图片 chip 另有一个必填布尔事实，说明 Host 还能不能为它提供媒体；非图片附件没有这个字段。该事实为 false 的 chip 保持既有元数据形态，Renderer 不得据此构造 target，也不得按名称、大小或任何其他投影字段猜测一个可能存在的标识。
 
 ## File changes diff command
 

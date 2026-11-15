@@ -7,6 +7,10 @@ import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
 import { MessageInfoBar } from "./MessageInfoBar.tsx";
+import {
+  AttachmentThumbnail,
+  type AttachmentThumbnailLoader,
+} from "../../components/AttachmentThumbnail.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import { resolveWorkspaceFileLink } from "../../workbench/workspace-file-links.ts";
 import {
@@ -18,8 +22,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { maxPreviewImageBytes } from "../../bridge/contracts.ts";
 import type {
   FileReferenceView,
+  MediaTarget,
   OutputActionHandler,
   PendingUi,
   RunInputView,
@@ -223,7 +229,43 @@ function outcomeState(
       return "failed";
   }
 }
-function TaskInput({ input }: { input: RunInputView }) {
+/// Addresses the attachments of one sent message. A message that has already
+/// become a Run is addressed by that Run; one still waiting for its turn is
+/// addressed by its submission, because it does not have a Run yet.
+type SentInputMedia =
+  { taskId: string; runId: string } | { taskId: string; operationId: string };
+
+function sentAttachmentTarget(
+  media: SentInputMedia,
+  index: number,
+): MediaTarget {
+  return "runId" in media
+    ? { kind: "runAttachment", taskId: media.taskId, runId: media.runId, index }
+    : {
+        kind: "submissionAttachment",
+        taskId: media.taskId,
+        operationId: media.operationId,
+        index,
+      };
+}
+
+function TaskInput({
+  input,
+  media,
+  loadThumbnail,
+  onOpenAttachment,
+}: {
+  input: RunInputView;
+  /// Absent for a message Product cannot address media for, which keeps every
+  /// chip in it at the metadata form it has always had.
+  media?: SentInputMedia;
+  loadThumbnail?: AttachmentThumbnailLoader<MediaTarget>;
+  onOpenAttachment?: (
+    target: MediaTarget,
+    name: string,
+    opener: HTMLButtonElement,
+  ) => void;
+}) {
   const { t } = useI18n();
   const content =
     input.kind === "text" ? (
@@ -234,28 +276,62 @@ function TaskInput({ input }: { input: RunInputView }) {
       <div className="task-multimodal-input">
         {input.text && <p className="task-input-copy">{input.text}</p>}
         <div className="task-input-attachments" role="list">
-          {input.attachments.map((attachment, index) => (
-            <span
-              className="task-input-attachment"
-              role="listitem"
-              key={`${attachment.displayName}:${index}`}
-            >
-              <span aria-hidden="true">
-                {attachment.kind === "image" ? (
-                  attachment.format.toUpperCase()
+          {input.attachments.map((attachment, index) => {
+            // A chip becomes interactive only where the Host still has media
+            // for it: a file attachment, a redacted record and an image sent
+            // before its identity was recorded all keep the static chip rather
+            // than offering an entry that cannot answer.
+            const target =
+              attachment.kind === "image" &&
+              attachment.media &&
+              !attachment.redacted &&
+              media
+                ? sentAttachmentTarget(media, index)
+                : null;
+            return (
+              <span
+                className="task-input-attachment"
+                role="listitem"
+                key={`${attachment.displayName}:${index}`}
+              >
+                {target && attachment.kind === "image" ? (
+                  <AttachmentThumbnail
+                    target={target}
+                    label={attachment.displayName}
+                    formatLabel={attachment.format.toUpperCase()}
+                    load={loadThumbnail}
+                    onOpen={
+                      onOpenAttachment &&
+                      BigInt(attachment.sizeBytes) <=
+                        BigInt(maxPreviewImageBytes)
+                        ? (opener) =>
+                            onOpenAttachment(
+                              target,
+                              attachment.displayName,
+                              opener,
+                            )
+                        : undefined
+                    }
+                  />
                 ) : (
-                  <Icon name="skill-file" />
+                  <span aria-hidden="true">
+                    {attachment.kind === "image" ? (
+                      attachment.format.toUpperCase()
+                    ) : (
+                      <Icon name="skill-file" />
+                    )}
+                  </span>
                 )}
+                <strong dir="auto">{attachment.displayName}</strong>
+                <small>
+                  {attachment.kind === "image"
+                    ? `${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`
+                    : t("attachment.type.file")}
+                  {` · ${formatAttachmentSize(attachment.sizeBytes)}`}
+                </small>
               </span>
-              <strong dir="auto">{attachment.displayName}</strong>
-              <small>
-                {attachment.kind === "image"
-                  ? `${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`
-                  : t("attachment.type.file")}
-                {` · ${formatAttachmentSize(attachment.sizeBytes)}`}
-              </small>
-            </span>
-          ))}
+            );
+          })}
         </div>
       </div>
     );
@@ -316,6 +392,8 @@ export function TaskContent({
   workspaceRoot = null,
   onPreviewWorkspaceFile,
   loadFilePreview,
+  loadAttachmentThumbnail,
+  onOpenSentAttachment,
   onReviewFileChanges,
   onRespond,
   renderPendingUi,
@@ -355,6 +433,13 @@ export function TaskContent({
   /** Current Account recharge eligibility; never inherited from Run history. */
   recharge?: { available: boolean; busy: boolean; onOpen: () => void };
   loadFilePreview?: FilePreviewLoader;
+  loadAttachmentThumbnail?: AttachmentThumbnailLoader<MediaTarget>;
+  /** Opens the image a message was sent with in the media viewer. */
+  onOpenSentAttachment?: (
+    target: MediaTarget,
+    name: string,
+    opener: HTMLButtonElement,
+  ) => void;
   onPreviewFile: (
     taskId: string,
     runId: string,
@@ -512,7 +597,19 @@ export function TaskContent({
           </>
         }
       >
-        <TaskInput input={record.input} />
+        <TaskInput
+          input={record.input}
+          media={
+            task
+              ? {
+                  taskId: task.id,
+                  operationId: record.submission.operationId,
+                }
+              : undefined
+          }
+          loadThumbnail={loadAttachmentThumbnail}
+          onOpenAttachment={onOpenSentAttachment}
+        />
       </UserInputMessage>
     );
   }
@@ -1194,7 +1291,12 @@ export function TaskContent({
                         : `${run.id}:root`
                     }
                   >
-                    <TaskInput input={run.input} />
+                    <TaskInput
+                      input={run.input}
+                      media={{ taskId: task.id, runId: run.id }}
+                      loadThumbnail={loadAttachmentThumbnail}
+                      onOpenAttachment={onOpenSentAttachment}
+                    />
                   </Message>
                   <MessageInfoBar
                     role="user"

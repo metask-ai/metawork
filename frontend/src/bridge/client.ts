@@ -34,6 +34,7 @@ import type {
   AttachmentThumbnailResult,
   FilePreview,
   FilePreviewLoadOptions,
+  MediaTarget,
   FileChangeDiffResult,
   ModelMetadata,
 } from "./contracts.ts";
@@ -377,19 +378,19 @@ export class BridgeClient {
   ): Promise<FilePreview> {
     return this.previews.load(taskId, runId, fileReferenceId, options);
   }
-  /// The viewer tier for a staged draft image.
+  /// The viewer tier for a registered image, draft or sent.
   previewAttachment(
-    attachmentToken: string,
+    target: MediaTarget,
     options?: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
-    return this.previews.loadAttachment(attachmentToken, options);
+    return this.previews.loadAttachment(target, options);
   }
-  /// The thumbnail tier for a staged draft image.
+  /// The thumbnail tier for a registered image, draft or sent.
   attachmentThumbnail(
-    attachmentToken: string,
+    target: MediaTarget,
     options?: FilePreviewLoadOptions,
   ): Promise<AttachmentThumbnailResult> {
-    return this.previews.loadThumbnail(attachmentToken, options);
+    return this.previews.loadThumbnail(target, options);
   }
   async fileChangeDiff(
     taskId: string,

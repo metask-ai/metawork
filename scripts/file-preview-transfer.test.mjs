@@ -438,6 +438,8 @@ test("a text preview can finish while image receipt is blocked", async () => {
 });
 
 const token = "a".repeat(48);
+const draft = { kind: "draftAttachment", token };
+const sent = { kind: "runAttachment", taskId: "3", runId: "7", index: 0 };
 const thumbnailResponse = (overrides = {}) => ({
   state: "ready",
   thumbnail: {
@@ -461,7 +463,7 @@ test("a derived thumbnail arrives in one response with no grant to release", asy
     },
     () => "4",
   );
-  const result = await loader.loadThumbnail(token);
+  const result = await loader.loadThumbnail(draft);
   assert.equal(result.state, "ready");
   assert.equal(result.image.width, 1);
   assert.equal(
@@ -472,10 +474,7 @@ test("a derived thumbnail arrives in one response with no grant to release", asy
   assert.deepEqual(calls, [
     {
       command: commands.mediaThumbnail,
-      payload: {
-        generation: "4",
-        target: { kind: "draftAttachment", token },
-      },
+      payload: { generation: "4", target: draft },
     },
   ]);
   result.release();
@@ -521,10 +520,10 @@ test("a thumbnail from a stale security epoch is taken again after the new one",
     },
     () => "4",
   );
-  const first = await loader.loadThumbnail(token);
+  const first = await loader.loadThumbnail(draft);
   assert.equal(first.state, "ready");
   epoch = "2";
-  const pending = loader.loadThumbnail(token);
+  const pending = loader.loadThumbnail(draft);
   // The loader still believes epoch 1, so this answer is refused; it waits for
   // a newer canonical epoch and asks exactly once more.
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -556,7 +555,10 @@ test("thumbnails queue rather than failing a whole chip grid", async () => {
     () => "4",
   );
   const pending = Array.from({ length: 12 }, (_, index) =>
-    loader.loadThumbnail("b".repeat(47) + String(index % 10)),
+    loader.loadThumbnail({
+      kind: "draftAttachment",
+      token: "b".repeat(47) + String(index % 10),
+    }),
   );
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(peak, 3);
@@ -574,7 +576,7 @@ test("thumbnails queue rather than failing a whole chip grid", async () => {
 
 test("the attachment viewer tier uses the media command and the shared transfer", async () => {
   const host = new Host();
-  const result = await host.loader.loadAttachment(token);
+  const result = await host.loader.loadAttachment(draft);
   assert.equal(result.state, "ready");
   assert.deepEqual(
     host.calls.map((call) => call.command),
@@ -583,8 +585,42 @@ test("the attachment viewer tier uses the media command and the shared transfer"
   assert.deepEqual(host.calls[0].payload, {
     generation: "1",
     previewId: "1",
-    target: { kind: "draftAttachment", token },
+    target: draft,
   });
   result.release();
   assert.equal(host.active.size, 0);
+});
+
+test("a sent image uses the same two tiers under its own target", async () => {
+  const calls = [];
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      return thumbnailResponse();
+    },
+    () => "4",
+  );
+  const first = await loader.loadThumbnail(sent);
+  assert.equal(first.state, "ready");
+  // Two sent images in the same message are different resources, and neither
+  // collides with a draft chip.
+  const second = await loader.loadThumbnail({ ...sent, index: 1 });
+  assert.equal(second.state, "ready");
+  assert.notEqual(first.image.id, second.image.id);
+  assert.deepEqual(
+    calls.map((call) => call.payload.target),
+    [sent, { ...sent, index: 1 }],
+  );
+  const host = new Host();
+  const viewer = await host.loader.loadAttachment(sent);
+  assert.equal(viewer.state, "ready");
+  assert.deepEqual(host.calls[0].payload, {
+    generation: "1",
+    previewId: "1",
+    target: sent,
+  });
+  viewer.release();
+  assert.equal(host.active.size, 0);
+  first.release();
+  second.release();
 });

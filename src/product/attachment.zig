@@ -85,6 +85,37 @@ pub const Descriptor = struct { id: u64, kind: Kind, format: ?Format, display_na
 pub const Thumbnail = struct { bytes: []const u8, width: u32, height: u32 };
 pub const Original = struct { directory: []const u8, relative: []const u8, size_bytes: usize };
 pub const max_original_relative_bytes = store.max_relative_bytes;
+
+/// Logical identity of the Product-owned bytes behind an image a Task has
+/// accepted: the store name of the original it keeps until the Task is deleted,
+/// and the store name of the chip derivative written beside it when the message
+/// was sent. The runtime entry id correlates ownership for this process only,
+/// so a restart cannot address anything with it; these names can be persisted
+/// with the message and still resolve afterwards.
+pub const Media = struct {
+    original_name: [store.name_text_bytes]u8,
+    thumbnail_name: [store.name_text_bytes]u8,
+    thumbnail_size_bytes: u32,
+    thumbnail_width: u32,
+    thumbnail_height: u32,
+};
+
+/// Suffix of a stored chip derivative. Deliberately not an image format
+/// suffix: the Task directory then says which of its files are the user's
+/// retained originals and which are Product's own derivatives, and the
+/// derivative's media type is fixed by the tier contract, not by its name.
+pub const thumbnail_extension = "thumb";
+
+/// The extension `classify` gave the original. A total mapping, so the stored
+/// name is reconstructed from the persisted format instead of being stored
+/// twice and risking the two copies disagreeing.
+pub fn originalExtension(format: Format) []const u8 {
+    return switch (format) {
+        .png => "png",
+        .jpeg => "jpg",
+        .webp => "webp",
+    };
+}
 pub const BorrowedPart = union(enum) {
     image: struct { id: u64, format: Format, bytes: []const u8, reference: []const u8 },
     text: struct { id: u64, bytes: []const u8 },
@@ -106,6 +137,10 @@ const Entry = struct {
     thumbnail: []u8 = &.{},
     thumbnail_width: u32 = 0,
     thumbnail_height: u32 = 0,
+    /// The chip derivative as a store file, written when the batch was borrowed
+    /// for a Task. Set only from `.borrowed` onwards; it is what the message's
+    /// persisted identity names.
+    thumbnail_file: ?store.File = null,
     reference: []u8 = &.{},
     workspace_reference: ?WorkspaceReference = null,
     workspace_path: []u8 = &.{},
@@ -465,6 +500,7 @@ pub const Runtime = struct {
             borrowed += 1;
             if (retrying) try self.classify(entry);
             try self.file_store.?.move(&entry.file, task_id);
+            self.retainThumbnail(entry);
             if (entry.workspace_reference != null) {
                 parts[index] = if (entry.format != null)
                     .{ .image = .{ .id = entry.id, .format = .png, .bytes = entry.preview, .reference = entry.workspace_path } }
@@ -528,6 +564,9 @@ pub const Runtime = struct {
         entry.state = .retry_owned;
         entry.retry_task_id = task_id;
         entry.retry_group = group;
+        // The retry re-derives from the original, so this derivative would be
+        // orphaned under the Task directory with nothing left pointing at it.
+        self.releaseThumbnailFile(entry);
         self.file_store.?.move(&entry.file, 0) catch {
             if (self.destroyTaskInput(entry)) self.slots[index] = null;
             return false;
@@ -562,6 +601,9 @@ pub const Runtime = struct {
 
     fn destroyTaskInput(self: *Runtime, entry: *Entry) bool {
         std.debug.assert(entry.state == .task_owned or entry.state == .retry_owned or entry.state == .task_cleanup_pending);
+        // A message whose original is discarded keeps no derivative either: its
+        // record is going away with it, so nothing can address this file again.
+        self.releaseThumbnailFile(entry);
         self.file_store.?.deleteChecked(entry.file) catch {
             entry.state = .task_cleanup_pending;
             return false;
@@ -575,11 +617,7 @@ pub const Runtime = struct {
         var prefix: [12]u8 = undefined;
         const count = try self.file_store.?.read(entry.file, 0, &prefix);
         if (detectFormat(prefix[0..count])) |format| {
-            try self.file_store.?.setExtension(&entry.file, switch (format) {
-                .png => "png",
-                .jpeg => "jpg",
-                .webp => "webp",
-            });
+            try self.file_store.?.setExtension(&entry.file, originalExtension(format));
             const prepare = self.images.prepare_fn orelse return error.UnsupportedType;
             const raw = try self.file_store.?.readAlloc(self.allocator, entry.file);
             defer {
@@ -629,6 +667,91 @@ pub const Runtime = struct {
         entry.thumbnail = thumbnail.bytes;
         entry.thumbnail_width = thumbnail.width;
         entry.thumbnail_height = thumbnail.height;
+    }
+
+    /// The chip derivative follows the original into Task ownership: the copy in
+    /// memory is wiped the moment the batch is retained, and a sent message has
+    /// to keep showing what was attached. A failed write costs this attachment
+    /// its history thumbnail and nothing else -- an accepted message must not
+    /// fail because a derivative could not be stored.
+    fn retainThumbnail(self: *Runtime, entry: *Entry) void {
+        std.debug.assert(entry.thumbnail_file == null);
+        if (entry.thumbnail.len == 0 or entry.thumbnail.len > max_image_thumbnail_bytes) return;
+        var file = self.file_store.?.put(entry.thumbnail) catch return;
+        self.file_store.?.setExtension(&file, thumbnail_extension) catch {
+            self.file_store.?.delete(file);
+            return;
+        };
+        self.file_store.?.move(&file, entry.file.task_id) catch {
+            self.file_store.?.delete(file);
+            return;
+        };
+        entry.thumbnail_file = file;
+    }
+
+    fn releaseThumbnailFile(self: *Runtime, entry: *Entry) void {
+        if (entry.thumbnail_file) |file| self.file_store.?.delete(file);
+        entry.thumbnail_file = null;
+    }
+
+    /// The persisted identity of an accepted image, read while the batch is
+    /// still borrowed. A derivative that could not be written leaves no
+    /// identity at all, so history keeps the plain metadata chip for it.
+    pub fn acceptedMedia(self: *const Runtime, id: u64) ?Media {
+        const entry = self.slots[self.findIndex(id) orelse return null].?;
+        if (entry.state != .borrowed or entry.format == null) return null;
+        const thumbnail = entry.thumbnail_file orelse return null;
+        return .{
+            .original_name = entry.file.name,
+            .thumbnail_name = thumbnail.name,
+            .thumbnail_size_bytes = @intCast(thumbnail.size),
+            .thumbnail_width = entry.thumbnail_width,
+            .thumbnail_height = entry.thumbnail_height,
+        };
+    }
+
+    /// Store-relative identity of an original a Task accepted, addressed by the
+    /// identity persisted with its message rather than by a live staging entry.
+    /// The file is the store's to open; this never yields an absolute path.
+    pub fn acceptedOriginal(
+        self: *const Runtime,
+        media: Media,
+        task_id: u64,
+        format: Format,
+        size_bytes: u64,
+        buffer: []u8,
+    ) ?Original {
+        const file_store = self.file_store orelse return null;
+        if (task_id == 0) return null;
+        const file: store.File = .{
+            .name = media.original_name,
+            .task_id = task_id,
+            .size = std.math.cast(usize, size_bytes) orelse return null,
+            .extension = store.Extension.fromSuffix(originalExtension(format)) catch return null,
+        };
+        return .{
+            .directory = file_store.directory,
+            .relative = store.relativePath(file, buffer) catch return null,
+            .size_bytes = file.size,
+        };
+    }
+
+    /// Bounded read of an accepted chip derivative. One small file, no decode
+    /// and no original: the bytes are the ones staging already derived.
+    pub fn readAcceptedThumbnail(self: *Runtime, media: Media, task_id: u64, buffer: []u8) ?Thumbnail {
+        const file_store = self.file_store orelse return null;
+        const size = media.thumbnail_size_bytes;
+        if (task_id == 0 or size == 0 or size > max_image_thumbnail_bytes or size > buffer.len) return null;
+        if (media.thumbnail_width == 0 or media.thumbnail_height == 0) return null;
+        const file: store.File = .{
+            .name = media.thumbnail_name,
+            .task_id = task_id,
+            .size = size,
+            .extension = store.Extension.fromSuffix(thumbnail_extension) catch return null,
+        };
+        const bytes = buffer[0..size];
+        if ((file_store.read(file, 0, bytes) catch return null) != size) return null;
+        return .{ .bytes = bytes, .width = media.thumbnail_width, .height = media.thumbnail_height };
     }
 
     /// Chip-sized derived pixels for a staged draft image. Only a ready entry
@@ -710,6 +833,7 @@ pub const Borrow = struct {
             const entry = &self.runtime.slots[index].?;
             // A failed move leaves a ready file at either location; its authority
             // is still the staging grant and the next borrow moves it afresh.
+            self.runtime.releaseThumbnailFile(entry);
             const moved = if (self.runtime.file_store.?.move(&entry.file, 0)) |_| true else |_| false;
             std.crypto.secureZero(u8, entry.reference);
             self.runtime.allocator.free(entry.reference);

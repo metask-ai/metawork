@@ -159,7 +159,11 @@ export async function runApprovalModeVertical({
     );
     const run = current.runs.find((run) => run.id === runId);
     assert.equal(run.phase, phase, JSON.stringify(run.terminal));
-    if (phase === "cancelled") assert.equal(run.terminal.cause, "user_cancel");
+    // Every cancelled Run in this audit is stopped by an approval change that
+    // crosses the Core profile boundary, which is a Product reason of its own
+    // rather than a user Stop.
+    if (phase === "cancelled")
+      assert.equal(run.terminal.cause, "approval_mode_change");
     return observe(`run:${runId}:${phase}`, current);
   };
   const checkedCheckpoint = async (kind, id) => {
