@@ -5,10 +5,10 @@
 //! references, Host-generated media, and user attachments. The File Preview
 //! target key assumes a Run produced the bytes and that they live inside an
 //! authorized Workspace, which is why an attachment cannot enter it: its bytes
-//! live in the Product-private store (or, for a chip derivative, only in
-//! memory), so Workspace id/epoch/root are facts that simply do not exist for
-//! it. This module keeps "which identity, which authority, which bytes, which
-//! tier" in one place instead of letting each call site decide.
+//! live in the Product-private store, or in memory while the draft still holds
+//! them, so Workspace id/epoch/root are facts that simply do not exist for it.
+//! This module keeps "which identity, which authority, which bytes, which tier"
+//! in one place instead of letting each call site decide.
 //!
 //! Registered kinds are the ones that are actually served. Adding the reference
 //! sources later is a change here plus their own authority, not a change to the

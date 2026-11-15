@@ -226,6 +226,7 @@ pub const AttachmentKind = task_state.AttachmentKind;
 pub const AttachmentFormat = task_state.AttachmentFormat;
 pub const MultimodalAttachment = task_state.MultimodalAttachment;
 pub const AttachmentMedia = task_state.AttachmentMedia;
+pub const attachment_media_name_bytes = task_state.attachment_media_name_bytes;
 pub const attachment_media_max_thumbnail_bytes = task_state.attachment_media_max_thumbnail_bytes;
 pub const attachment_media_max_thumbnail_side = task_state.attachment_media_max_thumbnail_side;
 pub const RunInput = task_state.RunInput;

@@ -310,8 +310,9 @@ comptime {
     // ceilings. Product Control owns both sides of that boundary, so it is the
     // one place that can prove the two agree.
     if (task_runtime.attachment_media_max_thumbnail_bytes != max_attachment_thumbnail_bytes or
-        task_runtime.attachment_media_max_thumbnail_side != max_attachment_thumbnail_side)
-        @compileError("Task history attachment media ceilings must match the deriving aggregate");
+        task_runtime.attachment_media_max_thumbnail_side != max_attachment_thumbnail_side or
+        task_runtime.attachment_media_name_bytes != product_attachment.store.name_text_bytes)
+        @compileError("Task history attachment media facts must match the deriving aggregate");
 }
 
 pub const AttachmentAcceptance = struct {

@@ -50,6 +50,7 @@ pub const RunError = runtime.RunError;
 pub const EventRejection = state.EventRejection;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const AttachmentMedia = runtime.AttachmentMedia;
+pub const attachment_media_name_bytes = runtime.attachment_media_name_bytes;
 pub const attachment_media_max_thumbnail_bytes = runtime.attachment_media_max_thumbnail_bytes;
 pub const attachment_media_max_thumbnail_side = runtime.attachment_media_max_thumbnail_side;
 pub const PermissionChoice = runtime.PermissionChoice;
