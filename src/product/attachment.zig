@@ -91,6 +91,12 @@ pub const Media = struct {
     thumbnail_height: u32,
 };
 
+/// Suffix of a stored chip derivative. Deliberately not an image format
+/// suffix: the Task directory then says which of its files are the user's
+/// retained originals and which are Product's own derivatives, and the
+/// derivative's media type is fixed by the tier contract, not by its name.
+pub const thumbnail_extension = "thumb";
+
 /// The extension `classify` gave the original. A total mapping, so the stored
 /// name is reconstructed from the persisted format instead of being stored
 /// twice and risking the two copies disagreeing.
@@ -639,7 +645,7 @@ pub const Runtime = struct {
         std.debug.assert(entry.thumbnail_file == null);
         if (entry.thumbnail.len == 0 or entry.thumbnail.len > max_image_thumbnail_bytes) return;
         var file = self.file_store.?.put(entry.thumbnail) catch return;
-        self.file_store.?.setExtension(&file, "png") catch {
+        self.file_store.?.setExtension(&file, thumbnail_extension) catch {
             self.file_store.?.delete(file);
             return;
         };
@@ -708,7 +714,7 @@ pub const Runtime = struct {
             .name = media.thumbnail_name,
             .task_id = task_id,
             .size = size,
-            .extension = store.Extension.fromSuffix("png") catch return null,
+            .extension = store.Extension.fromSuffix(thumbnail_extension) catch return null,
         };
         const bytes = buffer[0..size];
         if ((file_store.read(file, 0, bytes) catch return null) != size) return null;
