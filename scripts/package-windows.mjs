@@ -18,10 +18,7 @@ import { readNativePackageManifest } from "./package-metadata.mjs";
 import { runChild } from "./run-child-process.mjs";
 import { verifyNativeAutomationIsolation } from "./verify-native-automation-isolation.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
-import {
-  reportMainPackageSize,
-  verifyMainPackageStage,
-} from "./main-package-size.mjs";
+import { verifyMainPackageStage } from "./main-package-contents.mjs";
 import {
   stageAgentCoreRuntimeAssets,
   verifyAgentCoreRuntimeAssets,
@@ -625,7 +622,10 @@ async function packageWindows() {
   const bundle = await verifyStagedAgentCoreBundle(repositoryRoot, {
     targetId: distribution.targetId,
   });
-  await buildFrontend(repositoryRoot);
+  // The bundle this package is for, not the runner's own architecture: with
+  // no target the build injects the host's, and an x64 machine packaging ARM64
+  // staged no x64 bundle for it to verify.
+  await buildFrontend(repositoryRoot, { target: bundle.target });
   rmSync(distribution.releaseBuildPath, { recursive: true, force: true });
   await runChild(
     "zig",
@@ -739,12 +739,9 @@ async function packageWindows() {
     );
   }
   const digest = verifyWindowsInstaller(distribution.installerArtifactPath);
-  const size = reportMainPackageSize(
-    distribution.targetId,
-    distribution.installerArtifactPath,
-  );
+  const bytes = statSync(distribution.installerArtifactPath).size;
   console.log(
-    `built ${signing ? "signed" : "unsigned"} Windows ${distribution.architecture} installer with Inno Setup ${compilerMajor}: ${distribution.installerArtifactPath} (sha256=${digest}, ${size.summary})`,
+    `built ${signing ? "signed" : "unsigned"} Windows ${distribution.architecture} installer with Inno Setup ${compilerMajor}: ${distribution.installerArtifactPath} (sha256=${digest}, ${bytes} bytes)`,
   );
 }
 

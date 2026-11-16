@@ -117,6 +117,20 @@ npm run package:macos -- all
 
 `arm64`、`x64` 与 `all` 是唯一有效选择；缺少所选 target 的 canonical bundle 时在访问签名 identity 前明确失败。发布架构不由最后一次 stage、Host 默认架构或环境变量决定。
 
+## 未签名边界
+
+`package:macos` 默认 `--signing required`：正式发版命令不变，缺少 Developer ID identity 时仍然明确失败。没有证书的机器显式要求未签名模式：
+
+```bash
+npm run package:macos -- arm64 --signing none
+```
+
+未签名模式跑完整条分发打包路径，只省掉需要证书的那几步：验证 canonical bundle、用 `actool` 编译 Icon Composer 资产、ReleaseSafe 构建、Native SDK 生成 `.app`、stage 图标与最低系统版本、部署并核验 AgentCore runtime 资产、检查主程序恰好是单一目标架构、复核 Mach-O section 与构建输出一致，以及 Bundle ID、版本、Renderer、图标与托盘资源的结构校验。到这里干净停下：不生成 DMG、不签名、不公证、不装订、不执行 Gatekeeper assessment。它产出的 `.app` 是验证产物，永远不是发布产物。
+
+这个边界和 Windows 对称：两边都能在没有凭据的机器上跑一遍打包路径，证明它还能用。未签名模式不读取签名 identity，因此也无法靠它取得任何签名或公证结论；identity 只在 `--signing required` 下解析，正式签名路径的行为不受未签名模式存在的影响。
+
+DMG 留在签名一侧不是遗漏：它的 Finder 图标视图要在真实图形会话里由 Finder 写入 `.DS_Store`，最后一步又是以 Developer ID 签名磁盘映像，两者都不是未签名验证能代替的。
+
 DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事务。第一次部署具备单实例能力的版本时，测试者或用户必须先显式退出仍在运行的旧 MetaWork，再替换 `/Applications` 中的 `.app`；旧 Host 尚未持有数据目录 lease，也不理解新的启动转交协议，因此这一代际边界不具备并行运行或双写保护。完成首次切换后，同一 artifact 与数据目录的兼容版本由应用自身执行单实例转交。
 
 打包入口先要求当前 `xcode-select` 提供 allowlist 内的 Xcode `actool`，把 `assets/icons/MetaWork.icon` 编译为临时 `Assets.car` 与 fallback ICNS；普通开发、check、test 和 build 不调用该工具。随后从 `security find-identity` 精确筛选唯一 Developer ID Application identity，再从所选证书的 subject `OU` 读取 Team ID 并复核 SHA-1 fingerprint。它构建 ReleaseSafe、调用 Native SDK 生成未签名 `.app`，以打包期 Native SDK compatibility seam 原位替换 SDK 临时图标、合并 Icon Composer metadata、stage 其余完整原生资源，再以 `--options runtime --timestamp` 执行唯一一次应用签名。验证必须覆盖 Bundle ID、产品版本、Renderer、Icon Composer resource digest、托盘资源、Developer ID leaf authority、Team ID、Apple anchor、hardened runtime 和可信时间戳。`Assets.car` 与 fallback ICNS 都是发布时生成并在结束后清理的 artifact，不提交到仓库；工具版本变化必须先复核输出与真实系统视觉，再扩展 allowlist。
@@ -140,11 +154,43 @@ DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事�
 1. `chore: release` 提交经 PR 合入 `main`；
 2. 在该 commit 上推送 `v<version>` tag，`.github/workflows/release.yml` 校验这个 tag 并建立 Release 草稿；
 3. 检出该 tag 的确切 sha，stage 所选 canonical bundle 后按本文流程完成签名、公证与发布验证；
-4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本。
+4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本，见下节。
 
 闸门放在打包之前是因为它廉价：workflow 是秒级，四个产物加公证是小时级。先打包再打 tag 会让 tag 指向一棵没有人构建过的树——打包期间任何合入都会移动 `main` 的尖端。推送 tag 不构成公开声明，workflow 只建立未发布的草稿。
 
 GitHub Release 只记录版本，不承载分发：产物由下载主机提供，不作为附件上传。产物出问题时发下一个 patch 版本，不删除也不移动已经打出的 tag——已经取到该 tag 的人会停留在与 Release 所述不同的树上。
+
+## 更新 manifest
+
+运行中的客户端只读一个文件来发现新版本：[`src/product/update.zig`](../src/product/update.zig) 里的 `https://metawork.metask-ai.com/manifest.json`。发布草稿和把这个文件指向新版本是同一步，因为在产物已上传、草稿已发布而 manifest 仍指向旧版本的那段时间里，没有任何用户会知道新版本存在；反过来，manifest 先指向一个未发布的版本会把用户送到下载不到的产物上。
+
+**这个文件不在本仓库。** 仓库里没有被跟踪的 `manifest.json`，也没有任何站点部署配置，所以它既不随 tag 变化，也不经过 PR——改它是一次仓库之外的手工操作，没有任何自动化会替你做。
+
+它由腾讯云 CloudBase 静态托管提供，回源 COS（响应头 `server: tcbgw`、`x-cloudbase-upstream-type: Tencent-COS`）。改法是在 CloudBase 控制台或用 `tcb` CLI 上传新的 `manifest.json` 覆盖同一路径。
+
+`cache-control: public, max-age=300, s-maxage=600`，即 CDN 最多缓存 10 分钟：上传后不会立刻生效。刚上传完用 `curl` 看到旧版本号是正常的，等缓存过期再确认，不要以为上传失败而重复上传。
+
+0.2.13 发版后这个文件的实际内容：
+
+```json
+{
+  "version": "0.2.13",
+  "downloads": {
+    "macos": {
+      "arm64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-macos-arm64.dmg?release=0.2.13&rev=20261116",
+      "x64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-macos-x64.dmg?release=0.2.13&rev=20261116"
+    },
+    "windows": {
+      "x64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-windows-x64.exe?release=0.2.13&rev=20261116",
+      "arm64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-windows-arm64.exe?release=0.2.13&rev=20261116"
+    }
+  }
+}
+```
+
+切版本时要一起改的，除了顶层 `version`，还有四个 URL 里的版本目录 `v<version>`、文件名，以及 `?release=<version>&rev=<yyyymmdd>` 这两个查询参数——`release` 是版本号，`rev` 是上传当天的日期。漏掉任何一个都会让某个平台或架构继续下载上一版。
+
+产物本身在另一台主机上，不和 manifest 在一起：`https://downloads.metask-ai.com/metawork/v<version>/`。客户端的接受边界由 [`src/product/update.zig`](../src/product/update.zig) 固定：manifest 不超过 64 KiB、JSON 嵌套不超过 8 层、重复键直接拒绝，每个下载 URL 必须以 `https://downloads.metask-ai.com/` 开头且不带 user、password、port 或 fragment。任何一项不满足，整份 manifest 被整体拒绝，客户端停留在当前版本且不报告新版本。
 
 ## Office Skill 与私有依赖
 

@@ -17,9 +17,12 @@ import {
   macosDistributionForAgentCoreTarget,
   macosPackageTargetIds,
   parseDeveloperIdCertificateReport,
+  parseMacosPackageArguments,
   parseNativePackageMetadata,
   parseNotarySubmission,
   parseTeamIdentifier,
+  isTimestampServiceFailure,
+  timestampRetryPlan,
   requireSingleMacosExecutableArchitecture,
   selectDistributionCodeSigningIdentity,
   stageMacosTrayIcon,
@@ -85,6 +88,110 @@ test("macOS package selection is explicit and defaults to both architectures", (
   assert.throws(
     () => macosPackageTargetIds("universal"),
     /expected arm64, x64, or all/u,
+  );
+});
+
+test("macOS packaging signs unless asked not to", () => {
+  assert.deepEqual(parseMacosPackageArguments([]), {
+    architecture: "all",
+    signing: "required",
+  });
+  for (const architecture of ["arm64", "x64", "all"]) {
+    assert.deepEqual(parseMacosPackageArguments([architecture]), {
+      architecture,
+      signing: "required",
+    });
+  }
+  // Unsigned has to be asked for: this entry only ever produces a release
+  // artifact, so an operator running the documented command cannot be handed
+  // an unsigned .app by a default.
+  for (const args of [["--signing", "none"], ["--signing=none"]]) {
+    assert.deepEqual(parseMacosPackageArguments(args), {
+      architecture: "all",
+      signing: "none",
+    });
+  }
+  assert.deepEqual(parseMacosPackageArguments(["arm64", "--signing=none"]), {
+    architecture: "arm64",
+    signing: "none",
+  });
+  for (const [args, message] of [
+    [["--signing"], /--signing must be none or required/u],
+    [["--signing", "adhoc"], /--signing must be none or required/u],
+    [["--signing=self"], /--signing must be none or required/u],
+    [
+      ["--signing=none", "--signing=required"],
+      /--signing may only be specified once/u,
+    ],
+    [["arm64", "x64"], /architecture may only be specified once/u],
+    [["--preview"], /unknown package:macos argument --preview/u],
+  ]) {
+    assert.throws(() => parseMacosPackageArguments(args), message);
+  }
+  // The selection itself stays owned by macosPackageTargetIds, so an invalid
+  // architecture still fails with the values it accepts.
+  assert.equal(
+    parseMacosPackageArguments(["universal"]).architecture,
+    "universal",
+  );
+});
+
+test("an unsigned macOS package stops at the verified app bundle", () => {
+  const packageScript = readFileSync(
+    new URL("./package-macos.mjs", import.meta.url),
+    "utf8",
+  );
+  // The identity is read only for a signed package. Resolving it ahead of
+  // every build step is what kept this path off any machine without the
+  // certificate, so no macOS packaging ran in CI at all.
+  assert.match(
+    packageScript,
+    /signing === "required" \? resolveDistributionIdentity\(\) : null/u,
+  );
+  assert.equal(
+    packageScript.match(/resolveDistributionIdentity\(\)/gu).length,
+    2,
+  );
+  const unsignedStart = packageScript.indexOf("  if (identity === null) {");
+  assert.notEqual(unsignedStart, -1);
+  const unsigned = packageScript.slice(
+    unsignedStart,
+    packageScript.indexOf("const ripgrepPath", unsignedStart),
+  );
+  // It reaches a built and structurally verified .app, and stops: everything
+  // past this point either needs the certificate or signs something.
+  assert.match(unsigned, /verifyMacosExecutableSections\(/u);
+  assert.match(unsigned, /verifyPackagedMacosAppContents\(appIconArtifact\)/u);
+  assert.match(unsigned, /return \{ executableSections \};/u);
+  for (const forbidden of [
+    /signWithDeveloperId/u,
+    /verifyDeveloperIdSignature/u,
+    /createDistributionDiskImage/u,
+    /notarizeDiskImage/u,
+    /stapler/u,
+    /spctl/u,
+    /hdiutil/u,
+  ]) {
+    assert.doesNotMatch(unsigned, forbidden);
+  }
+  // The checks an unsigned run does perform are the same calls a signed run
+  // makes, not a reduced copy of them.
+  assert.equal(
+    packageScript.match(/verifyPackagedMacosAppContents\(/gu).length,
+    3,
+  );
+  // An unsigned architecture reports and moves on, never reaching the disk
+  // image, notarization and stapling that follow for a signed one.
+  const packaging = packageScript.slice(
+    packageScript.indexOf("async function packageMacos("),
+  );
+  const unsignedReport = packaging.indexOf("built unsigned ${distribution");
+  assert.notEqual(unsignedReport, -1);
+  assert.ok(unsignedReport < packaging.indexOf("createDistributionDiskImage("));
+  assert.ok(unsignedReport < packaging.indexOf("notarizeDiskImage("));
+  assert.match(
+    packaging.slice(unsignedReport),
+    /^[^;]*;\s*\)?;?\s*continue;/su,
   );
 });
 
@@ -364,6 +471,79 @@ test("Developer ID certificate metadata binds the selected fingerprint and Team 
   assert.throws(
     () => parseDeveloperIdCertificateReport("subject=CN=missing metadata"),
     /did not contain/u,
+  );
+});
+
+test("a lost Apple timestamp is retried and anything else is not", () => {
+  // What the 0.2.13 release actually saw. The connection to Apple's RFC 3161
+  // service never completed - SYN retransmitted to port 80 until a ~15s
+  // timeout, no HTTP request sent - and codesign reported it as this, so this
+  // is the text the retry has to recognise.
+  const observed =
+    "codesign --force --sign 0123 --timestamp MetaWork.app failed with exit code 1\nMetaWork.app: A timestamp was expected but was not found.";
+  assert.ok(isTimestampServiceFailure(observed));
+  for (const transient of [
+    "MetaWork.app: The timestamp service is not available.",
+    "metawork.dmg: errSecCSTimestampServiceNotAvailable",
+    "metawork.dmg: errSecCSTimestampRejection",
+    "productsign: error -67882",
+  ]) {
+    assert.ok(isTimestampServiceFailure(transient), transient);
+  }
+  // A certificate, keychain, policy or entitlement failure is a real problem.
+  // Retrying it would only reach the same refusal more slowly, and would hide
+  // it behind minutes of waiting at the one point a release cannot afford to
+  // be ambiguous.
+  for (const fatal of [
+    "MetaWork.app: code object is not signed at all",
+    "The specified item could not be found in the keychain.",
+    "MetaWork.app: resource fork, Finder information, or similar detritus not allowed",
+    "user interaction is not allowed",
+    "Warning: unable to build chain to self-signed root for signer",
+    "errSecInternalComponent",
+    "error: The operation could not be completed. Invalid argument -67881234",
+  ]) {
+    assert.ok(!isTimestampServiceFailure(fatal), fatal);
+    assert.equal(timestampRetryPlan(1, fatal), null);
+  }
+
+  // Bounded, with growing waits: four retries after the first attempt, then
+  // the failure surfaces. A service still refusing after that is an outage to
+  // report, not something to hold the release machine in front of.
+  assert.deepEqual(
+    [1, 2, 3, 4].map(
+      (attempt) => timestampRetryPlan(attempt, observed).delaySeconds,
+    ),
+    [10, 20, 40, 80],
+  );
+  assert.equal(timestampRetryPlan(1, observed).attempts, 5);
+  assert.equal(timestampRetryPlan(5, observed), null);
+  assert.equal(timestampRetryPlan(6, observed), null);
+});
+
+test("no timestamped signature bypasses the retry", () => {
+  const packageScript = readFileSync(
+    new URL("./package-macos.mjs", import.meta.url),
+    "utf8",
+  );
+  // Both signing sites - the application and its disk image - go through the
+  // retrying runner, and nothing hands --timestamp straight to run().
+  assert.equal(
+    packageScript.match(/runTimestampedCodesign\(/gu).length,
+    3,
+    "one definition and both signing sites",
+  );
+  for (const call of packageScript.match(
+    /run\("\/usr\/bin\/codesign",[\s\S]{0,400}/gu,
+  ) ?? []) {
+    assert.doesNotMatch(call.slice(0, call.indexOf(");") + 2), /--timestamp/u);
+  }
+  assert.equal(packageScript.match(/"--timestamp"/gu).length, 2);
+  // Classification needs the failure text, so the signing call captures its
+  // output instead of inheriting it.
+  assert.match(
+    packageScript,
+    /run\("\/usr\/bin\/codesign", args, \{ capture: true \}\)/u,
   );
 });
 

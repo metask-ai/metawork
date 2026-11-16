@@ -406,6 +406,66 @@ export function verifyDeveloperIdSignature(
   return { authorities, identifier, policy, report, teamId };
 }
 
+// Every signature here carries --timestamp, which is a hard dependency on
+// Apple's RFC 3161 service, and the 0.2.13 release lost two signing runs to
+// it. The system log says the failure was the TCP connection itself: DNS had
+// already returned an IPv4 address, but the connection retransmitted SYN to
+// port 80 seven times and timed out after about 15 seconds
+// (NSURLErrorDomain -1001, response_status=-1, request_bytes=0,
+// response_bytes=0). Not one HTTP request left the machine, so this was packet
+// loss on the path and not server-side throttling, and Apple's own guidance on
+// the symptom treats it as a transient service or network fault. With no retry
+// at all, one blip threw away a signing and notarization sequence that takes
+// over twenty minutes.
+const timestampAttempts = 5;
+
+// An allowlist, so an unrecognized failure still fails on the first attempt.
+// A certificate, keychain, entitlement or policy failure is a real problem and
+// retrying it only reaches the same failure more slowly - the point is to
+// absorb a lost timestamp request, never to grind at a refusal.
+export function isTimestampServiceFailure(output) {
+  return /A timestamp was expected but was not found|The timestamp service is not available|errSecCSTimestamp|(?:^|[^0-9])-67882(?![0-9])/iu.test(
+    output,
+  );
+}
+
+// The whole retry decision in one place: how many seconds to wait before
+// attempt + 1, or null to fail now. Bounded on purpose - a timestamp service
+// that is still refusing after four waits is an outage to be reported, not
+// something to sit in front of while the release machine is held.
+export function timestampRetryPlan(attempt, output) {
+  if (attempt >= timestampAttempts || !isTimestampServiceFailure(output))
+    return null;
+  return { attempts: timestampAttempts, delaySeconds: 10 * 2 ** (attempt - 1) };
+}
+
+function waitSeconds(seconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
+}
+
+// Output is captured rather than inherited because the failure has to be read
+// to be classified, so it is echoed on success to keep codesign's own report
+// in the packaging log.
+function runTimestampedCodesign(args, label) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const result = run("/usr/bin/codesign", args, { capture: true });
+      const output = combinedOutput(result).trim();
+      if (output) console.log(output);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const plan = timestampRetryPlan(attempt, message);
+      if (plan === null) throw error;
+      console.warn(
+        `${label}: Apple timestamp service failed on attempt ${attempt} of ${plan.attempts}, retrying in ${plan.delaySeconds}s`,
+      );
+      console.warn(message);
+      waitSeconds(plan.delaySeconds);
+    }
+  }
+}
+
 export function signWithDeveloperId(targetPath, identity, options = {}) {
   requireMacos();
   requireTarget(targetPath);
@@ -424,7 +484,7 @@ export function signWithDeveloperId(targetPath, identity, options = {}) {
     args.push("--preserve-metadata=entitlements");
   }
   args.push(targetPath);
-  run("/usr/bin/codesign", args);
+  runTimestampedCodesign(args, `${path.basename(targetPath)} signing`);
 }
 
 function runNative(args) {
@@ -533,7 +593,11 @@ export function verifyMacosMinimumSystemVersion(appPath) {
   return expected;
 }
 
-function verifyPackagedMacosApp(identity, appIconArtifact) {
+// Everything a packaged .app can be held to without a signing identity: the
+// Renderer it carries, its icons, its declared identity and minimum system.
+// An unsigned run stops after this, because it is the last thing that can be
+// proven rather than faked.
+function verifyPackagedMacosAppContents(appIconArtifact) {
   const sourceAssets = path.join(repositoryRoot, "frontend", "dist");
   const packagedAssets = path.join(
     packagedAppPath,
@@ -586,6 +650,10 @@ function verifyPackagedMacosApp(identity, appIconArtifact) {
   }
   verifyMacosMinimumSystemVersion(packagedAppPath);
   verifyStagedMacosAppIcon(appIconArtifact, packagedAppPath);
+}
+
+function verifyPackagedMacosApp(identity, appIconArtifact) {
+  verifyPackagedMacosAppContents(appIconArtifact);
   return verifyDeveloperIdSignature(
     packagedAppPath,
     identity,
@@ -737,13 +805,10 @@ function createDistributionDiskImage(identity, targetPath) {
     }
     rmSync(workRoot, { recursive: true, force: true });
   }
-  run("/usr/bin/codesign", [
-    "--force",
-    "--sign",
-    identity.fingerprint,
-    "--timestamp",
-    targetPath,
-  ]);
+  runTimestampedCodesign(
+    ["--force", "--sign", identity.fingerprint, "--timestamp", targetPath],
+    `${path.basename(targetPath)} signing`,
+  );
   verifyDeveloperIdDiskImageSignature(targetPath, identity);
   run("/usr/bin/hdiutil", ["verify", targetPath], {
     capture: true,
@@ -928,6 +993,22 @@ async function buildPackagedMacosApp(
     runtimeAssetOptions,
   );
   verifyPackagedMacosExecutableArchitecture(distribution.executable);
+  // Where an unsigned package stops, which is the same boundary
+  // scripts/package-windows.mjs draws: the whole distribution packaging path
+  // runs, and only the steps that need the certificate are left out. A machine
+  // without a Developer ID still proves that the .app a signed run would sign
+  // can be built and is structurally the right one, which is what makes this
+  // path checkable anywhere instead of only on the release machine.
+  if (identity === null) {
+    verifyMacosExecutableSections(
+      executableSections,
+      readFileSync(
+        path.join(executableDirectory, localProductIdentity.executableName),
+      ),
+    );
+    verifyPackagedMacosAppContents(appIconArtifact);
+    return { executableSections };
+  }
   const ripgrepPath = path.join(executableDirectory, "rg");
   signWithDeveloperId(ripgrepPath, identity, {
     identifier: `${localProductIdentity.bundleId}.agentcore.rg`,
@@ -952,7 +1033,50 @@ async function buildPackagedMacosApp(
   };
 }
 
-async function packageMacos(selection) {
+// The same shape scripts/package-windows.mjs takes, with the opposite default:
+// Windows packaging is also the ordinary local way to build an installer, while
+// this entry only ever produces a release artifact, so leaving the certificate
+// out has to be asked for rather than fallen into. A release operator running
+// the documented command cannot end up with an unsigned .app.
+export function parseMacosPackageArguments(arguments_) {
+  let architecture = "all";
+  let architectureSeen = false;
+  let signing = "required";
+  let signingSeen = false;
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (!argument.startsWith("--")) {
+      if (architectureSeen) {
+        throw new Error(
+          "macOS package architecture may only be specified once",
+        );
+      }
+      // Validated by macosPackageTargetIds, which owns the selection and
+      // names the accepted values in its own failure.
+      architecture = argument;
+      architectureSeen = true;
+      continue;
+    }
+    let value;
+    if (argument === "--signing") {
+      value = arguments_[index + 1];
+      index += 1;
+    } else if (argument.startsWith("--signing=")) {
+      value = argument.slice("--signing=".length);
+    } else {
+      throw new Error(`unknown package:macos argument ${argument}`);
+    }
+    if (signingSeen) throw new Error("--signing may only be specified once");
+    signingSeen = true;
+    if (value !== "none" && value !== "required") {
+      throw new Error("--signing must be none or required");
+    }
+    signing = value;
+  }
+  return Object.freeze({ architecture, signing });
+}
+
+async function packageMacos(selection, signing) {
   requireMacos();
   const distributions = macosPackageTargetIds(selection).map(
     macosDistributionForAgentCoreTarget,
@@ -971,7 +1095,11 @@ async function packageMacos(selection) {
     appIconPngSourcePath,
   );
   try {
-    const identity = resolveDistributionIdentity();
+    // Read only when it is going to be used. Resolving it first meant a
+    // machine without the certificate could not reach any build step at all,
+    // which is why no part of this path ran anywhere but the release machine.
+    const identity =
+      signing === "required" ? resolveDistributionIdentity() : null;
     for (const distribution of distributions) {
       const signature = await buildPackagedMacosApp(
         identity,
@@ -979,6 +1107,12 @@ async function packageMacos(selection) {
         appIconArtifact,
         agentCoreBundles.get(distribution.targetId),
       );
+      if (identity === null) {
+        console.log(
+          `built unsigned ${distribution.artifact} macOS app ${packagedAppPath}: no disk image, signature or notarization, a verification artifact and never a release artifact`,
+        );
+        continue;
+      }
       createDistributionDiskImage(identity, distribution.diskImagePath);
       const notarized = notarizeDiskImage(
         identity,
@@ -998,10 +1132,10 @@ async function packageMacos(selection) {
 }
 
 async function main() {
-  if (process.argv.length > 3) {
-    throw new Error("usage: npm run package:macos -- [arm64|x64|all]");
-  }
-  await packageMacos(process.argv[2] ?? "all");
+  const { architecture, signing } = parseMacosPackageArguments(
+    process.argv.slice(2),
+  );
+  await packageMacos(architecture, signing);
 }
 
 const invokedPath = process.argv[1]

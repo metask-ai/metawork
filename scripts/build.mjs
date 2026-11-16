@@ -32,9 +32,9 @@ export const nativeCli = path.join(
 
 export async function buildFrontend(
   root = repositoryRoot,
-  { outDir, signal } = {},
+  { outDir, signal, target } = {},
 ) {
-  await generateRendererWire({ signal });
+  await generateRendererWire({ signal, target });
   const args = [viteCli, "build"];
   if (outDir) args.push("--outDir", outDir);
   await runChild(process.execPath, args, {
@@ -93,7 +93,7 @@ export async function buildAutomationDebugArtifact(
     root,
     targetId ? { targetId } : undefined,
   );
-  await buildFrontend(root);
+  await buildFrontend(root, { target: bundle.target });
   await buildNative(root, {
     optimize: "Debug",
     target: bundle.target,
@@ -130,7 +130,7 @@ if (isMain) {
     repositoryRoot,
     targetId ? { targetId } : undefined,
   );
-  await buildFrontend(repositoryRoot);
+  await buildFrontend(repositoryRoot, { target: bundle.target });
   if (mode === "debug") {
     await buildNative(repositoryRoot, {
       optimize: "Debug",
