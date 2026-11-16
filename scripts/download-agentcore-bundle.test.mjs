@@ -11,7 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { downloadAgentCoreArchive } from "./download-agentcore-bundle.mjs";
+import {
+  downloadAgentCoreArchive,
+  resolveDownloadTargetId,
+} from "./download-agentcore-bundle.mjs";
 
 const lock = {
   version: "1.2.3",
@@ -62,6 +65,70 @@ for (const [target, [name, bytes]] of Object.entries(archives)) {
     assert.deepEqual(requests, [`${origin}manifest.json`, `${origin}${name}`]);
   });
 }
+
+test("an explicit target may be any locked one, including a cross-compiled host's", () => {
+  const host = () => "x86_64-windows-msvc";
+  // Packaging the Windows ARM64 installer cross compiles on an x64 host, so the
+  // bundle it must fetch is deliberately not the host's.
+  assert.equal(
+    resolveDownloadTargetId(["aarch64-windows-msvc"], { hostTargetId: host }),
+    "aarch64-windows-msvc",
+  );
+  for (const target of [
+    "x86_64-windows-msvc",
+    "aarch64-windows-msvc",
+    "aarch64-macos",
+    "x86_64-macos",
+  ]) {
+    assert.equal(
+      resolveDownloadTargetId([target], { hostTargetId: host }),
+      target,
+    );
+  }
+
+  // No argument still means this machine's own target, and an explicit target
+  // never consults the host, so an unsupported host cannot block it.
+  assert.equal(
+    resolveDownloadTargetId([], { hostTargetId: host }),
+    "x86_64-windows-msvc",
+  );
+  const unsupported = () => {
+    throw new Error("unsupported AgentCore host target: riscv64-plan9");
+  };
+  assert.equal(
+    resolveDownloadTargetId(["aarch64-macos"], { hostTargetId: unsupported }),
+    "aarch64-macos",
+  );
+  assert.throws(
+    () => resolveDownloadTargetId([], { hostTargetId: unsupported }),
+    /unsupported AgentCore host target/,
+  );
+});
+
+test("the download entry still refuses unknown targets and extra arguments", () => {
+  const host = () => "x86_64-windows-msvc";
+  for (const target of [
+    "x86_64-windows-gnu",
+    "aarch64-windows",
+    "",
+    "../x86_64-windows-msvc",
+  ]) {
+    assert.throws(
+      () => resolveDownloadTargetId([target], { hostTargetId: host }),
+      /unsupported AgentCore bundle target/,
+      target,
+    );
+  }
+  for (const args of [
+    ["x86_64-windows-msvc", "aarch64-windows-msvc"],
+    ["x86_64-windows-msvc", "--force"],
+  ]) {
+    assert.throws(
+      () => resolveDownloadTargetId(args, { hostTargetId: host }),
+      /usage:/,
+    );
+  }
+});
 
 test("rejects release identity mismatches before requesting the archive", async () => {
   for (const changes of [

@@ -16,6 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   defaultAgentCoreTargetId,
   loadLockedAgentCoreManifest,
+  policyForTargetId,
   readAgentCoreBundleTargetId,
 } from "./agentcore-bundle.mjs";
 import { runChild } from "./run-child-process.mjs";
@@ -143,21 +144,31 @@ export async function downloadAgentCoreArchive(
   return bytes;
 }
 
+// This machine's own target is the default, not a requirement: the bundle a
+// build needs is the build's target, which is not the host's whenever we cross
+// compile - packaging the Windows ARM64 installer runs on an x64 host. Fetching
+// a bundle executes nothing, so the host says nothing about which one is
+// legitimate. What must agree is the staged bundle and the target being built,
+// and verifyStagedAgentCoreBundle already enforces exactly that where the build
+// consumes it. The host identity still matters to the probes that run a bundle
+// locally, and they keep deriving it themselves.
+export function resolveDownloadTargetId(
+  args,
+  { hostTargetId = defaultAgentCoreTargetId } = {},
+) {
+  if (args.length > 1)
+    throw new Error(
+      "usage: node scripts/download-agentcore-bundle.mjs [target-id]",
+    );
+  return policyForTargetId(args.length === 1 ? args[0] : hostTargetId()).id;
+}
+
 const isMain =
   process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
-  const [targetId] = process.argv.slice(2);
-  if (process.argv.length !== 3)
-    throw new Error(
-      "usage: node scripts/download-agentcore-bundle.mjs <target-id>",
-    );
-  const hostTargetId = defaultAgentCoreTargetId();
-  if (targetId !== hostTargetId)
-    throw new Error(
-      `AgentCore target ${targetId} does not match ${hostTargetId}`,
-    );
+  const targetId = resolveDownloadTargetId(process.argv.slice(2));
 
   const { manifest: lock } = await loadLockedAgentCoreManifest(
     repositoryRoot,
