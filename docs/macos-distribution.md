@@ -154,11 +154,43 @@ DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事�
 1. `chore: release` 提交经 PR 合入 `main`；
 2. 在该 commit 上推送 `v<version>` tag，`.github/workflows/release.yml` 校验这个 tag 并建立 Release 草稿；
 3. 检出该 tag 的确切 sha，stage 所选 canonical bundle 后按本文流程完成签名、公证与发布验证；
-4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本。
+4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本，见下节。
 
 闸门放在打包之前是因为它廉价：workflow 是秒级，四个产物加公证是小时级。先打包再打 tag 会让 tag 指向一棵没有人构建过的树——打包期间任何合入都会移动 `main` 的尖端。推送 tag 不构成公开声明，workflow 只建立未发布的草稿。
 
 GitHub Release 只记录版本，不承载分发：产物由下载主机提供，不作为附件上传。产物出问题时发下一个 patch 版本，不删除也不移动已经打出的 tag——已经取到该 tag 的人会停留在与 Release 所述不同的树上。
+
+## 更新 manifest
+
+运行中的客户端只读一个文件来发现新版本：[`src/product/update.zig`](../src/product/update.zig) 里的 `https://metawork.metask-ai.com/manifest.json`。发布草稿和把这个文件指向新版本是同一步，因为在产物已上传、草稿已发布而 manifest 仍指向旧版本的那段时间里，没有任何用户会知道新版本存在；反过来，manifest 先指向一个未发布的版本会把用户送到下载不到的产物上。
+
+**这个文件不在本仓库。** 仓库里没有被跟踪的 `manifest.json`，也没有任何站点部署配置，所以它既不随 tag 变化，也不经过 PR——改它是一次仓库之外的手工操作，没有任何自动化会替你做。
+
+它由腾讯云 CloudBase 静态托管提供，回源 COS（响应头 `server: tcbgw`、`x-cloudbase-upstream-type: Tencent-COS`）。改法是在 CloudBase 控制台或用 `tcb` CLI 上传新的 `manifest.json` 覆盖同一路径。
+
+`cache-control: public, max-age=300, s-maxage=600`，即 CDN 最多缓存 10 分钟：上传后不会立刻生效。刚上传完用 `curl` 看到旧版本号是正常的，等缓存过期再确认，不要以为上传失败而重复上传。
+
+0.2.13 发版后这个文件的实际内容：
+
+```json
+{
+  "version": "0.2.13",
+  "downloads": {
+    "macos": {
+      "arm64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-macos-arm64.dmg?release=0.2.13&rev=20261116",
+      "x64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-macos-x64.dmg?release=0.2.13&rev=20261116"
+    },
+    "windows": {
+      "x64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-windows-x64.exe?release=0.2.13&rev=20261116",
+      "arm64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-windows-arm64.exe?release=0.2.13&rev=20261116"
+    }
+  }
+}
+```
+
+切版本时要一起改的，除了顶层 `version`，还有四个 URL 里的版本目录 `v<version>`、文件名，以及 `?release=<version>&rev=<yyyymmdd>` 这两个查询参数——`release` 是版本号，`rev` 是上传当天的日期。漏掉任何一个都会让某个平台或架构继续下载上一版。
+
+产物本身在另一台主机上，不和 manifest 在一起：`https://downloads.metask-ai.com/metawork/v<version>/`。客户端的接受边界由 [`src/product/update.zig`](../src/product/update.zig) 固定：manifest 不超过 64 KiB、JSON 嵌套不超过 8 层、重复键直接拒绝，每个下载 URL 必须以 `https://downloads.metask-ai.com/` 开头且不带 user、password、port 或 fragment。任何一项不满足，整份 manifest 被整体拒绝，客户端停留在当前版本且不报告新版本。
 
 ## Office Skill 与私有依赖
 
