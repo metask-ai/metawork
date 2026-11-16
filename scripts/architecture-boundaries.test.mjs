@@ -3200,6 +3200,32 @@ test("Application arbitrates single-instance ownership before business owners", 
   );
 });
 
+test("vendor C and C++ compilation units carry no UBSan instrumentation", () => {
+  // Zig instruments the vendored C/C++ units with its C UBSan, and ucrt's
+  // inline `wmemcmp` reads 8 bytes at a time from whatever alignment the
+  // linker gave a wide literal - deliberate, legal on x86, UB by the
+  // standard. It is inline, so it compiles as part of the SDK's Windows C++
+  // unit: clicking a system notification reached `parseArguments`
+  // (`toast_notifications.h`) and aborted on the alignment check. Under a
+  // distributed ReleaseSafe build that abort is a silent trap with no panic
+  // text at all, so dropping the assignment ships an app that vanishes when
+  // a notification is clicked. Zig's own runtime safety checks are a
+  // separate mechanism and stay exactly as the optimization mode sets them.
+  // The app executable's root module is the only receiver: tests are never
+  // distributed and are the one place the instrumentation earns its keep,
+  // and our own C (SQLite) lives on other modules that keep theirs.
+  const assignments = [
+    ...read("build.zig").matchAll(
+      /\b([A-Za-z_][\w.]*)\.sanitize_c\s*=\s*\.(\w+)\s*;/gu,
+    ),
+  ].map((match) => [match[1], match[2]]);
+  assert.deepEqual(
+    assignments,
+    [["artifacts.exe.root_module", "off"]],
+    "build.zig must turn the C UBSan off for the app executable's root module, and for nothing else: without that assignment, clicking a Windows system notification aborts inside the vendored SDK C++ (ucrt's inline wmemcmp reads 8 bytes from a 4-byte-aligned wide literal), and in a ReleaseSafe distribution build it traps silently - no panic text, the app is simply gone. Narrow or remove it only once zogien/native#27 (https://github.com/zogien/native/issues/27) gives the Windows C++ compiles a precise -fno-sanitize=alignment.",
+  );
+});
+
 test("ordinary build and test entries stay isolated from macOS signing", () => {
   const packageJson = JSON.parse(read("package.json"));
   for (const script of ["check", "test", "build:debug", "build:release"]) {
@@ -3327,7 +3353,7 @@ test("system notification text is one closed vocabulary across Host and Renderer
   const slots = [...slotBlock.matchAll(/^\s{4}([a-z][a-z0-9_]*),$/gmu)].map(
     (match) => match[1],
   );
-  assert.ok(slots.length >= 8, "the Host must publish its notification slots");
+  assert.ok(slots.length >= 7, "the Host must publish its notification slots");
   const camel = (name) =>
     name.replace(/_([a-z0-9])/gu, (_, character) => character.toUpperCase());
 
@@ -3358,16 +3384,22 @@ test("system notification text is one closed vocabulary across Host and Renderer
     assert.ok(Object.hasOwn(zhCN, id), `${key} has no Chinese message (${id})`);
   }
 
-  // The Host owns no notification copy of its own: the only strings it puts
-  // in a banner are the manifest display name and the Product Task title.
-  // (That an unregistered table drops the body rather than falling back to
-  // English is proven by window.zig's own tests.)
+  // The Host owns no notification copy of its own: the only string it puts
+  // in a banner is the Product Task title, which is its headline; every
+  // other word comes from the registered table. The product name is not one
+  // of them — the system prints it itself, in the Windows attribution strip
+  // and the macOS notification header — so it takes no text slot here.
+  // (That an unregistered table drops the status rather than falling back
+  // to English is proven by window.zig's own tests.)
   const presentation = window.slice(
     window.indexOf("pub fn notifyScheduledTask("),
     window.indexOf("pub fn connectWindows("),
   );
   assert.ok(presentation.includes("showTaskNotification"));
-  assert.match(presentation, /\.title = app_manifest\.display_name,/u);
+  assert.match(presentation, /\.title = notification\.title\[0\.\.end\],/u);
+  assert.doesNotMatch(presentation, /app_manifest/u);
+  // No action button: a click on the banner is the only route into a Task.
+  assert.doesNotMatch(presentation, /action_label|action_command/u);
   assert.doesNotMatch(presentation, /"[A-Z][a-z]+ [a-z]/u);
   assert.doesNotMatch(presentation, /Scheduled task|View task|MetaWork/u);
 });

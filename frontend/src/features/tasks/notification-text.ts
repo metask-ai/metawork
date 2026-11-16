@@ -18,7 +18,6 @@ const slots: Record<keyof NotificationTextRegistration, MessageId> = {
   runCompleted: "notification.run.completed",
   runFailed: "notification.run.failed",
   runNeedsApproval: "notification.run.needs_approval",
-  openTaskAction: "notification.open_task",
 };
 
 /**

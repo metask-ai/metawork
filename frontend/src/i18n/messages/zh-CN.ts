@@ -1762,5 +1762,4 @@ export const zhCN: Record<MessageId, string> = {
   "notification.run.completed": "任务已完成",
   "notification.run.failed": "任务失败",
   "notification.run.needs_approval": "任务正在等待你的确认",
-  "notification.open_task": "查看任务",
 };

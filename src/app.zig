@@ -1140,8 +1140,9 @@ test "notification activation follows SDK command routing into the real Task Bri
     };
     const app: native_sdk.App = .{ .name = "schedule-notification-test", .context = &composition, .event_fn = App.event };
     const before = control.currentRevision();
-    // An action button exists only once the Renderer has registered its label,
-    // so routing can only be exercised against a registered table.
+    // The status line comes from the registered table; the banner's one route
+    // into the Task does not, so this exercises both from a registered table
+    // and, below, the command a wordless banner still carries.
     composition.platform.window.setNotificationText(bridge_api.notification_text.decode(.{
         .scheduleCompleted = "completed",
         .scheduleFailed = "failed",
@@ -1150,26 +1151,25 @@ test "notification activation follows SDK command routing into the real Task Bri
         .runCompleted = "run completed",
         .runFailed = "run failed",
         .runNeedsApproval = "run needs approval",
-        .openTaskAction = "open",
     }).?);
     try std.testing.expect(composition.platform.window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .task_id = 1, .title = "Completed", .kind = .completed }));
     try harness.runtime.dispatchCommand(app, .{ .name = "metawork.schedule.open.1", .source = .runtime, .window_id = 1 });
     try std.testing.expectEqual(@as(usize, 0), host.calls);
-    const activation = harness.null_platform.activateNotification("schedule-1-1-completed", .action).?;
-    try harness.runtime.dispatchPlatformEvent(app, activation);
-    try std.testing.expectEqual(@as(usize, 1), host.calls);
-    // A click on the banner itself reaches the same Task through the same
-    // command, so the user does not have to hit the button.
+    // The banner carries no action button, so nothing is bound to one. This
+    // consumes the record, which is why the next case raises the notification
+    // again before clicking it.
+    try std.testing.expect(harness.null_platform.activateNotification("schedule-1-1-completed", .action) == null);
+    // A click on the banner itself is the single route into the Task.
     try std.testing.expect(composition.platform.window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .task_id = 1, .title = "Completed", .kind = .completed }));
     const body_activation = harness.null_platform.activateNotification("schedule-1-1-completed", .body).?;
     try harness.runtime.dispatchPlatformEvent(app, body_activation);
-    try std.testing.expectEqual(@as(usize, 2), host.calls);
+    try std.testing.expectEqual(@as(usize, 1), host.calls);
     // A Run notification routes through that same single command.
     try harness.runtime.dispatchPlatformEvent(app, .app_deactivated);
     try std.testing.expect(composition.platform.window.notifyRunAttention(&harness.runtime, .{ .task_id = 1, .run_id = 5, .title = "Completed", .kind = .completed }));
     const run_activation = harness.null_platform.activateNotification("run-1-5-completed", .body).?;
     try harness.runtime.dispatchPlatformEvent(app, run_activation);
-    try std.testing.expectEqual(@as(usize, 3), host.calls);
+    try std.testing.expectEqual(@as(usize, 2), host.calls);
     try std.testing.expectEqual(before, control.currentRevision());
 }
 
