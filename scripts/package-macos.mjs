@@ -406,6 +406,66 @@ export function verifyDeveloperIdSignature(
   return { authorities, identifier, policy, report, teamId };
 }
 
+// Every signature here carries --timestamp, which is a hard dependency on
+// Apple's RFC 3161 service, and the 0.2.13 release lost two signing runs to
+// it. The system log says the failure was the TCP connection itself: DNS had
+// already returned an IPv4 address, but the connection retransmitted SYN to
+// port 80 seven times and timed out after about 15 seconds
+// (NSURLErrorDomain -1001, response_status=-1, request_bytes=0,
+// response_bytes=0). Not one HTTP request left the machine, so this was packet
+// loss on the path and not server-side throttling, and Apple's own guidance on
+// the symptom treats it as a transient service or network fault. With no retry
+// at all, one blip threw away a signing and notarization sequence that takes
+// over twenty minutes.
+const timestampAttempts = 5;
+
+// An allowlist, so an unrecognized failure still fails on the first attempt.
+// A certificate, keychain, entitlement or policy failure is a real problem and
+// retrying it only reaches the same failure more slowly - the point is to
+// absorb a lost timestamp request, never to grind at a refusal.
+export function isTimestampServiceFailure(output) {
+  return /A timestamp was expected but was not found|The timestamp service is not available|errSecCSTimestamp|(?:^|[^0-9])-67882(?![0-9])/iu.test(
+    output,
+  );
+}
+
+// The whole retry decision in one place: how many seconds to wait before
+// attempt + 1, or null to fail now. Bounded on purpose - a timestamp service
+// that is still refusing after four waits is an outage to be reported, not
+// something to sit in front of while the release machine is held.
+export function timestampRetryPlan(attempt, output) {
+  if (attempt >= timestampAttempts || !isTimestampServiceFailure(output))
+    return null;
+  return { attempts: timestampAttempts, delaySeconds: 10 * 2 ** (attempt - 1) };
+}
+
+function waitSeconds(seconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
+}
+
+// Output is captured rather than inherited because the failure has to be read
+// to be classified, so it is echoed on success to keep codesign's own report
+// in the packaging log.
+function runTimestampedCodesign(args, label) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const result = run("/usr/bin/codesign", args, { capture: true });
+      const output = combinedOutput(result).trim();
+      if (output) console.log(output);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const plan = timestampRetryPlan(attempt, message);
+      if (plan === null) throw error;
+      console.warn(
+        `${label}: Apple timestamp service failed on attempt ${attempt} of ${plan.attempts}, retrying in ${plan.delaySeconds}s`,
+      );
+      console.warn(message);
+      waitSeconds(plan.delaySeconds);
+    }
+  }
+}
+
 export function signWithDeveloperId(targetPath, identity, options = {}) {
   requireMacos();
   requireTarget(targetPath);
@@ -424,7 +484,7 @@ export function signWithDeveloperId(targetPath, identity, options = {}) {
     args.push("--preserve-metadata=entitlements");
   }
   args.push(targetPath);
-  run("/usr/bin/codesign", args);
+  runTimestampedCodesign(args, `${path.basename(targetPath)} signing`);
 }
 
 function runNative(args) {
@@ -745,13 +805,10 @@ function createDistributionDiskImage(identity, targetPath) {
     }
     rmSync(workRoot, { recursive: true, force: true });
   }
-  run("/usr/bin/codesign", [
-    "--force",
-    "--sign",
-    identity.fingerprint,
-    "--timestamp",
-    targetPath,
-  ]);
+  runTimestampedCodesign(
+    ["--force", "--sign", identity.fingerprint, "--timestamp", targetPath],
+    `${path.basename(targetPath)} signing`,
+  );
   verifyDeveloperIdDiskImageSignature(targetPath, identity);
   run("/usr/bin/hdiutil", ["verify", targetPath], {
     capture: true,
