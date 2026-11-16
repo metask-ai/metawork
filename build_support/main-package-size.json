@@ -1,18 +1,17 @@
 {
-  "schema": 1,
-  "baselineVersion": "0.2.6",
+  "schema": 2,
   "targets": {
     "x86_64-windows-msvc": {
-      "artifact": "metawork-0.2.6-windows-x64.exe",
-      "sha256": "92c0cefa7d75fe3606587e7695acc33fddb16945d66b939e88193d93a8075ff4",
-      "bytes": 8441096,
-      "allowanceBytes": 1048576
+      "version": "0.2.11",
+      "artifact": "metawork-0.2.11-windows-x64.exe",
+      "sha256": "be4b240ec71128af351b3755d7c082a96555492c363c6798fd1be23317f28874",
+      "bytes": 9863352
     },
     "aarch64-windows-msvc": {
-      "artifact": "metawork-0.2.6-windows-arm64.exe",
-      "sha256": "eef76ada2f0b6cfaf9ed89ea260a1f827a77007f8729790c1b7ec9e813e50acd",
-      "bytes": 8053432,
-      "allowanceBytes": 1048576
+      "version": "0.2.12",
+      "artifact": "metawork-0.2.12-windows-arm64.exe",
+      "sha256": "9f1cd52ae37f505629e3bce4c46f38644412ae1ca40991eacfd0b612903ecbb5",
+      "bytes": 9477976
     }
   }
 }

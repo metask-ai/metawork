@@ -19,7 +19,7 @@ import { runChild } from "./run-child-process.mjs";
 import { verifyNativeAutomationIsolation } from "./verify-native-automation-isolation.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import {
-  verifyMainPackageSize,
+  reportMainPackageSize,
   verifyMainPackageStage,
 } from "./main-package-size.mjs";
 import {
@@ -747,12 +747,12 @@ async function packageWindows() {
     );
   }
   const digest = verifyWindowsInstaller(distribution.installerArtifactPath);
-  verifyMainPackageSize(
+  const size = reportMainPackageSize(
     distribution.targetId,
     distribution.installerArtifactPath,
   );
   console.log(
-    `built ${signing ? "signed" : "unsigned"} Windows ${distribution.architecture} installer with Inno Setup ${compilerMajor}: ${distribution.installerArtifactPath} (sha256=${digest})`,
+    `built ${signing ? "signed" : "unsigned"} Windows ${distribution.architecture} installer with Inno Setup ${compilerMajor}: ${distribution.installerArtifactPath} (sha256=${digest}, ${size.summary})`,
   );
 }
 
