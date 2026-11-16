@@ -87,7 +87,16 @@ pub const CaptureKind = enum(u8) {
     _,
 };
 
-pub const BreadcrumbPhase = enum(u8) { empty = 0, running = 1, finished = 2, _ };
+pub const BreadcrumbPhase = enum(u8) {
+    empty = 0,
+    running = 1,
+    finished = 2,
+    /// A slot between the claim and the identity it is about to carry. A dump
+    /// that lands in this window shows the state honestly: the slot holds no
+    /// Run yet, so no reader counts it as one.
+    claiming = 3,
+    _,
+};
 
 /// Build identity, supplied by the composition root.
 pub const Identity = struct {
@@ -127,11 +136,18 @@ pub const frame_capacity: usize = 32;
 pub const fault_block_bytes: usize = 72 + frame_capacity * @sizeOf(u64);
 pub const breadcrumb_entry_bytes: usize = 40;
 /// Two per host worker (`host_worker_count` in `src/app.zig` is 16), which is
-/// the most Runs that can execute at once: every live Run is present, plus at
-/// least as many that just finished, which is what separates "this Run was
-/// running" from "this Run had already completed". A power of two keeps the
-/// publish side a masked `fetchAdd` -- no division in the Run path, and no
-/// second cursor to keep consistent with the first.
+/// the most Runs that can execute at once.
+///
+/// What the capacity buys is not "every live Run is present" -- that is the
+/// claim rule's job, and a claim never takes a slot from a Run that is still
+/// executing. It buys that a claim always finds a slot: with at most 16 live
+/// Runs, at least 16 slots are claimable, so the bounded scan cannot run out
+/// while the pool is the one this host builds. The headroom is also what
+/// keeps recently finished Runs in the record, which is what separates "this
+/// Run was running" from "this Run had already completed". If some future
+/// pool does hold more live Runs than there are slots, a claim returns
+/// `no_breadcrumb`: the record comes out one Run short rather than one Run
+/// wrong.
 pub const breadcrumb_capacity: usize = 32;
 pub const breadcrumb_block_bytes: usize = breadcrumb_entry_bytes * breadcrumb_capacity;
 pub const record_bytes: usize =
@@ -334,35 +350,70 @@ fn fillIdentity(options: Options) void {
 // ---------------------------------------------------------------------------
 // Breadcrumbs
 //
-// Publish side: the worker that owns the Run. `beginRun` claims a slot with
-// one masked `fetchAdd` and stores the identity before the phase, so a reader
-// that sees `running` sees the identity with it. `finishRun` only marks the
-// slot it claimed, and only while that slot still holds the same Run: once the
-// ring has wrapped past it the slot belongs to a newer Run and must be left
-// alone. `(task_id, run_id)` is unique per Run, so there is nothing to
-// mistake it for.
+// Publish side: the worker that owns the Run.
+//
+// The one rule that makes the record trustworthy is that a claim never takes a
+// slot from a Run that is still executing. A ring that overwrote the oldest
+// slot regardless would quietly drop exactly the Runs worth naming -- a Run
+// that outlives `breadcrumb_capacity` later starts is the long one, and a
+// long Run is what a fatal fault takes with it -- and the record would then
+// name a precise, wrong set of Tasks. So `beginRun` scans for a slot that is
+// empty or finished and takes it with a compare-exchange, which is also what
+// keeps two workers from claiming the same slot; the cursor only decides where
+// the scan starts, so finished entries are reused oldest-first. The identity
+// is stored between the claim and the `running` publish, so a reader that
+// sees `running` sees the identity with it.
+//
+// `finishRun` retires only the slot it claimed, and only while that slot still
+// holds the same Run: once the ring has handed it to another Run the newer
+// occupant stays. `(task_id, run_id)` is unique per Run, so there is nothing
+// to mistake it for.
 // ---------------------------------------------------------------------------
 
-/// Returns the claimed slot. Usable before `install`: without handlers the
-/// ring is simply never read.
+/// The slot handle for a Run the ring could not record, because every slot
+/// held a live Run. `finishRun` ignores it: one missing record beats one wrong
+/// record.
+pub const no_breadcrumb: u32 = std.math.maxInt(u32);
+
+/// Returns the claimed slot, or `no_breadcrumb`. Usable before `install`:
+/// without handlers the ring is simply never read.
 pub fn beginRun(task_id: u64, run_id: u64) u32 {
-    const slot: u32 = @intCast(breadcrumb_cursor.fetchAdd(1, .monotonic) % breadcrumb_capacity);
-    const entry = &breadcrumbs[slot];
-    @atomicStore(u8, &entry.phase, @intFromEnum(BreadcrumbPhase.empty), .monotonic);
-    @atomicStore(u64, &entry.task_id, task_id, .monotonic);
-    @atomicStore(u64, &entry.run_id, run_id, .monotonic);
-    @atomicStore(i64, &entry.started_at_unix_ms, currentUnixMs(), .monotonic);
-    @atomicStore(u64, &entry.thread_id, currentThreadId(), .monotonic);
-    @atomicStore(u8, &entry.phase, @intFromEnum(BreadcrumbPhase.running), .release);
-    return slot;
+    const running = @intFromEnum(BreadcrumbPhase.running);
+    const claiming = @intFromEnum(BreadcrumbPhase.claiming);
+    const start = breadcrumb_cursor.fetchAdd(1, .monotonic);
+    for (0..breadcrumb_capacity) |offset| {
+        const slot: u32 = @intCast((start +% offset) % breadcrumb_capacity);
+        const entry = &breadcrumbs[slot];
+        const observed = @atomicLoad(u8, &entry.phase, .acquire);
+        if (observed == running or observed == claiming) continue;
+        if (@cmpxchgStrong(u8, &entry.phase, observed, claiming, .acq_rel, .acquire) != null)
+            continue;
+        @atomicStore(u64, &entry.task_id, task_id, .monotonic);
+        @atomicStore(u64, &entry.run_id, run_id, .monotonic);
+        @atomicStore(i64, &entry.started_at_unix_ms, currentUnixMs(), .monotonic);
+        @atomicStore(u64, &entry.thread_id, currentThreadId(), .monotonic);
+        @atomicStore(u8, &entry.phase, running, .release);
+        return slot;
+    }
+    return no_breadcrumb;
 }
 
 pub fn finishRun(slot: u32, task_id: u64, run_id: u64) void {
+    // `no_breadcrumb` lands here too: nothing was recorded, nothing to retire.
     if (slot >= breadcrumb_capacity) return;
     const entry = &breadcrumbs[slot];
     if (@atomicLoad(u64, &entry.run_id, .monotonic) != run_id) return;
     if (@atomicLoad(u64, &entry.task_id, .monotonic) != task_id) return;
-    @atomicStore(u8, &entry.phase, @intFromEnum(BreadcrumbPhase.finished), .release);
+    // Only a Run that is still the slot's live occupant may retire it, so a
+    // late finish cannot reach past a reuse this Run never saw.
+    _ = @cmpxchgStrong(
+        u8,
+        &entry.phase,
+        @intFromEnum(BreadcrumbPhase.running),
+        @intFromEnum(BreadcrumbPhase.finished),
+        .acq_rel,
+        .acquire,
+    );
 }
 
 /// Test support: the ring and its cursor are process state that every test in
@@ -1485,15 +1536,110 @@ test "a captured fault carries the live Runs and leaves finished ones behind" {
     try std.testing.expectEqual(CaptureKind.posix_signal, after.fault.?.kind);
 }
 
-test "a finish after the ring wraps leaves the newer Run alone" {
+test "a Run that is still executing survives every later claim" {
+    // The failure this pins: a ring that reused the oldest slot regardless
+    // would drop a Run that outlives `breadcrumb_capacity` later starts --
+    // the long Run, which is the one a fatal fault takes with it -- and the
+    // record would then name a precise, wrong set of Tasks.
+    resetBreadcrumbs();
+    capture_attempts.store(0, .monotonic);
+    record_handle = null;
+    fillIdentity(.{ .role = .ui, .data_root = "", .identity = test_identity });
+    const live = beginRun(1, 1);
+    try std.testing.expect(live != no_breadcrumb);
+    for (0..breadcrumb_capacity * 3) |index| {
+        const slot = beginRun(2, index + 1);
+        try std.testing.expect(slot != no_breadcrumb);
+        try std.testing.expect(slot != live);
+        finishRun(slot, 2, index + 1);
+    }
+    const entry = breadcrumbSnapshot()[live];
+    try std.testing.expectEqual(BreadcrumbPhase.running, entry.phaseValue());
+    try std.testing.expectEqual(@as(u64, 1), entry.task_id);
+    try std.testing.expectEqual(@as(u64, 1), entry.run_id);
+    // And it is still the Run the record names.
+    capture(.{ .kind = .posix_signal, .code = 11 });
+    const decoded = try decodeRecord(&record_storage);
+    var storage: [breadcrumb_capacity]Breadcrumb = undefined;
+    const interrupted = decoded.interruptedRuns(&storage);
+    try std.testing.expectEqual(@as(usize, 1), interrupted.len);
+    try std.testing.expectEqual(@as(u64, 1), interrupted[0].task_id);
+    try std.testing.expectEqual(@as(u64, 1), interrupted[0].run_id);
+}
+
+test "a finish cannot retire a slot the ring has handed to a newer Run" {
     resetBreadcrumbs();
     const slot = beginRun(1, 1);
-    for (0..breadcrumb_capacity) |index| _ = beginRun(2, index + 1);
-    try std.testing.expectEqual(BreadcrumbPhase.running, breadcrumbSnapshot()[slot].phaseValue());
+    // Retire it, so the ring may reuse the slot, then claim until it does.
+    finishRun(slot, 1, 1);
+    var reused = false;
+    var next: u64 = 1;
+    while (!reused and next <= breadcrumb_capacity * 4) : (next += 1) {
+        const candidate = beginRun(2, next);
+        try std.testing.expect(candidate != no_breadcrumb);
+        if (candidate == slot) reused = true else finishRun(candidate, 2, next);
+    }
+    try std.testing.expect(reused);
     finishRun(slot, 1, 1);
     const entry = breadcrumbSnapshot()[slot];
     try std.testing.expectEqual(BreadcrumbPhase.running, entry.phaseValue());
     try std.testing.expectEqual(@as(u64, 2), entry.task_id);
+}
+
+test "a ring with no claimable slot loses a record instead of a live Run" {
+    resetBreadcrumbs();
+    var claimed: [breadcrumb_capacity]u32 = undefined;
+    for (&claimed, 0..) |*slot, index| {
+        slot.* = beginRun(3, index + 1);
+        try std.testing.expect(slot.* != no_breadcrumb);
+    }
+    const before = breadcrumbSnapshot();
+    try std.testing.expectEqual(no_breadcrumb, beginRun(3, breadcrumb_capacity + 1));
+    finishRun(no_breadcrumb, 3, breadcrumb_capacity + 1);
+    const after = breadcrumbSnapshot();
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+    for (claimed, 0..) |slot, index| {
+        try std.testing.expectEqual(@as(u64, index + 1), after[slot].run_id);
+        try std.testing.expectEqual(BreadcrumbPhase.running, after[slot].phaseValue());
+    }
+}
+
+test "concurrent claims never hand two live Runs the same slot" {
+    const Claimer = struct {
+        var occupied: [breadcrumb_capacity]std.atomic.Value(bool) =
+            @splat(std.atomic.Value(bool).init(false));
+        var collisions: std.atomic.Value(usize) = .init(0);
+        var lost: std.atomic.Value(usize) = .init(0);
+
+        fn run(task_id: u64) void {
+            for (0..256) |index| {
+                const slot = beginRun(task_id, index + 1);
+                if (slot == no_breadcrumb) {
+                    _ = lost.fetchAdd(1, .monotonic);
+                    continue;
+                }
+                if (occupied[slot].swap(true, .acq_rel)) _ = collisions.fetchAdd(1, .monotonic);
+                std.Thread.yield() catch {};
+                _ = occupied[slot].swap(false, .acq_rel);
+                finishRun(slot, task_id, index + 1);
+            }
+        }
+    };
+    resetBreadcrumbs();
+    Claimer.collisions.store(0, .monotonic);
+    Claimer.lost.store(0, .monotonic);
+    for (&Claimer.occupied) |*flag| flag.store(false, .monotonic);
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index|
+        thread.* = try std.Thread.spawn(.{}, Claimer.run, .{index + 1});
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqual(@as(usize, 0), Claimer.collisions.load(.monotonic));
+    // Eight claimers against 32 slots never exhaust the ring.
+    try std.testing.expectEqual(@as(usize, 0), Claimer.lost.load(.monotonic));
+    for (breadcrumbSnapshot()) |entry| switch (entry.phaseValue()) {
+        .empty, .finished => {},
+        else => return error.UnretiredBreadcrumb,
+    };
 }
 
 test "the ring holds every Run the host pool can execute at once" {
