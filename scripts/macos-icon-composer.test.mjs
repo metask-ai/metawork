@@ -66,36 +66,47 @@ test("macOS Icon Composer source is the flat canonical app icon", () => {
   assert.equal(manifest.groups[0].translucency.enabled, false);
 });
 
-test("macOS Icon Composer packaging pins the reviewed actool compiler", () => {
-  const xcode26Report = `<?xml version="1.0" encoding="UTF-8"?>
+test("macOS Icon Composer pins the reviewed actool build, not Xcode's version", () => {
+  const report = (bundleVersion, shortVersion) =>
+    `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>com.apple.actool.version</key><dict>
-<key>bundle-version</key><string>24765</string>
-<key>short-bundle-version</key><string>26.6</string>
+<key>bundle-version</key><string>${bundleVersion}</string>
+<key>short-bundle-version</key><string>${shortVersion}</string>
 </dict></dict></plist>`;
-  const xcode27Report = `<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict><key>com.apple.actool.version</key><dict>
-<key>bundle-version</key><string>25098</string>
-<key>short-bundle-version</key><string>27.0</string>
-</dict></dict></plist>`;
-  assert.deepEqual(parseActoolVersionReport(xcode26Report), {
+  assert.deepEqual(parseActoolVersionReport(report("24765", "26.6")), {
     bundleVersion: "24765",
     shortVersion: "26.6",
   });
+  // The two builds that have been reviewed: Xcode 26.6 on the hosted arm64
+  // runner image, and Xcode 27.0 on the release machine.
+  for (const [bundleVersion, shortVersion] of [
+    ["24765", "26.6"],
+    ["25098", "27.0"],
+  ]) {
+    assert.deepEqual(
+      requireSupportedActoolVersion(
+        parseActoolVersionReport(report(bundleVersion, shortVersion)),
+      ),
+      { bundleVersion, shortVersion },
+    );
+  }
+  // The same reviewed build under a marketing version nobody wrote down:
+  // Xcode 27.1 carries actool 25098 as well. Requiring both fields to match
+  // refused this, which is the whole reason the gate reads the build alone.
   assert.deepEqual(
-    requireSupportedActoolVersion(parseActoolVersionReport(xcode26Report)),
-    { bundleVersion: "24765", shortVersion: "26.6" },
+    requireSupportedActoolVersion(
+      parseActoolVersionReport(report("25098", "27.1")),
+    ),
+    { bundleVersion: "25098", shortVersion: "27.1" },
   );
-  assert.deepEqual(
-    requireSupportedActoolVersion(parseActoolVersionReport(xcode27Report)),
-    { bundleVersion: "25098", shortVersion: "27.0" },
-  );
+  // An unreviewed build stays refused however familiar its Xcode version is.
   assert.throws(
     () =>
       requireSupportedActoolVersion({
         bundleVersion: "99999",
-        shortVersion: "27.1",
+        shortVersion: "26.6",
       }),
-    /unsupported actool 27\.1/u,
+    /unsupported actool build 99999, reported as 26\.6/u,
   );
   assert.throws(
     () => parseActoolVersionReport("not a plist"),

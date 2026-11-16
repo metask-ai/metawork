@@ -15,9 +15,20 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const macosAppIconName = "MetaWork";
+// actool's own build number, which is what identifies the binary that turns
+// MetaWork.icon into an Assets.car. `short-bundle-version` is Xcode's
+// marketing version and moves independently of it: build 25098 ships in both
+// Xcode 27.0, on the release machine, and Xcode 27.1, on the hosted arm64
+// runner image, both measured on 2026-11-16. Matching on the pair therefore
+// refused a compiler that had already been reviewed, for no reason beyond
+// Xcode's own version moving. The short version is still parsed and still
+// reported, because it is the number a human needs in order to find the Xcode
+// an unreviewed build came from.
 export const supportedActoolVersions = Object.freeze([
-  Object.freeze({ bundleVersion: "24765", shortVersion: "26.6" }),
-  Object.freeze({ bundleVersion: "25098", shortVersion: "27.0" }),
+  // Xcode 26.6, which is the hosted macos-26 image's default.
+  "24765",
+  // Xcode 27.0 and 27.1.
+  "25098",
 ]);
 
 const nativeSdkFallbackIconName = "AppIcon.icns";
@@ -104,14 +115,9 @@ export function parseActoolVersionReport(output) {
 }
 
 export function requireSupportedActoolVersion(version) {
-  const supported = supportedActoolVersions.some(
-    (candidate) =>
-      candidate.shortVersion === version.shortVersion &&
-      candidate.bundleVersion === version.bundleVersion,
-  );
-  if (!supported) {
+  if (!supportedActoolVersions.includes(version.bundleVersion)) {
     throw new Error(
-      `unsupported actool ${version.shortVersion} (${version.bundleVersion}); review Icon Composer output before extending the allowlist`,
+      `unsupported actool build ${version.bundleVersion}, reported as ${version.shortVersion}; review Icon Composer output before extending the allowlist`,
     );
   }
   return version;
