@@ -21,17 +21,26 @@ name: Release
 # better than github.com would, so the page records what a version is rather
 # than being the place to get it from.
 #
-# The second job runs the distribution packaging path for both Windows
-# architectures against the tagged tree, unsigned, because that path only ever
-# runs on one developer's machine and broke twice without anyone noticing: the
-# main package size gate stayed red for five releases, and a host target guard
-# in the AgentCore downloader made ARM64 packaging impossible from an x64
+# The packaging jobs run the distribution path for all four artifacts against
+# the tagged tree, unsigned, because that path only ever runs on one
+# developer's machine and broke twice without anyone noticing: the main
+# package size gate stayed red for five releases, and a host target guard in
+# the AgentCore downloader made ARM64 packaging impossible from an x64
 # machine. Both are exit codes.
+#
+# macOS can run here at all only because the packaging entry gained an
+# unsigned mode. Before that it could not reach a single build step without a
+# Developer ID, so none of it had ever run outside the release machine. What
+# the unsigned mode cannot stand in for is the disk image: its Finder icon
+# view has to be written by Finder in a real graphical session, and its last
+# step signs the image. So these jobs end at a verified .app, and the dmg,
+# signature, notarization and stapling remain a hand-run on the certificate
+# machine.
 #
 # It is one workflow rather than two so that `needs: draft` can exist. Two
 # workflows triggered by the same tag start at the same time, so a tag that is
-# about to be refused still starts a 45-minute Windows matrix. Gated, the
-# matrix never begins: failing cheaply is the whole reason the tag goes first.
+# about to be refused still starts a 45-minute packaging matrix. Gated, neither
+# begins: failing cheaply is the whole reason the tag goes first.
 #
 # The cost, accepted deliberately: between releases nothing verifies the
 # packaging path, so a break surfaces when the tag is pushed, and a tag is
@@ -411,4 +420,127 @@ jobs:
             else
               printf -- '- No installer measurement was produced; the packaging run did not reach the end.\n'
             fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  macos:
+    name: macOS app (${{ matrix.architecture }})
+    needs: draft
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
+    strategy:
+      fail-fast: false
+      # Both targets on arm64 hardware, which is what the release machine is:
+      # the x64 artifact has always been cross-built from the same Mac, so an
+      # Intel runner would verify a path nobody releases from.
+      #
+      # The image is pinned to macos-26 rather than macos-latest because the
+      # Icon Composer gate only accepts actool builds that have been reviewed,
+      # and this image's default Xcode is the 26.6 whose actool build (24765)
+      # is already in that allowlist, measured on 2026-11-16. DEVELOPER_DIR is
+      # deliberately not pinned on top of that: when the image's default Xcode
+      # moves, the gate is supposed to say so by name, which is the same thing
+      # it does on the release machine.
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-26
+            target: aarch64-macos
+            lock: build_support/agentcore-bundle.macos-aarch64.lock.json
+          - architecture: x64
+            runner: macos-26
+            target: x86_64-macos
+            lock: build_support/agentcore-bundle.macos-x86_64.lock.json
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      # Dependency packages only, for the same reasons as the Windows job: a
+      # release is built from nothing, and the repository is already over the
+      # Actions cache limit.
+      - name: Cache Zig dependency packages
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .zig-cache/global/p
+          key: zig-packages-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
+
+      - name: Prepare Zig cache
+        shell: bash
+        run: |
+          cache="$GITHUB_WORKSPACE/.zig-cache/global"
+          mkdir -p "$cache/tmp"
+          echo "ZIG_GLOBAL_CACHE_DIR=$cache" >> "$GITHUB_ENV"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Restore AgentCore release download
+        id: agentcore-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
+
+      - name: Stage locked AgentCore bundle
+        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
+
+      - name: Save verified AgentCore release download
+        if: steps.agentcore-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
+
+      # Unlike Windows, macOS packaging defaults to --signing required, so the
+      # unsigned mode is asked for explicitly. Everything up to the disk image
+      # runs: the ReleaseSafe build, the Native SDK package, the Icon Composer
+      # compile, minimum system version and tray staging, the AgentCore runtime
+      # assets, the single-architecture check, the Mach-O section comparison
+      # and the bundle's own structural verification.
+      #
+      # `shell: bash` is load-bearing: it is the only way this step gets
+      # pipefail, and without it a failing packaging run would be hidden by
+      # tee's own exit code.
+      - name: Build the unsigned app
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          npm run package:macos -- "$ARCHITECTURE" --signing none 2>&1 | tee package.log
+
+      - name: Report the packaging result
+        if: always()
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          {
+            printf '### macOS %s\n\n' "$ARCHITECTURE"
+            line=$(grep -E '^built (unsigned|Developer ID signed) ' package.log 2>/dev/null | tail -1 || true)
+            if [[ -n "$line" ]]; then
+              printf -- '- %s\n' "${line#built }"
+            else
+              printf -- '- No packaging result was produced; the run did not reach the end.\n'
+            fi
+            # No artifact size here, unlike the Windows installer: the unsigned
+            # path stops before the disk image, so there is nothing measurable
+            # on disk that a release would ship.
+            printf -- '- Unsigned and unnotarized: a verification artifact, never a release artifact.\n'
           } >> "$GITHUB_STEP_SUMMARY"
