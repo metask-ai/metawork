@@ -898,6 +898,8 @@ async function buildPackagedMacosApp(
     "package",
     "--target",
     "macos",
+    "--optimize",
+    "ReleaseSafe",
     "--assets",
     "frontend/dist",
     "--signing",

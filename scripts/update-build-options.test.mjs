@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseBuildArguments, buildNative } from "./build.mjs";
 
-test("ordinary debug and ReleaseFast builds do not imply an update channel", () => {
+test("ordinary debug and release builds do not imply an update channel", () => {
   for (const mode of ["debug", "release"]) {
     assert.equal(parseBuildArguments([mode]).automaticUpdateCheck, false);
     assert.equal(

@@ -138,7 +138,7 @@ if (isMain) {
     });
   } else {
     await buildNative(repositoryRoot, {
-      optimize: "ReleaseFast",
+      optimize: "ReleaseSafe",
       target: bundle.target,
       automaticUpdateCheck,
     });
