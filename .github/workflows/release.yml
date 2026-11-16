@@ -1,0 +1,414 @@
+name: Release
+
+# The gate a release tag has to pass, and the draft it leaves behind.
+#
+# A release is cut by pushing the tag first and packaging from the commit that
+# tag names, so this workflow is where a release fails cheaply: half a minute
+# of checks against the tag, ahead of four signed and notarized artifacts that
+# take hours. Packaging the working tree and tagging afterwards would leave the
+# tag describing a tree nobody built, because anything merged in between moves
+# main's tip away from what was packaged.
+#
+# Pushing the tag is not an announcement: all this produces is an unpublished
+# draft. It builds nothing. The installers are built and signed on a machine
+# that holds the certificate. The manifest is edited in the same step as the
+# publish, because it is the only thing that tells a running MetaWork a new
+# version exists, so a manifest pointing at an unpublished release would hand
+# users a version they cannot download.
+#
+# A MetaWork release carries no files. The client reads its own manifest and
+# downloads from the product's own host, which serves this product's users
+# better than github.com would, so the page records what a version is rather
+# than being the place to get it from.
+#
+# The second job runs the distribution packaging path for both Windows
+# architectures against the tagged tree, unsigned, because that path only ever
+# runs on one developer's machine and broke twice without anyone noticing: the
+# main package size gate stayed red for five releases, and a host target guard
+# in the AgentCore downloader made ARM64 packaging impossible from an x64
+# machine. Both are exit codes.
+#
+# It is one workflow rather than two so that `needs: draft` can exist. Two
+# workflows triggered by the same tag start at the same time, so a tag that is
+# about to be refused still starts a 45-minute Windows matrix. Gated, the
+# matrix never begins: failing cheaply is the whole reason the tag goes first.
+#
+# The cost, accepted deliberately: between releases nothing verifies the
+# packaging path, so a break surfaces when the tag is pushed, and a tag is
+# never moved, so the answer is the next patch version. The real packaging
+# happens after the tag either way, which is why running this on every push to
+# main only ever bought knowing earlier, not a tree that cannot be broken.
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example, v0.2.13)
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  ZIG_VERSION: 0.16.0
+  # packaging/windows/metawork.iss includes
+  # `compiler:Languages\ChineseSimplified.isl`, which resolves inside the
+  # compiler's own directory and ships only with Inno Setup 7, so the 6.7.1 the
+  # runner image preinstalls cannot build this installer at all. The compiler
+  # is therefore installed rather than taken from the image, pinned to the
+  # version the release machine uses, with the digest from the published winget
+  # manifest.
+  INNO_SETUP_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe
+  INNO_SETUP_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: Check the tag and draft its notes
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+    steps:
+      - name: Accept only a stable release tag
+        shell: bash
+        run: |
+          # The shape src/product/update.zig accepts: three numeric parts, no
+          # leading zeros, no pre-release suffix. A tag the running application
+          # could not compare is not a release. This workflow has nothing to
+          # say about a pre-release tag, so it fails rather than guess.
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}$ ]]; then
+            echo "::error::Expected a stable release tag in the form vMAJOR.MINOR.PATCH, got $TAG."
+            exit 1
+          fi
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the tag to be contained in main
+        shell: bash
+        run: |
+          # Without this, any branch tip can be tagged and drafted as a
+          # release. `fetch-depth: 0` is documented to fetch every branch, but
+          # the check must not quietly pass if main is ever missing, so fetch
+          # it explicitly and fail loudly when even that cannot produce it.
+          # The fetch is unauthenticated, which this public repository allows.
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          fi
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "::error::main is not present in this checkout, so containment cannot be verified."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/$TAG^{commit}" refs/remotes/origin/main; then
+            echo "::error::$TAG does not point at a commit contained in main."
+            exit 1
+          fi
+          # Resolved from the tag rather than taken from $GITHUB_SHA, which on
+          # a manual run is the sha of the dispatched branch and not of the tag
+          # being drafted. This is the commit packaging has to start from.
+          echo "COMMIT=$(git rev-parse "refs/tags/$TAG^{commit}")" >> "$GITHUB_ENV"
+
+      - name: Require app.zon to declare the tagged version
+        shell: bash
+        run: |
+          # Only app.zon, on purpose. build.zig.zon, both package.json files
+          # and the two package-lock.json fields are already pinned to app.zon
+          # by "release version has one manifest owner and exact package
+          # mirrors" in scripts/architecture-boundaries.test.mjs, which runs on
+          # every pull request and covers one field more than a check here
+          # would. The tag is the only version source that test cannot see, so
+          # it is the only one worth re-deriving at tag time.
+          matches=$(grep -cE '^[[:space:]]*\.version = "[^"]+",?$' app.zon || true)
+          if [[ "$matches" != "1" ]]; then
+            echo "::error file=app.zon::Expected exactly one .version field in app.zon, found $matches."
+            exit 1
+          fi
+          declared=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)",?$/\1/p' app.zon)
+          if [[ "$declared" != "$VERSION" ]]; then
+            echo "::error file=app.zon::app.zon declares $declared, but $TAG names $VERSION."
+            exit 1
+          fi
+          echo "app.zon declares $VERSION"
+
+      - name: Take the release notes from the changelog
+        shell: bash
+        run: |
+          # Notes come from the curated changelog, never from generated pull
+          # request titles: the repository already writes release notes, and a
+          # draft that has to be rewritten by hand is a step that gets skipped.
+          #
+          # A missing section is also a blocker, but this is not where it
+          # should first be noticed: "release version has a dated changelog
+          # section" in scripts/architecture-boundaries.test.mjs fails on the
+          # `chore: release` pull request itself, a whole step before a tag
+          # exists. The check here is the backstop for a changelog edited after
+          # that pull request merged, and it stays a hard failure.
+          escaped=${VERSION//./\\.}
+          if ! grep -qE "^## \[$escaped\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md has no dated '## [$VERSION] - YYYY-MM-DD' section."
+            exit 1
+          fi
+          # A fixed prefix with index(), so the version's dots and brackets
+          # need no regex escaping. `### Added` is not a section boundary
+          # because the heading has to start at the first column.
+          notes=$(awk -v heading="## [$VERSION] - " '
+            index($0, heading) == 1 { capture = 1; next }
+            capture && index($0, "## ") == 1 { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          notes=$(printf '%s\n' "$notes" | sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac)
+          if [[ -z "${notes//[[:space:]]/}" ]]; then
+            echo "::error file=CHANGELOG.md::The $VERSION section in CHANGELOG.md is empty."
+            exit 1
+          fi
+          printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
+          echo "release notes: $(wc -l < "$RUNNER_TEMP/release-notes.md") lines from CHANGELOG.md"
+
+      - name: Create or refresh the draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Drafts carry a tag_name but are not reachable through
+          # /releases/tags/{tag}, so the listing is the only way to find one.
+          # Written to a file rather than read from a command substitution so
+          # that a failed listing fails this step instead of looking like "no
+          # release exists yet" and creating a second one. $TAG is already
+          # constrained to digits and dots by the first step, so interpolating
+          # it into the jq program cannot change the filter.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | [.draft, .id, .html_url] | @tsv" \
+            > "$RUNNER_TEMP/releases.tsv"
+          found=$(wc -l < "$RUNNER_TEMP/releases.tsv")
+          # GitHub allows several releases to share a tag_name. Picking one of
+          # them would mean refreshing an arbitrary draft and leaving the rest.
+          if (( found > 1 )); then
+            echo "::error::$TAG already has $found releases; resolve them before drafting."
+            exit 1
+          fi
+          draft=""
+          id=""
+          url=""
+          if (( found == 1 )); then
+            IFS=$'\t' read -r draft id url < "$RUNNER_TEMP/releases.tsv"
+          fi
+          # A published release is never edited here; only an unpublished draft
+          # is refreshed, so re-running after a changelog fix is safe.
+          if [[ -n "$id" && "$draft" == "false" ]]; then
+            printf 'Release %s is already published, leaving it untouched:\n%s\n' "$TAG" "$url"
+            {
+              echo "RELEASE_STATE=published"
+              echo "RELEASE_URL=$url"
+            } >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [[ -n "$id" ]]; then
+            jq -n --arg name "MetaWork $TAG" \
+              --rawfile body "$RUNNER_TEMP/release-notes.md" \
+              '{name: $name, body: $body}' |
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$id" --input - >/dev/null
+            printf 'Refreshed the existing draft for %s:\n%s\n' "$TAG" "$url"
+          else
+            url=$(gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --title "MetaWork $TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md")
+            printf 'Created a draft for %s:\n%s\n' "$TAG" "$url"
+          fi
+          {
+            echo "RELEASE_STATE=draft"
+            echo "RELEASE_URL=$url"
+          } >> "$GITHUB_ENV"
+
+      - name: Summarise the run
+        shell: bash
+        run: |
+          # Everything that produces a shippable artifact happens after this
+          # run, on a machine with the certificate, so the summary says what is
+          # left rather than implying a finished release. The sha is spelled out
+          # because it, not main's tip, is what gets packaged.
+          {
+            printf '## MetaWork %s\n\n' "$TAG"
+            printf -- '- `app.zon` declares `%s`, and the tagged commit is contained in `main`\n' "$VERSION"
+            printf -- '- Notes taken from the `CHANGELOG.md` section for `%s`\n' "$VERSION"
+            if [[ "$RELEASE_STATE" == "published" ]]; then
+              printf -- '- Already published, left untouched: %s\n\n' "$RELEASE_URL"
+            else
+              printf -- '- Draft ready, **not published**: %s\n\n' "$RELEASE_URL"
+            fi
+            printf 'Next, by hand: check out `%s` and package, sign and notarize the four installers from it, upload them to the download host, then publish this draft and point the update manifest at the new version in the same step. Nothing is attached to a MetaWork release.\n\n' "$COMMIT"
+            printf 'If an artifact turns out to be wrong, release the next patch version. This tag stays where it is: moving or deleting a tag that has been drafted leaves anyone who already fetched it on a different tree than the one this release names.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    name: Windows installer (${{ matrix.architecture }})
+    needs: draft
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+            target: x86_64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-x86_64.lock.json
+          - architecture: arm64
+            runner: windows-2022
+            target: aarch64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-aarch64.lock.json
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      # Only the fetched dependency packages, which are small and shared with
+      # CI. The compiled output is deliberately not cached: a release is
+      # always built from nothing, and a warm object cache would hide exactly
+      # the kind of regression this job is here to catch. The repository is
+      # also already over the 10 GB Actions cache limit, so a new 800 MB entry
+      # per target would evict the caches the test jobs depend on.
+      - name: Cache Zig dependency packages
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .zig-cache/global/p
+          key: zig-packages-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
+
+      - name: Prepare Zig cache
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE '.zig-cache/global'
+          New-Item -ItemType Directory -Force (Join-Path $cache 'tmp') | Out-Null
+          "ZIG_GLOBAL_CACHE_DIR=$cache" >> $env:GITHUB_ENV
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Restore AgentCore release download
+        id: agentcore-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
+
+      # An explicit target, including the one that is not the runner's own
+      # architecture. The downloader accepts any target present in a lock
+      # without consulting the host, which is what makes ARM64 packaging
+      # possible here at all.
+      - name: Stage locked AgentCore bundle
+        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
+
+      - name: Save verified AgentCore release download
+        if: steps.agentcore-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
+
+      - name: Install the pinned Inno Setup compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          curl.exe --fail --location --silent --show-error --output $installer $env:INNO_SETUP_URL
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash
+          $expected = $env:INNO_SETUP_SHA256.ToUpperInvariant()
+          if ($actual -ne $expected) {
+            throw "Inno Setup download digest is $actual, expected $expected"
+          }
+          # The installer is a GUI program, so the call operator would not wait
+          # for it and the next step would look for a compiler that is still
+          # being written.
+          $process = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/ALLUSERS'
+          if ($process.ExitCode -ne 0) {
+            throw "Inno Setup installer exited with $($process.ExitCode)"
+          }
+          $location = $null
+          foreach ($key in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1'
+          )) {
+            $entry = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            if ($entry -and $entry.InstallLocation) {
+              $location = $entry.InstallLocation
+              break
+            }
+          }
+          if (-not $location) { throw 'Inno Setup 7 registered no install location' }
+          $compiler = Join-Path $location 'ISCC.exe'
+          # Asserted by name rather than left to ISCC, so a compiler without
+          # the language files the installer script requires fails here with
+          # the reason instead of inside a compile log.
+          $language = Join-Path $location 'Languages\ChineseSimplified.isl'
+          foreach ($required in @($compiler, $language)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Inno Setup 7 install is missing $required"
+            }
+          }
+          # Pointing the packaging script at this exact compiler settles the
+          # discovery order, so the image's preinstalled Inno Setup 6 cannot be
+          # reached through PATH and fail the gate for the wrong reason.
+          "METAWORK_INNO_SETUP_COMPILER=$compiler" >> $env:GITHUB_ENV
+          & $compiler /? | Select-Object -First 1
+
+      # Unsigned is the script's own default, so this is the release path with
+      # nothing removed from it except the parts that need the certificate.
+      - name: Build the unsigned installer
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        # The log stays in the workspace rather than under $RUNNER_TEMP, whose
+        # backslash Windows path a bash step would have to hand to grep and
+        # tee as a literal.
+        run: |
+          npm run package:windows -- "$ARCHITECTURE" 2>&1 | tee package.log
+
+      # The size delta only reports; it never fails a build. Putting it in the
+      # run summary is what makes a drifting main package visible without
+      # anyone opening a log, which is how it stayed red for five releases.
+      - name: Report the measured installer
+        if: always()
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          {
+            printf '### Windows %s\n\n' "$ARCHITECTURE"
+            line=$(grep -E '^built (unsigned|signed) Windows ' package.log 2>/dev/null | tail -1 || true)
+            if [[ -n "$line" ]]; then
+              printf -- '- %s\n' "${line#built }"
+              printf -- '- Unsigned and unnotarized: a verification artifact, never a release artifact.\n'
+            else
+              printf -- '- No installer measurement was produced; the packaging run did not reach the end.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

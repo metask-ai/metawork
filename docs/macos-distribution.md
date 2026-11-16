@@ -133,6 +133,19 @@ DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事�
 
 普通 `check`、`test`、Debug/Release build、Windows baseline 和 automation 不依赖 Apple Development、Developer ID 或 notary credential，也不访问真实 Keychain。
 
+## 发布顺序
+
+正式打包的输入是 tag 指向的 commit，不是工作树，也不是 `main` 的当前尖端：
+
+1. `chore: release` 提交经 PR 合入 `main`；
+2. 在该 commit 上推送 `v<version>` tag，`.github/workflows/release.yml` 校验这个 tag 并建立 Release 草稿；
+3. 检出该 tag 的确切 sha，stage 所选 canonical bundle 后按本文流程完成签名、公证与发布验证；
+4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本。
+
+闸门放在打包之前是因为它廉价：workflow 是秒级，四个产物加公证是小时级。先打包再打 tag 会让 tag 指向一棵没有人构建过的树——打包期间任何合入都会移动 `main` 的尖端。推送 tag 不构成公开声明，workflow 只建立未发布的草稿。
+
+GitHub Release 只记录版本，不承载分发：产物由下载主机提供，不作为附件上传。产物出问题时发下一个 patch 版本，不删除也不移动已经打出的 tag——已经取到该 tag 的人会停留在与 Release 所述不同的树上。
+
 ## Office Skill 与私有依赖
 
 Office 能力由[产品需求](requirements.md#53-task)拥有，跨平台准备、执行和故障恢复只由 [Product Skill 合同](product-architecture.md#内置-office-skill)定义。主包携带压缩 Skill、固定入口与锁定输入，不携带 Python、Node 或文档库；Application 资源发布仍属于自有数据根，macOS 排他发布只经[已登记窄 seam](architecture.md#35-native-sdk)。

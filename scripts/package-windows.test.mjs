@@ -233,18 +233,20 @@ test("Inno Setup compiler discovery prefers an explicit absolute path", () => {
   );
 });
 
-test("Inno Setup compiler gate accepts the supported 6 and 7 families", () => {
-  assert.equal(
-    parseInnoSetupCompilerMajor("Inno Setup 6 Command-Line Compiler"),
-    6,
-  );
+test("Inno Setup compiler gate requires the family that ships the language file", () => {
   assert.equal(
     parseInnoSetupCompilerMajor("Inno Setup 7 Command-Line Compiler"),
     7,
   );
+  // 6 is discovered on plenty of machines and compiles nothing here, so it
+  // has to fail at the gate with the reason rather than inside ISCC.
+  assert.throws(
+    () => parseInnoSetupCompilerMajor("Inno Setup 6 Command-Line Compiler"),
+    /ChineseSimplified\.isl/u,
+  );
   assert.throws(
     () => parseInnoSetupCompilerMajor("unknown compiler"),
-    /supported Inno Setup/u,
+    /ChineseSimplified\.isl/u,
   );
 });
 
@@ -350,12 +352,8 @@ test("modern SignTool arguments pin identity, SHA-256, RFC 3161, and verificatio
     "MetaWork.exe",
   ]);
   assert.match(
-    innoSignToolCompilerArgument(7, configuration),
+    innoSignToolCompilerArgument(configuration),
     /^--signtool=metawork=\$q.*signtool\.exe\$q sign \/sha1 .*\/fd SHA256 .*\/tr \$q.*\$q .*\/td SHA256 .*\$f$/u,
-  );
-  assert.match(
-    innoSignToolCompilerArgument(6, configuration),
-    /^\/Smetawork=/u,
   );
   const innoScript = readFileSync(
     new URL("../packaging/windows/metawork.iss", import.meta.url),
