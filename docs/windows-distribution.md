@@ -40,7 +40,20 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256 与整包体积相对上一个已发布版本的增量。
 
-编译安装器前，runtime stage 必须通过主包资源检查，不混入展开的 Office 资源树、Python、Node 或文档库。完整 Skill/helper/必要 XSD 以压缩内嵌资源随主包发布，解包前接受固定摘要、大小及路径检查；不以压缩规避内容边界。发布失败不阻止应用启动。整包体积不设上限：最终安装器以 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 记录的同 target 上一个已发布安装器为参照计算增量，和 SHA-256 一起输出在打包成功日志里；该增量只报告，不拒绝构建，也不以单个 executable 或资源压缩量代替整包测量。应用自身代码的合理增长可以接受，主包不携带解释器、文档库和展开资源树才是边界。基线由发布负责推进：每次 `chore: release` 在两个架构的安装器产出后各执行一次 `node scripts/main-package-size.mjs --record-size <target-id> <installer>`，并把更新后的策略文件随同一次发布提交合入；缺这一步时下一版报出的增量仍以陈旧快照为参照。策略文件本身保持严格校验，缺字段或格式错误必须立即失败。
+编译安装器前，runtime stage 必须通过主包资源检查，不混入展开的 Office 资源树、Python、Node 或文档库。完整 Skill/helper/必要 XSD 以压缩内嵌资源随主包发布，解包前接受固定摘要、大小及路径检查；不以压缩规避内容边界。发布失败不阻止应用启动。整包体积不设上限：最终安装器以 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 记录的同 target 上一个已发布安装器为参照计算增量，和 SHA-256 一起输出在打包成功日志里；该增量只报告，不拒绝构建，也不以单个 executable 或资源压缩量代替整包测量。应用自身代码的合理增长可以接受，主包不携带解释器、文档库和展开资源树才是边界。基线由发布负责推进：每个版本在两个架构的安装器产出后各执行一次 `node scripts/main-package-size.mjs --record-size <target-id> <installer>`，并把更新后的策略文件合入 `main`；安装器在 tag 之后才产出，因此这组记录是 tag 之后的独立提交，tag 指向的树不含本版的体积与摘要。缺这一步时下一版报出的增量仍以陈旧快照为参照。策略文件本身保持严格校验，缺字段或格式错误必须立即失败。
+
+## 发布顺序
+
+正式打包的输入是 tag 指向的 commit，不是工作树，也不是 `main` 的当前尖端：
+
+1. `chore: release` 提交经 PR 合入 `main`；
+2. 在该 commit 上推送 `v<version>` tag，`.github/workflows/release.yml` 校验这个 tag 并建立 Release 草稿；
+3. 检出该 tag 的确切 sha，按本文的固定流程生成两个架构的签名安装器；
+4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本。
+
+闸门放在打包之前是因为它廉价：workflow 是秒级，四个产物加公证是小时级。先打包再打 tag 会让 tag 指向一棵没有人构建过的树——打包期间任何合入都会移动 `main` 的尖端。推送 tag 不构成公开声明，workflow 只建立未发布的草稿。
+
+GitHub Release 只记录版本，不承载分发：产物由下载主机提供，不作为附件上传。产物出问题时发下一个 patch 版本，不删除也不移动已经打出的 tag——已经取到该 tag 的人会停留在与 Release 所述不同的树上。
 
 ## 签名边界
 
