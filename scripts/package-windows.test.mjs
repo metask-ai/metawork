@@ -421,7 +421,7 @@ test("Windows runtime gate requires the Native release package and GUI executabl
   .version = "0.1.1",
   .app_id = "com.metask.metawork.dev",
   .executable = "metawork.exe",
-  .optimize = "ReleaseFast",
+  .optimize = "ReleaseSafe",
   .subsystem = "gui",
 }`,
     );

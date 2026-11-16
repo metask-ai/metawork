@@ -565,7 +565,7 @@ export function verifyWindowsRuntimeStage(
     `.version = "${manifest.metadata.version}"`,
     `.app_id = "${manifest.identity.bundleId}"`,
     `.executable = "${manifest.identity.executableName}.exe"`,
-    `.optimize = "ReleaseFast"`,
+    `.optimize = "ReleaseSafe"`,
     `.subsystem = "gui"`,
   ]) {
     if (!nativeManifest.includes(expected)) {
@@ -628,14 +628,14 @@ async function packageWindows() {
     [
       "build",
       `-Dtarget=${bundle.target}`,
-      "-Doptimize=ReleaseFast",
+      "-Doptimize=ReleaseSafe",
       "-Dautomatic-update-check=true",
       "--prefix",
       distribution.releaseBuildPath,
     ],
     {
       cwd: repositoryRoot,
-      label: "Isolated Windows ReleaseFast build",
+      label: "Isolated Windows ReleaseSafe build",
       timeoutMs: null,
     },
   );
@@ -659,6 +659,8 @@ async function packageWindows() {
       distribution.runtimeStagePath,
       "--binary",
       releaseExecutablePath,
+      "--optimize",
+      "ReleaseSafe",
       "--assets",
       path.join(repositoryRoot, "frontend", "dist"),
     ],
