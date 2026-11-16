@@ -1536,6 +1536,7 @@ fn wireAgentCore(
     });
     const core_identity = b.addOptions();
     core_identity.addOption([]const u8, "manifest_sha256", &bundle.manifest_sha256);
+    core_identity.addOption(u16, "abi_revision", bundle.abi_revision);
     session.addOptions("agentcore_identity", core_identity);
     session.addImport("metask_agentcore", sdk);
     session.addImport("agent_file_delivery", agent_file_delivery);

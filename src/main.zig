@@ -1,6 +1,7 @@
 const app = @import("metawork_app");
 
 pub const panic = app.panic;
+pub const debug = app.debug;
 
 pub fn main(init: @import("std").process.Init) !void {
     return app.run(init);

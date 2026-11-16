@@ -168,6 +168,7 @@ pub const ModelError = session_control.ModelError;
 pub const CallbackRejection = session_control.CallbackRejection;
 pub const CoreEventKind = session_control.CoreEventKind;
 pub const core_manifest_sha256 = core_identity.manifest_sha256;
+pub const core_abi_revision: u16 = core_identity.abi_revision;
 pub const InputCounts = session_control.InputCounts;
 pub const InputObservation = session_control.InputObservation;
 pub const InputRejection = session_control.InputRejection;

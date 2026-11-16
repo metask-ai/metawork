@@ -58,6 +58,9 @@ const Manifest = struct {
 
 pub const Bundle = struct {
     manifest_sha256: [64]u8,
+    /// Accepted binary ABI revision of this exact bundle. Verified above and
+    /// carried out so the Agent can publish it as part of process identity.
+    abi_revision: u16,
     deployment_target: ?std.SemanticVersion,
     link_libc: bool,
     sdk_dependency: SdkDependency,
@@ -161,6 +164,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     std.crypto.hash.sha2.Sha256.hash(lock_bytes, &manifest_digest, .{});
     return .{
         .manifest_sha256 = std.fmt.bytesToHex(manifest_digest, .lower),
+        .abi_revision = @intCast(lock.contract.binary_abi_revision),
         .deployment_target = target.deployment_target,
         .link_libc = lock.link.requires_c_runtime,
         .sdk_dependency = target.sdk_dependency,

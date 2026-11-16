@@ -345,6 +345,7 @@ pub const ExecutorPort = struct {
 
 pub const WorkerResources = struct {
     notifier: task_execution.Notifier,
+    run_trace: task_execution.RunTrace = .{},
     completion_factory: task_execution.CompletionFactory,
     projector: task_execution.TextProjector = .{
         .project_fn = task_execution.projectSanitized,
@@ -401,6 +402,8 @@ pub const RunNotifier = struct {
 fn noRunNotification(_: ?*anyopaque, _: RunNotification) bool {
     return false;
 }
+
+pub const RunTrace = task_execution.RunTrace;
 
 pub const RunClock = struct {
     context: ?*anyopaque = null,
@@ -3434,6 +3437,8 @@ pub const Runtime = struct {
         errdefer if (job_owned) job.destroy();
         job.* = .{
             .run = run_record,
+            .task_id = task.durable.id,
+            .run_trace = effects.worker.run_trace,
             .lease = run_lease.take(),
             .checkpoint_lease = checkpoint_lease.take(),
             .notifier = effects.worker.notifier,

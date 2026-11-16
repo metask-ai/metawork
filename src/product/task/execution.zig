@@ -24,6 +24,30 @@ pub const Notifier = struct {
     }
 };
 
+/// Application-owned fault breadcrumbs.
+///
+/// The worker that owns a Run publishes its identity before execution and
+/// marks it finished afterwards, so a process-fatal fault can name the Runs it
+/// interrupted without a fault handler walking Product state -- which it could
+/// not do safely. Product requires nothing of the port: absent, Runs execute
+/// exactly as before.
+pub const RunTrace = struct {
+    context: ?*anyopaque = null,
+    begin_fn: ?*const fn (?*anyopaque, u64, u64) u32 = null,
+    finish_fn: ?*const fn (?*anyopaque, u32, u64, u64) void = null,
+
+    pub fn begin(self: RunTrace, task_id: u64, run_id: u64) ?u32 {
+        const begin_fn = self.begin_fn orelse return null;
+        return begin_fn(self.context, task_id, run_id);
+    }
+
+    pub fn finish(self: RunTrace, claim: ?u32, task_id: u64, run_id: u64) void {
+        const value = claim orelse return;
+        const finish_fn = self.finish_fn orelse return;
+        finish_fn(self.context, value, task_id, run_id);
+    }
+};
+
 pub const CompletionFactory = struct {
     context: ?*anyopaque = null,
     create_fn: ?*const fn (
@@ -134,6 +158,10 @@ pub const CheckpointResources = struct {
 
 pub const RunJob = struct {
     run: *state.RunRecord,
+    /// Owning Task, copied for the fault breadcrumb: the Run record alone does
+    /// not carry its Task identity, and a fault handler cannot go looking.
+    task_id: u64,
+    run_trace: RunTrace,
     lease: worker_lease.WorkerLease,
     checkpoint_lease: ?worker_lease.WorkerLease,
     notifier: Notifier,
@@ -239,6 +267,11 @@ pub fn executeRun(context: *anyopaque) void {
     const job: *RunJob = @ptrCast(@alignCast(context));
     defer job.finish();
     const run = job.run;
+    // Published by this worker, on this thread, for the whole of the Run: a
+    // fatal fault anywhere in the process can then say which Runs it took
+    // with it, and which thread was in which Run.
+    const breadcrumb = job.run_trace.begin(job.task_id, run.id);
+    defer job.run_trace.finish(breadcrumb, job.task_id, run.id);
     const claimed = run.agent_handoff.cmpxchgStrong(.queued, .starting, .acq_rel, .acquire);
     std.debug.assert(claimed == null);
     var agent_run = switch (job.sessionAccess().beginRunOutcome(run.id)) {

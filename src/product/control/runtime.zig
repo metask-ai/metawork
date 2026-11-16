@@ -434,6 +434,7 @@ pub const skillImportReason = skill_runtime.importReason;
 
 pub const Configuration = struct {
     run_clock: task_runtime.RunClock = .{},
+    run_trace: task_runtime.RunTrace = .{},
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
@@ -1298,6 +1299,7 @@ pub const Runtime = struct {
 
     updates: update.Runtime,
     run_clock: task_runtime.RunClock,
+    run_trace: task_runtime.RunTrace,
     allocator: std.mem.Allocator,
     io: std.Io,
     agent_runtime: *lifecycle.Runtime,
@@ -1621,6 +1623,7 @@ pub const Runtime = struct {
             .change_notifier = configuration.change_notifier,
             .run_notifier = configuration.run_notifier,
             .run_clock = configuration.run_clock,
+            .run_trace = configuration.run_trace,
             .updates = update.Runtime.init(product_identity.version, .{
                 .os = if (builtin.os.tag == .windows) .windows else .macos,
                 .arch = if (builtin.cpu.arch == .aarch64) .arm64 else .x64,
@@ -8423,6 +8426,7 @@ pub const Runtime = struct {
                     .context = self.change_notifier.context,
                     .notify_fn = self.change_notifier.wake,
                 },
+                .run_trace = self.run_trace,
                 .completion_factory = .{
                     .context = self.completion_factory.context,
                     .create_fn = self.completion_factory.create_fn,

@@ -63,6 +63,7 @@ pub const ModelError = session_impl.ModelError;
 pub const CallbackRejection = session_impl.CallbackRejection;
 pub const CoreEventKind = session_impl.CoreEventKind;
 pub const core_manifest_sha256 = session_impl.core_manifest_sha256;
+pub const core_abi_revision = session_impl.core_abi_revision;
 pub const InputCounts = session_impl.InputCounts;
 pub const InputObservation = session_impl.InputObservation;
 pub const InputRejection = session_impl.InputRejection;
