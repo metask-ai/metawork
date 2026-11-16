@@ -34,6 +34,26 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "install-prefix", "Independent output directory for this artifact")) |prefix|
         b.resolveInstallPrefix(prefix, .{});
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
+    // No UBSan instrumentation on the vendored C/C++ compilation units.
+    // ucrt's `wmemcmp` is inline and reads 8 bytes at a time from whatever
+    // alignment the linker gave a wide literal - deliberate, legal on x86,
+    // UB by the standard - so it compiles as part of the SDK's Windows C++
+    // unit and takes Zig's C UBSan with it: clicking a system notification
+    // reached `parseArguments` (`toast_notifications.h`) and aborted on the
+    // alignment check. What this turns off is that instrumentation of C and
+    // C++ units alone. Zig's own runtime safety checks are a separate
+    // mechanism and stay exactly as the optimization mode sets them, which
+    // is the whole point of distributing ReleaseSafe builds - and under
+    // ReleaseSafe a C UBSan hit is a silent trap with no panic text at all,
+    // so this is a crash nobody would be able to read a report of.
+    // `artifacts.tests.root_module` is deliberately left instrumented:
+    // tests are never distributed, and they are the one place the
+    // instrumentation earns its keep. Narrow or drop this line once
+    // zogien/native#27 (https://github.com/zogien/native/issues/27) gives
+    // the Windows C++ compiles the precise `-fno-sanitize=alignment`,
+    // symmetric with the macOS ObjC `-fno-sanitize=builtin` the SDK
+    // already passes in `build/app.zig`.
+    artifacts.exe.root_module.sanitize_c = .off;
     const artifact = selectedArtifact(b);
     const automatic_update_checks = b.option(bool, "automatic-update-check", "Enable periodic official version checks for this distribution artifact") orelse false;
     if (artifact == .automation and automatic_update_checks)
