@@ -405,7 +405,11 @@ export async function runDevelopment() {
       const frontendDir = path.join(directory, "renderer");
       const installPrefix = path.join(directory, "app");
       const signal = cancellation.signal;
-      await buildFrontend(repositoryRoot, { outDir: frontendDir, signal });
+      await buildFrontend(repositoryRoot, {
+        outDir: frontendDir,
+        signal,
+        target: bundle.target,
+      });
       await buildNative(repositoryRoot, {
         target: bundle.target,
         optimize: "Debug",
