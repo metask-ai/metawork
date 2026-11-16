@@ -6,6 +6,33 @@
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-11-16
+
+### Added
+
+- Composer 将附件、Workspace 文件和 Skill 统一到一个添加菜单；折叠侧栏也可直接新建 Task。
+- Models 新增腾讯混元预设，更新 Kimi、MiniMax 和 GLM 预设，并按显示名称排列内置厂商。
+- 图片附件新增缩略图和就地灯箱，草稿与已发送消息共用同一套预览体验，并可在重启后继续查看历史图片。
+- 系统通知统一由本地化呈现层生成，以 Task 标题作为通知标题，并在点击后安全定位对应 Task。
+- 新增 Windows 与 macOS 分层 CI，以及 tag-first 发布工作流；后者校验 tag 指向的精确提交、创建 Release 草稿，并运行双架构 Windows 无签名打包矩阵。
+
+### Changed
+
+- Task 变更操作明确限定影响范围；审批模式切换不再丢失排队输入，重复补发保持幂等，手动压缩前会续期 Metask 凭据。
+- 既有 Metask Task 不再与创建时的登录会话绑定，重新登录后可原位继续；Provider 失败会展示已知原因，并在确认余额或额度不足时提供充值入口。
+- Foundation 新增有界共享 HTTP 执行层，统一供 Metask、MCP、Completion 和更新检查使用，并向更新检查返回失败阶段与原因。
+- AgentCore 升级至官方 `0.15.0` / ABI revision 28，并为 Agent stream 启用有限重试预算；Native SDK 升级至 `0.11.1-fork.2`，同时刷新 Windows 与 macOS 的 x86_64/ARM64 bundles。
+- Windows 系统通知从托盘气泡改为系统原生 WinRT toast，应用身份由 Native SDK 在运行时注册；来源名因此显示为 MetaWork，不再是内部标识符。
+- 正式分发改用 `ReleaseSafe`；Windows 安装器固定使用 Inno Setup 7，整包体积由阻断 Gate 改为按同架构上一版本报告增量。
+- 限制 Host 自建线程与 Control worker 的栈空间，并新增生产内存增长验证入口。
+
+### Fixed
+
+- 修复执行前被拒绝的输入无法恢复、未知提交结果无法按 Host 回执收口，以及未分类失败错误引导到模型设置的问题。
+- 修复 Windows 非 ASCII 项目路径无法打开、主窗口图标缺失，以及卸载后通知 AUMID 残留的问题。
+- 修复自动更新检查丢失服务器响应诊断、失败后下一次检查调度过晚，以及下载预检拒绝原因不明确的问题。
+- 修复附件暂存为一次传输持有多个目标句柄的问题。
+
 ## [0.2.12] - 2026-11-11
 
 ### Added
@@ -560,7 +587,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.12...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.13...HEAD
+[0.2.13]: https://github.com/metask-ai/metawork/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/metask-ai/metawork/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/metask-ai/metawork/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/metask-ai/metawork/compare/v0.2.9...v0.2.10
