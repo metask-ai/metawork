@@ -2039,6 +2039,5 @@ export const enUS = {
   "notification.run.completed": "Task finished",
   "notification.run.failed": "Task failed",
   "notification.run.needs_approval": "Task is waiting for your approval",
-  "notification.open_task": "View task",
 } as const;
 export type MessageId = keyof typeof enUS;

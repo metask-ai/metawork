@@ -137,7 +137,6 @@ export async function runNotificationPresentationVertical({
     runCompleted: "任务已完成",
     runFailed: "任务失败",
     runNeedsApproval: "任务正在等待你的确认",
-    openTaskAction: "查看任务",
   };
   const english = {
     scheduleCompleted: "Scheduled task completed",
@@ -148,7 +147,6 @@ export async function runNotificationPresentationVertical({
     runCompleted: "Task finished",
     runFailed: "Task failed",
     runNeedsApproval: "Task is waiting for your approval",
-    openTaskAction: "View task",
   };
   const register = (table) =>
     invoke("metawork.host.notifications.registerText", table);
@@ -218,8 +216,9 @@ export async function runNotificationPresentationVertical({
 
   // 1. Minimized, with the Chinese table registered: the banner is raised,
   //    and `chinese-banner.png` is the evidence that every word of it is in
-  //    that language — application name, Task title, body and button alike.
-  assert.equal((await register(chinese)).registered, 8);
+  //    that language — the Task title on the headline and the status under
+  //    it, with the product name left to the attribution strip.
+  assert.equal((await register(chinese)).registered, 7);
   await minimize();
   await clearAnchor("anchor clear before the Chinese case");
   await capture("baseline-chinese.png");
@@ -241,14 +240,13 @@ export async function runNotificationPresentationVertical({
     registered: "zh-CN",
     expectedTitle: "整理本周进展",
     expectedBody: chinese.runCompleted,
-    expectedAction: chinese.openTaskAction,
     banner: chineseBanner,
   });
 
   // 2. Re-registering follows a language change on the next banner, and a
-  //    click on the banner BODY — not its button — brings the window forward
-  //    and opens that Task.
-  assert.equal((await register(english)).registered, 8);
+  //    click on the banner — the only way in, now that there is no button —
+  //    brings the window forward and opens that Task.
+  assert.equal((await register(english)).registered, 7);
   await minimize();
   await clearAnchor("anchor clear before the English case");
   await capture("baseline-english.png");
@@ -276,7 +274,6 @@ export async function runNotificationPresentationVertical({
     registered: "en-US",
     expectedTitle: "Weekly progress digest",
     expectedBody: english.runCompleted,
-    expectedAction: english.openTaskAction,
     banner: englishBanner,
     click,
     openCommand,
@@ -313,7 +310,9 @@ export async function runNotificationPresentationVertical({
   //    Host never holds a half-filled table, so no banner loses only some of
   //    its words.
   await assert.rejects(
-    register({ ...chinese, openTaskAction: "查".repeat(64) }),
+    // Over the table's own 256-byte width, which is the limit every slot is
+    // held to now that they all fill the notification body.
+    register({ ...chinese, runCompleted: "查".repeat(100) }),
     "an over-long slot must be refused",
   );
   await minimize();
@@ -330,7 +329,6 @@ export async function runNotificationPresentationVertical({
     case: "a refused registration keeps the table the Host already had",
     taskId: refusalTask,
     expectedBody: english.runCompleted,
-    expectedAction: english.openTaskAction,
     banner: refusalBanner,
   });
 

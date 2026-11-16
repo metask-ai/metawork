@@ -4,7 +4,6 @@ const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
 const notification_text = bridge_api.notification_text;
-const app_manifest = @import("app_manifest_zon");
 
 pub const main_window_id: native_sdk.platform.WindowId = 1;
 
@@ -19,8 +18,8 @@ const tray_items = [_]native_sdk.platform.TrayMenuItem{
 
 /// The one notification command that opens a Task. The wire name dates from
 /// scheduled tasks, which introduced it; every Task-opening notification now
-/// carries it, bound to both the action button and the banner itself, and
-/// `src/app.zig` routes it through `notificationTaskId` below.
+/// carries it, bound to the banner itself, and `src/app.zig` routes it
+/// through `notificationTaskId` below.
 const open_task_prefix = "metawork.schedule.open.";
 
 pub fn notificationTaskId(name: []const u8) ?u64 {
@@ -50,7 +49,7 @@ const TaskNotification = struct {
     id: []const u8,
     /// Which catalog string the body takes.
     slot: notification_text.Slot,
-    /// The Task title, already localized by Product, shown as the subtitle.
+    /// The Task title, already localized by Product, and the banner headline.
     title: []const u8,
     /// Zero when this notification cannot open a Task.
     task_id: u64,
@@ -163,40 +162,60 @@ pub const State = struct {
 
     /// The only place the Host hands a notification to the SDK.
     ///
-    /// The window title and the Task title are the only strings the Host owns
-    /// that are already in the user's language: `display_name` is the product
-    /// name and Product localized the Task title. Body and action label exist
-    /// only in the Renderer's catalog, so with no registered table this sends
-    /// the banner WITHOUT them rather than falling back to English. That is a
-    /// deliberate trade: a half-English banner beside a Chinese Task title is
-    /// the defect this layer exists to remove, and an English fallback would
-    /// keep that defect alive on the one path nobody looks at.
+    /// The headline is the Task title, never the product name. Both systems
+    /// already say who sent the banner — Windows prints the AUMID display
+    /// name in the attribution strip above the whole group of our toasts, and
+    /// macOS shows it in the notification header beside the icon — so a
+    /// product name in the first slot spends the most prominent line on what
+    /// the user can already read there, and leaves two banners from different
+    /// Tasks looking identical.
+    ///
+    /// Which slots: headline and body, with subtitle left empty. Neither
+    /// platform renders a hole for the empty middle slot. Windows emits a
+    /// `<text>` for the subtitle only when it is non-empty, so the body is
+    /// the toast's second line (the `show` XML builder in the SDK's
+    /// `platform/windows/toast_notifications.h`), and macOS assigns
+    /// `subtitle` only when non-empty (`showTitle:` in its
+    /// `platform/macos/user_notifications.h`). Body is also the slot with
+    /// the room: the SDK holds a subtitle to `max_notification_subtitle_bytes`
+    /// and a body to the far larger `max_notification_body_bytes`, which is
+    /// what `notification_text.slotLimit` sizes the catalog's status strings
+    /// against.
+    ///
+    /// The status line exists only in the Renderer's catalog, so with no
+    /// registered table this sends the banner WITHOUT it rather than falling
+    /// back to English. That is a deliberate trade: a half-English banner
+    /// beside a Chinese Task title is the defect this layer exists to remove,
+    /// and an English fallback would keep that defect alive on the one path
+    /// nobody looks at. What is left still identifies its Task: the title,
+    /// under the product name the system itself supplies.
     fn showTaskNotification(
         self: *const State,
         runtime: *native_sdk.Runtime,
         notification: TaskNotification,
     ) bool {
         if (!std.unicode.utf8ValidateSlice(notification.title)) return false;
-        var end = @min(notification.title.len, native_sdk.platform.max_notification_subtitle_bytes);
+        // The headline is the one slot nothing below will do without: the
+        // SDK's own validation refuses a notification with an empty title,
+        // macOS drops one, and Windows would print a blank first line. A
+        // Task with no title yet gets no banner rather than an
+        // unidentifiable one.
+        if (notification.title.len == 0) return false;
+        var end = @min(notification.title.len, native_sdk.platform.max_notification_title_bytes);
         while (!std.unicode.utf8ValidateSlice(notification.title[0..end])) end -= 1;
-        const body = if (self.notification_text) |*table| table.get(notification.slot) else "";
-        const label = if (self.notification_text) |*table| table.get(.open_task_action) else "";
-        var command_buffer: [native_sdk.platform.max_notification_action_command_bytes]u8 = undefined;
-        // The SDK pairs label and command: an unlabelled button cannot be
-        // presented, so without a catalog there is no action to route either.
-        const command = if (notification.task_id != 0 and label.len != 0)
+        const status = if (self.notification_text) |*table| table.get(notification.slot) else "";
+        var command_buffer: [native_sdk.platform.max_notification_activation_command_bytes]u8 = undefined;
+        const command = if (notification.task_id != 0)
             std.fmt.bufPrint(&command_buffer, open_task_prefix ++ "{d}", .{notification.task_id}) catch return false
         else
             "";
         runtime.showNotification(.{
             .id = notification.id,
-            .title = app_manifest.display_name,
-            .subtitle = notification.title[0..end],
-            .body = body,
-            .action_label = if (command.len != 0) label else "",
-            .action_command = command,
-            // Clicking the banner itself opens the Task too, not just the
-            // button. The SDK dispatches at most one of the two.
+            .title = notification.title[0..end],
+            .body = status,
+            // A click anywhere on the banner opens the Task. It is the only
+            // way in, so it hangs on the Task identity alone, not on the
+            // catalog the status line comes from.
             .activation_command = command,
         }) catch return false;
         return true;
@@ -510,18 +529,23 @@ test "Windows user close preserves SDK hide policy while explicit quit closes" {
 test "SDK consumption notification bounds presentation without changing Product title" {
     const Spy = struct {
         var calls: usize = 0;
-        var seen: [native_sdk.platform.max_notification_subtitle_bytes]u8 = undefined;
+        var seen: [native_sdk.platform.max_notification_title_bytes]u8 = undefined;
         var len: usize = 0;
         var fail = false;
         var task_id: ?u64 = null;
         fn notify(_: ?*anyopaque, options: native_sdk.platform.NotificationOptions) anyerror!void {
             calls += 1;
-            try std.testing.expect(std.unicode.utf8ValidateSlice(options.subtitle));
-            try std.testing.expect(options.subtitle.len <= seen.len);
-            @memcpy(seen[0..options.subtitle.len], options.subtitle);
-            len = options.subtitle.len;
-            task_id = notificationTaskId(options.action_command);
-            try std.testing.expectEqual(options.action_command.len == 0, options.action_label.len == 0);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(options.title));
+            try std.testing.expect(options.title.len <= seen.len);
+            @memcpy(seen[0..options.title.len], options.title);
+            len = options.title.len;
+            task_id = notificationTaskId(options.activation_command);
+            // Two text slots are used and the third is not, so the status
+            // reads directly under the headline; and no action button is
+            // presented, so neither action field is ever set.
+            try std.testing.expectEqual(@as(usize, 0), options.subtitle.len);
+            try std.testing.expectEqual(@as(usize, 0), options.action_label.len);
+            try std.testing.expectEqual(@as(usize, 0), options.action_command.len);
             if (task_id != null) try std.testing.expect(options.id.len > 0);
             if (fail) return error.InjectedNotificationFailure;
         }
@@ -535,8 +559,11 @@ test "SDK consumption notification bounds presentation without changing Product 
     window.setNotificationText(testNotificationText());
     const long = "a" ** 127 ++ "界" ++ "b" ** 50;
     const notification: control_ports.ScheduleNotification = .{ .scheduled_task_id = 1, .title = long, .kind = .completed };
-    // Runtime validation would reject the original, unbounded subtitle.
-    try std.testing.expectError(error.NotificationFieldTooLarge, harness.runtime.showNotification(.{ .title = "MetaWork", .subtitle = long }));
+    // Runtime validation would reject the original, unbounded title, and
+    // refuses an empty one outright — which is why the Host bounds the Task
+    // title into the headline and sends no banner without one.
+    try std.testing.expectError(error.NotificationFieldTooLarge, harness.runtime.showNotification(.{ .title = long }));
+    try std.testing.expectError(error.InvalidNotificationOptions, harness.runtime.showNotification(.{ .title = "" }));
     try std.testing.expectEqual(@as(usize, 0), Spy.calls);
     try std.testing.expect(window.notifyScheduledTask(&harness.runtime, notification));
     try std.testing.expectEqual(@as(usize, 127), Spy.len);
@@ -612,7 +639,6 @@ fn testNotificationText() notification_text.Table {
         .runCompleted = "任务已完成",
         .runFailed = "任务失败",
         .runNeedsApproval = "任务正在等待你的确认",
-        .openTaskAction = "查看任务",
     }).?;
 }
 
@@ -669,20 +695,11 @@ const NotificationSpy = struct {
     fn seenTitle() []const u8 {
         return title[0..title_len];
     }
-    fn seenSubtitle() []const u8 {
-        return subtitle[0..subtitle_len];
-    }
     fn seenBody() []const u8 {
         return body[0..body_len];
     }
-    fn seenLabel() []const u8 {
-        return label[0..label_len];
-    }
     fn seenId() []const u8 {
         return id[0..id_len];
-    }
-    fn seenActionTaskId() ?u64 {
-        return notificationTaskId(action_command[0..action_command_len]);
     }
     fn seenActivationTaskId() ?u64 {
         return notificationTaskId(activation_command[0..activation_command_len]);
@@ -702,16 +719,19 @@ test "a registered table writes the whole banner in the Renderer's language" {
         .title = "每日简报",
         .kind = .completed,
     }));
-    // The window title is the manifest's display name, not a literal repeated
-    // at the call site.
-    try std.testing.expectEqualStrings(app_manifest.display_name, NotificationSpy.seenTitle());
-    // Body, button and Task title are all in one language.
-    try std.testing.expectEqualStrings("每日简报", NotificationSpy.seenSubtitle());
+    // The headline is the Task title: the product name is the system's to
+    // print, in the attribution strip over the whole group of our banners.
+    try std.testing.expectEqualStrings("每日简报", NotificationSpy.seenTitle());
+    // The status follows it in the body, in the same language, with nothing
+    // between them: an empty subtitle is dropped by both platforms rather
+    // than rendered as a blank line.
     try std.testing.expectEqualStrings("定时任务已完成", NotificationSpy.seenBody());
-    try std.testing.expectEqualStrings("查看任务", NotificationSpy.seenLabel());
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.subtitle_len);
     try std.testing.expectEqualStrings("schedule-7-42-completed", NotificationSpy.seenId());
-    // The button and the banner itself both open the same Task.
-    try std.testing.expectEqual(@as(?u64, 42), NotificationSpy.seenActionTaskId());
+    // There is no action button, so nothing is routed through one.
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.label_len);
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.action_command_len);
+    // A click on the banner is the one way in, and it opens this Task.
     try std.testing.expectEqual(@as(?u64, 42), NotificationSpy.seenActivationTaskId());
 
     // Every scheduled-task kind takes a slot of its own; no two share a string.
@@ -753,11 +773,12 @@ test "re-registering the table changes the next banner's language" {
         .runCompleted = "Task finished",
         .runFailed = "Task failed",
         .runNeedsApproval = "Task is waiting for your approval",
-        .openTaskAction = "View task",
     }).?);
     try std.testing.expect(window.notifyScheduledTask(&harness.runtime, failed));
     try std.testing.expectEqualStrings("Scheduled task failed", NotificationSpy.seenBody());
-    try std.testing.expectEqualStrings("View task", NotificationSpy.seenLabel());
+    // The Task title comes from Product either way, so only the status line
+    // changes language.
+    try std.testing.expectEqualStrings("Daily digest", NotificationSpy.seenTitle());
 }
 
 test "an unregistered table drops the banner's words instead of falling back to English" {
@@ -773,14 +794,18 @@ test "an unregistered table drops the banner's words instead of falling back to 
         .title = "每日简报",
         .kind = .completed,
     }));
-    // The two strings that are already in the user's language still go out.
-    try std.testing.expectEqualStrings(app_manifest.display_name, NotificationSpy.seenTitle());
-    try std.testing.expectEqualStrings("每日简报", NotificationSpy.seenSubtitle());
-    // Everything that would have had to be English does not.
+    // The one string that is already in the user's language still goes out,
+    // as the headline; the system supplies the product name around it.
+    try std.testing.expectEqualStrings("每日简报", NotificationSpy.seenTitle());
+    // The status line, which would have had to be English, does not.
     try std.testing.expectEqual(@as(usize, 0), NotificationSpy.body_len);
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.subtitle_len);
     try std.testing.expectEqual(@as(usize, 0), NotificationSpy.label_len);
     try std.testing.expectEqual(@as(usize, 0), NotificationSpy.action_command_len);
-    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.activation_command_len);
+    // Opening the Task does not depend on the catalog: a click on a wordless
+    // banner still reaches it, which is why the command no longer hangs on a
+    // button label.
+    try std.testing.expectEqual(@as(?u64, 42), NotificationSpy.seenActivationTaskId());
     // It is still a real notification the user sees, with its own identity.
     try std.testing.expectEqual(@as(usize, 1), NotificationSpy.calls);
     try std.testing.expectEqualStrings("schedule-7-42-completed", NotificationSpy.seenId());
@@ -811,12 +836,11 @@ test "a Run notification waits for the application to lose the foreground" {
     try std.testing.expect(!harness.runtime.app_active);
     try std.testing.expect(window.notifyRunAttention(&harness.runtime, completed));
     try std.testing.expectEqual(@as(usize, 1), NotificationSpy.calls);
-    try std.testing.expectEqualStrings(app_manifest.display_name, NotificationSpy.seenTitle());
-    try std.testing.expectEqualStrings("整理周报", NotificationSpy.seenSubtitle());
+    try std.testing.expectEqualStrings("整理周报", NotificationSpy.seenTitle());
     try std.testing.expectEqualStrings("任务已完成", NotificationSpy.seenBody());
-    try std.testing.expectEqualStrings("查看任务", NotificationSpy.seenLabel());
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.subtitle_len);
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.label_len);
     try std.testing.expectEqualStrings("run-42-3-completed", NotificationSpy.seenId());
-    try std.testing.expectEqual(@as(?u64, 42), NotificationSpy.seenActionTaskId());
     try std.testing.expectEqual(@as(?u64, 42), NotificationSpy.seenActivationTaskId());
 
     // Each reason takes its own slot and its own replacement identity, so a
@@ -849,8 +873,31 @@ test "a Run notification in an unregistered language keeps the Task title and dr
         .title = "整理周报",
         .kind = .failed,
     }));
-    try std.testing.expectEqualStrings("整理周报", NotificationSpy.seenSubtitle());
+    try std.testing.expectEqualStrings("整理周报", NotificationSpy.seenTitle());
     try std.testing.expectEqual(@as(usize, 0), NotificationSpy.body_len);
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.subtitle_len);
     try std.testing.expectEqual(@as(usize, 0), NotificationSpy.label_len);
     try std.testing.expectEqualStrings("run-9-1-failed", NotificationSpy.seenId());
+    try std.testing.expectEqual(@as(?u64, 9), NotificationSpy.seenActivationTaskId());
+}
+
+test "a Task with no title yet gets no banner" {
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    NotificationSpy.install(harness);
+    var window: State = .{};
+    window.setNotificationText(testNotificationText());
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "notification-test" };
+    try harness.runtime.dispatchPlatformEvent(app, .app_deactivated);
+    // The title carries the whole identity of the banner now, and both
+    // platforms need that slot filled: macOS refuses an empty title outright
+    // and Windows would show a blank first line over the status.
+    try std.testing.expect(!window.notifyRunAttention(&harness.runtime, .{
+        .task_id = 11,
+        .run_id = 2,
+        .title = "",
+        .kind = .completed,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), NotificationSpy.calls);
 }

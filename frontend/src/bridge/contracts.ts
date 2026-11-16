@@ -23,7 +23,6 @@ export type NotificationTextRegistration = {
   runCompleted: string;
   runFailed: string;
   runNeedsApproval: string;
-  openTaskAction: string;
 };
 export { approvalFailureReasons };
 export type AccountState =

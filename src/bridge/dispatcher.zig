@@ -8040,20 +8040,20 @@ test "Dispatcher validates authority before domain calls and preserves committed
     // complete table installs, and the Host answers with the slot count it
     // now holds.
     const registered = native_dispatcher.dispatch(
-        "{\"id\":\"notification-text\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"查看任务\"}}",
+        "{\"id\":\"notification-text\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\"}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, registered, "\"registered\":8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, registered, "\"registered\":7") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.notification_text_calls);
     try std.testing.expectEqualStrings("任务已完成", harness.notification_text.?.get(.run_completed));
-    try std.testing.expectEqualStrings("查看任务", harness.notification_text.?.get(.open_task_action));
+    try std.testing.expectEqualStrings("等待确认", harness.notification_text.?.get(.run_needs_approval));
     // A registration missing a slot is refused whole, so the Host keeps the
     // table it already had rather than losing one banner's words.
     for ([_][]const u8{
         "{\"id\":\"missing-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"a\"}}",
-        "{\"id\":\"empty-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"\"}}",
-        "{\"id\":\"unknown-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"查看任务\",\"runPaused\":\"x\"}}",
+        "{\"id\":\"empty-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"\"}}",
+        "{\"id\":\"unknown-slot\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"runPaused\":\"x\"}}",
     }) |request| {
         const refused = native_dispatcher.dispatch(request, source, &response);
         try std.testing.expect(std.mem.indexOf(u8, refused, "\"handler_failed\"") != null);
@@ -8061,7 +8061,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expectEqual(@as(usize, 1), harness.notification_text_calls);
     // A window that is not the bootstrap window cannot relabel its banners.
     const foreign_notification_text = native_dispatcher.dispatch(
-        "{\"id\":\"foreign-notification-text\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\",\"openTaskAction\":\"查看任务\"}}",
+        "{\"id\":\"foreign-notification-text\",\"command\":\"metawork.host.notifications.registerText\",\"payload\":{\"scheduleCompleted\":\"已完成\",\"scheduleFailed\":\"失败\",\"scheduleSkipped\":\"已跳过\",\"scheduleNeedsAttention\":\"需要处理\",\"runCompleted\":\"任务已完成\",\"runFailed\":\"任务失败\",\"runNeedsApproval\":\"等待确认\"}}",
         native_sdk.bridge.Source{ .origin = source.origin, .window_id = source.window_id + 1 },
         &response,
     );

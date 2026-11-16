@@ -25,8 +25,6 @@ pub const Slot = enum {
     run_completed,
     run_failed,
     run_needs_approval,
-    /// Label of the single action button, which opens the Task.
-    open_task_action,
 
     pub const count = @typeInfo(Slot).@"enum".fields.len;
 };
@@ -40,10 +38,11 @@ pub const max_slot_bytes: usize = 256;
 /// The SDK refuses a notification whose field exceeds its own limit, which
 /// would lose the banner entirely. Hold each slot to the limit of the field it
 /// feeds instead, so a registration that could not be shown is refused at
-/// registration time. Exhaustive, so a new slot must state where it goes.
+/// registration time. Every slot fills the notification body today — the
+/// headline is the Task title, which is not ours to translate — but the switch
+/// stays exhaustive so a slot aimed at a tighter field has to say so.
 pub fn slotLimit(slot: Slot) usize {
     return @min(max_slot_bytes, switch (slot) {
-        .open_task_action => platform.max_notification_action_label_bytes,
         .schedule_completed,
         .schedule_failed,
         .schedule_skipped,
@@ -79,7 +78,6 @@ pub const Registration = struct {
     runCompleted: []const u8,
     runFailed: []const u8,
     runNeedsApproval: []const u8,
-    openTaskAction: []const u8,
 };
 
 comptime {
@@ -136,11 +134,9 @@ test "a decoded table answers every slot with its registered string" {
         .runCompleted = "任务已完成",
         .runFailed = "任务失败",
         .runNeedsApproval = "任务等待你的确认",
-        .openTaskAction = "查看任务",
     }).?;
     try std.testing.expectEqualStrings("定时任务已完成", table.get(.schedule_completed));
     try std.testing.expectEqualStrings("任务等待你的确认", table.get(.run_needs_approval));
-    try std.testing.expectEqualStrings("查看任务", table.get(.open_task_action));
     inline for (@typeInfo(Slot).@"enum".fields) |slot|
         try std.testing.expect(table.get(@field(Slot, slot.name)).len > 0);
 }
@@ -154,7 +150,6 @@ test "a registration is refused whole rather than installed half-filled" {
         .runCompleted = "e",
         .runFailed = "f",
         .runNeedsApproval = "g",
-        .openTaskAction = "h",
     };
     try std.testing.expect(decode(complete) != null);
     inline for (@typeInfo(Registration).@"struct".fields, 0..) |field, index| {
@@ -176,11 +171,10 @@ test "a registration is refused whole rather than installed half-filled" {
     }
 }
 
-test "the action label slot is held to the SDK limit the body slots exceed" {
-    try std.testing.expectEqual(
-        platform.max_notification_action_label_bytes,
-        slotLimit(.open_task_action),
-    );
-    try std.testing.expectEqual(max_slot_bytes, slotLimit(.run_completed));
-    try std.testing.expect(slotLimit(.open_task_action) < slotLimit(.run_completed));
+test "every slot is held to the limit of the notification body it fills" {
+    inline for (@typeInfo(Slot).@"enum".fields) |slot|
+        try std.testing.expectEqual(max_slot_bytes, slotLimit(@field(Slot, slot.name)));
+    // The table's own width is the binding limit here, and it has to stay
+    // inside the SDK field every slot feeds.
+    try std.testing.expect(max_slot_bytes <= platform.max_notification_body_bytes);
 }

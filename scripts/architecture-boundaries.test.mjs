@@ -3353,7 +3353,7 @@ test("system notification text is one closed vocabulary across Host and Renderer
   const slots = [...slotBlock.matchAll(/^\s{4}([a-z][a-z0-9_]*),$/gmu)].map(
     (match) => match[1],
   );
-  assert.ok(slots.length >= 8, "the Host must publish its notification slots");
+  assert.ok(slots.length >= 7, "the Host must publish its notification slots");
   const camel = (name) =>
     name.replace(/_([a-z0-9])/gu, (_, character) => character.toUpperCase());
 
@@ -3384,16 +3384,22 @@ test("system notification text is one closed vocabulary across Host and Renderer
     assert.ok(Object.hasOwn(zhCN, id), `${key} has no Chinese message (${id})`);
   }
 
-  // The Host owns no notification copy of its own: the only strings it puts
-  // in a banner are the manifest display name and the Product Task title.
-  // (That an unregistered table drops the body rather than falling back to
-  // English is proven by window.zig's own tests.)
+  // The Host owns no notification copy of its own: the only string it puts
+  // in a banner is the Product Task title, which is its headline; every
+  // other word comes from the registered table. The product name is not one
+  // of them — the system prints it itself, in the Windows attribution strip
+  // and the macOS notification header — so it takes no text slot here.
+  // (That an unregistered table drops the status rather than falling back
+  // to English is proven by window.zig's own tests.)
   const presentation = window.slice(
     window.indexOf("pub fn notifyScheduledTask("),
     window.indexOf("pub fn connectWindows("),
   );
   assert.ok(presentation.includes("showTaskNotification"));
-  assert.match(presentation, /\.title = app_manifest\.display_name,/u);
+  assert.match(presentation, /\.title = notification\.title\[0\.\.end\],/u);
+  assert.doesNotMatch(presentation, /app_manifest/u);
+  // No action button: a click on the banner is the only route into a Task.
+  assert.doesNotMatch(presentation, /action_label|action_command/u);
   assert.doesNotMatch(presentation, /"[A-Z][a-z]+ [a-z]/u);
   assert.doesNotMatch(presentation, /Scheduled task|View task|MetaWork/u);
 });
