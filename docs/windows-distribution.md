@@ -15,7 +15,7 @@ zig-out/package/metawork-<version>-windows-arm64.exe
 
 ## 工具与执行
 
-先满足仓库普通 Windows build 的全部前置条件，并安装 Inno Setup 6.7.3 或兼容的 7.x 版本：
+先满足仓库普通 Windows build 的全部前置条件，并安装 Inno Setup 7（签名机与 CI 固定 7.1.0）。Inno Setup 6 不是「旧一点也能用」：`packaging/windows/metawork.iss` 声明 `compiler:Languages\ChineseSimplified.isl`，而该文件只随 7 发行，6 根本编译不出安装器，因此打包入口直接拒绝 6：
 
 ```powershell
 winget install --id JRSoftware.InnoSetup.7 -e -s winget -i

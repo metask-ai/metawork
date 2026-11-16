@@ -178,6 +178,12 @@ function uniquePaths(paths) {
   });
 }
 
+// packaging/windows/metawork.iss names this language file, and
+// `compiler:` resolves inside the compiler's own directory, so the
+// installer script can only be compiled by a family that ships it.
+const innoSetupRequiredLanguageFile =
+  "compiler:Languages\\ChineseSimplified.isl";
+
 export function innoSetupCompilerCandidates(environment = process.env) {
   const explicit = environment.METAWORK_INNO_SETUP_COMPILER;
   if (explicit && !path.isAbsolute(explicit)) {
@@ -190,10 +196,7 @@ export function innoSetupCompilerCandidates(environment = process.env) {
     environment["ProgramFiles(x86)"],
   ]) {
     if (!root) continue;
-    installed.push(
-      path.join(root, "Inno Setup 7", "ISCC.exe"),
-      path.join(root, "Inno Setup 6", "ISCC.exe"),
-    );
+    installed.push(path.join(root, "Inno Setup 7", "ISCC.exe"));
   }
   const fromPath = (environment.Path ?? environment.PATH ?? "")
     .split(path.delimiter)
@@ -214,15 +217,13 @@ export function innoSetupRegistryCompilerCandidates(
   const registry = path.join(environment.SystemRoot, "System32", "reg.exe");
   const keys = [];
   for (const hive of ["HKCU", "HKLM"]) {
-    for (const version of [7, 6]) {
+    keys.push(
+      `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1`,
+    );
+    if (hive === "HKLM") {
       keys.push(
-        `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup ${version}_is1`,
+        `${hive}\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1`,
       );
-      if (hive === "HKLM") {
-        keys.push(
-          `${hive}\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup ${version}_is1`,
-        );
-      }
     }
   }
   const candidates = [];
@@ -259,7 +260,7 @@ export function resolveInnoSetupCompiler(
   ]).find(isFile);
   if (!compiler) {
     throw new Error(
-      "Inno Setup 6.7.3 or a compatible 7.x compiler is required. Install it with winget, or set METAWORK_INNO_SETUP_COMPILER to an absolute ISCC.exe path.",
+      `Inno Setup 7 is required, because packaging/windows/metawork.iss includes ${innoSetupRequiredLanguageFile}, which ships only with that family. Install it with winget, or set METAWORK_INNO_SETUP_COMPILER to an absolute ISCC.exe path.`,
     );
   }
   return compiler;
@@ -381,17 +382,23 @@ export function innoSignToolDefinition(configuration) {
   return `$q${configuration.signTool}$q sign /sha1 ${configuration.certificateSha1} /fd SHA256 /tr $q${configuration.timestampUrl}$q /td SHA256 /d $q${packageManifest.metadata.displayName}$q /v $f`;
 }
 
-export function innoSignToolCompilerArgument(compilerMajor, configuration) {
-  const definition = `metawork=${innoSignToolDefinition(configuration)}`;
-  return compilerMajor === 7 ? `--signtool=${definition}` : `/S${definition}`;
+export function innoSignToolCompilerArgument(configuration) {
+  return `--signtool=metawork=${innoSignToolDefinition(configuration)}`;
 }
 
 export function parseInnoSetupCompilerMajor(output) {
   const major = Number(
     output.match(/^Inno Setup (\d+) .*Command-Line Compiler\s*$/imu)?.[1],
   );
-  if (major !== 6 && major !== 7) {
-    throw new Error("ISCC.exe is not a supported Inno Setup 6 or 7 compiler");
+  // Inno Setup 6 is not an older compiler that produces a worse installer; it
+  // cannot compile packaging/windows/metawork.iss at all, because
+  // `compiler:Languages\ChineseSimplified.isl` resolves inside the compiler's
+  // own directory and that file ships only with 7. Accepting 6 here means
+  // failing later inside ISCC with a missing include nobody can place.
+  if (!(major >= 7)) {
+    throw new Error(
+      `ISCC.exe is not an Inno Setup 7 compiler, which packaging/windows/metawork.iss requires for ${innoSetupRequiredLanguageFile}`,
+    );
   }
   return major;
 }
@@ -409,15 +416,12 @@ export function verifyInnoSetupCompiler(compiler) {
   }
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   const major = parseInnoSetupCompilerMajor(output);
-  const requiredOptions =
-    major === 7
-      ? [
-          "--output-dir=<path>",
-          "--output-filename=<filename>",
-          "--quiet-progress",
-          "--define=<name>",
-        ]
-      : ["/O<path>", "/F<filename>", "/Qp", "/D<name>"];
+  const requiredOptions = [
+    "--output-dir=<path>",
+    "--output-filename=<filename>",
+    "--quiet-progress",
+    "--define=<name>",
+  ];
   for (const requiredOption of requiredOptions) {
     if (!output.includes(requiredOption)) {
       throw new Error(
@@ -708,25 +712,13 @@ async function packageWindows() {
     distribution,
   );
   if (signing) definitions.push("AppSignTool=metawork");
-  const signingCompilerArgument = signing
-    ? [innoSignToolCompilerArgument(compilerMajor, signing)]
-    : [];
-  const compilerArguments =
-    compilerMajor === 7
-      ? [
-          "--quiet-progress",
-          `--output-dir=${path.dirname(distribution.installerArtifactPath)}`,
-          `--output-filename=${installerStem}`,
-          ...signingCompilerArgument,
-          ...definitions.map((definition) => `--define=${definition}`),
-        ]
-      : [
-          "/Qp",
-          `/O${path.dirname(distribution.installerArtifactPath)}`,
-          `/F${installerStem}`,
-          ...signingCompilerArgument,
-          ...definitions.map((definition) => `/D${definition}`),
-        ];
+  const compilerArguments = [
+    "--quiet-progress",
+    `--output-dir=${path.dirname(distribution.installerArtifactPath)}`,
+    `--output-filename=${installerStem}`,
+    ...(signing ? [innoSignToolCompilerArgument(signing)] : []),
+    ...definitions.map((definition) => `--define=${definition}`),
+  ];
   await runChild(
     compiler,
     [

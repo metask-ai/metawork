@@ -20,6 +20,24 @@ name: Release
 # downloads from the product's own host, which serves this product's users
 # better than github.com would, so the page records what a version is rather
 # than being the place to get it from.
+#
+# The second job runs the distribution packaging path for both Windows
+# architectures against the tagged tree, unsigned, because that path only ever
+# runs on one developer's machine and broke twice without anyone noticing: the
+# main package size gate stayed red for five releases, and a host target guard
+# in the AgentCore downloader made ARM64 packaging impossible from an x64
+# machine. Both are exit codes.
+#
+# It is one workflow rather than two so that `needs: draft` can exist. Two
+# workflows triggered by the same tag start at the same time, so a tag that is
+# about to be refused still starts a 45-minute Windows matrix. Gated, the
+# matrix never begins: failing cheaply is the whole reason the tag goes first.
+#
+# The cost, accepted deliberately: between releases nothing verifies the
+# packaging path, so a break surfaces when the tag is pushed, and a tag is
+# never moved, so the answer is the next patch version. The real packaging
+# happens after the tag either way, which is why running this on every push to
+# main only ever bought knowing earlier, not a tree that cannot be broken.
 
 on:
   push:
@@ -32,6 +50,18 @@ on:
         type: string
 
 permissions: {}
+
+env:
+  ZIG_VERSION: 0.16.0
+  # packaging/windows/metawork.iss includes
+  # `compiler:Languages\ChineseSimplified.isl`, which resolves inside the
+  # compiler's own directory and ships only with Inno Setup 7, so the 6.7.1 the
+  # runner image preinstalls cannot build this installer at all. The compiler
+  # is therefore installed rather than taken from the image, pinned to the
+  # version the release machine uses, with the digest from the published winget
+  # manifest.
+  INNO_SETUP_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe
+  INNO_SETUP_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
@@ -220,4 +250,165 @@ jobs:
             fi
             printf 'Next, by hand: check out `%s` and package, sign and notarize the four installers from it, upload them to the download host, then publish this draft and point the update manifest at the new version in the same step. Nothing is attached to a MetaWork release.\n\n' "$COMMIT"
             printf 'If an artifact turns out to be wrong, release the next patch version. This tag stays where it is: moving or deleting a tag that has been drafted leaves anyone who already fetched it on a different tree than the one this release names.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    name: Windows installer (${{ matrix.architecture }})
+    needs: draft
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+            target: x86_64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-x86_64.lock.json
+          - architecture: arm64
+            runner: windows-2022
+            target: aarch64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-aarch64.lock.json
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      # Only the fetched dependency packages, which are small and shared with
+      # CI. The compiled output is deliberately not cached: a release is
+      # always built from nothing, and a warm object cache would hide exactly
+      # the kind of regression this job is here to catch. The repository is
+      # also already over the 10 GB Actions cache limit, so a new 800 MB entry
+      # per target would evict the caches the test jobs depend on.
+      - name: Cache Zig dependency packages
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .zig-cache/global/p
+          key: zig-packages-${{ matrix.runner }}-${{ matrix.target }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon', matrix.lock, 'package-lock.json') }}
+
+      - name: Prepare Zig cache
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE '.zig-cache/global'
+          New-Item -ItemType Directory -Force (Join-Path $cache 'tmp') | Out-Null
+          "ZIG_GLOBAL_CACHE_DIR=$cache" >> $env:GITHUB_ENV
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Restore AgentCore release download
+        id: agentcore-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
+
+      # An explicit target, including the one that is not the runner's own
+      # architecture. The downloader accepts any target present in a lock
+      # without consulting the host, which is what makes ARM64 packaging
+      # possible here at all.
+      - name: Stage locked AgentCore bundle
+        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
+
+      - name: Save verified AgentCore release download
+        if: steps.agentcore-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
+          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
+
+      - name: Install the pinned Inno Setup compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          curl.exe --fail --location --silent --show-error --output $installer $env:INNO_SETUP_URL
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash
+          $expected = $env:INNO_SETUP_SHA256.ToUpperInvariant()
+          if ($actual -ne $expected) {
+            throw "Inno Setup download digest is $actual, expected $expected"
+          }
+          # The installer is a GUI program, so the call operator would not wait
+          # for it and the next step would look for a compiler that is still
+          # being written.
+          $process = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/ALLUSERS'
+          if ($process.ExitCode -ne 0) {
+            throw "Inno Setup installer exited with $($process.ExitCode)"
+          }
+          $location = $null
+          foreach ($key in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1'
+          )) {
+            $entry = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            if ($entry -and $entry.InstallLocation) {
+              $location = $entry.InstallLocation
+              break
+            }
+          }
+          if (-not $location) { throw 'Inno Setup 7 registered no install location' }
+          $compiler = Join-Path $location 'ISCC.exe'
+          # Asserted by name rather than left to ISCC, so a compiler without
+          # the language files the installer script requires fails here with
+          # the reason instead of inside a compile log.
+          $language = Join-Path $location 'Languages\ChineseSimplified.isl'
+          foreach ($required in @($compiler, $language)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Inno Setup 7 install is missing $required"
+            }
+          }
+          # Pointing the packaging script at this exact compiler settles the
+          # discovery order, so the image's preinstalled Inno Setup 6 cannot be
+          # reached through PATH and fail the gate for the wrong reason.
+          "METAWORK_INNO_SETUP_COMPILER=$compiler" >> $env:GITHUB_ENV
+          & $compiler /? | Select-Object -First 1
+
+      # Unsigned is the script's own default, so this is the release path with
+      # nothing removed from it except the parts that need the certificate.
+      - name: Build the unsigned installer
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        # The log stays in the workspace rather than under $RUNNER_TEMP, whose
+        # backslash Windows path a bash step would have to hand to grep and
+        # tee as a literal.
+        run: |
+          npm run package:windows -- "$ARCHITECTURE" 2>&1 | tee package.log
+
+      # The size delta only reports; it never fails a build. Putting it in the
+      # run summary is what makes a drifting main package visible without
+      # anyone opening a log, which is how it stayed red for five releases.
+      - name: Report the measured installer
+        if: always()
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          {
+            printf '### Windows %s\n\n' "$ARCHITECTURE"
+            line=$(grep -E '^built (unsigned|signed) Windows ' package.log 2>/dev/null | tail -1 || true)
+            if [[ -n "$line" ]]; then
+              printf -- '- %s\n' "${line#built }"
+              printf -- '- Unsigned and unnotarized: a verification artifact, never a release artifact.\n'
+            else
+              printf -- '- No installer measurement was produced; the packaging run did not reach the end.\n'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
