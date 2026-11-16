@@ -69,6 +69,14 @@ fn runFixture(root: []const u8, class: plan.Class, nonce: []const u8) !std.proce
     return child.wait(std.testing.io);
 }
 
+/// The child must not have exited cleanly. Any other exit passes this gate on
+/// purpose: a Windows fault has no signal to report, it just leaves a status
+/// (3 after the standard library's own handler aborts, 0xC0000409 for the
+/// abort), and pinning those would pin another owner's policy. The cost is
+/// that a child which failed for an ordinary reason and exited 1 also gets
+/// through here, which is why nothing downstream takes this as evidence: a
+/// missing record, a record carrying another process's nonce, or a claim count
+/// short of the scenario each fail on their own.
 fn expectFaulted(termination: std.process.Child.Term) !void {
     switch (termination) {
         .exited => |code| if (code == 0) return error.FixtureExitedWithoutFaulting,
@@ -153,9 +161,10 @@ fn expectPlanBreadcrumbs(record: fault.Record) !void {
     // what the churn rotated through.
     try std.testing.expectEqual(fault.breadcrumb_capacity - 2, finished);
     try std.testing.expect(newest_churn);
-    // The churn is three times the ring, so the first of its Runs and the Run
-    // retired before it must both have been reused by now -- without which
-    // this scenario would not be testing reuse at all.
+    // `churn_runs` is more than twice the ring (69 claims against 32 slots,
+    // and only the 30 the live Runs leave free can take them), so the first
+    // churned Run and the Run retired before it must both have been reused by
+    // now. Without that this scenario would not be testing reuse at all.
     try std.testing.expect(!oldest_churn);
     try std.testing.expect(!retired);
 }
