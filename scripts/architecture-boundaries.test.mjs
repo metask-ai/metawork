@@ -267,6 +267,47 @@ test("release version has one manifest owner and exact package mirrors", () => {
   );
 });
 
+test("release version has a dated changelog section", () => {
+  const version = read("app.zon").match(/\.version = "([^"]+)"/)?.[1];
+  const changelog = read("CHANGELOG.md");
+  const lines = changelog.split("\n");
+
+  // The heading shape .github/workflows/release.yml matches when it takes a
+  // release draft's notes out of this file. Asserted here too, because here it
+  // fails on the `chore: release` pull request that bumped app.zon, a whole
+  // step before a tag exists to fail against.
+  const prefix = `## [${version}] - `;
+  const headings = lines.filter((line) => line.startsWith(prefix));
+  assert.equal(
+    headings.length,
+    1,
+    `CHANGELOG.md needs exactly one "${prefix}YYYY-MM-DD" heading`,
+  );
+  assert.match(headings[0], /^## \[[^\]]+\] - \d{4}-\d{2}-\d{2}$/);
+
+  // Extracted the way the workflow extracts it, so a section that passes here
+  // cannot still produce empty release notes. Only a heading in the first
+  // column ends the section; `### Added` and friends are part of it.
+  const start = lines.indexOf(headings[0]) + 1;
+  const next = lines.findIndex(
+    (line, index) => index >= start && line.startsWith("## "),
+  );
+  const body = lines.slice(start, next === -1 ? lines.length : next);
+  assert.notEqual(
+    body.join("").trim(),
+    "",
+    `The ${version} section in CHANGELOG.md is empty`,
+  );
+
+  // Every released heading is a link reference, so a section without its
+  // definition renders as literal brackets.
+  assert.equal(
+    lines.filter((line) => line.startsWith(`[${version}]: https://`)).length,
+    1,
+    `CHANGELOG.md needs exactly one [${version}] link definition`,
+  );
+});
+
 test("official update checks require distribution opt-in and stay outside Agent and Renderer networking", () => {
   const build = read("build.zig");
   assert.match(
