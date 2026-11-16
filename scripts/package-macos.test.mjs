@@ -17,6 +17,7 @@ import {
   macosDistributionForAgentCoreTarget,
   macosPackageTargetIds,
   parseDeveloperIdCertificateReport,
+  parseMacosPackageArguments,
   parseNativePackageMetadata,
   parseNotarySubmission,
   parseTeamIdentifier,
@@ -85,6 +86,110 @@ test("macOS package selection is explicit and defaults to both architectures", (
   assert.throws(
     () => macosPackageTargetIds("universal"),
     /expected arm64, x64, or all/u,
+  );
+});
+
+test("macOS packaging signs unless asked not to", () => {
+  assert.deepEqual(parseMacosPackageArguments([]), {
+    architecture: "all",
+    signing: "required",
+  });
+  for (const architecture of ["arm64", "x64", "all"]) {
+    assert.deepEqual(parseMacosPackageArguments([architecture]), {
+      architecture,
+      signing: "required",
+    });
+  }
+  // Unsigned has to be asked for: this entry only ever produces a release
+  // artifact, so an operator running the documented command cannot be handed
+  // an unsigned .app by a default.
+  for (const args of [["--signing", "none"], ["--signing=none"]]) {
+    assert.deepEqual(parseMacosPackageArguments(args), {
+      architecture: "all",
+      signing: "none",
+    });
+  }
+  assert.deepEqual(parseMacosPackageArguments(["arm64", "--signing=none"]), {
+    architecture: "arm64",
+    signing: "none",
+  });
+  for (const [args, message] of [
+    [["--signing"], /--signing must be none or required/u],
+    [["--signing", "adhoc"], /--signing must be none or required/u],
+    [["--signing=self"], /--signing must be none or required/u],
+    [
+      ["--signing=none", "--signing=required"],
+      /--signing may only be specified once/u,
+    ],
+    [["arm64", "x64"], /architecture may only be specified once/u],
+    [["--preview"], /unknown package:macos argument --preview/u],
+  ]) {
+    assert.throws(() => parseMacosPackageArguments(args), message);
+  }
+  // The selection itself stays owned by macosPackageTargetIds, so an invalid
+  // architecture still fails with the values it accepts.
+  assert.equal(
+    parseMacosPackageArguments(["universal"]).architecture,
+    "universal",
+  );
+});
+
+test("an unsigned macOS package stops at the verified app bundle", () => {
+  const packageScript = readFileSync(
+    new URL("./package-macos.mjs", import.meta.url),
+    "utf8",
+  );
+  // The identity is read only for a signed package. Resolving it ahead of
+  // every build step is what kept this path off any machine without the
+  // certificate, so no macOS packaging ran in CI at all.
+  assert.match(
+    packageScript,
+    /signing === "required" \? resolveDistributionIdentity\(\) : null/u,
+  );
+  assert.equal(
+    packageScript.match(/resolveDistributionIdentity\(\)/gu).length,
+    2,
+  );
+  const unsignedStart = packageScript.indexOf("  if (identity === null) {");
+  assert.notEqual(unsignedStart, -1);
+  const unsigned = packageScript.slice(
+    unsignedStart,
+    packageScript.indexOf("const ripgrepPath", unsignedStart),
+  );
+  // It reaches a built and structurally verified .app, and stops: everything
+  // past this point either needs the certificate or signs something.
+  assert.match(unsigned, /verifyMacosExecutableSections\(/u);
+  assert.match(unsigned, /verifyPackagedMacosAppContents\(appIconArtifact\)/u);
+  assert.match(unsigned, /return \{ executableSections \};/u);
+  for (const forbidden of [
+    /signWithDeveloperId/u,
+    /verifyDeveloperIdSignature/u,
+    /createDistributionDiskImage/u,
+    /notarizeDiskImage/u,
+    /stapler/u,
+    /spctl/u,
+    /hdiutil/u,
+  ]) {
+    assert.doesNotMatch(unsigned, forbidden);
+  }
+  // The checks an unsigned run does perform are the same calls a signed run
+  // makes, not a reduced copy of them.
+  assert.equal(
+    packageScript.match(/verifyPackagedMacosAppContents\(/gu).length,
+    3,
+  );
+  // An unsigned architecture reports and moves on, never reaching the disk
+  // image, notarization and stapling that follow for a signed one.
+  const packaging = packageScript.slice(
+    packageScript.indexOf("async function packageMacos("),
+  );
+  const unsignedReport = packaging.indexOf("built unsigned ${distribution");
+  assert.notEqual(unsignedReport, -1);
+  assert.ok(unsignedReport < packaging.indexOf("createDistributionDiskImage("));
+  assert.ok(unsignedReport < packaging.indexOf("notarizeDiskImage("));
+  assert.match(
+    packaging.slice(unsignedReport),
+    /^[^;]*;\s*\)?;?\s*continue;/su,
   );
 });
 

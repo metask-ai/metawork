@@ -117,6 +117,20 @@ npm run package:macos -- all
 
 `arm64`、`x64` 与 `all` 是唯一有效选择；缺少所选 target 的 canonical bundle 时在访问签名 identity 前明确失败。发布架构不由最后一次 stage、Host 默认架构或环境变量决定。
 
+## 未签名边界
+
+`package:macos` 默认 `--signing required`：正式发版命令不变，缺少 Developer ID identity 时仍然明确失败。没有证书的机器显式要求未签名模式：
+
+```bash
+npm run package:macos -- arm64 --signing none
+```
+
+未签名模式跑完整条分发打包路径，只省掉需要证书的那几步：验证 canonical bundle、用 `actool` 编译 Icon Composer 资产、ReleaseSafe 构建、Native SDK 生成 `.app`、stage 图标与最低系统版本、部署并核验 AgentCore runtime 资产、检查主程序恰好是单一目标架构、复核 Mach-O section 与构建输出一致，以及 Bundle ID、版本、Renderer、图标与托盘资源的结构校验。到这里干净停下：不生成 DMG、不签名、不公证、不装订、不执行 Gatekeeper assessment。它产出的 `.app` 是验证产物，永远不是发布产物。
+
+这个边界和 Windows 对称：两边都能在没有凭据的机器上跑一遍打包路径，证明它还能用。未签名模式不读取签名 identity，因此也无法靠它取得任何签名或公证结论；identity 只在 `--signing required` 下解析，正式签名路径的行为不受未签名模式存在的影响。
+
+DMG 留在签名一侧不是遗漏：它的 Finder 图标视图要在真实图形会话里由 Finder 写入 `.DS_Store`，最后一步又是以 Developer ID 签名磁盘映像，两者都不是未签名验证能代替的。
+
 DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事务。第一次部署具备单实例能力的版本时，测试者或用户必须先显式退出仍在运行的旧 MetaWork，再替换 `/Applications` 中的 `.app`；旧 Host 尚未持有数据目录 lease，也不理解新的启动转交协议，因此这一代际边界不具备并行运行或双写保护。完成首次切换后，同一 artifact 与数据目录的兼容版本由应用自身执行单实例转交。
 
 打包入口先要求当前 `xcode-select` 提供 allowlist 内的 Xcode `actool`，把 `assets/icons/MetaWork.icon` 编译为临时 `Assets.car` 与 fallback ICNS；普通开发、check、test 和 build 不调用该工具。随后从 `security find-identity` 精确筛选唯一 Developer ID Application identity，再从所选证书的 subject `OU` 读取 Team ID 并复核 SHA-1 fingerprint。它构建 ReleaseSafe、调用 Native SDK 生成未签名 `.app`，以打包期 Native SDK compatibility seam 原位替换 SDK 临时图标、合并 Icon Composer metadata、stage 其余完整原生资源，再以 `--options runtime --timestamp` 执行唯一一次应用签名。验证必须覆盖 Bundle ID、产品版本、Renderer、Icon Composer resource digest、托盘资源、Developer ID leaf authority、Team ID、Apple anchor、hardened runtime 和可信时间戳。`Assets.car` 与 fallback ICNS 都是发布时生成并在结束后清理的 artifact，不提交到仓库；工具版本变化必须先复核输出与真实系统视觉，再扩展 allowlist。

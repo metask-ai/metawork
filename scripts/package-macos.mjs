@@ -533,7 +533,11 @@ export function verifyMacosMinimumSystemVersion(appPath) {
   return expected;
 }
 
-function verifyPackagedMacosApp(identity, appIconArtifact) {
+// Everything a packaged .app can be held to without a signing identity: the
+// Renderer it carries, its icons, its declared identity and minimum system.
+// An unsigned run stops after this, because it is the last thing that can be
+// proven rather than faked.
+function verifyPackagedMacosAppContents(appIconArtifact) {
   const sourceAssets = path.join(repositoryRoot, "frontend", "dist");
   const packagedAssets = path.join(
     packagedAppPath,
@@ -586,6 +590,10 @@ function verifyPackagedMacosApp(identity, appIconArtifact) {
   }
   verifyMacosMinimumSystemVersion(packagedAppPath);
   verifyStagedMacosAppIcon(appIconArtifact, packagedAppPath);
+}
+
+function verifyPackagedMacosApp(identity, appIconArtifact) {
+  verifyPackagedMacosAppContents(appIconArtifact);
   return verifyDeveloperIdSignature(
     packagedAppPath,
     identity,
@@ -928,6 +936,22 @@ async function buildPackagedMacosApp(
     runtimeAssetOptions,
   );
   verifyPackagedMacosExecutableArchitecture(distribution.executable);
+  // Where an unsigned package stops, which is the same boundary
+  // scripts/package-windows.mjs draws: the whole distribution packaging path
+  // runs, and only the steps that need the certificate are left out. A machine
+  // without a Developer ID still proves that the .app a signed run would sign
+  // can be built and is structurally the right one, which is what makes this
+  // path checkable anywhere instead of only on the release machine.
+  if (identity === null) {
+    verifyMacosExecutableSections(
+      executableSections,
+      readFileSync(
+        path.join(executableDirectory, localProductIdentity.executableName),
+      ),
+    );
+    verifyPackagedMacosAppContents(appIconArtifact);
+    return { executableSections };
+  }
   const ripgrepPath = path.join(executableDirectory, "rg");
   signWithDeveloperId(ripgrepPath, identity, {
     identifier: `${localProductIdentity.bundleId}.agentcore.rg`,
@@ -952,7 +976,50 @@ async function buildPackagedMacosApp(
   };
 }
 
-async function packageMacos(selection) {
+// The same shape scripts/package-windows.mjs takes, with the opposite default:
+// Windows packaging is also the ordinary local way to build an installer, while
+// this entry only ever produces a release artifact, so leaving the certificate
+// out has to be asked for rather than fallen into. A release operator running
+// the documented command cannot end up with an unsigned .app.
+export function parseMacosPackageArguments(arguments_) {
+  let architecture = "all";
+  let architectureSeen = false;
+  let signing = "required";
+  let signingSeen = false;
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (!argument.startsWith("--")) {
+      if (architectureSeen) {
+        throw new Error(
+          "macOS package architecture may only be specified once",
+        );
+      }
+      // Validated by macosPackageTargetIds, which owns the selection and
+      // names the accepted values in its own failure.
+      architecture = argument;
+      architectureSeen = true;
+      continue;
+    }
+    let value;
+    if (argument === "--signing") {
+      value = arguments_[index + 1];
+      index += 1;
+    } else if (argument.startsWith("--signing=")) {
+      value = argument.slice("--signing=".length);
+    } else {
+      throw new Error(`unknown package:macos argument ${argument}`);
+    }
+    if (signingSeen) throw new Error("--signing may only be specified once");
+    signingSeen = true;
+    if (value !== "none" && value !== "required") {
+      throw new Error("--signing must be none or required");
+    }
+    signing = value;
+  }
+  return Object.freeze({ architecture, signing });
+}
+
+async function packageMacos(selection, signing) {
   requireMacos();
   const distributions = macosPackageTargetIds(selection).map(
     macosDistributionForAgentCoreTarget,
@@ -971,7 +1038,11 @@ async function packageMacos(selection) {
     appIconPngSourcePath,
   );
   try {
-    const identity = resolveDistributionIdentity();
+    // Read only when it is going to be used. Resolving it first meant a
+    // machine without the certificate could not reach any build step at all,
+    // which is why no part of this path ran anywhere but the release machine.
+    const identity =
+      signing === "required" ? resolveDistributionIdentity() : null;
     for (const distribution of distributions) {
       const signature = await buildPackagedMacosApp(
         identity,
@@ -979,6 +1050,12 @@ async function packageMacos(selection) {
         appIconArtifact,
         agentCoreBundles.get(distribution.targetId),
       );
+      if (identity === null) {
+        console.log(
+          `built unsigned ${distribution.artifact} macOS app ${packagedAppPath}: no disk image, signature or notarization, a verification artifact and never a release artifact`,
+        );
+        continue;
+      }
       createDistributionDiskImage(identity, distribution.diskImagePath);
       const notarized = notarizeDiskImage(
         identity,
@@ -998,10 +1075,10 @@ async function packageMacos(selection) {
 }
 
 async function main() {
-  if (process.argv.length > 3) {
-    throw new Error("usage: npm run package:macos -- [arm64|x64|all]");
-  }
-  await packageMacos(process.argv[2] ?? "all");
+  const { architecture, signing } = parseMacosPackageArguments(
+    process.argv.slice(2),
+  );
+  await packageMacos(architecture, signing);
 }
 
 const invokedPath = process.argv[1]
