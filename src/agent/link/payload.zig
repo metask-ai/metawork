@@ -64,6 +64,7 @@ pub const Classification = union(enum) {
 /// Classifies a type without failing the build, so a registry can count the
 /// decisions still owed.
 pub fn classify(comptime T: type) Classification {
+    @setEvalBranchQuota(100_000);
     return switch (@typeInfo(T)) {
         .void, .bool, .int, .float => .structural,
         .@"enum" => |info| if (info.is_exhaustive)

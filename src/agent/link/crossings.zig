@@ -19,6 +19,7 @@
 const std = @import("std");
 const contract = @import("agent_contract");
 const payload = @import("payload.zig");
+const shapes = @import("shapes.zig");
 
 const Classification = payload.Classification;
 
@@ -29,6 +30,10 @@ pub const Crossing = struct {
     /// What replaces the obstruction. Empty exactly when the type is
     /// structural.
     shape: []const u8,
+    /// The mirror type in `shapes.zig` that implements `shape`, once it
+    /// exists. Empty means the shape is decided but not yet built, which is
+    /// what the move still owes.
+    mirror: []const u8 = "",
 };
 
 pub fn describe(value: Classification) []const u8 {
@@ -42,6 +47,30 @@ fn crossing(
     comptime T: type,
     comptime expected: Classification,
     comptime shape: []const u8,
+) Crossing {
+    return crossingWith(T, expected, shape, "");
+}
+
+/// The same, for a type whose mirror now exists. `Mirror` is checked to be
+/// something the wire can carry, so a mirror cannot be recorded as done while
+/// still holding an obstruction of its own.
+fn shaped(
+    comptime T: type,
+    comptime expected: Classification,
+    comptime shape: []const u8,
+    comptime Mirror: type,
+) Crossing {
+    comptime {
+        payload.requireStructural(Mirror);
+        return crossingWith(T, expected, shape, @typeName(Mirror));
+    }
+}
+
+fn crossingWith(
+    comptime T: type,
+    comptime expected: Classification,
+    comptime shape: []const u8,
+    comptime mirror: []const u8,
 ) Crossing {
     comptime {
         const actual = payload.classify(T);
@@ -57,7 +86,7 @@ fn crossing(
             "a structural type needs no wire shape and a substituted one needs a stated shape: " ++
                 @typeName(T),
         );
-        return .{ .name = @typeName(T), .expected = expected, .shape = shape };
+        return .{ .name = @typeName(T), .expected = expected, .shape = shape, .mirror = mirror };
     }
 }
 
@@ -110,25 +139,29 @@ pub const crossings = [_]Crossing{
 
     // An owner that holds its bytes through an allocator: the bytes cross, the
     // ownership stays where it was.
-    crossing(
+    shaped(
         contract.TerminalResult,
         .{ .substituted = .allocator },
         "diagnostic bytes inline, receipts as data",
+        shapes.TerminalResult,
     ),
-    crossing(
+    shaped(
         contract.CompactTerminalResult,
         .{ .substituted = .allocator },
         "diagnostic bytes inline",
+        shapes.CompactTerminalResult,
     ),
-    crossing(
+    shaped(
         contract.CheckpointOutcome,
         .{ .substituted = .allocator },
         "record fields inline; the blob never crosses",
+        shapes.CheckpointOutcome,
     ),
-    crossing(
+    shaped(
         contract.PendingUiRequest,
         .{ .substituted = .allocator },
         "request JSON inline",
+        shapes.PendingUiRequest,
     ),
 
     // A context pointer or a byte callback: the far side performs the effect,
@@ -165,15 +198,26 @@ pub const crossings = [_]Crossing{
     ),
 
     // An embedded error set, which the error registry already numbers.
-    crossing(
+    shaped(
         contract.CloseOutcome,
         .{ .substituted = .open_value },
         "registered error code plus the disposition",
+        shapes.CloseOutcome,
     ),
-    crossing(
+    shaped(
         contract.BeginRunFailure,
         .{ .substituted = .open_value },
         "registered error code plus the disposition",
+        shapes.BeginRunFailure,
+    ),
+    // Found while building the mirrors rather than by reading the port: a
+    // callback rejection is reached inside a terminal result and carries
+    // `?anyerror`, which no registry can close.
+    shaped(
+        contract.control.CallbackRejection,
+        .{ .substituted = .open_value },
+        "registered error code, or recorded as present but unnamed",
+        shapes.CallbackRejection,
     ),
 };
 
@@ -183,13 +227,23 @@ pub fn writeTable(writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} {s} {s}\n", .{ describe(entry.expected), entry.name, entry.shape });
 }
 
-/// How many types still owe a wire shape. The move is done when every one of
-/// them has it; this is the number that should fall, not a count of lines.
+/// How many types still owe a wire shape: substituted, and with no mirror
+/// built yet. This is the number that should fall as the move proceeds, not a
+/// count of lines.
 pub fn owed() usize {
     var total: usize = 0;
-    for (crossings) |entry| if (entry.expected == .substituted) {
-        total += 1;
-    };
+    for (crossings) |entry| {
+        if (entry.expected == .substituted and entry.mirror.len == 0) total += 1;
+    }
+    return total;
+}
+
+/// How many substituted types already have their mirror.
+pub fn shapedCount() usize {
+    var total: usize = 0;
+    for (crossings) |entry| {
+        if (entry.expected == .substituted and entry.mirror.len != 0) total += 1;
+    }
     return total;
 }
 
@@ -205,8 +259,9 @@ test "the inventory is still true, and says something about every entry" {
         .substituted => try std.testing.expect(entry.shape.len != 0),
     };
     try std.testing.expectEqual(@as(usize, 22), structural);
-    try std.testing.expectEqual(@as(usize, 16), owed());
-    try std.testing.expectEqual(crossings.len, structural + owed());
+    try std.testing.expectEqual(@as(usize, 7), shapedCount());
+    try std.testing.expectEqual(@as(usize, 10), owed());
+    try std.testing.expectEqual(crossings.len, structural + shapedCount() + owed());
 }
 
 test "every obstruction the codec can report is represented, so none is unplanned" {

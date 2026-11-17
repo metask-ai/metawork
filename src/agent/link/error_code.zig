@@ -176,6 +176,18 @@ pub fn decode(code: u16) ?LinkError {
     return null;
 }
 
+/// The same decode narrowed to `surface.Error`. A port result that declares
+/// the contract set cannot hold `OutOfMemory`, so a peer sending that number
+/// where a contract error belongs is a protocol violation, not an allocation
+/// failure to pass along.
+pub fn decodeContract(code: u16) ?Error {
+    @setEvalBranchQuota(entries.len * 64);
+    inline for (entries) |entry| {
+        if (code == entry.code) return @field(Error, entry.name);
+    }
+    return null;
+}
+
 /// Writes the registered mapping, one `code name` pair per line. The
 /// cross-process port review reads this instead of a table kept by hand.
 pub fn writeTable(writer: *std.Io.Writer) std.Io.Writer.Error!void {
