@@ -27,7 +27,8 @@ Object.defineProperty(globalThis, "navigator", {
   value: dom.window.navigator,
 });
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, render, screen } =
+  await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({

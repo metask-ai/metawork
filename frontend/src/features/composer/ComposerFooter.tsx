@@ -86,7 +86,6 @@ function attachmentTypeLabel(
   attachment: ComposerAttachment,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  if (attachment.workspacePath) return t("composer.workspace_file");
   return t(
     attachment.kind === "image"
       ? "attachment.type.image"
@@ -96,11 +95,8 @@ function attachmentTypeLabel(
 
 function attachmentErrorMessage(reason: string): MessageId {
   const messages: Record<string, MessageId> = {
-    workspace_reference_type: "composer.reference_workspace_type",
-    workspace_reference_size: "composer.reference_workspace_size",
     unsupported_type: "attachment.error.unsupported_type",
     file_too_large: "attachment.error.file_too_large",
-    text_file_too_large: "attachment.error.file_too_large",
     too_many_files: "attachment.error.too_many_files",
     staging_capacity: "attachment.error.staging_capacity",
     read_failed: "attachment.error.read_failed",
@@ -164,8 +160,6 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
-  workspaceReferenceMenu,
-  workspaceReferenceScope,
   onDropFiles,
   onPasteImages,
   onCancelAttachments,
@@ -230,8 +224,6 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
-  workspaceReferenceMenu?: ReactNode;
-  workspaceReferenceScope?: string;
   onDropFiles?: (files: File[]) => void;
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
@@ -738,11 +730,8 @@ export function ComposerFooter({
                     </span>
                   )}
                   <span className="composer-attachment-copy">
-                    <strong
-                      dir="auto"
-                      title={attachment.workspacePath ?? attachment.displayName}
-                    >
-                      {attachment.workspacePath ?? attachment.displayName}
+                    <strong dir="auto" title={attachment.displayName}>
+                      {attachment.displayName}
                     </strong>
                     <small>
                       {attachmentTypeLabel(attachment, t)} ·{" "}
@@ -953,14 +942,13 @@ export function ComposerFooter({
                   </Button>
                 ) : (
                   <ComposerAddMenu
-                    key={workspaceReferenceScope ?? draftScope}
+                    key={draftScope}
                     triggerRef={attachmentButtonRef}
                     disabled={composeDisabled || attachmentActionsDisabled}
                     attachmentsEnabled={attachmentsEnabled}
                     skillText={draft.kind === "text" ? draft.text : null}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
-                    workspaceReferenceMenu={workspaceReferenceMenu}
                     onRefreshSkills={onRefreshSkillCatalog}
                     onChooseSkill={chooseCandidate}
                   />

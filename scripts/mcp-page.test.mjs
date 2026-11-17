@@ -36,7 +36,7 @@ Object.defineProperty(globalThis, "navigator", {
 });
 
 const { cleanup, fireEvent, render, screen, waitFor, within } =
-  await import("@testing-library/react");
+  await import("./renderer-testing-library.mjs");
 
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),

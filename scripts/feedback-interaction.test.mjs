@@ -80,7 +80,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
 globalThis.CSS ??= { escape: (value) => value.replace(/["\\]/g, "\\$&") };
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } =
-  await import("@testing-library/react");
+  await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),

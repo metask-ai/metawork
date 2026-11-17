@@ -417,7 +417,7 @@ export class BridgeClient {
     );
   }
   listWorkspaceDirectory(
-    taskId: string | null,
+    taskId: string,
     workspaceId: string,
     workspaceEpoch: string,
     path: string,
