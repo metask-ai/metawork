@@ -1464,6 +1464,15 @@ test "a rewind leaves its turns in history and out of the Conversation" {
     try std.testing.expectEqual(@as(?u64, 3), lastConversationRunId(&task));
     task.durable.runs[2].?.coverage = .covered;
 
+    // The declaration the executor acts on: queued messages were written to
+    // follow a continuation this rewind removes, so their text comes back for
+    // an explicit resend instead of running after it.
+    const impact = mutationImpact(.rewind);
+    try std.testing.expectEqual(task_state.SendInputReason.edit_and_rerun, impact.queued_input.resendable);
+    try std.testing.expectEqual(.required, impact.core_quiescence);
+    try std.testing.expectEqual(.unchanged, impact.execution_config);
+    try std.testing.expectEqual(.none, impact.model_access);
+
     // What the edit entry asks, in the window and at the call.
     try std.testing.expectEqual(
         @as(u64, 1),

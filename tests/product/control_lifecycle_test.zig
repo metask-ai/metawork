@@ -10729,13 +10729,13 @@ test "an edited message rewinds the Conversation and reruns in its place" {
     try std.testing.expectEqual(@as(?u64, 3), task.durable.runs[1].?.conversation_position);
     try expectFakeConversation(0, 4);
 
-    // A queued message written to follow the turns this rewind removes. Its
-    // text comes back for an explicit resend instead of running after it.
-    const queued = try scenario.control.sendInput("queued-after-edit", scenario.task_id, .{ .text = "after the second turn" });
-    try std.testing.expectEqual(.accepted, queued.outcome);
+    // One more ordinary turn, which the Task starts at once because it is
+    // idle. The edit below has to take this one out of the Conversation too.
+    const third = try scenario.control.sendInput("third-turn", scenario.task_id, .{ .text = "third turn" });
+    try std.testing.expectEqual(.accepted, third.outcome);
+    try settleInputScenario(scenario);
+    try expectFakeConversation(0, 6);
 
-    fake_core.rearmControlled();
-    fake_core.setNextPlan(.immediate);
     const accepted = try scenario.control.editTaskInput(
         "edit-first-turn",
         scenario.task_id,
@@ -10743,23 +10743,21 @@ test "an edited message rewinds the Conversation and reruns in its place" {
         .{ .text = "edited first turn" },
     );
     try std.testing.expectEqual(.accepted, accepted.outcome);
-    for (task.input_submissions.items) |record| {
-        if (std.mem.eql(u8, record.submission.operationId(), "queued-after-edit")) {
-            try std.testing.expectEqual(.failed, record.state);
-            try std.testing.expectEqual(task_state.SendInputReason.edit_and_rerun, record.reason.?);
-        }
-    }
     try settleInputScenario(scenario);
 
-    // The rerun took the edited turn's own position, and both later turns
-    // left the Conversation while staying in Product history.
+    // The rerun took the edited turn's own position, and all three later
+    // turns left the Conversation while staying in Product history.
     const rerun = for (task.durable.runs) |entry| {
         const run = entry orelse continue;
         if (run.id != first and run.superseded_by_run_id == null) break run.id;
     } else return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
-    try std.testing.expectEqual(@as(u32, 2), task_policy.rewoundRunCount(task, rerun));
+    try std.testing.expectEqual(@as(u32, 3), task_policy.rewoundRunCount(task, rerun));
     try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
+    for (task.durable.runs) |entry| if (entry) |run| {
+        if (run.id == rerun) continue;
+        try std.testing.expect(task_policy.runSuperseded(task, &run));
+    };
     // One turn after the rewind: the Conversation the next Run extends is the
     // context before the edited message plus the rerun itself.
     try expectFakeConversation(0, 2);
@@ -10803,11 +10801,15 @@ test "editing during a Run stops it under its own cause and reruns once idle" {
         const run = entry orelse continue;
         if (run.id != running) break run.id;
     } else return error.TestUnexpectedResult;
-    // The interrupted turn never left a reply behind, so the Conversation
-    // already ended where the rerun needed it to and Core was not called.
+    // Core had already taken the interrupted turn, so this was a real rewind
+    // and the rerun takes that turn's own position.
+    try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
     try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
     try std.testing.expect(task_policy.runSuperseded(task, stopped));
     try std.testing.expectEqual(@as(u32, 1), task_policy.rewoundRunCount(task, rerun));
+    // The Conversation is the context before the edited message plus the
+    // rerun's own turn.
+    try expectFakeConversation(0, 2);
 }
 
 test "active input continues exactly once after normal completion and never repeats adopted input" {

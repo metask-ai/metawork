@@ -2603,7 +2603,7 @@ pub const Runtime = struct {
         // this rewind removes, and their text comes back for an explicit
         // resend instead of running after it.
         self.applyMutationImpact(task_id, .rewind);
-        _ = self.cancelWaitingInputsExcept(task_id, .edit_and_rerun, index);
+        _ = self.cancelWaitingInputs(task_id, .edit_and_rerun, .{ .except = index });
         return submission;
     }
 
@@ -2629,6 +2629,14 @@ pub const Runtime = struct {
             .compact, .restore => return .wait,
             .none => {
                 if (task.runtime.worker_leases.hasLive()) return .wait;
+                // An edited message has to rewind the Conversation, and that
+                // is idle-only at the Core boundary -- which is stricter than
+                // having no active operation. Its declared impact says
+                // `core_quiescence = .required`, and an unfinalized terminal
+                // event means Core has not quiesced yet, so wait exactly as a
+                // manual compaction waits.
+                if (task.input_submissions.items[index].rewind_to_position != null and
+                    task_state.hasUnfinalizedTerminalEvents(task)) return .wait;
                 return .{ .start = index };
             },
             .run => |id| {
@@ -2708,7 +2716,7 @@ pub const Runtime = struct {
             const task = entry orelse continue;
             const id = task.durable.id;
             if (shutting_down) {
-                _ = self.cancelWaitingInputs(id, .shutting_down);
+                _ = self.cancelWaitingInputs(id, .shutting_down, .all);
                 _ = self.cancelInputContinuation(id, null, .shutting_down);
                 continue;
             }
@@ -2941,24 +2949,33 @@ pub const Runtime = struct {
 
     pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
         for (self.tasks) |entry| if (entry) |task| {
-            _ = self.cancelWaitingInputs(task.durable.id, .shutting_down);
+            _ = self.cancelWaitingInputs(task.durable.id, .shutting_down, .all);
         };
     }
 
-    /// Freeze the current batch by changing its records, never a sticky Task flag.
-    pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
-        return self.cancelWaitingInputsExcept(task_id, reason, null);
-    }
+    /// Which of the waiting batch a retirement leaves alone.
+    pub const WaitingInputScope = union(enum) {
+        all,
+        /// The one submission the caller has just accepted and is about to
+        /// drive: an edit-and-rerun retires the rest without retiring itself.
+        except: usize,
+        /// Edited messages waiting for their own rewind. One of them is the
+        /// reason the Run that just ended was stopped, so it waits for its
+        /// turn instead of failing with it.
+        except_rewinds,
+    };
 
-    /// `keep` is the one submission the caller has just accepted and is about
-    /// to drive: an edit-and-rerun retires the rest of the batch without
-    /// retiring itself.
-    pub fn cancelWaitingInputsExcept(self: *Runtime, task_id: u64, reason: SendInputReason, keep: ?usize) bool {
+    /// Freeze the current batch by changing its records, never a sticky Task flag.
+    pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason, scope: WaitingInputScope) bool {
         const task = self.find(task_id) orelse return false;
         task.skill_preparation = null;
         var changed = false;
         for (task.input_submissions.items, 0..) |*record, index| {
-            if (keep == index) continue;
+            switch (scope) {
+                .all => {},
+                .except => |keep| if (keep == index) continue,
+                .except_rewinds => if (record.rewind_to_position != null) continue,
+            }
             if (record.state != .waiting) continue;
             record.state = if (reason == .continuation_cancelled) .cancelled else .failed;
             record.reason = reason;
@@ -2970,7 +2987,7 @@ pub const Runtime = struct {
 
     pub fn stopInputs(self: *Runtime, task_id: u64) bool {
         const task = self.find(task_id) orelse return false;
-        const changed = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+        const changed = self.cancelWaitingInputs(task_id, .continuation_cancelled, .all);
         const continuation_changed = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         if (task.runtime.active_operation == .run) {
             if (task_state.findRun(task.durable.runs, task.runtime.active_operation.run)) |run|
@@ -3495,7 +3512,15 @@ pub const Runtime = struct {
             null;
         var rewound = false;
         if (rewind) |position| {
-            switch (try access.rewindToUserMessage(position)) {
+            const outcome = access.rewindToUserMessage(position) catch |err| switch (err) {
+                // Core quiescence is the one condition Product cannot observe
+                // perfectly from its own facts. Being told to wait is not a
+                // reason to destroy the user's edited message: the queue
+                // treats this as busy and comes back.
+                error.SessionNotIdle => return error.TaskBusy,
+                else => |other| return other,
+            };
+            switch (outcome) {
                 // `unchanged` is the Conversation already ending where the
                 // rerun needs it to: the edited Run's input never reached
                 // Core. Its turns still leave Product history below.
@@ -5052,7 +5077,7 @@ pub const Runtime = struct {
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
         if (archived) {
-            _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+            _ = self.cancelWaitingInputs(task_id, .continuation_cancelled, .all);
             _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
             task.runtime.permission_review.invalidate();
             acknowledgeLatestCompletion(task);
@@ -5230,7 +5255,7 @@ pub const Runtime = struct {
         };
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
-        _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+        _ = self.cancelWaitingInputs(task_id, .continuation_cancelled, .all);
         _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         return true;
     }
@@ -5333,7 +5358,7 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id) continue;
-            _ = self.cancelWaitingInputs(task.durable.id, .workspace_removing);
+            _ = self.cancelWaitingInputs(task.durable.id, .workspace_removing, .all);
             _ = self.cancelInputContinuation(task.durable.id, null, .workspace_removing);
             if (!task.runtime.hasAttachedSession()) continue;
             if (effect.release(task.durable.id) == .failed) return false;
@@ -7535,7 +7560,10 @@ pub const Runtime = struct {
         if (!run.terminal_observed) {
             const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
             if (terminal.outcome != .completed and !stopped_batch) {
-                _ = self.cancelWaitingInputs(task.durable.id, .admission_failed);
+                // A Run this Task stopped to make room for an edited message
+                // does not retire that message: it is the reason the Run
+                // stopped, and it is still waiting for the rewind it carries.
+                _ = self.cancelWaitingInputs(task.durable.id, .admission_failed, .except_rewinds);
             }
             for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state != .adopted and record.state != .transferred) {
