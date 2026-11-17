@@ -86,7 +86,6 @@ function attachmentTypeLabel(
   attachment: ComposerAttachment,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  if (attachment.workspacePath) return t("composer.workspace_file");
   return t(
     attachment.kind === "image"
       ? "attachment.type.image"
@@ -98,7 +97,6 @@ function attachmentErrorMessage(reason: string): MessageId {
   const messages: Record<string, MessageId> = {
     unsupported_type: "attachment.error.unsupported_type",
     file_too_large: "attachment.error.file_too_large",
-    text_file_too_large: "attachment.error.file_too_large",
     too_many_files: "attachment.error.too_many_files",
     staging_capacity: "attachment.error.staging_capacity",
     read_failed: "attachment.error.read_failed",
@@ -732,11 +730,8 @@ export function ComposerFooter({
                     </span>
                   )}
                   <span className="composer-attachment-copy">
-                    <strong
-                      dir="auto"
-                      title={attachment.workspacePath ?? attachment.displayName}
-                    >
-                      {attachment.workspacePath ?? attachment.displayName}
+                    <strong dir="auto" title={attachment.displayName}>
+                      {attachment.displayName}
                     </strong>
                     <small>
                       {attachmentTypeLabel(attachment, t)} ·{" "}

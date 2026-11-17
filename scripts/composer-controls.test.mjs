@@ -3880,15 +3880,6 @@ test("file size rejection displays the Host limit and preserves ready chips", ()
   assert.ok(screen.getByText("ready.txt"));
 });
 
-test("text file size rejection remains actionable", () => {
-  renderComposer({
-    attachmentsEnabled: true,
-    attachmentMaxFileBytes: "100000000",
-    attachmentError: "text_file_too_large",
-  });
-  assert.match(screen.getByRole("alert").textContent, /100 MB/);
-});
-
 function pasteItems(target, items) {
   const event = new window.Event("paste", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "clipboardData", {

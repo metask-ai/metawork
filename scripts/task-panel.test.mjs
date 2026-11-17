@@ -6757,10 +6757,10 @@ test("empty detail pane keeps the file tree control without unrelated header act
 test("workspace directory loads lazily and ignores late responses after Task switches", async () => {
   let tree;
   const requests = [];
-  function Fixture({ scope, visible = true }) {
+  function Fixture({ scope, taskId = scope, visible = true }) {
     tree = useWorkspaceFileTree(
       scope,
-      scope,
+      taskId,
       "1",
       "1",
       visible,
@@ -6775,9 +6775,9 @@ test("workspace directory loads lazily and ignores late responses after Task swi
       }),
     );
   }
-  const view = render(
-    createElement(Fixture, { scope: "first", visible: false }),
-  );
+  const view = render(createElement(Fixture, { scope: "draft", taskId: null }));
+  assert.equal(requests.length, 0);
+  view.rerender(createElement(Fixture, { scope: "first", visible: false }));
   assert.equal(requests.length, 0);
   view.rerender(createElement(Fixture, { scope: "first" }));
   await waitFor(() => assert.equal(requests.length, 1));

@@ -1946,13 +1946,6 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         return self.attachment_lane.beginPreparedPaths(&self.attachments, completion_id, id, path_count, paths);
     }
-    pub fn beginPreparedWorkspaceReference(self: *Runtime, completion_id: u64, id: u64, task_id: u64, workspace_id: u64, epoch: u64, path: []const u8) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        const binding = self.workspace.binding(workspace_id) orelse return error.InvalidTransfer;
-        if (binding.epoch != epoch or !self.workspaceFileAuthorized(task_id, workspace_id, epoch, binding.canonical_root) or
-            !file_preview.validWorkspacePath(path, false) or self.workspacePathHasCredential(path)) return error.InvalidTransfer;
-        return self.attachment_lane.beginPreparedWorkspaceReference(&self.attachments, completion_id, id, binding.canonical_root, .{ .id = workspace_id, .epoch = epoch, .task_id = task_id }, path);
-    }
     pub fn beginPreparedAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, files: []const product_attachment.ReceiveFile) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         defer self.pruneInputRetries();
@@ -1971,32 +1964,7 @@ pub const Runtime = struct {
     }
     pub fn drainAttachmentStagingCompletions(self: *Runtime, sink: AttachmentStagingSink) void {
         defer self.pruneInputRetries();
-        const AuthoritySink = struct {
-            runtime: *Runtime,
-            downstream: AttachmentStagingSink,
-
-            fn complete(context: *anyopaque, id: u64, result: AttachmentStagingResult) void {
-                const adapter: *@This() = @ptrCast(@alignCast(context));
-                const runtime = adapter.runtime;
-                if (result == .ready and result.ready.len == 1) {
-                    const descriptor = result.ready[0];
-                    if (runtime.attachments.workspaceReference(descriptor.id)) |reference| {
-                        const workspace = reference.binding;
-                        const current = runtime.workspace.binding(workspace.id);
-                        if (current == null or !runtime.workspaceFileAuthorized(workspace.task_id, workspace.id, workspace.epoch, current.?.canonical_root) or
-                            runtime.containsKnownCredential(workspace.path) or runtime.containsKnownCredential(reference.text))
-                        {
-                            const reason: AttachmentStagingRejection = if (runtime.attachments.releaseChecked(descriptor.id)) |_| .invalid_transfer else |_| .cleanup_failed;
-                            adapter.downstream.complete_fn(adapter.downstream.context, id, .{ .rejected = reason });
-                            return;
-                        }
-                    }
-                }
-                adapter.downstream.complete_fn(adapter.downstream.context, id, result);
-            }
-        };
-        var adapter: AuthoritySink = .{ .runtime = self, .downstream = sink };
-        self.attachment_lane.drainCompletions(&self.attachments, .{ .context = &adapter, .complete_fn = AuthoritySink.complete });
+        self.attachment_lane.drainCompletions(&self.attachments, sink);
     }
 
     /// Performs only bounded identity/authority work on the main thread and
@@ -2192,7 +2160,7 @@ pub const Runtime = struct {
 
     pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
         if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
-        if (task_id == 0 and !directory) return .{ .immediate = .restricted };
+        if (task_id == 0) return .{ .immediate = .restricted };
         const binding = self.workspace.binding(workspace_id) orelse return .{ .immediate = .missing };
         if (binding.epoch != workspace_epoch or !self.workspaceFileAuthorized(task_id, workspace_id, binding.epoch, binding.canonical_root) or !file_preview.validWorkspacePath(path, directory) or self.workspacePathHasCredential(path)) return .{ .immediate = .restricted };
         self.preview_lane.begin(.{
@@ -2221,11 +2189,6 @@ pub const Runtime = struct {
     }
 
     fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
-        if (task_id == 0) {
-            const fact = self.workspace.facts(workspace_id) orelse return false;
-            return fact.kind == .manual and fact.visible and !fact.project_removed and
-                self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
-        }
         return self.task_runtime.workspaceFileTaskMatches(task_id, workspace_id) and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
     }
 
@@ -4786,13 +4749,6 @@ pub const Runtime = struct {
                 if (multimodal.attachment_ids.len == 0 or
                     multimodal.attachment_ids.len > self.limits.max_attachments_per_draft)
                     return error.TooManyFiles;
-                for (multimodal.attachment_ids) |id| {
-                    const reference = self.attachments.workspaceReference(id) orelse continue;
-                    const binding = self.workspace.binding(reference.binding.id) orelse return error.InvalidRunInput;
-                    if (!self.workspaceFileAuthorized(task_id, binding.id, reference.binding.epoch, binding.canonical_root) or
-                        self.containsKnownCredential(reference.binding.path) or
-                        self.containsKnownCredential(reference.text)) return error.InvalidRunInput;
-                }
                 staged.borrow = if (retrying)
                     try self.attachments.borrowRetry(multimodal.attachment_ids, &staged.parts, &staged.indices, task_id)
                 else
@@ -4836,7 +4792,6 @@ pub const Runtime = struct {
                             .display_name = descriptor.display_name,
                             .bytes = text.bytes,
                             .size_bytes = descriptor.size_bytes,
-                            .workspace_reference_path = if (self.attachments.workspaceReference(text.id)) |reference| reference.binding.path else null,
                         },
                     };
                 }
@@ -19618,6 +19573,7 @@ test "file preview workspace directory authority redacts names and rejects stale
     try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 99, 2, 1, "", true));
     try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 1, "../outside", true));
     try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "visible.txt", false));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "", true));
     const Capture = struct {
         calls: usize = 0,
         state: FilePreviewState = .failed,
@@ -19636,7 +19592,7 @@ test "file preview workspace directory authority redacts names and rejects stale
         }
     };
     var capture = Capture{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 0, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 3, 2, 1, "", true));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;

@@ -573,7 +573,6 @@ export type AttachmentChooseResult =
       reason:
         | "unsupported_type"
         | "file_too_large"
-        | "text_file_too_large"
         | "too_many_files"
         | "staging_capacity"
         | "read_failed"

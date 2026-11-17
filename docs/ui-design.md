@@ -814,7 +814,7 @@ ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校
 
 逐项移除在开始时同步更新所属草稿，保留最新文字和其他附件；Host 回包只结算原操作，不能覆盖草稿或将结果写到其他 Task。移除等待期间文字编辑和 Task 切换仍可用，添加、重复移除和发送保持互斥，并以“正在移除文件”区别于添加/取消添加。操作及反馈绑定草稿 scope、连接 generation 和操作 identity，切走再返回也不接纳旧反馈；旧操作收尾不能解除新操作的互斥，焦点不能迁移到其他草稿。release=false 遵守既有幂等语义，不恢复旧 token；无法确认清理结果时明确提示，并复用连接恢复、清除旧连接未发送附件和保留文字/重选提示的规则，不能猜测删除成功或恢复可能已撤销的 token。
 
-Text draft 可以为空，只要附件全部是 ready 图片或工作区引用；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)接纳的非图片文件以“文件”展示并可与图片混合发送；草稿含普通非图片附件时，去除首尾空白后的用户指令必须非空，否则发送按钮保持禁用，不额外显示常驻提示。空文件、超限或无法解码的已识别图片在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
+Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)接纳的非图片文件以“文件”展示并可与图片混合发送；草稿含非图片附件时，去除首尾空白后的用户指令必须非空，否则发送按钮保持禁用，不额外显示常驻提示。空文件、超限或无法解码的已识别图片在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
 附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。普通 Composer 提交会话捕获本次附件与文字后清空所属草稿，后续编辑成为独立草稿，不等待实际 Run 启动。New task 创建期间沿用同一有界提交会话，取得 Task identity 后按序交付；旧回执只结算原提交，不清除新草稿。timeout 先 resync snapshot，不自动重放或恢复已消费 token；接收和原件结算见 [Product 附件合同](product-architecture.md#26-文件-attachment-staging)。
 

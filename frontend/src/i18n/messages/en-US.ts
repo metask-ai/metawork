@@ -999,7 +999,6 @@ export const enUS = {
   "attachment.add": "Add files",
   "composer.add": "Add to message",
   "composer.add_skill": "Add Skill",
-  "composer.workspace_file": "Working directory reference",
   "composer.add_skill_with_attachments":
     "Remove attachments before adding a Skill.",
   "attachment.removing": "Removing file…",

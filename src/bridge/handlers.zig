@@ -478,7 +478,7 @@ pub const FilePreviewKey = struct { generation: []const u8, previewId: []const u
 pub const WorkspaceFileRequest = struct {
     generation: []const u8,
     previewId: []const u8,
-    taskId: ?[]const u8,
+    taskId: []const u8,
     workspaceId: []const u8,
     workspaceEpoch: []const u8,
     path: []const u8,
@@ -590,15 +590,9 @@ pub const AttachmentAddBegin = struct {
     batchId: []const u8,
     remainingFiles: JsonU32 = .{ .value = product_control.max_attachment_batch_files },
     source: struct {
-        kind: enum { picker, native_paths, file_bytes, workspace_reference },
+        kind: enum { picker, native_paths, file_bytes },
         paths: ?[]const []const u8 = null,
         files: ?[]const struct { name: []const u8, sizeBytes: []const u8 } = null,
-        reference: ?struct {
-            taskId: ?[]const u8,
-            workspaceId: []const u8,
-            workspaceEpoch: []const u8,
-            path: []const u8,
-        } = null,
     },
 };
 pub const AttachmentReceiveAppend = struct {
@@ -1132,6 +1126,20 @@ test "file preview payload requires exact Task Run and reference identity" {
             \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
         ),
     );
+}
+
+test "workspace directory and preview payloads require a Task identity" {
+    var request = try parsePayload(WorkspaceFileRequest,
+        \\{"generation":"1","previewId":"3","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":"docs"}
+    );
+    defer request.deinit();
+    try std.testing.expectEqualStrings("1", request.value.taskId);
+    for ([_][]const u8{
+        \\{"generation":"1","previewId":"3","taskId":null,"workspaceId":"2","workspaceEpoch":"4","path":"docs"}
+        ,
+        \\{"generation":"1","previewId":"3","workspaceId":"2","workspaceEpoch":"4","path":"docs"}
+        ,
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(WorkspaceFileRequest, payload));
 }
 
 test "media payloads require one exact registered target" {

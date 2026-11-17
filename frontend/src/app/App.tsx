@@ -1413,7 +1413,7 @@ export default function App() {
     rightPanelOpen && fileTreeOpen && !settingsOpen,
     useCallback(
       (
-        taskId: string | null,
+        taskId: string,
         workspaceId: string,
         workspaceEpoch: string,
         path: string,
@@ -3003,16 +3003,7 @@ export default function App() {
   function setDraftWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
     if (workspaceId === automaticWorkspaceOptionId) {
-      if (
-        newTaskDraftId &&
-        newTaskDraftId !== unscopedNewTaskDraftId &&
-        !(
-          composerDraftRef.current.kind === "multimodal" &&
-          composerDraftRef.current.attachments.some(
-            (attachment) => attachment.workspacePath,
-          )
-        )
-      )
+      if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
         newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
       dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
       window.requestAnimationFrame(() => composer.current?.focus());
@@ -3330,11 +3321,7 @@ export default function App() {
     );
   }
 
-  async function addAttachments(
-    source: Exclude<AddSource, { kind: "workspace_reference" }> = {
-      kind: "picker",
-    },
-  ) {
+  async function addAttachments(source: AddSource = { kind: "picker" }) {
     if (attachmentBusyRef.current || attachmentRemoval.current.busy) {
       setAttachmentError("input_busy");
       return;

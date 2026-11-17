@@ -459,7 +459,6 @@ pub const MultimodalAttachment = struct {
     reference: []const u8 = &.{},
     size_bytes: ?u64 = null,
     source_format: ?AttachmentFormat = null,
-    workspace_reference_path: ?[]const u8 = null,
     media: ?AttachmentMedia = null,
 };
 
@@ -516,7 +515,7 @@ pub const OwnedRunInput = struct {
             .multimodal => |media| {
                 length = media.text.len;
                 for (media.attachments) |part| {
-                    for ([_][]const u8{ part.display_name, part.bytes, part.reference, part.workspace_reference_path orelse "" }) |value|
+                    for ([_][]const u8{ part.display_name, part.bytes, part.reference }) |value|
                         length = std.math.add(usize, length, value.len) catch return error.ProjectionCapacity;
                 }
             },
@@ -544,8 +543,6 @@ pub const OwnedRunInput = struct {
                     target.display_name = copy(bytes, &offset, part.display_name);
                     target.bytes = copy(bytes, &offset, part.bytes);
                     target.reference = copy(bytes, &offset, part.reference);
-                    if (part.workspace_reference_path) |path|
-                        target.workspace_reference_path = copy(bytes, &offset, path);
                 }
                 break :blk .{ .multimodal = .{ .text = text, .attachments = attachments } };
             },

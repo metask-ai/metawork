@@ -858,7 +858,6 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.add": "添加文件",
   "composer.add": "添加内容",
   "composer.add_skill": "添加技能",
-  "composer.workspace_file": "工作目录引用",
   "composer.add_skill_with_attachments": "请先移除附件，再添加技能。",
   "attachment.removing": "正在移除文件…",
   "attachment.error.release_unconfirmed":
