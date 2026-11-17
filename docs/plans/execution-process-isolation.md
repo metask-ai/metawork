@@ -34,6 +34,8 @@
 
 一个要明说的代价:**放弃等待不释放容量。** 槽位要留到对端应答为止,因为 correlation 必须一直被占着,否则一个迟到的应答会被匹配到下一个占用该槽的调用上——容量是有界且可恢复的,而投错调用的应答是一个长得像正确答案的错答案。
 
+由此两条定界要求:**容量按「对端未结清的 correlation」定界,不按「同时在等的调用方」定界**——后者严格小于前者,按它挑的数平时够用、而在驱动批量放弃等待时才耗尽,偏差还不明显;**耗尽必须分成两个 typed failure**,「并发过多」与「未结清过多」的补救动作不同(前者稍后重试,后者是对端停了应答、等也没用),给同一个码就又是诊断指认错误的原因。
+
 前置重构已经落地（PR #211），一期不必再做：`src/agent/contract.zig` 是 archive-free 的契约模块根，`src/agent/session/surface.zig` 是纯数据声明，`src/agent/session/port.zig` 是 vtable 端口、`port_impl.zig` 是唯一的进程内实现。`src/product/` 整目录已无 `metawork_agent` 导入，Product 经 `metawork_agent_contract` 与 port 面访问 Agent。
 
 但 port 面**不是**边界的全部调用面，本文先前那句「换掉 `port_impl.zig` 这一组 vtable 就是边界的全部调用面」是错的，实施第 3 步时核出来的。除 port 的 52 个方法之外，Product 还在进程内**直接调用 Agent 自有 opaque 句柄上的方法**，这些调用一条都不经过 `port.zig`：

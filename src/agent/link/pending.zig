@@ -28,9 +28,19 @@ const std = @import("std");
 pub const Correlation = u64;
 
 pub const SendError = error{
-    /// Every slot is outstanding. Bounded, so the caller maps it onto the
-    /// admission result it already has rather than growing.
-    PendingCapacity,
+    /// The table is full of calls that still have someone waiting. The remedy
+    /// is to try again shortly: the peer is answering, there are simply too
+    /// many at once.
+    TooManyInFlight,
+    /// The table is full and some of it is held by calls nobody awaits any
+    /// more -- correlations the peer still owes an answer for. The remedy is
+    /// different in kind: waiting does not help, because what is missing is
+    /// the peer's answers.
+    ///
+    /// These are two failures rather than one because the diagnostic must not
+    /// name the wrong cause. Giving both the same code would say "too busy"
+    /// when the truth is "the far side has stopped answering".
+    TooManyUnsettled,
     /// Correlations are exhausted. Not wrapped: a wrapped correlation could
     /// match a live call.
     CorrelationExhausted,
@@ -102,18 +112,29 @@ pub const Table = struct {
     /// Reserves a correlation. The caller sends under it and then either
     /// claims or abandons; doing neither leaks the slot, which `liveCount`
     /// makes visible.
+    ///
+    /// Capacity is the number of correlations the peer has not settled, not
+    /// the number of callers waiting at once. The second is strictly smaller,
+    /// so sizing by it would pick a number that is fine in ordinary use and
+    /// runs out exactly when a driver abandons a batch of waits.
     pub fn open(self: *Table) SendError!Correlation {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.next == std.math.maxInt(Correlation)) return error.CorrelationExhausted;
+        var abandoned: usize = 0;
         for (self.slots) |*slot| {
-            if (slot.live) continue;
-            self.next += 1;
-            slot.* = .{ .correlation = self.next, .live = true };
-            self.live += 1;
-            return self.next;
+            if (!slot.live) {
+                self.next += 1;
+                slot.* = .{ .correlation = self.next, .live = true };
+                self.live += 1;
+                return self.next;
+            }
+            if (slot.abandoned) abandoned += 1;
         }
-        return error.PendingCapacity;
+        // Which exhaustion this is, decided from the table rather than
+        // guessed. A slot held by a caller that has gone is the peer owing an
+        // answer; with none of those, the pressure really is concurrency.
+        return if (abandoned != 0) error.TooManyUnsettled else error.TooManyInFlight;
     }
 
     /// Blocks until the response arrives or the link ends. The slot is
@@ -192,6 +213,19 @@ pub const Table = struct {
 
     pub fn capacity(self: *const Table) usize {
         return self.slots.len;
+    }
+
+    /// Correlations the peer still owes an answer for and nobody awaits. The
+    /// number capacity has to be sized against, and the one that says the far
+    /// side has stopped answering.
+    pub fn unsettledCount(self: *Table) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var total: usize = 0;
+        for (self.slots) |slot| {
+            if (slot.live and slot.abandoned) total += 1;
+        }
+        return total;
     }
 
     fn indexOf(self: *const Table, correlation: Correlation) ?usize {
@@ -275,11 +309,11 @@ test "abandoning keeps the slot until the peer answers, and never reuses the cor
     defer table.deinit();
 
     const first = try table.open();
-    try testing.expectError(error.PendingCapacity, table.open());
+    try testing.expectError(error.TooManyInFlight, table.open());
     table.abandon(first);
     // Still occupied: nobody is waiting, but the peer may still answer.
     try testing.expectEqual(@as(usize, 1), table.liveCount());
-    try testing.expectError(error.PendingCapacity, table.open());
+    try testing.expectError(error.TooManyUnsettled, table.open());
 
     // The peer's late answer releases the slot, and is not handed to anyone.
     table.deposit(first, owned("late answer to a call nobody awaits"));
@@ -313,4 +347,48 @@ test "closing releases what was deposited but never claimed" {
     table.deposit(try table.open(), owned("unclaimed"));
     // `deinit` closes, and the leak checker is what proves the release: if
     // closing dropped the bytes instead of freeing them, this test fails.
+}
+
+test "exhaustion by abandonment is reported as unsettled, not as concurrency" {
+    // A driver cancelling a batch of Runs abandons a run of waits. Those slots
+    // stay occupied until the peer answers, so the table can be exhausted with
+    // nobody waiting on anything. The refusal has to say which of the two it
+    // is, because the remedies differ: retry shortly, or the far side has
+    // stopped answering and waiting will not help.
+    var table: Table = undefined;
+    try table.init(testing.io, testing.allocator, 3);
+    defer table.deinit();
+
+    var abandoned: [3]Correlation = undefined;
+    for (&abandoned) |*slot| {
+        slot.* = try table.open();
+        table.abandon(slot.*);
+    }
+    try testing.expectEqual(@as(usize, 3), table.unsettledCount());
+    try testing.expectError(error.TooManyUnsettled, table.open());
+
+    // Once the peer settles one, a call fits again, and with no abandoned
+    // slots left the next exhaustion is concurrency rather than liveness.
+    for (abandoned) |correlation| table.deposit(correlation, owned("settled"));
+    try testing.expectEqual(@as(usize, 0), table.unsettledCount());
+    const live = [_]Correlation{ try table.open(), try table.open(), try table.open() };
+    try testing.expectError(error.TooManyInFlight, table.open());
+    for (live) |correlation| table.abandon(correlation);
+}
+
+test "capacity counts what the peer has not settled, not who is waiting" {
+    // The sizing rule, asserted so it cannot be read the other way: with one
+    // caller waiting and two answers still owed, three slots are in use.
+    var table: Table = undefined;
+    try table.init(testing.io, testing.allocator, 3);
+    defer table.deinit();
+    const waiting = try table.open();
+    const owed_one = try table.open();
+    const owed_two = try table.open();
+    table.abandon(owed_one);
+    table.abandon(owed_two);
+    try testing.expectEqual(@as(usize, 1), 3 - table.unsettledCount());
+    try testing.expectEqual(@as(usize, 3), table.liveCount());
+    try testing.expectError(error.TooManyUnsettled, table.open());
+    table.abandon(waiting);
 }
