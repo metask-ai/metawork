@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -2886,6 +2887,113 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
     assert.ok(bundleVerifier.includes(lock));
     assert.ok(bundlePolicy.includes(target));
     assert.ok(bundlePolicy.includes(lock));
+  }
+});
+
+test("the locked AgentCore bindings assemble the module build.zig replicates", () => {
+  // The bundle's own Zig package attaches the static archive to the module it
+  // exports, which puts that archive on the link line of every compilation
+  // that needs only the ABI declarations or the JSON codec. `wireAgentCore`
+  // composes the same module itself, from the same checksum-pinned sources, so
+  // the archive can belong to `agent_session` alone -- the one module that
+  // reaches the ABI entry point. That replication is the only place MetaWork
+  // encodes the bundle's internal module layout, so it is the only place that
+  // drifts when upstream changes that layout.
+  //
+  // The digest below is `bindings/zig/build.zig` as every locked bundle pins
+  // it. When it moves, re-read that file, make `wireAgentCore` match it, then
+  // update this expectation.
+  const bindingsDigest =
+    "7e60bab1cac9f30f5fcfb7ab800342f85954176da75ea10ba510ffd486c5b3ce";
+  const bindingsPath = "bindings/zig/build.zig";
+  const drift = `${bindingsPath} no longer assembles the module build.zig replicates: three sources src/types.zig, src/protocol.zig and src/root.zig behind the import names metask_agentcore_types and metask_agentcore_protocol, with the archive attached to the exported metask_agentcore module. Re-read the bundle's ${bindingsPath}, update wireAgentCore in build.zig to match it, then update this test.`;
+
+  // Every target, from the locks alone: the bundles themselves are not in the
+  // repository, and all four pin this file to one digest because the file is
+  // target-independent.
+  const locks = [
+    ["aarch64-macos", "build_support/agentcore-bundle.macos-aarch64.lock.json"],
+    ["x86_64-macos", "build_support/agentcore-bundle.macos-x86_64.lock.json"],
+    [
+      "aarch64-windows-msvc",
+      "build_support/agentcore-bundle.windows-aarch64.lock.json",
+    ],
+    [
+      "x86_64-windows-msvc",
+      "build_support/agentcore-bundle.windows-x86_64.lock.json",
+    ],
+  ];
+  for (const [target, lockPath] of locks) {
+    const entry = JSON.parse(read(lockPath)).files.find(
+      (file) => file.path === bindingsPath,
+    );
+    assert.ok(entry, `${target}: the lock does not pin ${bindingsPath}`);
+    assert.equal(entry.sha256, bindingsDigest, `${target}: ${drift}`);
+  }
+
+  // Where a bundle is staged, the digest's meaning is checked rather than
+  // assumed. A build that runs the Zig graph at all has one staged.
+  let staged = 0;
+  for (const [target] of locks) {
+    const path = `.agentcore/bundles/${target}/${bindingsPath}`;
+    if (!existsSync(new URL(path, root))) continue;
+    staged += 1;
+    const source = read(path);
+    assert.equal(
+      createHash("sha256").update(source).digest("hex"),
+      bindingsDigest,
+      `${target}: staged ${bindingsPath} does not match the digest its lock pins`,
+    );
+    const sources = [
+      ...source.matchAll(/\.root_source_file = b\.path\("([^"]+)"\)/g),
+    ]
+      .map((match) => match[1])
+      .sort();
+    assert.deepEqual(
+      sources,
+      ["src/protocol.zig", "src/root.zig", "src/types.zig"],
+      `${target}: ${drift}`,
+    );
+    const imports = [...source.matchAll(/\bmodule\.addImport\("([^"]+)"/g)]
+      .map((match) => match[1])
+      .sort();
+    assert.deepEqual(
+      imports,
+      ["metask_agentcore_protocol", "metask_agentcore_types"],
+      `${target}: ${drift}`,
+    );
+    assert.match(source, /b\.addModule\("metask_agentcore", \.\{/, drift);
+    assert.match(source, /\bmodule\.addObjectFile\(/, drift);
+  }
+  // Not asserted: that a bundle is staged at all. The bundles are gitignored,
+  // so a checkout that has not staged one still runs the lock assertions
+  // above, which is what carries the pin.
+  void staged;
+
+  // And our side names the same three sources and two import names.
+  const build = read("build.zig");
+  const opens = build.indexOf("const sdk_types = b.createModule(");
+  const closes = build.indexOf("sdk.link_libc = bundle.link_libc;");
+  assert.ok(
+    opens >= 0 && closes > opens,
+    "build.zig no longer composes the AgentCore module between sdk_types and sdk.link_libc",
+  );
+  const replication = build.slice(opens, closes);
+  for (const file of ["types.zig", "protocol.zig", "root.zig"]) {
+    assert.match(
+      replication,
+      new RegExp(
+        `bundle\\.bindings_source_root, "${file.replace(".", "\\.")}"`,
+      ),
+      `build.zig stopped composing ${file} from the bundle: ${drift}`,
+    );
+  }
+  for (const name of ["metask_agentcore_types", "metask_agentcore_protocol"]) {
+    assert.match(
+      replication,
+      new RegExp(`sdk\\.addImport\\("${name}",`),
+      `build.zig stopped wiring ${name}: ${drift}`,
+    );
   }
 });
 
