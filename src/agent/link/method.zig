@@ -245,12 +245,11 @@ pub fn find(code: u16) DecodeError!Entry {
 }
 
 pub fn codeOf(comptime owner: Owner, comptime name: []const u8) u16 {
-    comptime {
-        for (entries) |entry| {
-            if (entry.owner == owner and std.mem.eql(u8, entry.name, name)) return entry.code;
-        }
-        @compileError("no link method named " ++ name ++ " on " ++ @tagName(owner));
+    @setEvalBranchQuota(entries.len * 128);
+    inline for (entries) |entry| {
+        if (entry.owner == owner and comptime std.mem.eql(u8, entry.name, name)) return entry.code;
     }
+    @compileError("no link method named " ++ name ++ " on " ++ @tagName(owner));
 }
 
 /// Writes the registry, one `code owner.method transport` line each. The

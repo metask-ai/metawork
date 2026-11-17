@@ -31,6 +31,7 @@ pub const handle_table = @import("link/handle_table.zig");
 pub const pending = @import("link/pending.zig");
 pub const shapes = @import("link/shapes.zig");
 pub const wire_types = @import("link/wire_types.zig");
+pub const envelope = @import("link/envelope.zig");
 pub const reverse = @import("link/reverse.zig");
 pub const channel = @import("link/channel.zig");
 
@@ -170,6 +171,7 @@ test {
     _ = pending;
     _ = shapes;
     _ = wire_types;
+    _ = envelope;
     _ = reverse;
     _ = channel;
 }

@@ -56,6 +56,36 @@
 
 方向上这不应该变成 59 个新 RPC：这些读取的都是句柄创建后不再变化的数据，所以正确的形状是**投影随 activation/selection 过界一次，UI 侧本地回答这些读取**，与 `catalog.Projection` 过界的处理同构。`takeSelection` 与各 `deinit` 是例外，它们改变 exec 侧状态，必须成为 port 调用。该方向待评审，本文不先按它改步骤划分。
 
+### 2.2 第八条:port 的方法集没有「链路不可达」这个答案(2026-11-18,实施中核出)
+
+`port.zig` 的头注写明「The method set is deliberately the one the caller already had: the same names, the same arguments, the same error sets. This is a boundary, not a redesign.」**进程内这句成立,拆开后不成立**:一个会失败的边界需要能说出自己失败了,而 51 个方法里有 **21 个的返回类型根本没有错误通道**。
+
+21 个里大多数已经有一个可以诚实使用的值,这部分不需要改契约:
+
+| 方法 | 链路不可达时的诚实答案 |
+| --- | --- |
+| `take_event` / `has_pending_events` / `pending_event_count` / `notify_event_consumer` | 不过界(`stream`,由 UI 侧 pump 本地回答) |
+| `restore_admission` | `.unavailable`(已有) |
+| `retain_reference` / `try_retain` / `skill_policy_matches` | `false`,fail closed |
+| `release_reference` / `stop_event_delivery` / `release` | 无返回值;对端已不在,释放本身无意义(exec 侧状态由它自己的收口处理) |
+| `close_outcome` / `begin_run_outcome` | `.failure{err, disposition}`(已有) |
+| `submit_input` | **`.unknown`(已有)**,其注释正是「A dependency contract failure cannot be reported as a refusal.」 |
+| `permission_stop_request` | `null` |
+
+`submit_input` 这一条要单独说:**这个仓库早就有这个形状,而且早就把原则写出来了**——依赖契约失败不能被报成一次拒绝。所以下面那几项的修法方向不是发明,是照这条既有先例补齐。
+
+剩下 **5 项没有任何可以诚实返回的值**,全部需要在返回类型上加一个「说不出」的值,属于契约改动:
+
+| 方法 | 为什么没有答案 |
+| --- | --- |
+| `snapshot` | 必须返回**一个** `SessionSnapshot`。编出来的 state / active_run_id / pending_ui_request_id 是一个长得完全像真话的假答案 |
+| `input_observation` | 全零的 observation 表示「not ready、什么都没接受」,于是 `blocksAutomaticAllow()` 返回 false——**等于在链路不可达时放开自动审批**。这一项不只是不准,是危险 |
+| `request_termination`(RunControl) | `{requested, already_requested, already_terminal, stale_run, session_closing}` 没有「说不出」;拿 `session_closing` 顶替等于断言 Session 正在关闭 |
+| `borrow_skill_restore_inputs` | 必须返回一个 lease 加 policy |
+| `execute` | 必须返回**一个** `TerminalResult`。既有词汇里 `failure = .dependency_contract` 加 `session_disposition_at_completion = .poisoned` 看起来是诚实的编码,但它是否被 Product 当成那个意思要先核,不能假定 |
+
+**这是契约改动,按第 7 节要先取得用户明确同意,所以本文只记事实、不自行加值。** 在它定下来之前,这 5 项的转发无法实现——不是因为代码难写,而是因为写出来就必须编一个答案,而编答案正是这条线一整天在拒绝的那件事。
+
 ### 2.1 本节前提审计（2026-11-18）
 
 本节已经出过五条错前提，全部是动手建才翻的、读类型面一条都没翻出来。五条集中在一节，这是关于**本节**的事实，不是五件独立的事，所以在声称后续步骤形状之前逐条审一遍。判据是对着代码核，不是对着注释核——翻掉的五条里有三条的来源正是一条没人核过的注释。

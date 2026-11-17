@@ -1,12 +1,20 @@
 //! What each port type becomes on the wire, and the request and response
 //! payloads that follow from it.
 //!
-//! The 52 forwarding stubs are not written out one by one. Their payloads are
-//! derived from the vtable signatures: a method's request is its parameters
-//! after the context pointer, each mapped through `Wire`, and its response is
-//! its return type with the error union stripped and the payload mapped the
-//! same way. So a parameter that changes type changes the wire shape with it,
-//! where fifty-two hand-written encoders would keep sending the old one.
+//! The 52 forwarding stubs' *payloads* are derived rather than written: a
+//! method's request is its parameters after the context pointer, each mapped
+//! through `Wire`, and its response is its return type with the error union
+//! stripped and mapped the same way. So a parameter that changes type changes
+//! the wire shape with it, where fifty-two hand-written encoders would keep
+//! sending the old one.
+//!
+//! The stub *functions* are written out, one per method, and an earlier
+//! commit message of mine said otherwise. Zig 0.16 removed `@Type`, so a
+//! function whose signature is computed cannot be synthesised; each stub
+//! declares its vtable signature by hand and forwards through one generic
+//! call. What the derivation removes is the per-method encoder, which is where
+//! the drift would have been -- not the fifty-two signatures, which the
+//! compiler checks against the vtable anyway.
 //!
 //! `Wire` is the only hand-maintained part, and it is closed: a type that is
 //! not listed must classify as structural, or the build fails naming it. That
