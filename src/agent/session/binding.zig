@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const root = @import("../session.zig");
-const control = @import("control.zig");
+const control = @import("agent_contract").control;
 
 const control_closed_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
 const control_reference_mask = control_closed_bit - 1;

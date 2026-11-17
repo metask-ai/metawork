@@ -303,6 +303,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-catalog", .root_module = test_modules.agent_catalog },
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
+        .{ .name = "metawork-agent-contract", .root_module = test_modules.agent_contract },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
@@ -364,6 +365,8 @@ pub fn build(b: *std.Build) void {
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_schedule_state or spec.root_module == test_modules.product_schedule_persistence or spec.root_module == test_modules.product_schedule_view or spec.root_module == test_modules.product_schedule_runtime)
             schedule_tests.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.agent_contract)
+            b.step("test-agent-contract", "Run the Agent contract declarations and codec tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -900,6 +903,7 @@ const WiredModules = struct {
     image_container: *std.Build.Module,
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
+    agent_contract: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -1596,11 +1600,25 @@ fn wireAgentCore(
     agent_checkpoint_restore.addImport("metask_agentcore", sdk);
     agent_checkpoint_restore.addImport("agent_checkpoint", agent_checkpoint);
     agent_checkpoint_restore.addImport("agent_model_binding", agent_model_binding);
+    // Declarations, limits and codecs that the Product names, kept in a module
+    // of their own so they carry no path to the ABI entry point and no
+    // archive. `src/agent/contract.zig` states the rule it enforces.
+    const agent_contract = b.createModule(.{
+        .root_source_file = b.path("src/agent/contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_contract.addImport("metask_agentcore", sdk);
+    agent_contract.addImport("agent_protocol", agent_protocol);
+    agent_contract.addImport("agent_file_delivery", agent_file_delivery);
+    agent_contract.addImport("agent_http_transport", agent_http_transport);
+    agent_contract.addImport("image_container", image_container);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
+    session.addImport("agent_contract", agent_contract);
     const core_identity = b.addOptions();
     core_identity.addOption([]const u8, "manifest_sha256", &bundle.manifest_sha256);
     core_identity.addOption(u16, "abi_revision", bundle.abi_revision);
@@ -2747,6 +2765,7 @@ fn wireAgentCore(
         .image_container = image_container,
         .product_permission_review = product_permission_review,
         .agent_session = session,
+        .agent_contract = agent_contract,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

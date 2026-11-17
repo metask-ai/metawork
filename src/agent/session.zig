@@ -3,9 +3,10 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
-const multimodal = @import("session/multimodal.zig");
+const multimodal = contract.multimodal;
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
+const contract = @import("agent_contract");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
 const catalog = @import("agent_catalog");
@@ -13,22 +14,22 @@ const mcp_runtime = @import("agent_mcp_runtime");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
-const session_control = @import("session/control.zig");
-const session_model_error = @import("session/model_error.zig");
+const session_control = contract.control;
+const session_model_error = contract.model_error;
 const core_identity = @import("agentcore_identity");
-const session_wire = @import("session/wire.zig");
-const capabilities = @import("capabilities.zig");
+const session_wire = contract.wire;
+const capabilities = contract.capabilities;
 const session_binding = @import("session/binding.zig");
 const model_binding = @import("agent_model_binding");
 const ModelBinding = model_binding.ModelBinding;
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
 const session_runtime = @import("session/runtime.zig");
-const image_generation = @import("image_generation.zig");
-const generate_image = @import("generate_image.zig");
-const generate_video = @import("generate_video.zig");
+const image_generation = contract.image_generation;
+const generate_image = contract.generate_image;
+const generate_video = contract.generate_video;
 const deliver_file = @import("agent_file_delivery");
-const mcp_install = @import("mcp_install.zig");
+const mcp_install = contract.mcp_install;
 const image_http = @import("agent_http_transport");
 
 pub const ImageGenerationTestOptions = struct {
