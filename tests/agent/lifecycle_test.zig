@@ -3792,7 +3792,20 @@ test "closing an active Run aborts, joins, and preserves the first termination s
         .event_pump_failure => |value| value == .consumer_rejected,
         else => false,
     });
-    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    // The signal is whichever of the two threads got there first, and the raw
+    // status does not follow it symmetrically. A cancel that wins prevents the
+    // Core call, and an absent raw status is exactly what the control block
+    // reports as `prevented_core_call`, so requiring one unconditionally
+    // asserted a single branch of the race this test deliberately runs both
+    // ways. A status that did arrive still has to be the callback failure.
+    switch (signal) {
+        .event_pump_failure => try std.testing.expectEqual(
+            @as(?u32, wire.STATUS_CALLBACK_FAILED),
+            terminal.raw_status_code,
+        ),
+        else => if (terminal.raw_status_code) |code|
+            try std.testing.expectEqual(@as(u32, wire.STATUS_CALLBACK_FAILED), code),
+    }
     session.recordTerminationSignal(.{ .interrupted = .timeout });
     try closeSession(session, .session_close);
     fake_core.lock();
