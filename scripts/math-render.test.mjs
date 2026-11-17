@@ -188,6 +188,78 @@ test("a fenced math block renders as display math", () => {
   assert.match(markup, /<math [^>]*display="block"/);
   assert.match(markup, /<mfrac>/);
   assertNoInlineStyle(markup);
+
+  // The fence marker is the author's choice, so the closing one is read from
+  // what the opening one was.
+  const tilde = render("~~~math\n\\frac{a}{b}\n~~~");
+  assert.match(tilde, /<math [^>]*display="block"/);
+  assert.match(tilde, /<mfrac>/);
+});
+
+test("an unterminated fence shows its source, not a formula", () => {
+  const markup = render("```math\n\\frac{a}{b}");
+  assert.doesNotMatch(markup, /<math/);
+  assert.doesNotMatch(markup, /katex-error/);
+  // The fence the author opened stays on screen as written, rather than the
+  // renderer guessing where the formula ends.
+  assert.match(markup, /```math/);
+  assert.match(markup, /\\frac\{a\}\{b\}/);
+  assertNoInlineStyle(markup);
+
+  // A closing run shorter than the opening one does not close a fence, so the
+  // formula is still arriving -- the same rule micromark applied when it left
+  // those backticks inside the block.
+  const short = render("````math\n\\frac{a}{b}\n```");
+  assert.doesNotMatch(short, /<math/);
+  assert.match(short, /````math/);
+});
+
+test("a fenced formula arriving byte by byte never flickers through a formula", () => {
+  const complete = "```math\n\\frac{a}{b}\n```";
+  for (let length = 1; length <= complete.length; length += 1) {
+    const prefix = complete.slice(0, length);
+    const markup = render(prefix);
+    assertNoInlineStyle(markup);
+    assert.doesNotMatch(markup, /katex-error/, `prefix ${prefix}`);
+    if (length === complete.length) {
+      assert.match(markup, /<math [^>]*display="block"/, `prefix ${prefix}`);
+      continue;
+    }
+    assert.doesNotMatch(markup, /<math/, `prefix ${prefix}`);
+    // From the byte that makes the info string `math`, everything that has
+    // arrived is on screen verbatim, fence included. Before it, the prefix is
+    // a bare fence opener, which GFM renders as an empty code block whatever
+    // language follows -- the same with or without math on this root.
+    if (prefix.startsWith("```math"))
+      assert.ok(
+        markup.includes(prefix.trimEnd()),
+        `prefix ${prefix} is not visible: ${markup}`,
+      );
+  }
+});
+
+test("a fenced formula KaTeX cannot parse falls back to delimited source", () => {
+  // Terminated, so the streaming guard passes it on, but the braces are
+  // unbalanced and KaTeX raises a parse error.
+  const markup = render("```math\n\\frac{a}{b\n```");
+  assert.doesNotMatch(markup, /katex-error/);
+  assert.doesNotMatch(markup, /<math/);
+  // One spelling whichever the author used, and without the newline the
+  // generic code-block handler appends to a block's text.
+  assert.match(markup, /\$\$\\frac\{a\}\{b\$\$/);
+  assertNoInlineStyle(markup);
+});
+
+test("the fenced spelling is held to the same untrusted-input bounds", () => {
+  const link = render("```math\n\\href{https://evil.example}{click}\n```");
+  assert.doesNotMatch(link, /href=/);
+  assert.match(link, /\\href/);
+  assertNoInlineStyle(link);
+
+  const bomb = render("```math\n\\def\\a{\\a\\a}\\a\n```");
+  assert.doesNotMatch(bomb, /<math/);
+  assert.match(bomb, /\\def/);
+  assertNoInlineStyle(bomb);
 });
 
 test("every Markdown caller gets math, not only Assistant output", () => {
@@ -241,6 +313,9 @@ test("clipboard HTML keeps the LaTeX source, not MathML", async () => {
     String.raw`$$a \\ b$$`,
     "$$\n\\frac{a}{b}\n$$",
     "the value $$x+1$$ holds",
+    // The fenced spelling keeps its own fence, so what is pasted parses back
+    // to the same formula.
+    "```math\n\\frac{a}{b}\n```",
   ]) {
     const markup = await renderMarkdownForClipboard(source);
     assert.doesNotMatch(markup, /<math/);

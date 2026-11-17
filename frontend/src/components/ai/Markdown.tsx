@@ -17,6 +17,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { Element, ElementContent, Root as HastRoot } from "hast";
 import type {
+  Code,
   InlineCode,
   Link,
   Nodes as MdastNodes,
@@ -183,7 +184,16 @@ function referencePlugin(
 type Source = { toString(): string };
 
 type MdastParent = Extract<MdastNodes, { children: MdastNodes[] }>;
-type MathNode = { type: "math" | "inlineMath"; data?: Record<string, unknown> };
+// The shapes a formula arrives in: `remark-math`'s flow and text nodes, and
+// GitHub's other block spelling, ` ```math `, which `remark-math` does not
+// parse at all -- it stays a fenced code node, which `rehype-katex` then
+// recognizes by its `language-math` class. Holding all of them as one math
+// node here is what keeps a single streaming guard, a single fallback and a
+// single copy path for both spellings.
+type MathNode = {
+  type: "math" | "inlineMath" | "code";
+  data?: Record<string, unknown>;
+};
 
 const katexOptions = {
   output: "mathml",
@@ -200,8 +210,9 @@ const katexOptions = {
   maxExpand: 256,
 } as const;
 
-// Single-dollar text math is off, so every formula either root parsed carries
-// a run of at least two dollars.
+// The one spelling a formula is handed back in when it cannot be rendered,
+// whichever of the two block spellings it was written in: by then the failure
+// has come from the typesetting layer, which no longer carries the author's.
 const delimiter = "$$";
 const displayClass = ["language-math", "math-display"];
 // Chromium does not make a `math` element itself a scroll container, so the
@@ -209,8 +220,12 @@ const displayClass = ["language-math", "math-display"];
 // stylesheet scrolls. Marking it here keeps the rule off `:has`.
 const blockMathClass = "ai-markdown-math-block";
 
-function isMath(node: { type: string }): node is MathNode & MdastNodes {
-  return node.type === "math" || node.type === "inlineMath";
+function isMath(node: MdastNodes): node is MathNode & MdastNodes {
+  return (
+    node.type === "math" ||
+    node.type === "inlineMath" ||
+    (node.type === "code" && node.lang === "math")
+  );
 }
 
 // The delimited source exactly as the document spells it. A parsed `value` is
@@ -224,20 +239,35 @@ function mathSource(document: string, node: MdastNodes): string | null {
     : document.slice(start, end);
 }
 
-function openingRun(source: string): number {
-  return /^[ \t]*(\$+)/.exec(source)?.[1].length ?? 0;
+// What the document opened the formula with: a run of dollars, or the marker
+// of the fence the ` ```math ` spelling opened.
+function openingDelimiter(source: string): string {
+  return /^[ \t]*(\$+|`{3,}|~{3,})/.exec(source)?.[1] ?? "";
 }
 
-// A finished formula carries its closing run. An Assistant still streaming one
-// has not written it yet, and neither has a user who typed a lone `$$`.
+// A finished formula carries its closing delimiter. An Assistant still
+// streaming one has not written it yet, and neither has a user who typed a
+// lone `$$` or opened a fence. A fence closes on a line of its own carrying at
+// least as many markers as it opened with -- the rule micromark itself applies
+// before it reports the block closed, so a shorter run is still mid-formula.
 function terminated(source: string): boolean {
-  const run = openingRun(source);
-  if (run === 0) return false;
+  const opening = openingDelimiter(source);
+  if (opening === "") return false;
   const body = source.trimEnd();
-  return body.length >= run * 2 && body.endsWith("$".repeat(run));
+  if (opening.startsWith("$"))
+    return body.length >= opening.length * 2 && body.endsWith(opening);
+  return new RegExp(`\\n[ \\t]*${opening[0]}{${opening.length},}[ \\t]*$`).test(
+    body,
+  );
 }
 
-function literal(node: MathNode, source: string): Text | Paragraph {
+function literal(node: MathNode, source: string): Text | Paragraph | Code {
+  // A fence keeps the shape it was written in. It is multi-line by
+  // construction, so a paragraph would collapse the lines the author typed;
+  // every other unclosed fence in the document already streams in as a code
+  // block; and this is the only form that parses back to the same formula once
+  // it has been pasted somewhere else.
+  if (node.type === "code") return { type: "code", value: source };
   const text: Text = { type: "text", value: source };
   return node.type === "inlineMath"
     ? text
@@ -303,7 +333,7 @@ function remarkMathSource() {
         // inside running text stays inline, so it does not break the line.
         if (
           node.type !== "inlineMath" ||
-          openingRun(source) < 2 ||
+          openingDelimiter(source).length < 2 ||
           parent.type !== "paragraph" ||
           parent.children.length !== 1
         )
@@ -377,9 +407,15 @@ function rehypeMathSafety() {
       if (node.type !== "element") return;
       const classes = classList(node);
       if (classes.includes("katex-error")) {
+        // What KaTeX was handed is the formula's LaTeX, and that is what comes
+        // back, in one spelling whichever the author used. A fenced formula
+        // reaches here through the generic code-block handler, which appends a
+        // newline to a block's text; it is not part of the formula, so it is
+        // not part of the source handed back either.
+        const source = textOf(node).replace(/\n+$/, "");
         parent.children.splice(index, 1, {
           type: "text",
-          value: `${delimiter}${textOf(node)}${delimiter}`,
+          value: `${delimiter}${source}${delimiter}`,
         });
         return;
       }
