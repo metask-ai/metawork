@@ -155,7 +155,7 @@ New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以
 
 - 加号选取与拖拽是同一文件添加能力的不同输入方式，共用整批接纳、类型识别、顺序、配额、取消与草稿结果；具体来源的路径身份或 DOM 字节读取失败仍如实区分。用户只看到正在添加和正在取消，不根据来源开放不同文件能力。
 - Host 为每个 Task 发布模型选择可用状态，精确区分可用、目录加载、目录不可用、执行替换中、运行时分离、不支持的来源和 authority 已变化；Renderer 只按该状态显示可编辑菜单、暂时禁用菜单或带原因的只读模型，不跨根 projection 猜测权限。
-- Renderer 按 Workspace intent 隔离并恢复 New task 草稿。只有 Product Control 发布 ready execution admission 后才能发送。默认 Workspace intent 为 Automatic，界面显示“默认”，首次发送时才由 Host 创建 Automatic Workspace。用户可以在发送前切换到已授权或新选择的 Manual Workspace；
+- Renderer 按 Workspace intent 隔离并恢复 New task 草稿。通用新建任务入口预选当前打开的 Task 所属的可用项目。可用项目是仍显示在项目列表、已授权且未脱敏的 Manual Workspace。没有这样的项目时选择默认的 Automatic intent，首次发送时才由 Host 创建 Automatic Workspace。发送前用户可以改选工作目录，首次发送使用届时选定的 Workspace intent。只有 Product Control 发布 ready execution admission 后才能发送；
 - New task 首次发送复用一个真实 Task 创建请求；创建期间可以继续编辑和发送，有界保留明确点击的提交。取得 Task identity 后按点击顺序交付，不等待上条发送回执。创建失败或未知逐条展示，不自动创建或补发；Task 已创建则保留对象，执行失败不伪造未接收或 Running；
 - 用户可以在 Workspace 中创建、切换、继续、归档和删除 Task；不存在独立的 Task `closed` 产品终态；
 - 多个 Task 可以同时存在；

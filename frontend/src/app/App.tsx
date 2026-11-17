@@ -1482,6 +1482,15 @@ export default function App() {
     () => orderedProjects(snapshot.workspaces),
     [snapshot.workspaces],
   );
+  const initialNewTaskWorkspaceId =
+    route === "workbench"
+      ? (projects.find(
+          (workspace) =>
+            workspace.id === selectedTaskSummary?.workspaceId &&
+            workspace.authorization === "available" &&
+            !workspace.redacted,
+        )?.id ?? null)
+      : null;
   const navigableTaskItems = useMemo(
     () => navigableTasks(snapshot),
     [snapshot],
@@ -2369,6 +2378,29 @@ export default function App() {
     if (snapshot) reconcileSubmissionProjection(snapshot, bridgeGeneration);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localSubmissions, bridgeGeneration]);
+  const moveNewTaskDraft = newTaskDrafts.moveDraft;
+  const openNewTaskDraft = useCallback(
+    (workspaceId: string | null) => {
+      pendingTaskSelection.current = null;
+      newTaskSubmissionInstance.current += 1;
+      // Retire lookup ownership; in-flight sessions still finish their own sends.
+      const prefix = `${bridgeGenerationRef.current}:new-task:`;
+      for (const key of submissionSessions.current.keys())
+        if (key.startsWith(prefix)) submissionSessions.current.delete(key);
+      setNewTaskApprovalOverride(null);
+      setNewTaskRequestedModel(null);
+      if (workspaceId !== null && newTaskDraftId === unscopedNewTaskDraftId)
+        moveNewTaskDraft(newTaskDraftId, workspaceId);
+      setRoute("workbench");
+      dispatchWorkbench({ type: "task.draft.opened", workspaceId });
+      window.requestAnimationFrame(() => composer.current?.focus());
+    },
+    [moveNewTaskDraft, newTaskDraftId],
+  );
+  const beginNewTask = useCallback(
+    () => openNewTaskDraft(initialNewTaskWorkspaceId),
+    [initialNewTaskWorkspaceId, openNewTaskDraft],
+  );
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;
@@ -2379,13 +2411,18 @@ export default function App() {
       if (key === "k") {
         openGlobalSearch();
       } else {
-        setRoute("workbench");
         beginNewTask();
       }
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [bridgeUnavailable, modelSetupOpen, openGlobalSearch, renameEditor]);
+  }, [
+    beginNewTask,
+    bridgeUnavailable,
+    modelSetupOpen,
+    openGlobalSearch,
+    renameEditor,
+  ]);
   useEffect(() => {
     if (!client.available()) return;
     return client.onShortcut((detail) => {
@@ -3031,22 +3068,6 @@ export default function App() {
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: workspace.id,
-    });
-    window.requestAnimationFrame(() => composer.current?.focus());
-  }
-  function beginNewTask() {
-    pendingTaskSelection.current = null;
-    newTaskSubmissionInstance.current += 1;
-    // Retire lookup ownership; in-flight sessions still finish their own sends.
-    const prefix = `${bridgeGenerationRef.current}:new-task:`;
-    for (const key of submissionSessions.current.keys())
-      if (key.startsWith(prefix)) submissionSessions.current.delete(key);
-    setNewTaskApprovalOverride(null);
-    setNewTaskRequestedModel(null);
-    setRoute("workbench");
-    dispatchWorkbench({
-      type: "task.draft.opened",
-      workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
@@ -5259,10 +5280,7 @@ export default function App() {
                   <WorkspaceRemovalMenu
                     workspace={workspace}
                     openDisabled={workbenchMutationDisabled}
-                    onNewTask={() => {
-                      beginNewTask();
-                      setDraftWorkspaceById(workspace.id);
-                    }}
+                    onNewTask={() => openNewTaskDraft(workspace.id)}
                     onOpen={() =>
                       client.openWorkspace(workspace.id, workspace.epoch)
                     }
