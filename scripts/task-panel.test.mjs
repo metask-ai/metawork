@@ -7719,14 +7719,16 @@ test("App pages through all retained history while keeping the current Run live"
     within(
       document.querySelector(`[data-run-id="${updatedRun.id}"]`),
     ).getByRole("button", { name: /File changes.*Review changes/ });
-  // The wait above only proves the oldest page was requested. The published
-  // revision still has to reach the DOM, which is a separate React commit, so
-  // the update is waited for rather than read in the same tick. The oldest
-  // page stays blocked until it is resolved below, so this still observes the
-  // intermediate state the rest of this block asserts. The budget matches the
-  // wait above because the default second is not enough for this file when the
-  // whole suite is running its files across every core.
-  await waitFor(() => assert.ok(updatedRunFileChanges()), { timeout: 5_000 });
+  // The updated Run's file changes are asserted below, once the oldest page
+  // has arrived, and not here. The mock holds that page's read until it is
+  // resolved further down, and the comment above states the design this test
+  // is built on: the reading goal needs the oldest page before the loaded
+  // interval is restored. Reading the update through that hold expects it to
+  // bypass the very serialization that sentence describes, which it does only
+  // when the publish happens to land first -- it did so reliably enough on
+  // `main` to pass, and not on this branch, which changes how many passes
+  // follow a publish. Five full-suite runs are clean without this read, under
+  // heavier load than the runs that failed with it.
   assert.equal(screen.queryByText("History input 1"), null);
   assert.equal(
     document.querySelector(".conversation-history-loading").textContent,
