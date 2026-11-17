@@ -4,7 +4,7 @@
 //! durable effect, revision, or root snapshot orchestration.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const product_skill = @import("metawork_product_skill");
 const task_state = @import("product_task_state");
 const task_policy = @import("product_task_policy");

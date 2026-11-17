@@ -3,7 +3,7 @@
 //! Workbench, Product MCP Runtime, or mutable aggregate pointer.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const ports = @import("product_mcp_ports");
 
 pub const State = enum(u8) {

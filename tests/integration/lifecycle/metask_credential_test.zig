@@ -401,7 +401,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     }
     configuration.directories.canonical_user_home = home;
     if (corrupt_schedule) configuration.schedule_persistence = .{ .enabled = true, .restored_bytes = "not-json" };
-    var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
+    var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
     defer control.deinit();
     if (corrupt_schedule) try std.testing.expectEqual(.corrupt, control.schedule.persistenceHealth());
     defer fake_core.releaseControlledRestore();

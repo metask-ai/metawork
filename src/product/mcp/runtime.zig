@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const configuration = @import("product_mcp_configuration");
 const state_module = @import("product_mcp_state");
 const policy = @import("product_mcp_policy");

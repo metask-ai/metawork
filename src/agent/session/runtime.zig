@@ -1,9 +1,10 @@
 //! Agent runtime lifecycle and shared execution helpers.
 
 const std = @import("std");
-const multimodal = @import("multimodal.zig");
+const multimodal = contract.multimodal;
 const identity_profile = @import("identity.zig");
 const sdk = @import("metask_agentcore");
+const contract = @import("agent_contract");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
 const catalog = @import("agent_catalog");
@@ -11,16 +12,16 @@ const mcp_runtime = @import("agent_mcp_runtime");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
-const session_control = @import("control.zig");
-const session_wire = @import("wire.zig");
+const session_control = contract.control;
+const session_wire = contract.wire;
 const model_binding = @import("agent_model_binding");
-const capabilities = @import("../capabilities.zig");
+const capabilities = contract.capabilities;
 const session_binding = @import("binding.zig");
-const image = @import("../image_generation.zig");
-const image_tool = @import("../generate_image.zig");
-const video_tool = @import("../generate_video.zig");
+const image = contract.image_generation;
+const image_tool = contract.generate_image;
+const video_tool = contract.generate_video;
 const delivery_tool = @import("agent_file_delivery");
-const mcp_install = @import("../mcp_install.zig");
+const mcp_install = contract.mcp_install;
 // Intentional same-module cycle with session.zig; Runtime and Session retain
 // direct typed references without introducing a speculative context layer.
 const root = @import("../session.zig");
@@ -1471,6 +1472,12 @@ pub const Runtime = struct {
         self.sessions[session_slot] = null;
         session.deinit();
         self.allocator.destroy(session);
+    }
+
+    /// This Runtime as the Product-facing port. The declarations live in the
+    /// contract module; `session/port_impl.zig` builds the implementation.
+    pub fn runtimePort(self: *Runtime) contract.port.RuntimePort {
+        return @import("port_impl.zig").runtimePort(self);
     }
 
     pub fn takeEvent(self: *Runtime) ?OwnedCoreEvent {

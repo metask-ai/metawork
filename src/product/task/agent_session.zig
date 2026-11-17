@@ -6,7 +6,7 @@
 //! allocation and ownership contracts.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 
 pub const BindingState = enum {
     owned,
@@ -19,8 +19,8 @@ pub const BindingState = enum {
 };
 
 const Owned = struct {
-    runtime: *agent.Runtime,
-    session: *agent.Session,
+    runtime: agent.RuntimePort,
+    session: agent.SessionPort,
 };
 
 pub const Binding = struct {
@@ -29,14 +29,14 @@ pub const Binding = struct {
     binding_state: BindingState,
 
     pub fn open(
-        runtime: *agent.Runtime,
+        runtime: agent.RuntimePort,
         options: agent.SessionOpenOptions,
     ) !Binding {
         const route = try runtime.createSessionRoute(options);
         return initRoute(runtime, route);
     }
 
-    fn initRoute(runtime: *agent.Runtime, route: agent.SessionRoute) Binding {
+    fn initRoute(runtime: agent.RuntimePort, route: agent.SessionRoute) Binding {
         std.debug.assert(route.id != 0);
         return .{
             .owner = .{
@@ -49,7 +49,7 @@ pub const Binding = struct {
     }
 
     fn initRestoreRoute(
-        runtime: *agent.Runtime,
+        runtime: agent.RuntimePort,
         route: agent.SessionRestoreRoute,
     ) Restored {
         return .{
@@ -177,7 +177,7 @@ pub const Restored = struct {
 };
 
 pub fn restore(
-    runtime: *agent.Runtime,
+    runtime: agent.RuntimePort,
     options: agent.SessionRestoreOptions,
 ) !Restored {
     const route = try runtime.restoreSessionRoute(options);
@@ -188,7 +188,7 @@ pub fn restore(
 /// ownership is transferred only with `take`, and every live value must call
 /// `deinit` exactly once.
 pub const Access = struct {
-    session: ?*agent.Session,
+    session: ?agent.SessionPort,
 
     pub fn take(self: *Access) Access {
         const session = self.session orelse unreachable;
@@ -202,7 +202,7 @@ pub const Access = struct {
         session.releaseReference();
     }
 
-    fn get(self: *Access) *agent.Session {
+    fn get(self: *Access) agent.SessionPort {
         return self.session orelse unreachable;
     }
 
@@ -307,7 +307,7 @@ pub const Access = struct {
 
     pub fn pendingUiObservation(
         self: *Access,
-    ) ?agent.Session.PendingUiObservation {
+    ) ?agent.SessionPort.PendingUiObservation {
         return self.get().pendingUiObservation();
     }
 

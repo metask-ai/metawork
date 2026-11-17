@@ -1393,7 +1393,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
-    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
     var control_live = true;
     defer if (control_live) control.deinit();
     control.setAccountProjectionCredentials(account.accessTokenProjection());
@@ -1432,7 +1432,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     {
         var access = try control.testTask(task_id).?.runtime.acquireAccess();
         defer access.deinit();
-        try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
+        try expectImageDeclaration(h.runtime, agent.sessionBehind(access.session.?), large_read, .host);
     }
     try std.testing.expect(std.mem.startsWith(u8, control.testTask(task_id).?.runtime.executionConst().?.provider_id, "custom_provider:"));
     const projection_epoch = control.projectionSecurityEpoch();
@@ -1531,7 +1531,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     try std.testing.expect(std.mem.indexOf(u8, restored, "synthetic-image-key") == null);
     try std.testing.expect(std.mem.indexOf(u8, restored, "image_execution") == null);
     typed_history.fixture_restore = restored;
-    control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
+    control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
     control_live = true;
     control.setAccountProjectionCredentials(account.accessTokenProjection());
     try control.startCustomProviders(h.root, effects.vault());
@@ -1555,7 +1555,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     {
         var access = try recovered.runtime.acquireAccess();
         defer access.deinit();
-        try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
+        try expectImageDeclaration(h.runtime, agent.sessionBehind(access.session.?), large_read, .host);
     }
     const second_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
     try std.testing.expect(recovered.durable.runs[1].?.image_execution == null);
@@ -2230,7 +2230,7 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
     const limits: image_product.control_api.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 };
-    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime.runtimePort(), limits, configuration);
     defer {
         control.stopCustomProviders();
         control.deinit();
@@ -2396,7 +2396,7 @@ fn canonicalProductDelivery(content: []const u8, checked: ?CheckedXlsxReport, st
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
     const limits: image_product.control_api.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 };
-    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime.runtimePort(), limits, configuration);
     var control_live = true;
     defer if (control_live) {
         control.stopCustomProviders();
@@ -2453,7 +2453,7 @@ fn canonicalProductDelivery(content: []const u8, checked: ?CheckedXlsxReport, st
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, "file_delivery") == null);
     typed_history.fixture_restore = saved;
-    control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
+    control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime.runtimePort(), limits, configuration);
     control_live = true;
     const restored = control.testTask(task_id).?;
     try std.testing.expect(!restored.runtime.hasAttachedSession());
@@ -2485,7 +2485,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
-    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
     defer {
         control.stopCustomProviders();
         control.deinit();

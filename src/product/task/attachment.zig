@@ -1,7 +1,7 @@
 //! Process-only Task resource ownership and legal operation state.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const catalog_snapshot = @import("metawork_product_skill").catalog;
 const agent_session = @import("product_task_agent_session");
 const owned_execution = @import("product_task_execution_binding");

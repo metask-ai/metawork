@@ -3,9 +3,11 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
-const multimodal = @import("session/multimodal.zig");
+const multimodal = contract.multimodal;
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
+const contract = @import("agent_contract");
+const surface = contract.surface;
 const wire = sdk.types;
 const event_pump = @import("event_pump");
 const catalog = @import("agent_catalog");
@@ -13,28 +15,47 @@ const mcp_runtime = @import("agent_mcp_runtime");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
-const session_control = @import("session/control.zig");
-const session_model_error = @import("session/model_error.zig");
+const session_control = contract.control;
+const session_model_error = contract.model_error;
 const core_identity = @import("agentcore_identity");
-const session_wire = @import("session/wire.zig");
-const capabilities = @import("capabilities.zig");
+const session_wire = contract.wire;
+const capabilities = contract.capabilities;
 const session_binding = @import("session/binding.zig");
 const model_binding = @import("agent_model_binding");
 const ModelBinding = model_binding.ModelBinding;
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
 const session_runtime = @import("session/runtime.zig");
-const image_generation = @import("image_generation.zig");
-const generate_image = @import("generate_image.zig");
-const generate_video = @import("generate_video.zig");
+const image_generation = contract.image_generation;
+const generate_image = contract.generate_image;
+const generate_video = contract.generate_video;
 const deliver_file = @import("agent_file_delivery");
-const mcp_install = @import("mcp_install.zig");
+const mcp_install = contract.mcp_install;
 const image_http = @import("agent_http_transport");
 
-pub const ImageGenerationTestOptions = struct {
-    transport: image_http.Transport,
-    limits: image_generation.Limits = .{},
-};
+pub const Protocol = surface.Protocol;
+pub const stream_retry_budget = surface.stream_retry_budget;
+pub const max_submitted_inputs = surface.max_submitted_inputs;
+pub const max_submitted_input_bytes = surface.max_submitted_input_bytes;
+pub const PermissionModeUpdate = surface.PermissionModeUpdate;
+pub const PermissionInteraction = surface.PermissionInteraction;
+pub const McpActivationUnavailableReason = surface.McpActivationUnavailableReason;
+pub const McpActivationOutcome = surface.McpActivationOutcome;
+pub const WorkspaceTrust = surface.WorkspaceTrust;
+pub const WorkspaceInput = surface.WorkspaceInput;
+pub const OperationIdFloor = surface.OperationIdFloor;
+pub const SkillPolicyInput = surface.SkillPolicyInput;
+pub const SessionOpenOptions = surface.SessionOpenOptions;
+pub const SessionRestoreOptions = surface.SessionRestoreOptions;
+pub const CloseOutcome = surface.CloseOutcome;
+pub const BeginRunFailure = surface.BeginRunFailure;
+pub const RunInput = surface.RunInput;
+pub const PendingUiRequest = surface.PendingUiRequest;
+pub const SessionSnapshot = surface.SessionSnapshot;
+pub const ImageGenerationRunInput = surface.ImageGenerationRunInput;
+pub const ImageGenerationTestOptions = surface.ImageGenerationTestOptions;
+pub const Error = surface.Error;
+
 pub const ImageGenerationTestBinding = image_generation.BindingInput;
 pub const ImageGenerationOutput = image_generation.Output;
 pub const ImageGenerationOutputResult = image_generation.OutputResult;
@@ -44,12 +65,6 @@ pub const ImageGenerationReceipt = image_generation.Receipt;
 pub const ImageGenerationFormat = image_generation.Format;
 pub const ImageGenerationLimits = image_generation.Limits;
 pub const image_generation_limits = image_generation.production_limits;
-/// Binding bytes are borrowed only through preparation. Effect contexts remain
-/// borrowed through Run quiescence and are retained by the Host execution owner.
-pub const ImageGenerationRunInput = struct {
-    binding: image_generation.BindingInput,
-    transport: image_http.Transport,
-};
 pub const ImageGenerationCredentialReader = image_generation.CredentialReader;
 pub const VideoGenerationRunInput = generate_video.Input;
 pub const VideoGenerationOutcome = generate_video.Outcome;
@@ -81,15 +96,6 @@ pub const FileDeliveryInspection = deliver_file.Inspection;
 pub const max_file_deliveries_per_run = deliver_file.max_receipts_per_run;
 pub const MultimodalInputLimits = multimodal.InputLimits;
 pub const multimodal_input_limits = multimodal.input_limits;
-/// Extra same-turn re-issues this Host grants a Run whose accepted stream
-/// failed without an answer after it showed output: a stall, a stream that
-/// ended before its stop report, or a dropped connection. It never covers a
-/// server-declared error or a local decode failure, and it is additional to
-/// the one re-issue every request already has of its own while it started no
-/// tool call. Two matches the reference implementation's headless value; each
-/// spend re-bills that request's whole input, so the Host stays deliberately
-/// low until there is evidence about how often drops arrive consecutively.
-pub const stream_retry_budget: u32 = 2;
 comptime {
     std.debug.assert(stream_retry_budget > 0);
     std.debug.assert(stream_retry_budget <= wire.MAX_STREAM_RETRY_BUDGET_V1);
@@ -106,16 +112,7 @@ pub const PermissionCallbackOutcome = sdk.protocol.PermissionCallbackOutcome;
 pub const PermissionProvenance = sdk.protocol.PermissionProvenance;
 pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
 
-/// Trusted effects for the fixed Host tool, independent of model arguments.
-/// A same-named MCP or built-in tool does not inherit this description.
-pub fn hostToolPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
-    if (namespace != .host) return null;
-    if (std.mem.eql(u8, name, generate_image.name)) return generate_image.description;
-    if (std.mem.eql(u8, name, generate_video.name)) return generate_video.description;
-    if (std.mem.eql(u8, name, deliver_file.name)) return deliver_file.description;
-    if (std.mem.eql(u8, name, mcp_install.name)) return mcp_install.description;
-    return null;
-}
+pub const hostToolPermissionContext = capabilities.hostToolPermissionContext;
 pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const CatalogHealth = catalog.Health;
@@ -173,26 +170,13 @@ pub const InputCounts = session_control.InputCounts;
 pub const InputObservation = session_control.InputObservation;
 pub const InputRejection = session_control.InputRejection;
 pub const InputSubmission = session_control.InputSubmission;
-pub const max_submitted_inputs: usize = @intCast(wire.MAX_SUBMITTED_INPUTS_V1);
-pub const max_submitted_input_bytes: usize = @intCast(wire.MAX_SUBMITTED_INPUT_BYTES_V1);
 pub const CompactOutcome = session_control.CompactOutcome;
 pub const CompactTerminalResult = session_control.CompactTerminalResult;
 pub const TerminationRequestResult = session_control.TerminationRequestResult;
 pub const EventReadyNotification = session_control.EventReadyNotification;
 pub const EventReadyNotifier = session_control.EventReadyNotifier;
-pub const Protocol = @import("agent_protocol").Protocol;
 pub const PermissionMode = session_control.PermissionMode;
 pub const ShellPolicy = session_control.ShellPolicy;
-
-pub const PermissionModeUpdate = struct {
-    changed: bool,
-    policy_generation: u64,
-};
-
-pub const PermissionInteraction = enum {
-    interactive,
-    noninteractive,
-};
 
 pub const PermissionRequest = sdk.PermissionRequest;
 pub const ParsedPermissionRequest = session_wire.ParsedPermissionRequest;
@@ -205,22 +189,6 @@ pub const RunControl = session_binding.RunControl;
 pub const RunControlLease = session_binding.RunControlLease;
 const SessionControlBlock = session_binding.SessionControlBlock;
 pub const Runtime = session_runtime.Runtime;
-
-pub const McpActivationUnavailableReason = enum {
-    refresh_failed,
-    refresh_rejected,
-    invalid_catalog,
-    resource_limit,
-    generation_mismatch,
-    binding_mismatch,
-    invalid_selection,
-};
-
-pub const McpActivationOutcome = union(enum) {
-    empty,
-    activated: *McpActivation,
-    unavailable: McpActivationUnavailableReason,
-};
 
 pub const McpConfigurationApplyOutcome = enum {
     applied,
@@ -250,26 +218,24 @@ pub const SessionRoute = struct {
     session: *Session,
 };
 
-pub const BeginRunFailure = struct {
-    err: Error,
-    session_disposition: SessionDisposition,
-};
-
 pub const BeginRunOutcome = union(enum) {
     run: Run,
     failure: BeginRunFailure,
 };
 
-pub const CloseOutcome = union(enum) {
-    closed,
-    failure: struct {
-        err: Error,
-        session_disposition: SessionDisposition,
-    },
-};
-
 /// The unique execution owner returned by `Session.beginRun`. This is a linear
 /// value and must execute and deinitialize exactly once.
+const port_impl = @import("session/port_impl.zig");
+
+/// The Product-facing ports over this Runtime and its Sessions. The
+/// declarations live in the contract module; these build the in-process
+/// implementation of them.
+pub const SessionPort = contract.port.SessionPort;
+pub const RuntimePort = contract.port.RuntimePort;
+pub const sessionPort = port_impl.sessionPort;
+pub const runtimePort = port_impl.runtimePort;
+pub const sessionBehind = port_impl.sessionBehind;
+
 pub const Run = struct {
     session: *Session,
     run_id: u64,
@@ -298,29 +264,8 @@ pub const Run = struct {
     }
 };
 
-pub const WorkspaceTrust = union(enum) {
-    temporary: []const u8,
-    explicitly_trusted,
-};
-
-pub const WorkspaceInput = struct {
-    canonical_root: []const u8,
-    trust: WorkspaceTrust,
-};
-
 pub const InputPart = multimodal.InputPart;
 pub const ImageFormat = multimodal.ImageFormat;
-
-pub const RunInput = union(enum) {
-    /// Ordered borrowed blocks, copied/encoded before prepareRun returns.
-    multimodal: []const InputPart,
-    text: []const u8,
-    skill: struct {
-        skill_id: []const u8,
-        catalog_revision: []const u8,
-        argument_values: []const []const u8,
-    },
-};
 
 const OwnedRunInput = union(enum) {
     multimodal: multimodal.OwnedInput,
@@ -430,32 +375,6 @@ const OwnedRunInput = union(enum) {
     }
 };
 
-pub const OperationIdFloor = struct {
-    last_run_id: u64 = 0,
-    last_compact_id: u64 = 0,
-    last_ui_request_id: u64 = 0,
-};
-
-pub const SessionOpenOptions = struct {
-    model_binding: ModelBinding,
-    permission_mode: PermissionMode,
-    shell_policy: ShellPolicy,
-    permission_interaction: PermissionInteraction = .interactive,
-    workspace: WorkspaceInput,
-    canonical_user_home: []const u8 = "",
-    workspace_epoch: []const u8 = "",
-    skill_catalog: ?*CatalogLease = null,
-    skill_policy: ?SkillPolicyInput = null,
-    mcp_selection: ?*const McpSelection = null,
-    /// Product history may contain operations intentionally excluded from the
-    /// Conversation checkpoint. They still consume public operation ids.
-    operation_id_floor: OperationIdFloor = .{},
-};
-
-pub const SkillPolicyInput = struct {
-    granted_skill_ids: []const []const u8 = &.{},
-};
-
 /// The handle and exact default-deny grant set remain in the Agent owner.
 /// A captured copy shares the original immutable catalog lease, not a query
 /// of today's global catalog. Each copy must be consumed by deinit.
@@ -534,13 +453,6 @@ pub const SessionRestoreInputs = struct {
     }
 };
 
-pub const SessionRestoreOptions = struct {
-    session: SessionOpenOptions,
-    checkpoint_limits: CheckpointLimits,
-    source: CheckpointSource,
-    expectation: CheckpointRestoreExpectation,
-};
-
 pub const SessionRestoreRoute = struct {
     id: u64,
     session: *Session,
@@ -570,104 +482,6 @@ pub const Limits = struct {
     max_ui_response_bytes: usize = 256 * 1024,
     max_terminal_diagnostic_bytes: usize = 512,
     event_ready_notifier: ?EventReadyNotifier = null,
-};
-
-pub const SessionSnapshot = struct {
-    session_id: u64,
-    state: SessionState,
-    workspace_root: []const u8,
-    active_run_id: u64,
-    active_compact_id: u64,
-    pending_ui_request_id: ?u64,
-    input: InputObservation = .{},
-};
-
-pub const PendingUiRequest = struct {
-    session_id: u64,
-    run_id: u64,
-    request_id: u64,
-    input_adopted_count: u32 = 0,
-    json: []u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *PendingUiRequest) void {
-        self.allocator.free(self.json);
-        self.* = undefined;
-    }
-};
-
-pub const Error = error{
-    InvalidLimits,
-    InvalidWorkspace,
-    WorkspaceNotTrusted,
-    InvalidCatalogQuery,
-    InvalidCatalogDescriptor,
-    DuplicateCatalogIdentity,
-    SkillCatalogInvalid,
-    SkillCatalogIncomplete,
-    CatalogResourceLimit,
-    CatalogReleaseFailed,
-    CatalogLeasesOutstanding,
-    CatalogBindingMismatch,
-    InvalidSkillPolicy,
-    CatalogRefreshFailed,
-    McpRefreshFailed,
-    McpRefreshRejected,
-    InvalidMcpCatalogDescriptor,
-    McpCatalogResourceLimit,
-    McpCatalogGenerationMismatch,
-    McpCatalogBindingMismatch,
-    InvalidMcpSelection,
-    StaleMcpSelection,
-    McpRestoreSourceChanged,
-    McpRefreshInProgress,
-    McpConfigurationApplyFailed,
-    McpConfigurationApplyUncertain,
-    McpConfigurationApplyLimit,
-    McpNotRefreshed,
-    McpCheckpointBudgetRequired,
-    McpSelectionUpdateFailed,
-    McpRuntimeIdentityExhausted,
-    RuntimeShuttingDown,
-    SessionCapacity,
-    UnknownSession,
-    SessionNotClosed,
-    CoreCallFailed,
-    PermissionModeUpdateFailed,
-    PermissionModeBudgetRequired,
-    QueueFull,
-    SessionNotIdle,
-    SessionPoisoned,
-    SessionClosing,
-    InvalidRunInput,
-    InvalidCredential,
-    CredentialUpdateFailed,
-    CredentialUpdateResourceLimit,
-    CredentialUpdateContract,
-    RunInputTooLarge,
-    RunInputBudgetExceeded,
-    RunIdExhausted,
-    RunGenerationExhausted,
-    CompactIdExhausted,
-    SessionIdExhausted,
-    NoSuchRun,
-    NoSuchCompact,
-    NoPendingUiRequest,
-    StaleUiResponse,
-    InvalidUiResponse,
-    StateNotReached,
-    SessionDestroyFailed,
-    RuntimeDestroyFailed,
-    RestoreInvalid,
-    RestoreBusy,
-    RestoreFailed,
-    RestoreCancelled,
-    RestoreIoFailed,
-    RestoreContractFailed,
-    CheckpointCorrupt,
-    CheckpointUnsupported,
-    CheckpointIncompatible,
-    LogicalSessionConflict,
 };
 
 const max_core_session_id_bytes: usize = @intCast(wire.MAX_SESSION_ID_BYTES_V1);
@@ -2153,7 +1967,7 @@ pub const Session = struct {
         if (failed) return error.SessionDestroyFailed;
     }
 
-    fn executeBegunRun(self: *Session, run_id: u64, generation: u64) TerminalResult {
+    pub fn executeBegunRun(self: *Session, run_id: u64, generation: u64) TerminalResult {
         self.lock();
         std.debug.assert(run_id == self.active_run_id);
         std.debug.assert(generation == self.active_run_generation);

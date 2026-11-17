@@ -1,7 +1,7 @@
 //! Product-owned immutable compiled Skill authority projection.
 
 const std = @import("std");
-const lifecycle = @import("metawork_agent");
+const lifecycle = @import("metawork_agent_contract");
 
 pub const CatalogAvailability = enum { uninitialized, loading, ready, degraded, unavailable };
 

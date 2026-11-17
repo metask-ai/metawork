@@ -1681,7 +1681,7 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     defer enablement.deinit();
     var vault = TaskSwitchVault{};
     defer for (0..2) |index| std.crypto.secureZero(u8, vault.keys[index][0..vault.lengths[index]]);
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = if (refresh_pressure) 1 else 4, .max_tasks = 1, .max_workspaces = 1 }, .{
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = if (refresh_pressure) 1 else 4, .max_tasks = 1, .max_workspaces = 1 }, .{
         .directories = .{ .canonical_user_home = home },
         .task_persistence = typed_history.capability(),
         .checkpoint_store = .{ .file_store = &checkpoints },
@@ -2025,7 +2025,7 @@ fn expectProductIncrementalConvergence(bad_first: bool) !void {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     };
-    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{
         .preparation = &preparation,
         .management = managementConfiguration(&durable, &manifest),
         .host_capabilities = .{ .connection_approval = true },
@@ -2197,7 +2197,7 @@ fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
     const storage = try a.alloc(u8, mcp_configuration.max_store_bytes);
     defer a.free(storage);
     var durable: DurableRegistry = .{ .storage = storage };
-    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{
         .preparation = &preparation,
         .activation = activation,
         .management = managementConfiguration(&durable, &manifest),
@@ -2521,7 +2521,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !v
     const current_registry = &current_preparation.registry.?;
     const fingerprint = mcp_configuration.connectionFingerprint(current_registry.value.servers[0]);
     current_registry.value.servers[0].connection_approval.?.fingerprint = try current_registry.arena.allocator().dupe(u8, &fingerprint);
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 1,
@@ -2949,7 +2949,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
     var initial_workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        initial_runtime,
+        initial_runtime.runtimePort(),
         .{ .worker_count = 1, .queue_capacity = 4 },
         .{ .mcp = .{
             .preparation = &initial_preparation,
@@ -3059,7 +3059,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
     var restarted_workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        restarted_runtime,
+        restarted_runtime.runtimePort(),
         .{ .worker_count = 1, .queue_capacity = 4 },
         .{
             .directories = .{ .canonical_user_home = if (static_auth) root_storage[0..root_len] else null },
@@ -3167,7 +3167,7 @@ fn expectMcpProductAdmissionWithAuth(protocol_version: []const u8, transport: ag
             return err;
         };
         access.deinit();
-        defer original.deinit() catch unreachable;
+        defer original.release() catch unreachable;
         try std.testing.expectEqual(@as(u32, 1), mcp.state.management.?.runtime_manifest.?.entries[0].task_references);
         if (race == .retain_disabled) {
             var extra_tasks: [2]u64 = undefined;
@@ -3877,7 +3877,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     defer originals.deinit();
     var vault = TaskSwitchVault{};
     defer for (0..2) |i| std.crypto.secureZero(u8, vault.keys[i][0..vault.lengths[i]]);
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4, .max_tasks = 1, .max_workspaces = 1 }, .{
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4, .max_tasks = 1, .max_workspaces = 1 }, .{
         .directories = .{ .canonical_user_home = home },
         .task_persistence = typed_history.capability(),
         .checkpoint_store = .{ .file_store = &checkpoints },
@@ -3994,8 +3994,8 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
         var restored_access = try task.runtime.acquireAccess();
         defer restored_access.deinit();
         var ceiling = try restored_access.captureRestoreInputs();
-        defer ceiling.deinit() catch unreachable;
-        try std.testing.expectEqual(@as(usize, 1), ceiling.skill.?.borrow().policy.granted_skill_ids.len);
+        defer ceiling.release() catch unreachable;
+        try std.testing.expectEqual(@as(usize, 1), ceiling.agent.borrowSkillRestoreInputs(ceiling.skill.?).policy.granted_skill_ids.len);
     }
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Continue on the new connection." }, .allow_session));
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Deny this echo tool." }, .allow_session));
@@ -4009,13 +4009,13 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     var access_owned = true;
     defer if (access_owned) access.deinit();
     var restored_inputs = try access.captureRestoreInputs();
-    defer restored_inputs.deinit() catch unreachable;
+    defer restored_inputs.release() catch unreachable;
     try std.testing.expectError(error.SkillUnavailable, control.runTask(task_id, .{ .skill = .{ .skill_id = blocked.skill_id, .catalog_revision = restored_catalog.revision, .selection_revision = restored_catalog.selection_revision.?, .argument_values = &.{} } }));
     try std.testing.expectEqual(if (manual) agent.PermissionMode.accept_edits else agent.PermissionMode.full_access, restored_inputs.permission_mode);
     if (manual) try std.testing.expect(task.runtime.last_restore_report.?.restored_permission_rules >= 2);
     try std.testing.expectEqual(agent.ShellPolicy.unrestricted, restored_inputs.shell_policy);
     try std.testing.expectEqual(agent.PermissionInteraction.interactive, restored_inputs.permission_interaction);
-    const ids = restored_inputs.skill.?.borrow().policy.granted_skill_ids;
+    const ids = restored_inputs.agent.borrowSkillRestoreInputs(restored_inputs.skill.?).policy.granted_skill_ids;
     try std.testing.expectEqual(@as(usize, 2), ids.len);
     try std.testing.expect(for (ids) |id| {
         if (std.mem.eql(u8, id, retained.skill_id)) break true;
@@ -4220,7 +4220,7 @@ test "real Coordinator settles eligibility loss and edit without self waking" {
     };
     const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
     defer budget.release();
-    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{ .preparation = &preparation, .management = managementConfiguration(&durable, &manifest) } });
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{ .preparation = &preparation, .management = managementConfiguration(&durable, &manifest) } });
     runtime_owned = false;
     preparation_owned = false;
     manifest_owned = false;
@@ -4426,7 +4426,7 @@ test "real Core connects a restored expired grant only with committed new bearer
             var management = managementConfiguration(&self.durable, &manifest);
             management.locator_generator = .{ .available = true, .context = &self.durable, .fill_fn = DurableRegistry.fillIdentity };
             management.credentials = .{ .available = true, .context = self, .probe_fn = probe, .create_fn = create, .delete_fn = delete };
-            return .{ .core = core, .control = try product_control.Runtime.init(allocator, std.testing.io, core, .{ .worker_count = 1, .queue_capacity = 4 }, .{
+            return .{ .core = core, .control = try product_control.Runtime.init(allocator, std.testing.io, core.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4 }, .{
                 .run_clock = .{ .context = self, .now_unix_ms_fn = now },
                 .mcp = .{ .preparation = &preparation, .management = management, .host_capabilities = .{ .oauth = true, .connection_approval = true } },
             }) };
@@ -4663,7 +4663,7 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     defer typed_history.deinit();
     var enablement = try product_skill.enablement.FileStore.init(std.testing.io, root);
     defer enablement.deinit();
-    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .directories = .{ .canonical_user_home = root }, .task_persistence = typed_history.capability(), .checkpoint_store = .{ .file_store = &checkpoints }, .skill_enablement = .{ .file_store = &enablement }, .mcp = .{ .preparation = &preparation, .management = configuration } });
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4 }, .{ .directories = .{ .canonical_user_home = root }, .task_persistence = typed_history.capability(), .checkpoint_store = .{ .file_store = &checkpoints }, .skill_enablement = .{ .file_store = &enablement }, .mcp = .{ .preparation = &preparation, .management = configuration } });
     runtime_owned = false;
     preparation_owned = false;
     manifest_owned = false;

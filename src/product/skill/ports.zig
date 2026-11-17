@@ -1,7 +1,7 @@
 //! Narrow effect ports consumed by the live Product Skill owner.
 //! These callbacks grant no Workbench, Executor, or Agent Runtime identity.
 
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const std = @import("std");
 const sources = @import("product_skill_sources");
 

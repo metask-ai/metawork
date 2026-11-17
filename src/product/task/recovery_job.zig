@@ -4,7 +4,7 @@
 //! Workspace pointer and publishes exactly one linear completion.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const models_contract = @import("metawork_product_models_contract");
 const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
@@ -317,10 +317,10 @@ pub const RestoreCapabilities = struct {
     pub fn deinit(self: *RestoreCapabilities) agent.Error!void {
         if (self.mcp) |selection| selection.deinit();
         var failure: ?agent.Error = null;
-        if (self.skill) |inputs| inputs.deinit() catch |err| {
+        if (self.skill) |inputs| self.original.agent.releaseSkillRestoreInputs(inputs) catch |err| {
             failure = err;
         };
-        self.original.deinit() catch |err| {
+        self.original.release() catch |err| {
             failure = err;
         };
         self.* = undefined;
@@ -368,7 +368,7 @@ pub const BindingCommit = enum { not_started, pending, committed, failed, outcom
 
 pub const Job = struct {
     allocator: std.mem.Allocator,
-    runtime: *agent.Runtime,
+    runtime: agent.RuntimePort,
     store: ?*checkpoint_store.FileStore,
     notifier: Notifier,
     checkpoint_limits: agent.CheckpointLimits,
@@ -520,8 +520,8 @@ pub const Job = struct {
             },
             .canonical_user_home = self.attempt.workspace.canonical_user_home,
             .workspace_epoch = self.attempt.workspace.epoch_token,
-            .skill_catalog = if (capabilities) |value| if (value.skill) |inputs| inputs.borrow().catalog else null else null,
-            .skill_policy = if (capabilities) |value| if (value.skill) |inputs| inputs.borrow().policy else null else null,
+            .skill_catalog = if (capabilities) |value| if (value.skill) |inputs| value.original.agent.borrowSkillRestoreInputs(inputs).catalog else null else null,
+            .skill_policy = if (capabilities) |value| if (value.skill) |inputs| value.original.agent.borrowSkillRestoreInputs(inputs).policy else null else null,
             .mcp_selection = if (capabilities) |value| value.mcp else null,
             .operation_id_floor = .{
                 .last_run_id = self.attempt.run_id_floor,
