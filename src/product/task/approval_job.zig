@@ -2,7 +2,7 @@
 //! observations, or an encoded history candidate; no worker reads Task state.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");

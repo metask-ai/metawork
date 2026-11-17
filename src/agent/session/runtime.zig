@@ -1474,6 +1474,12 @@ pub const Runtime = struct {
         self.allocator.destroy(session);
     }
 
+    /// This Runtime as the Product-facing port. The declarations live in the
+    /// contract module; `session/port_impl.zig` builds the implementation.
+    pub fn runtimePort(self: *Runtime) contract.port.RuntimePort {
+        return @import("port_impl.zig").runtimePort(self);
+    }
+
     pub fn takeEvent(self: *Runtime) ?OwnedCoreEvent {
         return self.events.takeFair();
     }

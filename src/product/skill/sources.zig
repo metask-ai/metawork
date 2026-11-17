@@ -1,7 +1,7 @@
 //! Bounded checks for canonical Skill roots and the bundled Skill source.
 const std = @import("std");
 const builtin = @import("builtin");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 
 pub const builtin_source_instance_id = "metawork.builtin";
 pub const default_source_priority: i32 = 999;

@@ -112,16 +112,7 @@ pub const PermissionCallbackOutcome = sdk.protocol.PermissionCallbackOutcome;
 pub const PermissionProvenance = sdk.protocol.PermissionProvenance;
 pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
 
-/// Trusted effects for the fixed Host tool, independent of model arguments.
-/// A same-named MCP or built-in tool does not inherit this description.
-pub fn hostToolPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
-    if (namespace != .host) return null;
-    if (std.mem.eql(u8, name, generate_image.name)) return generate_image.description;
-    if (std.mem.eql(u8, name, generate_video.name)) return generate_video.description;
-    if (std.mem.eql(u8, name, deliver_file.name)) return deliver_file.description;
-    if (std.mem.eql(u8, name, mcp_install.name)) return mcp_install.description;
-    return null;
-}
+pub const hostToolPermissionContext = capabilities.hostToolPermissionContext;
 pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const CatalogHealth = catalog.Health;
@@ -234,6 +225,16 @@ pub const BeginRunOutcome = union(enum) {
 
 /// The unique execution owner returned by `Session.beginRun`. This is a linear
 /// value and must execute and deinitialize exactly once.
+const port_impl = @import("session/port_impl.zig");
+
+/// The Product-facing ports over this Runtime and its Sessions. The
+/// declarations live in the contract module; these build the in-process
+/// implementation of them.
+pub const SessionPort = contract.port.SessionPort;
+pub const RuntimePort = contract.port.RuntimePort;
+pub const sessionPort = port_impl.sessionPort;
+pub const runtimePort = port_impl.runtimePort;
+
 pub const Run = struct {
     session: *Session,
     run_id: u64,
@@ -1965,7 +1966,7 @@ pub const Session = struct {
         if (failed) return error.SessionDestroyFailed;
     }
 
-    fn executeBegunRun(self: *Session, run_id: u64, generation: u64) TerminalResult {
+    pub fn executeBegunRun(self: *Session, run_id: u64, generation: u64) TerminalResult {
         self.lock();
         std.debug.assert(run_id == self.active_run_id);
         std.debug.assert(generation == self.active_run_generation);

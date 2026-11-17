@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const catalog = @import("product_skill_catalog");
 const enablement = @import("product_skill_enablement");
 const management = @import("product_skill_management");

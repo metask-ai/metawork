@@ -34,7 +34,7 @@ pub const SessionControlBlock = struct {
         return false;
     }
 
-    fn release(self: *SessionControlBlock) void {
+    pub fn release(self: *SessionControlBlock) void {
         self.wait_mutex.lockUncancelable(self.session.agent_runtime.io);
         const previous = self.lifetime.fetchSub(1, .acq_rel);
         std.debug.assert(previous & control_reference_mask > 1);

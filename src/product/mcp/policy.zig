@@ -3,7 +3,7 @@
 //! prepare owned Agent allowlists, but owns no Workbench, worker, timer, or effect.
 
 const std = @import("std");
-const lifecycle = @import("metawork_agent");
+const lifecycle = @import("metawork_agent_contract");
 const mcp_configuration = @import("product_mcp_configuration");
 const mcp_state = @import("product_mcp_state");
 

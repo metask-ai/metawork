@@ -3,7 +3,7 @@ const credential_match = @import("product_credential_match");
 const builtin = @import("builtin");
 const update = @import("metawork_product_update");
 const product_identity = @import("metawork_product_identity");
-const lifecycle = @import("metawork_agent");
+const lifecycle = @import("metawork_agent_contract");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
@@ -139,7 +139,7 @@ const default_attachment_file_bytes: usize = 100_000_000;
 const default_attachment_count: usize = product_attachment.max_files_per_message;
 
 fn pendingAgentEvents(context: *anyopaque, session_id: u64) usize {
-    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
     return runtime.pendingEventCount(session_id);
 }
 
@@ -867,7 +867,7 @@ fn cancelMcpJob(context: *anyopaque, identity: *anyopaque) bool {
 }
 
 fn activateMcpCatalog(context: *anyopaque) mcp_ports.CatalogError!lifecycle.McpActivationOutcome {
-    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
     return runtime.activateMcp();
 }
 
@@ -876,12 +876,12 @@ fn createMcpAdmissionSelection(
     activation: *const lifecycle.McpActivation,
     allowlists: []const lifecycle.McpServerAllowlist,
 ) mcp_ports.CatalogError!?*lifecycle.McpSelection {
-    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
     return runtime.createMcpAdmissionSelection(activation, allowlists);
 }
 
 fn prepareMcpRestoreSelection(context: *anyopaque, original: *const lifecycle.McpRestoreSelection, activation: *const lifecycle.McpActivation, ceiling: []const lifecycle.McpActivationTool) mcp_ports.CatalogError!*lifecycle.McpSelection {
-    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
     return runtime.prepareMcpRestoreSelection(original, activation, ceiling);
 }
 
@@ -893,7 +893,7 @@ fn mcpExecutorPort(executor: *executor_impl.Executor) mcp_ports.Executor {
     };
 }
 
-fn mcpCatalogPort(runtime: *lifecycle.Runtime) mcp_ports.Catalog {
+fn mcpCatalogPort(runtime: *lifecycle.RuntimePort) mcp_ports.Catalog {
     return .{
         .context = runtime,
         .activate_fn = activateMcpCatalog,
@@ -945,19 +945,19 @@ fn querySkillCatalog(
     context: *anyopaque,
     input: lifecycle.CatalogQuery,
 ) anyerror!lifecycle.CatalogAcquisition {
-    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
     return runtime.querySkillCatalog(input);
 }
 
 fn releaseSkillCatalog(context: *anyopaque, lease: *lifecycle.CatalogLease) void {
-    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
     runtime.releaseSkillCatalog(lease) catch
         @panic("Agent rejected a Product Skill catalog lease");
 }
 
 fn productSkillPorts(
     executor: *executor_impl.Executor,
-    runtime: *lifecycle.Runtime,
+    runtime: *lifecycle.RuntimePort,
     notifier: ChangeNotifier,
 ) skill_ports.Ports {
     return .{
@@ -1302,7 +1302,7 @@ pub const Runtime = struct {
     run_trace: task_runtime.RunTrace,
     allocator: std.mem.Allocator,
     io: std.Io,
-    agent_runtime: *lifecycle.Runtime,
+    agent_runtime: *lifecycle.RuntimePort,
     limits: Limits,
     workspace: product_workspace.Runtime,
     attachments: product_attachment.Runtime,
@@ -1379,13 +1379,28 @@ pub const Runtime = struct {
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
+    /// `agent` is the Agent Runtime port, or anything that can produce one.
+    ///
+    /// Transitional: accepting the producer keeps this commit free of the
+    /// mechanical call-site churn, which lands on its own. The next commit
+    /// narrows the parameter to `lifecycle.RuntimePort` and this
+    /// normalization goes with it.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        agent_runtime: *lifecycle.Runtime,
+        agent: anytype,
         limits: Limits,
         configuration: Configuration,
     ) Error!Runtime {
+        const agent_port: lifecycle.RuntimePort = if (@TypeOf(agent) == lifecycle.RuntimePort)
+            agent
+        else
+            agent.runtimePort();
+        // The adapter contexts below are addresses, and this Runtime is
+        // returned by value, so the port cannot live in the returned struct.
+        const agent_runtime = try allocator.create(lifecycle.RuntimePort);
+        errdefer allocator.destroy(agent_runtime);
+        agent_runtime.* = agent_port;
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_events_per_drain == 0 or limits.max_event_drain_ns == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
@@ -3919,7 +3934,7 @@ pub const Runtime = struct {
             .unavailable;
         try self.checkMetaskAuthorization(execution_input.target.provider_id);
         var task_input: task_runtime.CreateTaskInput = .{
-            .agent_runtime = self.agent_runtime,
+            .agent_runtime = self.agent_runtime.*,
             .execution = execution_input,
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
@@ -4106,12 +4121,12 @@ pub const Runtime = struct {
     fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!task_runtime.Runtime.RestoreFilters {
         const facts = self.task_runtime.restoreSkillFacts(task_id) orelse return error.UnknownTask;
         var skill: ?*lifecycle.SkillRestoreInputs = null;
-        errdefer if (skill) |value| value.deinit() catch {};
+        errdefer if (skill) |value| self.agent_runtime.releaseSkillRestoreInputs(value) catch {};
         if (original.skill) |captured| {
             const catalog = facts.catalog orelse return error.CatalogUnavailable;
             const ids = try self.skill.restoreCeiling(self.allocator, facts.workspace_id, facts.workspace_epoch, catalog);
             defer self.allocator.free(ids);
-            skill = try captured.narrow(.{ .granted_skill_ids = ids });
+            skill = try self.agent_runtime.narrowSkillRestoreInputs(captured, .{ .granted_skill_ids = ids });
         }
         if (original.mcp) |captured| {
             const mcp = if (self.mcp) |*value| value else return error.RecoveryUnavailable;
@@ -4164,7 +4179,7 @@ pub const Runtime = struct {
         defer if (capabilities) |*value| value.deinit() catch {};
         if (try self.task_runtime.captureModelRebindInputs(task_id)) |captured| {
             var original = captured;
-            errdefer original.deinit() catch {};
+            errdefer original.release() catch {};
             const filters = try self.prepareTaskRestoreFilters(task_id, &original);
             capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
         }
@@ -4192,7 +4207,7 @@ pub const Runtime = struct {
             .source_generation = execution.source_generation,
             .continuation_source_id = continuation_source_id,
             .approval_revision = approval_revision,
-            .agent_runtime = self.agent_runtime,
+            .agent_runtime = self.agent_runtime.*,
             .checkpoint_store = self.checkpoint_store,
             .checkpoint_store_health = &self.checkpoint_store_health,
             .checkpoint_limits = checkpoint_export_limits,
@@ -7279,6 +7294,10 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        // Read both out first: the body ends by invalidating `self`.
+        const allocator = self.allocator;
+        const agent_cell = self.agent_runtime;
+        defer allocator.destroy(agent_cell);
         self.shutdownExecutor();
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
@@ -9918,8 +9937,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         return control.captureTaskHistoryCandidate(null);
     }
     pub fn initHistoryFixture(allocator: std.mem.Allocator, control: *Runtime, limits: Limits, configuration: Configuration) !void {
-        test_agent_runtime.io = std.testing.io;
-        control.* = try Runtime.init(allocator, std.testing.io, &test_agent_runtime, limits, configuration);
+        control.* = try Runtime.init(allocator, std.testing.io, test_agent_port, limits, configuration);
     }
     pub const OutputFileEffect = OutputCheckHarness;
 
@@ -10643,7 +10661,7 @@ test "approval checkpoint restores before the first Run independently of the Tas
         tasks[0].checkpoint.?.session.model = case.checkpoint_model;
         var output: [128 * 1024]u8 = undefined;
         const bytes = try task_persistence.encode(&output, state, source.taskPersistenceLimits());
-        var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
             .task_persistence = history.capability(bytes),
         });
         defer restored.deinit();
@@ -11195,7 +11213,11 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     return total;
 }
 
-var test_agent_runtime: lifecycle.Runtime = undefined;
+/// No Control test in this file drives the Agent: they exercise projection,
+/// persistence and view paths, and the event drain has to find an empty
+/// queue. `quiet` answers exactly that and panics on anything else, where
+/// the zeroed Agent Runtime this used to pass answered by accident.
+const test_agent_port: lifecycle.RuntimePort = .quiet;
 fn testLimits() Limits {
     return .{
         .max_tasks = 2,
@@ -11320,8 +11342,7 @@ test "non-Skill executor completion wakes queued built-in Skill discovery" {
     var limits = testLimits();
     limits.worker_count = 1;
     limits.queue_capacity = 1;
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, limits, .{
         .change_notifier = .{ .context = &harness, .wake = Harness.wake },
     });
     defer {
@@ -11383,11 +11404,10 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
 }
 
 fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: Configuration) !void {
-    test_agent_runtime.io = std.testing.io;
     control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         limits,
         configuration,
     );
@@ -11846,11 +11866,10 @@ test "Workspace containment accepts platform roots and rejects path prefixes" {
 }
 
 test "automatic Workspace root is optional and reserved from user registration" {
-    test_agent_runtime.io = std.testing.io;
     var unavailable = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{},
     );
@@ -11878,7 +11897,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .directories = .{ .testing_automatic_workspace_root = &root } },
     );
@@ -11904,7 +11923,6 @@ test "automatic Workspace root is optional and reserved from user registration" 
 }
 
 test "automatic Workspace root configuration swaps only future allocations and fails closed on uncertain persistence" {
-    test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "default", .default_dir);
@@ -11932,7 +11950,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .directories = .{
             .automatic_workspace_system_root = configured_default,
@@ -12088,7 +12106,6 @@ test "automatic Workspace root configuration swaps only future allocations and f
 }
 
 test "automatic Workspace root bootstrap restores a committed custom root" {
-    test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(std.testing.io, "default", .default_dir);
@@ -12115,7 +12132,7 @@ test "automatic Workspace root bootstrap restores a committed custom root" {
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .directories = .{
             .automatic_workspace_system_root = default_storage[0..default_len],
@@ -12132,7 +12149,6 @@ test "automatic Workspace root bootstrap restores a committed custom root" {
 }
 
 test "Workspace registry owns empty selection recent use authorization and capacity" {
-    test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
         ".",
@@ -12154,7 +12170,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         .{
             .max_workspaces = 2,
             .max_tasks = 1,
@@ -12223,7 +12239,6 @@ test "Workspace registry owns empty selection recent use authorization and capac
 }
 
 test "Workspace upsert unknown outcome stays usable and heals on retry" {
-    test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
         ".",
@@ -12242,7 +12257,7 @@ test "Workspace upsert unknown outcome stays usable and heals on retry" {
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .task_persistence = persistence.capability(null) },
     );
@@ -12266,10 +12281,9 @@ test "Workspace upsert unknown outcome stays usable and heals on retry" {
 }
 
 test "Project removal frees a slot and re-addition preserves Workspace identity and authorization" {
-    test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, .{ .max_workspaces = 1, .max_tasks = 1 }, .{});
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, .{ .max_workspaces = 1, .max_tasks = 1 }, .{});
     defer control.deinit();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
@@ -12300,7 +12314,6 @@ test "Project removal frees a slot and re-addition preserves Workspace identity 
 }
 
 test "Project removal survives Host restart while Workspace authority remains available" {
-    test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -12310,12 +12323,12 @@ test "Project removal survives Host restart while Workspace authority remains av
     var persistence = TestTaskPersistence{ .storage = storage };
     const limits: Limits = .{ .max_workspaces = 1, .max_tasks = 1 };
     {
-        var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{ .task_persistence = persistence.capability(null) });
+        var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, limits, .{ .task_persistence = persistence.capability(null) });
         defer control.deinit();
         const id = try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted });
         try control.removeProjectAtEpoch(id, 1);
     }
-    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{ .task_persistence = persistence.capability(persistence.storage[0..persistence.len]) });
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, limits, .{ .task_persistence = persistence.capability(persistence.storage[0..persistence.len]) });
     defer restored.deinit();
     const workspace = restored.workspace.facts(1).?;
     try std.testing.expect(workspace.project_removed);
@@ -12722,7 +12735,7 @@ test "a Task saved by a newer build restores read-only and commits keep its fram
     var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .task_persistence = persistence.capability(newer) },
     );
@@ -12862,7 +12875,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         terminal_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            &test_agent_runtime,
+            test_agent_port,
             testLimits(),
             .{
                 .task_persistence = persistence.capability(terminal_bytes),
@@ -12918,7 +12931,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         failed_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            &test_agent_runtime,
+            test_agent_port,
             testLimits(),
             .{
                 .task_persistence = persistence.capability(failed_bytes),
@@ -12949,7 +12962,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         interrupted_compact_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            &test_agent_runtime,
+            test_agent_port,
             testLimits(),
             .{
                 .task_persistence = persistence.capability(interrupted_compact_bytes),
@@ -13002,7 +13015,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         legacy_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            &test_agent_runtime,
+            test_agent_port,
             testLimits(),
             .{ .task_persistence = persistence.capability(legacy_bytes) },
         );
@@ -13020,7 +13033,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     restored.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{
             .task_persistence = persistence.capability(
@@ -13091,7 +13104,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     deleted_restore.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{
             .task_persistence = persistence.capability(
@@ -13126,7 +13139,7 @@ test "clean shutdown persists an acknowledged completion without an eager commit
     var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .task_persistence = persistence.capability(
             persistence.storage[0..persistence.len],
@@ -13163,7 +13176,7 @@ test "one damaged Task record does not poison surviving history" {
     var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .task_persistence = persistence.capability(bytes) },
     );
@@ -13201,7 +13214,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{
             .task_persistence = persistence.capability(
@@ -13240,7 +13253,6 @@ test "Automatic Workspace history survives an unavailable allocator" {
 }
 
 test "Task persistence restore failure remains diagnostic while product mutations continue" {
-    test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
         ".",
@@ -13250,7 +13262,7 @@ test "Task persistence restore failure remains diagnostic while product mutation
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .task_persistence = .{ .restore_failed = true } },
     );
@@ -13503,7 +13515,7 @@ test "idle history writer admits unrelated model selection and deletion during a
     var persistence: TestTaskPersistence = .{ .storage = storage };
     var encoded: [128 * 1024]u8 = undefined;
     const restored = try task_persistence.encode(&encoded, state, source.taskPersistenceLimits());
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
         .task_persistence = persistence.capability(restored),
     });
     defer control.deinit();
@@ -13573,7 +13585,7 @@ test "pending Task deletion reads back an earlier ordinary history write" {
     const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(storage);
     var persistence: TestTaskPersistence = .{ .storage = storage, .result = .outcome_unknown };
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
         .task_persistence = persistence.capability(restored),
     });
     defer control.deinit();
@@ -13598,7 +13610,6 @@ test "pending Task deletion reads back an earlier ordinary history write" {
 }
 
 test "Task persistence failure keeps Workspace state and retries later" {
-    test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
         ".",
@@ -13621,7 +13632,7 @@ test "Task persistence failure keeps Workspace state and retries later" {
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .task_persistence = persistence.capability(null) },
     );
@@ -13726,8 +13737,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     const task_history_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(task_history_storage);
     var task_history: TestTaskPersistence = .{ .storage = task_history_storage };
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, .{
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
@@ -14081,7 +14091,6 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
 }
 
 test "unreadable Skill stores forbid every Workspace allocation until a strict reload proves the ids in use" {
-    test_agent_runtime.io = std.testing.io;
     var directory_b = std.testing.tmpDir(.{});
     defer directory_b.cleanup();
     var directory_store = std.testing.tmpDir(.{});
@@ -14108,7 +14117,7 @@ test "unreadable Skill stores forbid every Workspace allocation until a strict r
     {
         // Lost history plus an unreadable Skill store: no id can be proven free,
         // so neither a Manual nor an Automatic Workspace may be allocated.
-        var replacement = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        var replacement = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
             .skill_management = .{ .file_store = &asset_file, .staging_root = store_path, .restore_failed = true },
         });
         defer replacement.deinit();
@@ -14122,7 +14131,7 @@ test "unreadable Skill stores forbid every Workspace allocation until a strict r
     // above every id the store names, and the orphaned record stays inert.
     const canonical_assets = (try asset_file.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(canonical_assets);
-    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
         .skill_management = .{ .file_store = &asset_file, .staging_root = store_path, .restored_bytes = canonical_assets },
     });
     defer restored.deinit();
@@ -14923,11 +14932,10 @@ test "Run admission reserves a stable generation and rolls back every fallible a
 }
 
 test "Runtime without a ready model rejects explicit creation before Workspace effects" {
-    test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
@@ -15008,11 +15016,10 @@ const TestCustomProviderVault = struct {
 
 test "automation installs one ordinary Custom Provider without publishing its credential" {
     if (!build_options.automation) return error.SkipZigTest;
-    test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
@@ -15073,11 +15080,10 @@ test "automation installs one ordinary Custom Provider without publishing its cr
 
 test "production rejects automation execution before observing fixture input" {
     if (build_options.automation) return error.SkipZigTest;
-    test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
@@ -15101,7 +15107,6 @@ test "production rejects automation execution before observing fixture input" {
 
 test "automation cold restore rehydrates the persisted connection through credential replacement" {
     if (!build_options.automation) return error.SkipZigTest;
-    test_agent_runtime.io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -15118,7 +15123,7 @@ test "automation cold restore rehydrates the persisted connection through creden
         var first = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            &test_agent_runtime,
+            test_agent_port,
             .{
                 .max_tasks = 1,
                 .max_runs_per_task = 1,
@@ -15137,7 +15142,7 @@ test "automation cold restore rehydrates the persisted connection through creden
         var restored = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            &test_agent_runtime,
+            test_agent_port,
             .{
                 .max_tasks = 1,
                 .max_runs_per_task = 1,
@@ -15213,11 +15218,10 @@ fn createReadyTestCustomProvider(
 }
 
 test "Account identity and Models execution publish through separate projections" {
-    test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
@@ -17825,11 +17829,10 @@ fn maximumProjectionFixture(control: *Runtime) !void {
 }
 
 fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limits: Limits) !void {
-    test_agent_runtime.io = std.testing.io;
     control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         limits,
         .{},
     );
@@ -20948,7 +20951,6 @@ test "empty MCP startup commits a proven manageable runtime" {
     )).?;
     var runtime_manifest_owned = true;
     defer if (runtime_manifest_owned) runtime_manifest.deinit();
-    test_agent_runtime.io = std.testing.io;
     var control: Runtime = undefined;
     try initTestRuntimeWithLimits(
         &control,
@@ -21144,11 +21146,10 @@ test "MCP authorization operation owns product phase and durable token boundary"
     var manifest_owned = true;
     defer if (manifest_owned) manifest.deinit();
     var refresh_timer: TestMcpRefreshTimer = .{};
-    test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .mcp_refresh_timer = refresh_timer.timer(), .mcp = .{
             .preparation = &preparation,
@@ -21299,11 +21300,10 @@ test "MCP startup activation failure stays globally unavailable without inventin
     )).?;
     var runtime_manifest_owned = true;
     defer if (runtime_manifest_owned) runtime_manifest.deinit();
-    test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &test_agent_runtime,
+        test_agent_port,
         testLimits(),
         .{ .mcp = .{
             .preparation = &preparation,
@@ -22671,7 +22671,7 @@ test "Outputs persist through real history restore and sanitized locators lose f
         defer decoded.deinit();
         try std.testing.expectEqualStrings("", decoded.value.tasks[0].runs[0].outputs[1].locator);
     }
-    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
         .task_persistence = history.capability(storage[0..history.len]),
     });
     defer restored.deinit();

@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const credential_match = @import("product_credential_match");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const execution_binding = @import("product_task_execution_binding");
