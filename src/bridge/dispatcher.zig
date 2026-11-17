@@ -1398,11 +1398,8 @@ pub const Dispatcher = struct {
         const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
         if (key.preview_id <= self.preview_high_water or parsed.value.path.len > 4096) return error.InvalidBridgePayload;
         self.preview_high_water = key.preview_id;
-        const task_id = if (parsed.value.taskId) |text| id: {
-            const id = try handlers.parseWireId(text);
-            if (id == 0) return error.InvalidBridgePayload;
-            break :id id;
-        } else if (directory) @as(u64, 0) else return error.InvalidBridgePayload;
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        if (task_id == 0) return error.InvalidBridgePayload;
         const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
         const workspace_epoch = try handlers.parseWireId(parsed.value.workspaceEpoch);
         const control = try self.requireProductControl();
@@ -1815,7 +1812,6 @@ pub const Dispatcher = struct {
     fn receiveRejected(output: []u8, err: anyerror) ![]const u8 {
         const reason: []const u8 = switch (err) {
             error.FileTooLarge => "file_too_large",
-            error.TextFileTooLarge => "text_file_too_large",
             error.TooManyFiles => "too_many_files",
             error.StagingCapacity, error.InputBusy, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
             error.ExecutorShuttingDown => "shutting_down",
@@ -2016,12 +2012,10 @@ pub const Dispatcher = struct {
         defer shape.deinit();
         const source_shape = shape.value.object.get("source").?.object;
         if (source_shape.count() != (if (source.kind == .picker) @as(usize, 1) else @as(usize, 2))) return error.InvalidBridgePayload;
-        if ((source.reference != null) != (source.kind == .workspace_reference)) return error.InvalidBridgePayload;
         switch (source.kind) {
             .picker => if (source.paths != null or source.files != null) return error.InvalidBridgePayload,
             .native_paths => if (self.platform.attachment_input != .native_paths or source.paths == null or source.files != null) return error.InvalidBridgePayload,
             .file_bytes => if (source.files == null or source.paths != null) return error.InvalidBridgePayload,
-            .workspace_reference => if (source.paths != null or source.files != null) return error.InvalidBridgePayload,
         }
         if (key.batch_id <= self.receive_high_water) {
             respondAddError(responder, invocation.request.id, error.StaleTransfer);
@@ -2038,30 +2032,6 @@ pub const Dispatcher = struct {
             return;
         }
         const workbench = try self.requireProductControl();
-        if (source.reference) |reference| {
-            const task_id = if (reference.taskId) |text| id: {
-                const id = try handlers.parseWireId(text);
-                if (id == 0) return error.InvalidBridgePayload;
-                break :id id;
-            } else @as(u64, 0);
-            const workspace_id = try handlers.parseWireId(reference.workspaceId);
-            const epoch = try handlers.parseWireId(reference.workspaceEpoch);
-            const product_id = workbench.prepareAttachmentAdd() catch |err| {
-                respondAddError(responder, invocation.request.id, err);
-                return;
-            };
-            const completion = self.addSlot(responder, invocation.request.id, key.generation, invocation.source.window_id, key.batch_id) orelse {
-                _ = workbench.cancelAttachmentPreparation(product_id);
-                respondAddError(responder, invocation.request.id, error.InputBusy);
-                return;
-            };
-            self.receive_active = .{ .batch_id = key.batch_id, .product_id = product_id, .unified = true, .bytes = false };
-            workbench.beginPreparedWorkspaceReference(completion, product_id, task_id, workspace_id, epoch, reference.path) catch |err| {
-                _ = workbench.cancelAttachmentPreparation(product_id);
-                self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
-            };
-            return;
-        }
         if (source.kind == .file_bytes) {
             const files = source.files.?;
             if (files.len == 0 or files.len > max_files) {
@@ -9145,19 +9115,13 @@ test "unified add async jobs join cancellation and freeze their protocol produce
                 try std.testing.expect(!workbench.attachmentCleanupPending(debt.product_id, debt.attachment_id));
         }
     }
-    try tmp.dir.createDir(std.testing.io, "docs", .default_dir);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "docs/brief.md", .data = "read me\n" });
-    const workspace_id = try workbench.openWorkspace(.{ .workspace_root = path_buffer[0..path_len], .trust = .explicitly_trusted });
-    try std.testing.expectEqual(@as(u64, 1), workspace_id);
-    const reference_begin = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("beginWorkspaceReference").?, .{});
-    const expected_reference_calls = capture.calls + 1;
-    try capture.invoke(native, source, commands.begin_attachment_add, reference_begin);
-    try capture.wait(&workbench, &dispatcher, expected_reference_calls);
-    try capture.expect("\"status\":\"ready\"");
-    try capture.expect("\"displayName\":\"brief.md\"");
-    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "read me") == null);
-    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"98\"}");
-    try capture.expect("\"status\":\"cleaned\"");
+    const removed_reference = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("removedWorkspaceReference").?, .{});
+    const high_water = dispatcher.receive_high_water;
+    try capture.invoke(native, source, commands.begin_attachment_add, removed_reference);
+    try capture.expect("handler_failed");
+    try std.testing.expectEqual(high_water, dispatcher.receive_high_water);
+    try std.testing.expect(dispatcher.receive_active == null);
+    try std.testing.expect(!workbench.attachment_lane.isActive());
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
     workbench.attachment_lane.stopAdmission();
     try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");

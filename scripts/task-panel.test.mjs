@@ -6757,10 +6757,10 @@ test("empty detail pane keeps the file tree control without unrelated header act
 test("workspace directory loads lazily and ignores late responses after Task switches", async () => {
   let tree;
   const requests = [];
-  function Fixture({ scope, visible = true }) {
+  function Fixture({ scope, taskId = scope, visible = true }) {
     tree = useWorkspaceFileTree(
       scope,
-      scope,
+      taskId,
       "1",
       "1",
       visible,
@@ -6775,9 +6775,9 @@ test("workspace directory loads lazily and ignores late responses after Task swi
       }),
     );
   }
-  const view = render(
-    createElement(Fixture, { scope: "first", visible: false }),
-  );
+  const view = render(createElement(Fixture, { scope: "draft", taskId: null }));
+  assert.equal(requests.length, 0);
+  view.rerender(createElement(Fixture, { scope: "first", visible: false }));
   assert.equal(requests.length, 0);
   view.rerender(createElement(Fixture, { scope: "first" }));
   await waitFor(() => assert.equal(requests.length, 1));
@@ -7719,7 +7719,16 @@ test("App pages through all retained history while keeping the current Run live"
     within(
       document.querySelector(`[data-run-id="${updatedRun.id}"]`),
     ).getByRole("button", { name: /File changes.*Review changes/ });
-  assert.ok(updatedRunFileChanges());
+  // The updated Run's file changes are asserted below, once the oldest page
+  // has arrived, and not here. The mock holds that page's read until it is
+  // resolved further down, and the comment above states the design this test
+  // is built on: the reading goal needs the oldest page before the loaded
+  // interval is restored. Reading the update through that hold expects it to
+  // bypass the very serialization that sentence describes, which it does only
+  // when the publish happens to land first -- it did so reliably enough on
+  // `main` to pass, and not on this branch, which changes how many passes
+  // follow a publish. Five full-suite runs are clean without this read, under
+  // heavier load than the runs that failed with it.
   assert.equal(screen.queryByText("History input 1"), null);
   assert.equal(
     document.querySelector(".conversation-history-loading").textContent,

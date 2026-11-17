@@ -11,9 +11,7 @@ export type ComposerTextDraft = {
   attachmentsReloadRequired?: true;
 };
 
-export type ComposerAttachment = AttachmentDescriptor & {
-  workspacePath?: string;
-};
+export type ComposerAttachment = AttachmentDescriptor;
 
 export type ComposerMultimodalDraft = {
   kind: "multimodal";
@@ -54,9 +52,7 @@ export function composerDraftHasContent(draft: ComposerDraft) {
   return (
     draft.kind === "multimodal" &&
     draft.attachments.length > 0 &&
-    !draft.attachments.some(
-      (attachment) => attachment.kind === "file" && !attachment.workspacePath,
-    )
+    !draft.attachments.some((attachment) => attachment.kind === "file")
   );
 }
 
@@ -96,9 +92,7 @@ export function composerDraftToRunInput(
       : { kind: "text", text: draft.text };
   if (draft.kind === "multimodal")
     return draft.attachments.length === 0 ||
-      (draft.attachments.some(
-        (attachment) => attachment.kind === "file" && !attachment.workspacePath,
-      ) &&
+      (draft.attachments.some((attachment) => attachment.kind === "file") &&
         draft.text.trim().length === 0) ||
       parseSlashInput(draft.text)
       ? null
