@@ -10,6 +10,13 @@ permissions:
 
 env:
   ZIG_VERSION: 0.16.0
+  # packaging/windows/metawork.iss includes a language file that ships only
+  # with Inno Setup 7, so the 6.7.1 the runner image preinstalls cannot build
+  # this installer at all. Same URL and digest as release.yml, which is also
+  # the version the release machine uses; the duplication is two workflows
+  # naming one pinned dependency, not two policies.
+  INNO_SETUP_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe
+  INNO_SETUP_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
@@ -173,3 +180,140 @@ jobs:
         with:
           path: *native-cache-path
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
+
+  packaging:
+    name: Unsigned package (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    # Twice the 10 minutes the Windows installer measures on this image. The
+    # release job allows 45 because it also signs and notarizes.
+    timeout-minutes: 30
+    env: *platform-env
+    strategy:
+      fail-fast: false
+      # Its own matrix rather than *platforms, for two reasons: the packaging
+      # scripts take an architecture the test jobs have no field for, and this
+      # job's macOS leg has to be macos-26 while the test jobs deliberately
+      # stay on macos-15. One architecture per platform is what a gate needs,
+      # because the remaining two are built from these same scripts on these
+      # same images by release.yml, and what breaks is the shared path.
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            architecture: x64
+            script: package:windows
+            target: x86_64-windows-msvc
+            lock: build_support/agentcore-bundle.windows-x86_64.lock.json
+          # macos-26 because scripts/package-macos.mjs compiles the app icon
+          # through Icon Composer, whose gate accepts only actool builds that
+          # have been reviewed, and this image's default Xcode 26.6 reports one
+          # of them. If that image's default Xcode moves, this leg is supposed
+          # to fail by name rather than package a different icon quietly.
+          - name: macOS arm64
+            runner: macos-26
+            architecture: arm64
+            script: package:macos
+            target: aarch64-macos
+            lock: build_support/agentcore-bundle.macos-aarch64.lock.json
+
+    steps:
+      - *checkout
+      - *setup-node
+      - *setup-zig
+
+      # Dependency packages only, and no compilation cache of its own: the
+      # repository is already over the 10 GB Actions cache limit, and this job
+      # runs beside the native tests, which take longer than a cold packaging
+      # build, so compiling from nothing costs the run no wall clock.
+      - *cache-zig-packages
+      - *prepare-zig-cache
+      - *npm-ci
+      - *restore-agentcore
+      - *stage-agentcore
+      - *save-agentcore
+
+      - name: Install the pinned Inno Setup compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          curl.exe --fail --location --silent --show-error --output $installer $env:INNO_SETUP_URL
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash
+          $expected = $env:INNO_SETUP_SHA256.ToUpperInvariant()
+          if ($actual -ne $expected) {
+            throw "Inno Setup download digest is $actual, expected $expected"
+          }
+          # The installer is a GUI program, so the call operator would not wait
+          # for it and the next step would look for a compiler that is still
+          # being written.
+          $process = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/ALLUSERS'
+          if ($process.ExitCode -ne 0) {
+            throw "Inno Setup installer exited with $($process.ExitCode)"
+          }
+          $location = $null
+          foreach ($key in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 7_is1'
+          )) {
+            $entry = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            if ($entry -and $entry.InstallLocation) {
+              $location = $entry.InstallLocation
+              break
+            }
+          }
+          if (-not $location) { throw 'Inno Setup 7 registered no install location' }
+          $compiler = Join-Path $location 'ISCC.exe'
+          # Asserted by name rather than left to ISCC, so a compiler without
+          # the language files the installer script requires fails here with
+          # the reason instead of inside a compile log.
+          $language = Join-Path $location 'Languages\ChineseSimplified.isl'
+          foreach ($required in @($compiler, $language)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Inno Setup 7 install is missing $required"
+            }
+          }
+          # Pointing the packaging script at this exact compiler settles the
+          # discovery order, so the image's preinstalled Inno Setup 6 cannot be
+          # reached through PATH and fail the gate for the wrong reason.
+          "METAWORK_INNO_SETUP_COMPILER=$compiler" >> $env:GITHUB_ENV
+          & $compiler /? | Select-Object -First 1
+
+      # Unsigned on both platforms: it is the Windows script's own default and
+      # the macOS script's explicit mode, so this is the release path with
+      # nothing removed from it except the parts that need the certificate.
+      # Until now that path ran only on one developer's machine, and both
+      # defects it has produced were found by hand after a tag was pushed.
+      #
+      # `shell: bash` is load-bearing: it is the only way this step gets
+      # pipefail, and without it tee's exit code would swallow a failed
+      # packaging run. On Windows it also has to displace the default pwsh.
+      - name: Build the unsigned package
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PACKAGE_SCRIPT: ${{ matrix.script }}
+        run: |
+          npm run "$PACKAGE_SCRIPT" -- "$ARCHITECTURE" --signing none 2>&1 | tee package.log
+
+      # Reporting only; there is no size assertion here or in the packaging
+      # scripts. Putting the measurement in the run summary is what makes a
+      # drifting package visible on the pull request that moves it, rather than
+      # five releases later.
+      - name: Report the packaged artifact
+        if: always()
+        shell: bash
+        env:
+          LEG: ${{ matrix.name }}
+        run: |
+          {
+            printf '### %s\n\n' "$LEG"
+            line=$(grep -E '^built unsigned ' package.log 2>/dev/null | tail -1 || true)
+            if [[ -n "$line" ]]; then
+              printf -- '- %s\n' "${line#built }"
+            else
+              printf -- '- No packaging result was produced; the run did not reach the end.\n'
+            fi
+            printf -- '- Unsigned and unnotarized: a verification artifact, never a release artifact.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
