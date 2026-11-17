@@ -2675,6 +2675,55 @@ summary::-webkit-details-marker {
   color: var(--ui-content-error);
 }
 
+.message-info-edit {
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ui-content-muted);
+  background: none;
+  font-size: var(--text-micro);
+  cursor: pointer;
+}
+
+.message-info-edit:hover {
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel-2);
+}
+
+.run-input-edit {
+  display: flex;
+  width: min(78%, 660px);
+  margin-left: auto;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-input-edit-text {
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: 14px;
+  outline: none;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.run-input-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.run-input-edit .projection-note {
+  margin: 0;
+  text-align: end;
+}
+
 .ai-message {
   color: var(--ui-content-primary);
   font-size: var(--text-body);
@@ -6673,6 +6722,18 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .run-conversation-coverage-notice {
   margin: 8px 0 0;
+}
+
+/* A rerun starts here: the exchanges below it are out of the conversation. */
+.run-rewind-notice {
+  margin: 0 0 20px;
+}
+
+/* An exchange an edited message replaced. It stays readable, because what it
+   produced is still real: only the conversation lost it. */
+.ai-exchange[data-superseded] .ai-message,
+.ai-exchange[data-superseded] .run-reading-flow {
+  opacity: 0.62;
 }
 
 .ai-intervention {

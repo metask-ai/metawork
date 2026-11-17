@@ -952,6 +952,11 @@ export const enUS = {
   "input.waiting": "Waiting",
   "input.cancelled": "Stopped",
   "input.unexecuted": "Not executed",
+  "input.edit": "Edit",
+  "input.edit_notice":
+    "The conversation rewinds to this message; files and other changes already made stay as they are.",
+  "input.edit_confirm": "Rerun from here",
+  "input.edit_cancel": "Cancel",
   "input.retry_original": "Resend original message",
   "input.discard_retry": "Discard saved input",
   "input.submitted": "Message sent.",
@@ -966,6 +971,14 @@ export const enUS = {
     "The approval mode change stopped this run. The message was kept so you can resend it.",
   "mutation.reason.combined_input_too_large":
     "The combined messages exceed the input limit. Send them separately.",
+  "mutation.reason.edit_and_rerun":
+    "Editing an earlier message took this one out of the conversation. It was kept so you can resend it.",
+  "mutation.reason.rewind_compacted":
+    "That part of the conversation was summarized away and can no longer be replaced. The message was kept so you can send it as a new one.",
+  "mutation.reason.rewind_position_rejected":
+    "MetaWork could not place that message in the conversation, so nothing was changed. Please report this.",
+  "mutation.reason.rewind_failed":
+    "The conversation could not be rewound. Nothing was changed.",
   "mutation.reason.checkpoint_failed":
     "Run cleanup failed; messages were not continued.",
   "mutation.reason.schedule_failed":
@@ -1066,6 +1079,10 @@ export const enUS = {
   "run.terminal.partial_interrupted":
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
+  "run.rewound_here":
+    "This rerun replaced {count} exchanges above it, which are no longer part of the conversation.",
+  "run.superseded":
+    "An edited message replaced this exchange. It is no longer part of the conversation; the files and other changes it made stay.",
   "run.conversation_history_excluded":
     "This message remains in the task history, but is not included in the restored model context. You can still continue with a new message.",
   "run.process.title": "Execution details",

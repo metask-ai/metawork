@@ -168,6 +168,9 @@ function run(overrides = {}) {
   return {
     id: "9",
     conversationCoverage: "included",
+    editAdmitted: false,
+    superseded: false,
+    rewoundRuns: 0,
     phase: "completed",
     execution: {
       generation: "7",

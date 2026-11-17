@@ -2555,15 +2555,16 @@ pub const Runtime = struct {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
         const run = task_state.findRunConst(task.durable.runs, run_id) orelse return error.NoSuchRun;
-        // A turn a previous rewind already took out of the Conversation is not
-        // there to be replaced a second time.
-        if (task_policy.runSuperseded(task, run)) return error.RunChanged;
-        // History written before #114, or a submission that could not read
-        // the Conversation. Either way there is no position to name, and
-        // Product will not derive one from its own records.
-        const position = run.conversation_position orelse return error.RewindUnavailable;
-        if (position <= task.durable.compact_boundary) return error.RewindCompacted;
-        return position;
+        return switch (task_policy.editablePosition(task, run)) {
+            .position => |position| position,
+            .unavailable => |reason| switch (reason) {
+                // A turn a previous rewind already took out of the
+                // Conversation is not there to be replaced a second time.
+                .superseded => error.RunChanged,
+                .no_position => error.RewindUnavailable,
+                .compacted => error.RewindCompacted,
+            },
+        };
     }
 
     /// Accepts an edited earlier message. The message is admitted through the
@@ -6817,6 +6818,7 @@ pub const Runtime = struct {
             return;
         };
         const bounds = try runBounds(task, before_run_id, limit);
+        const shutting_down = effects.authority(projectionAuthorityQuery(task)).shutting_down;
         writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
         if (bounds.older) writer.print("\"{d}\"", .{task.durable.runs[bounds.start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
@@ -6830,7 +6832,8 @@ pub const Runtime = struct {
                 effects.text,
                 run,
                 task_state.runProjectionFacts(run),
-                task_view.resendAdmitted(task, effects.authority(projectionAuthorityQuery(task)).shutting_down),
+                task_view.resendAdmitted(task, shutting_down),
+                task_view.rewindProjection(task, run, shutting_down),
                 effects.now_ms,
             );
         }

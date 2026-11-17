@@ -21,6 +21,7 @@ const installControlExecution = fixture.installProductControlExecution;
 const installControlExecutionGeneration = fixture.installProductControlExecutionGeneration;
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
+const task_policy = product_task.testing.policy_module;
 
 test "Agent drain shares one event budget across both terminal observations" {
     fake_core.reset();
@@ -10697,6 +10698,76 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     return error.TestUnexpectedResult;
+}
+
+fn expectFakeConversation(index: usize, message_count: usize) !void {
+    const session = &fake_core.sessions[index];
+    session.lock();
+    defer session.unlock();
+    try std.testing.expectEqual(message_count, session.message_count);
+}
+
+test "an edited message rewinds the Conversation and reruns in its place" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    defer fake_core.releaseControlled();
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    fake_core.rearmControlled();
+    fake_core.setNextPlan(.controlled);
+    _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "second turn" });
+    try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+
+    const task = scenario.control.testTask(scenario.task_id).?;
+    const first = task.durable.runs[0].?.id;
+    // Two plain turns: each one took a user position and left a reply after
+    // it. The positions were read from describe at submission, never counted
+    // from these records.
+    try std.testing.expectEqual(@as(?u64, 1), task.durable.runs[0].?.conversation_position);
+    try std.testing.expectEqual(@as(?u64, 3), task.durable.runs[1].?.conversation_position);
+    try expectFakeConversation(0, 4);
+
+    // A queued message written to follow the turns this rewind removes. Its
+    // text comes back for an explicit resend instead of running after it.
+    const queued = try scenario.control.sendInput("queued-after-edit", scenario.task_id, .{ .text = "after the second turn" });
+    try std.testing.expectEqual(.accepted, queued.outcome);
+
+    fake_core.rearmControlled();
+    fake_core.setNextPlan(.immediate);
+    const accepted = try scenario.control.editTaskInput(
+        "edit-first-turn",
+        scenario.task_id,
+        first,
+        .{ .text = "edited first turn" },
+    );
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    for (task.input_submissions.items) |record| {
+        if (std.mem.eql(u8, record.submission.operationId(), "queued-after-edit")) {
+            try std.testing.expectEqual(.failed, record.state);
+            try std.testing.expectEqual(task_state.SendInputReason.edit_and_rerun, record.reason.?);
+        }
+    }
+    try settleInputScenario(scenario);
+
+    // The rerun took the edited turn's own position, and both later turns
+    // left the Conversation while staying in Product history.
+    const rerun = for (task.durable.runs) |entry| {
+        const run = entry orelse continue;
+        if (run.id != first and run.superseded_by_run_id == null) break run.id;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
+    try std.testing.expectEqual(@as(u32, 2), task_policy.rewoundRunCount(task, rerun));
+    try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
+    // One turn after the rewind: the Conversation the next Run extends is the
+    // context before the edited message plus the rerun itself.
+    try expectFakeConversation(0, 2);
+    // The turn that was replaced can no longer be named a second time.
+    try std.testing.expectError(
+        error.RunChanged,
+        scenario.control.taskEditablePosition(scenario.task_id, first),
+    );
 }
 
 test "active input continues exactly once after normal completion and never repeats adopted input" {

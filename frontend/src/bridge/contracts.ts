@@ -927,6 +927,12 @@ export type RunView = {
   finishedAtUnixMs: string | null;
   id: string;
   conversationCoverage: ConversationCoverage;
+  /** Whether this run's own message can still be edited and rerun from. */
+  editAdmitted: boolean;
+  /** A later edit rewound the conversation past this turn. */
+  superseded: boolean;
+  /** How many turns this run's own rewind replaced; 0 if it replaced none. */
+  rewoundRuns: number;
   phase: RunPhase;
   permissionProfile: PermissionProfile;
   permissionInteraction: PermissionInteraction;
@@ -1174,6 +1180,10 @@ export const sendInputReasons = [
   "admission_failed",
   "continuation_cancelled",
   "approval_mode_change",
+  "edit_and_rerun",
+  "rewind_compacted",
+  "rewind_position_rejected",
+  "rewind_failed",
   "combined_input_too_large",
   "checkpoint_failed",
   "schedule_failed",

@@ -3280,6 +3280,40 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
     }
   }
+  /**
+   * Replaces one earlier message and reruns the conversation from it. The
+   * text is that run's own recorded input as the user edited it; Product
+   * knows which conversation position it belongs to, so nothing is sent from
+   * here but the run it replaces.
+   */
+  async function editRunInput(taskId: string, runId: string, text: string) {
+    const key = `input-edit:${taskId}:${runId}`;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    inputRetryActions.current.add(key);
+    const audience = { scope: "task" as const, taskId };
+    const feedback = beginOperationFeedback(key, audience);
+    const operationId = newComposerOperationId();
+    try {
+      const result = await client.editInput(operationId, taskId, runId, {
+        kind: "text",
+        text,
+      });
+      settleOperationFeedback(
+        feedback,
+        result.outcome === "accepted"
+          ? null
+          : attentionStatus(mutationReasonMessageId(result.reason), audience),
+      );
+    } catch {
+      settleOperationFeedback(
+        feedback,
+        attentionStatus("feedback.unconfirmed", audience),
+      );
+    } finally {
+      inputRetryActions.current.delete(key);
+      await refreshSnapshot().catch(() => undefined);
+    }
+  }
   async function retryFailedSessionClose(taskId: string, bindingEpoch: string) {
     const key = `session-close:${taskId}`;
     if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
@@ -5879,6 +5913,9 @@ export default function App() {
                 }
                 onDiscardInputRetry={(taskId, operationId) =>
                   void actOnFailedInput(taskId, operationId, true)
+                }
+                onEditInput={(taskId, runId, text) =>
+                  void editRunInput(taskId, runId, text)
                 }
                 onOpenSettings={openSettings}
                 recharge={{

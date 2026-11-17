@@ -98,6 +98,7 @@ pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
 pub const send_input = "metawork.tasks.sendInput";
 pub const retry_input = "metawork.tasks.retryInput";
+pub const edit_input = "metawork.tasks.editInput";
 pub const discard_input_retry = "metawork.tasks.discardInputRetry";
 pub const stop = "metawork.tasks.stop";
 pub const set_approval_mode = "metawork.tasks.setApprovalMode";
@@ -217,6 +218,7 @@ pub const product = [_][]const u8{
     run,
     send_input,
     retry_input,
+    edit_input,
     discard_input_retry,
     stop,
     set_approval_mode,

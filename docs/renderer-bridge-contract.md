@@ -342,6 +342,8 @@ Skill catalog 的每个候选必填 `skillPolicyKey`，来自 Core 的逻辑策�
 
 `metawork.tasks.sendInput` 是普通 Composer 新输入的发送入口，payload 精确为 `{ operationId, taskId, input }`，input 复用 text、skill 与 multimodal tagged union。Renderer 不提供 binding epoch、idle/Run 目标，也不编排 Skill 准备或恢复。Host 校验当前窗口、连接 generation、Task/Workspace authority、内容、附件 grant 和真实容量；Task 在主线程取得唯一 owned payload 与安全展示预留后接收，执行启动、readiness、停止或收尾阶段不能成为普通有效消息的接收拒绝理由。已有公共 `tasks.run` 保留显式新 Run 语义，不能越过更早待处理输入。
 
+`metawork.tasks.editInput` 精确接收 `{ operationId, taskId, runId, input }`，input 复用 text 与 multimodal tagged payload，不接受 skill；Renderer 不发送 Conversation position，位置由 Host 从该 Run 提交时记录的值读取。Host 校验窗口、连接 generation、Task/Workspace authority、内容与附件 grant 后按普通输入接纳这条消息，并附带要回退到的位置；当前 Run 仍在运行时按既有 Run 取消路径停止它，这条消息在队列中等到 Task 真正 idle 才回退并启动自己的 Run。返回普通发送接收结果；预期拒绝沿用既有 `sendInputReason`，并新增 `rewind_compacted`（该段对话已被压缩摘要，无法再替换）、`rewind_position_rejected`（Host 未能在对话中定位该消息，属于缺陷，对话未改动）、`rewind_failed`（回退在 Core 边界失败，对话未改动）与 `edit_and_rerun`（排队消息因这次编辑退出对话，原文保留可重发）。该命令不接收原文位置、checkpoint 或 Core 侧内容。每个 Run snapshot 增加 `editAdmitted`（布尔，是否可以编辑这条消息并从它重跑）、`superseded`（布尔，已被编辑后的消息取代，不在上下文里）与 `rewoundRuns`（非负整数，这个 Run 自己的回退取代了多少轮，0 表示没有回退）。
+
 `metawork.tasks.retryInput` 精确接收 `{ taskId, originalOperationId, operationId }`。Host 只以该 Task 的未执行失败提交及其进程内保留输入为源，返回普通发送接收结果。原提交已转交时返回已接收的新 `operationId`；响应未知时按操作 ID 查回既有快照回执。`metawork.tasks.discardInputRetry` 精确接收 `{ taskId, originalOperationId }`，返回 `{ discarded }`。这两个命令只接收身份，不接收原文、附件路径或 grant。失败提交可选 `retryAvailable: true` 仅表示 Host 持有可重发输入，重启或淘汰后省略。
 
 Task 的可选 `modelInputBlocker` 由 Host 给出当前 Metask 模型准入阻塞原因，等待中的目录刷新不代表提交已失败。现有 `metawork.models.refreshCatalog` 可由旧任务的目录失败提示调用，完成后等待 canonical view。

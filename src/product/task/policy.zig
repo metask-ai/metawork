@@ -856,6 +856,37 @@ pub fn runSuperseded(task: *const task_state.Task, run: *const task_state.RunRec
     return performer.coverage != .excluded;
 }
 
+pub const EditUnavailable = enum {
+    /// No position was ever recorded for this Run: history written before
+    /// #114, or a submission that could not read the Conversation. Product
+    /// will not derive one from its own records.
+    no_position,
+    /// The position was summarized away. Nothing can name that turn again.
+    compacted,
+    /// A rewind already took this turn out of the Conversation.
+    superseded,
+};
+
+pub const EditablePosition = union(enum) {
+    position: u64,
+    unavailable: EditUnavailable,
+};
+
+/// The Conversation position an edit-and-rerun would name for this Run, or
+/// why there is none. Both the acceptance path and the projection that offers
+/// the edit entry read this, so the answer is the same in the window the user
+/// sees and in the call they make from it. Task lifecycle is each caller's
+/// own gate: this one answers only for the position.
+pub fn editablePosition(
+    task: *const task_state.Task,
+    run: *const task_state.RunRecord,
+) EditablePosition {
+    if (runSuperseded(task, run)) return .{ .unavailable = .superseded };
+    const position = run.conversation_position orelse return .{ .unavailable = .no_position };
+    if (position <= task.durable.compact_boundary) return .{ .unavailable = .compacted };
+    return .{ .position = position };
+}
+
 /// The Run a rewind replaced the Conversation from, if this Run performed
 /// one. Reading it from the Runs it superseded keeps one fact in one place:
 /// the position itself is that Run's own recorded position.
@@ -1366,6 +1397,81 @@ test "checkpoint matches covered frontier and permits only excluded Product tail
     task.durable.runs[1].?.coverage = .excluded;
     task.durable.runs[0].?.coverage = .excluded;
     try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+}
+
+test "a rewind leaves its turns in history and out of the Conversation" {
+    var runs = [_]?task_state.RunRecord{
+        terminalRun(1, .covered),
+        terminalRun(3, .covered),
+        terminalRun(5, .pending),
+    };
+    runs[0].?.conversation_position = 1;
+    runs[1].?.conversation_position = 3;
+    runs[2].?.conversation_position = 3;
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var ui_history: [0]?task_state.UiRecord = .{};
+    var task = task_state.Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+
+    // Run 5 replaced run 3: it took that turn's position, and the turn stays
+    // in history while leaving the Conversation.
+    task.durable.runs[1].?.superseded_by_run_id = 5;
+    try std.testing.expect(runSuperseded(&task, &task.durable.runs[1].?));
+    try std.testing.expect(!runSuperseded(&task, &task.durable.runs[0].?));
+    try std.testing.expectEqual(@as(u32, 1), rewoundRunCount(&task, 5));
+    try std.testing.expectEqual(@as(u64, 5), runHistoryHighWater(&task));
+    // The Conversation now ends at the Run before the one that was replaced.
+    try std.testing.expectEqual(@as(?u64, 1), lastConversationRunId(&task));
+
+    // A rewind is only as durable as the Run that performed it: while that
+    // Run is out of the Conversation, a restart restores a checkpoint that
+    // predates the rewind, so the turn it named is back.
+    task.durable.runs[2].?.coverage = .excluded;
+    try std.testing.expect(!runSuperseded(&task, &task.durable.runs[1].?));
+    try std.testing.expectEqual(@as(u32, 0), rewoundRunCount(&task, 5));
+    try std.testing.expectEqual(@as(?u64, 3), lastConversationRunId(&task));
+    task.durable.runs[2].?.coverage = .covered;
+
+    // What the edit entry asks, in the window and at the call.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        editablePosition(&task, &task.durable.runs[0].?).position,
+    );
+    try std.testing.expectEqual(
+        EditUnavailable.superseded,
+        editablePosition(&task, &task.durable.runs[1].?).unavailable,
+    );
+    // A compaction summarized that turn away: nothing can name it again.
+    task.durable.compact_boundary = 2;
+    try std.testing.expectEqual(
+        EditUnavailable.compacted,
+        editablePosition(&task, &task.durable.runs[0].?).unavailable,
+    );
+    task.durable.compact_boundary = 0;
+    // History written before positions were recorded. Product will not derive
+    // one from its own Run list, because ABI numbering counts replies, tool
+    // results and runtime text that have no records here.
+    task.durable.runs[0].?.conversation_position = null;
+    try std.testing.expectEqual(
+        EditUnavailable.no_position,
+        editablePosition(&task, &task.durable.runs[0].?).unavailable,
+    );
 }
 
 test "approval checkpoint survives a later Task model change but keeps revision and frontier exact" {

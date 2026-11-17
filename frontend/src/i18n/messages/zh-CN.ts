@@ -824,6 +824,11 @@ export const zhCN: Record<MessageId, string> = {
   "input.waiting": "等待处理",
   "input.cancelled": "已停止",
   "input.unexecuted": "未执行",
+  "input.edit": "编辑",
+  "input.edit_notice":
+    "对话会回退到这条消息；已经生成的文件和已经发生的改动都会保留。",
+  "input.edit_confirm": "从这里重跑",
+  "input.edit_cancel": "取消",
   "input.retry_original": "重发原消息",
   "input.discard_retry": "放弃重发",
   "input.submitted": "消息已发送。",
@@ -836,6 +841,13 @@ export const zhCN: Record<MessageId, string> = {
     "审批模式切换已停止本次运行，消息已保留，可重新发送。",
   "mutation.reason.combined_input_too_large":
     "多条消息合并后超过单轮输入容量，请拆分发送。",
+  "mutation.reason.edit_and_rerun":
+    "编辑较早的消息后，这条消息已不在对话里，内容已保留，可重新发送。",
+  "mutation.reason.rewind_compacted":
+    "这段对话已被压缩摘要，无法再替换，消息已保留，可作为新消息发送。",
+  "mutation.reason.rewind_position_rejected":
+    "MetaWork 没能在对话里定位这条消息，对话未作任何改动。请反馈这个问题。",
+  "mutation.reason.rewind_failed": "对话回退失败，未作任何改动。",
   "mutation.reason.checkpoint_failed": "本轮收尾未成功，未继续处理消息。",
   "mutation.reason.schedule_failed": "定时执行结果未能确认，未继续处理消息。",
   "mutation.reason.run_changed": "目标轮次已变化，请核对后重新发送。",
@@ -913,6 +925,9 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.partial_stopped": "工作已停止，回复未完整生成",
   "run.terminal.partial_interrupted": "工作意外中断，回复未完整生成",
   "run.terminal.partial_failed": "工作失败，回复未完整生成",
+  "run.rewound_here": "这次重跑取代了上面 {count} 轮对话，它们已不在上下文里。",
+  "run.superseded":
+    "这轮对话已被编辑后的消息取代，不在上下文里了；它产生的文件和改动仍然保留。",
   "run.conversation_history_excluded":
     "本轮消息仍保留在任务记录中，但未包含在恢复后的模型上下文中。后续消息仍可继续。",
   "run.process.title": "执行详情",
