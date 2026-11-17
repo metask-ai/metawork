@@ -7372,6 +7372,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-control);
 }
 
+/* A formula wider than the column scrolls inside its own box, the same way a
+   wide table does, instead of pushing the conversation sideways. Chromium does
+   not make a math element itself a scroll container, so the wrapper carries it.
+   A scrolling box forces overflow-y to a scrollbar, and MathML ink reaches a
+   few pixels past its layout box, so the padding gives that ink room and keeps
+   every formula from growing a vertical scrollbar it never needed. */
+.ai-markdown .ai-markdown-math-block {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25em;
+}
+
 .ai-markdown th,
 .ai-markdown td {
   padding: 7px 9px;

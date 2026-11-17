@@ -12,8 +12,20 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
-import type { InlineCode, Link, Parent, Root, RootContent, Text } from "mdast";
+import remarkMath from "remark-math";
+import type { Element, ElementContent, Root as HastRoot } from "hast";
+import type {
+  InlineCode,
+  Link,
+  Nodes as MdastNodes,
+  Paragraph,
+  Parent,
+  Root,
+  RootContent,
+  Text,
+} from "mdast";
 
 import { CodeBlock } from "./CodeBlock.tsx";
 import { Button } from "../ui/button.tsx";
@@ -159,6 +171,228 @@ function referencePlugin(
       });
     }
     visit(tree);
+  };
+}
+
+// LaTeX math for the shared Markdown root. KaTeX renders to MathML only: the
+// WebView lays the formula out, so the app ships no math font, no stylesheet
+// and no inline `style`, and the release CSP (`style-src 'self'`, with no
+// 'unsafe-inline') stays untouched.
+
+// Whatever unified hands a transformer as the file: only its source matters.
+type Source = { toString(): string };
+
+type MdastParent = Extract<MdastNodes, { children: MdastNodes[] }>;
+type MathNode = { type: "math" | "inlineMath"; data?: Record<string, unknown> };
+
+const katexOptions = {
+  output: "mathml",
+  // Model output is untrusted input. `\href`, `\url` and `\includegraphics`
+  // stay unexpanded and render as their own visible source.
+  trust: false,
+  // Questionable-but-parseable constructs render instead of failing the
+  // document; a genuinely unknown command still falls back to its source.
+  strict: false,
+  // A self-recursive `\def` is a denial-of-service reachable from every
+  // source this renderer accepts. Real formulas expand a handful of times;
+  // this bound stops a bomb in under a millisecond and reaches the same
+  // visible-source fallback as any other unparseable input.
+  maxExpand: 256,
+} as const;
+
+// Single-dollar text math is off, so every formula either root parsed carries
+// a run of at least two dollars.
+const delimiter = "$$";
+const displayClass = ["language-math", "math-display"];
+// Chromium does not make a `math` element itself a scroll container, so the
+// wrapper KaTeX puts around a display formula carries the class the
+// stylesheet scrolls. Marking it here keeps the rule off `:has`.
+const blockMathClass = "ai-markdown-math-block";
+
+function isMath(node: { type: string }): node is MathNode & MdastNodes {
+  return node.type === "math" || node.type === "inlineMath";
+}
+
+// The delimited source exactly as the document spells it. A parsed `value` is
+// unusable for an unterminated block: micromark reads the opening line as the
+// fence's meta and leaves the value empty, so the text would simply vanish.
+function mathSource(document: string, node: MdastNodes): string | null {
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  return start === undefined || end === undefined
+    ? null
+    : document.slice(start, end);
+}
+
+function openingRun(source: string): number {
+  return /^[ \t]*(\$+)/.exec(source)?.[1].length ?? 0;
+}
+
+// A finished formula carries its closing run. An Assistant still streaming one
+// has not written it yet, and neither has a user who typed a lone `$$`.
+function terminated(source: string): boolean {
+  const run = openingRun(source);
+  if (run === 0) return false;
+  const body = source.trimEnd();
+  return body.length >= run * 2 && body.endsWith("$".repeat(run));
+}
+
+function literal(node: MathNode, source: string): Text | Paragraph {
+  const text: Text = { type: "text", value: source };
+  return node.type === "inlineMath"
+    ? text
+    : { type: "paragraph", children: [text] };
+}
+
+// Every mdast parent holds plain content; the union of their child arrays is
+// what TypeScript cannot splice directly.
+function replaceChild(
+  parent: MdastParent,
+  index: number,
+  node: MdastNodes,
+): void {
+  (parent.children as MdastNodes[]).splice(index, 1, node);
+}
+
+function visitMdast(
+  parent: MdastParent,
+  each: (node: MdastNodes, index: number, parent: MdastParent) => void,
+): void {
+  // Backwards, so replacing a node cannot shift one not yet visited.
+  for (let index = parent.children.length - 1; index >= 0; index -= 1) {
+    const node = parent.children[index];
+    if (node === undefined) continue;
+    if ("children" in node) visitMdast(node, each);
+    each(node, index, parent);
+  }
+}
+
+function eachMath(
+  tree: Root,
+  each: (
+    node: MathNode & MdastNodes,
+    source: string,
+    index: number,
+    parent: MdastParent,
+  ) => void,
+  file: Source,
+): void {
+  const document = String(file);
+  visitMdast(tree, (node, index, parent) => {
+    if (!isMath(node)) return;
+    const source = mathSource(document, node);
+    if (source !== null) each(node, source, index, parent);
+  });
+}
+
+/// Runs after `remark-math`, on the one GFM tree. It introduces no second
+/// parser: every decision reads the original source through the positions that
+/// same parse recorded.
+function remarkMathSource() {
+  return (tree: Root, file: Source) => {
+    eachMath(
+      tree,
+      (node, source, index, parent) => {
+        if (!terminated(source)) {
+          // Show what has arrived, verbatim, until the closing delimiter does.
+          replaceChild(parent, index, literal(node, source));
+          return;
+        }
+        // A formula written as its own line is display math, which micromark
+        // reports as inline when the closing run is on that same line. One
+        // inside running text stays inline, so it does not break the line.
+        if (
+          node.type !== "inlineMath" ||
+          openingRun(source) < 2 ||
+          parent.type !== "paragraph" ||
+          parent.children.length !== 1
+        )
+          return;
+        const data = (node.data ?? {}) as Record<string, unknown>;
+        const properties = (data.hProperties ?? {}) as Record<string, unknown>;
+        node.data = {
+          ...data,
+          hProperties: { ...properties, className: displayClass },
+        };
+      },
+      file,
+    );
+  };
+}
+
+/// Replaces every math node with its own delimited source, for the rich-text
+/// clipboard root. Pasted `$$…$$` stays usable somewhere else; pasted MathML
+/// would not be.
+function remarkMathAsSource() {
+  return (tree: Root, file: Source) => {
+    eachMath(
+      tree,
+      (node, source, index, parent) => {
+        replaceChild(parent, index, literal(node, source));
+      },
+      file,
+    );
+  };
+}
+
+function classList(node: Element): string[] {
+  const value = node.properties.className;
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function textOf(node: ElementContent): string {
+  if (node.type === "text") return node.value;
+  return node.type === "element" ? node.children.map(textOf).join("") : "";
+}
+
+function stripStyle(node: ElementContent): void {
+  if (node.type !== "element") return;
+  if ("style" in node.properties) delete node.properties.style;
+  for (const child of node.children) stripStyle(child);
+}
+
+function visitHast(
+  parent: Element | HastRoot,
+  each: (
+    node: ElementContent,
+    index: number,
+    parent: Element | HastRoot,
+  ) => void,
+): void {
+  for (let index = parent.children.length - 1; index >= 0; index -= 1) {
+    const node = parent.children[index];
+    if (node === undefined) continue;
+    if (node.type === "element") visitHast(node, each);
+    each(node as ElementContent, index, parent);
+  }
+}
+
+/// Runs after `rehype-katex`. KaTeX's MathML needs no CSS, but both its own
+/// error span and rehype-katex's fallback carry an inline `style`, which the
+/// release CSP blocks. Neither may reach the document, so a formula KaTeX
+/// cannot render falls back to the delimited source it was written as.
+function rehypeMathSafety() {
+  return (tree: HastRoot) => {
+    visitHast(tree, (node, index, parent) => {
+      if (node.type !== "element") return;
+      const classes = classList(node);
+      if (classes.includes("katex-error")) {
+        parent.children.splice(index, 1, {
+          type: "text",
+          value: `${delimiter}${textOf(node)}${delimiter}`,
+        });
+        return;
+      }
+      if (!classes.some((name) => name.startsWith("katex"))) return;
+      stripStyle(node);
+      const display = node.children.some(
+        (child) =>
+          child.type === "element" &&
+          child.tagName === "math" &&
+          child.properties.display === "block",
+      );
+      if (display) node.properties.className = [...classes, blockMathClass];
+    });
   };
 }
 
@@ -348,6 +582,13 @@ function clipboardHref(href: string | undefined): string | null {
   return value && /^(?:https?:|mailto:)/i.test(value) ? value : null;
 }
 
+// Only `$$…$$` is a formula. Single-dollar text math would read ordinary
+// prose such as "costs $5 and $7" as one, and swallow both amounts.
+const mathSyntax: [typeof remarkMath, { singleDollarTextMath: false }] = [
+  remarkMath,
+  { singleDollarTextMath: false },
+];
+
 const clipboardComponents: Components = {
   a: ({ href, children }) => {
     const value = clipboardHref(href);
@@ -369,7 +610,7 @@ export async function renderMarkdownForClipboard(
   return renderToStaticMarkup(
     <ReactMarkdown
       skipHtml
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, mathSyntax, remarkMathAsSource]}
       components={clipboardComponents}
     >
       {markdown}
@@ -413,14 +654,17 @@ const MarkdownBody = memo(
     return (
       <ReactMarkdown
         skipHtml
-        remarkPlugins={
-          references?.size || localLinks
-            ? [
-                remarkGfm,
-                referencePlugin(references ?? noReferences, localLinks),
-              ]
-            : [remarkGfm]
-        }
+        remarkPlugins={[
+          remarkGfm,
+          mathSyntax,
+          ...(references?.size || localLinks
+            ? [referencePlugin(references ?? noReferences, localLinks)]
+            : []),
+          // Last: it reads the source the same parse recorded, so no earlier
+          // plugin can have rewritten a formula's positions.
+          remarkMathSource,
+        ]}
+        rehypePlugins={[[rehypeKatex, katexOptions], rehypeMathSafety]}
         components={textResourcesOnly ? textResourceComponents : components}
       >
         {children}
