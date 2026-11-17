@@ -51,6 +51,28 @@ fn crossing(
     return crossingWith(T, expected, shape, "");
 }
 
+/// For a capability the far side composes rather than receives. There is no
+/// mirror to check, so what is checked instead is that every input the far
+/// side needs in order to compose it is itself something the wire can carry --
+/// otherwise "the other side builds it" would just be hiding the obstruction
+/// one level down.
+fn composed(
+    comptime T: type,
+    comptime expected: Classification,
+    comptime shape: []const u8,
+    comptime inputs: []const type,
+) Crossing {
+    comptime {
+        if (inputs.len == 0) @compileError(
+            "a composed capability states the inputs that cross for it: " ++ @typeName(T),
+        );
+        for (inputs) |Input| payload.requireStructural(Input);
+        var names: []const u8 = "composed from";
+        for (inputs) |Input| names = names ++ " " ++ @typeName(Input);
+        return crossingWith(T, expected, shape, names);
+    }
+}
+
 /// The same, for a type whose mirror now exists. `Mirror` is checked to be
 /// something the wire can carry, so a mirror cannot be recorded as done while
 /// still holding an obstruction of its own.
@@ -166,15 +188,17 @@ pub const crossings = [_]Crossing{
 
     // A context pointer or a byte callback: the far side performs the effect,
     // and the wire carries only what it needs in order to.
-    crossing(
+    composed(
         contract.CheckpointSink,
         .{ .substituted = .untyped_pointer },
         "destination descriptor; the execution half writes the file",
+        &.{shapes.CheckpointDestination},
     ),
-    crossing(
+    shaped(
         contract.CatalogProjection,
         .{ .substituted = .untyped_pointer },
         "its fields without the owning arena pointer",
+        shapes.CatalogProjection,
     ),
     crossing(
         contract.CatalogQuery,
@@ -191,10 +215,11 @@ pub const crossings = [_]Crossing{
         .{ .substituted = .untyped_pointer },
         "binding fields; the transport is composed in the execution half",
     ),
-    crossing(
+    composed(
         contract.FileDeliveryInput,
         .{ .substituted = .untyped_pointer },
         "delivery root; the execution half holds the capability",
+        &.{shapes.FileDeliveryRoot},
     ),
 
     // An embedded error set, which the error registry already numbers.
@@ -238,7 +263,16 @@ pub fn owed() usize {
     return total;
 }
 
-/// How many substituted types already have their mirror.
+/// Whether the inventory is closed: nothing substituted is still waiting for
+/// its shape. This, not a count of items finished, is what says the move is
+/// done -- the item count is a lower bound, because reading the port does not
+/// enumerate the boundary and twice already it has not.
+pub fn closed() bool {
+    return owed() == 0;
+}
+
+/// How many substituted types already have their shape, by mirror or by
+/// composition.
 pub fn shapedCount() usize {
     var total: usize = 0;
     for (crossings) |entry| {
@@ -259,8 +293,8 @@ test "the inventory is still true, and says something about every entry" {
         .substituted => try std.testing.expect(entry.shape.len != 0),
     };
     try std.testing.expectEqual(@as(usize, 22), structural);
-    try std.testing.expectEqual(@as(usize, 7), shapedCount());
-    try std.testing.expectEqual(@as(usize, 10), owed());
+    try std.testing.expectEqual(@as(usize, 10), shapedCount());
+    try std.testing.expectEqual(@as(usize, 7), owed());
     try std.testing.expectEqual(crossings.len, structural + shapedCount() + owed());
 }
 

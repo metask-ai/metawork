@@ -41,6 +41,21 @@ const expected_sites = [
   "src/product/task/execution.zig",
 ];
 
+// KNOWN LIMITATION, deliberately recorded rather than left to be rediscovered.
+//
+// This scan is anchored on the consumer's spelling, and the repository already
+// contains a shape that walks past it: src/product/control/runtime.zig around
+// line 8394 forwards `completion_factory.context` and `.create_fn` into
+// `task/execution.zig`'s own `CompletionFactory`, which is a second type with
+// the same name. Another re-wrap under a different field name would be
+// invisible here.
+//
+// The tighter anchor is the producer, and there is exactly one: `createCompletion`
+// is defined once in src/app/completion_http_transport.zig and handed over once
+// in src/app.zig. Pinning those two counts, alongside this scan, leaves far less
+// spelling freedom than "whatever the field is called". Scheduled with the next
+// change to this guard; until then, read this test as "no new consumer spelling",
+// not as "no new holder".
 test("the independent Completion holders are exactly the recorded set", () => {
   const sites = zigFiles("src/").filter((path) =>
     /completion_factory\.create\(/.test(read(path)),

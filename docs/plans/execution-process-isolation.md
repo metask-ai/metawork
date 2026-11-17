@@ -202,7 +202,7 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | --- | --- |
 | 1 | 模式分叉与进程生命周期：exec 模式在建窗口前分出，UI 能启动、关闭、回收 exec；握手字段齐备且不符即拒绝。此步不搬 Runtime，Agent 仍在 UI 侧，用于单独验证分叉与握手 |
 | 2 | transport：帧、分片、typed 错误映射、调用相关 id、出站有界队列与 writer 线程、control 预留额度。以既有 port 方法集逐一对照，不得出现无映射的方法或错误 |
-| 3 | Runtime 与活对象搬迁（不含 MCP）：16 个欠 wire shape 的载荷逐项落形状、exec 侧句柄表、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。完成条件：`crossings.zig` 的记录与编译器一致且不再有 `untyped_pointer`、`allocator`、`open_value` 遗留，52 个转发全部填满 |
+| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、exec 侧句柄表、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 的 52 个转发全部填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
 | 4 | MCP 搬迁：UI 只送配置 generation 与 server 声明，exec 侧自建 `McpRuntimeInput` 与 transport owner，进程 spawn、Windows Job 归属、HTTP 栈与 OAuth 都在 exec 侧组合。完成条件含 4.6 的 Job 归属两个方向，以及第 7 节那条真杀 UI 之后 exec 与 MCP 子进程都还活着的验收 |
 | 5 | 关联身份：Session 创建与恢复协议带上 Product 指定身份；exec 侧持有至 Session 结束；二期字段位留出 |
 | 6 | disconnect 下行收口：按 4.6 的五步顺序实现，parked 解除先于终止；exec 孤儿自我收口；`EventDrainStatus` 分辨「已排空」与「链路已断」 |

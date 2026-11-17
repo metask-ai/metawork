@@ -27,6 +27,7 @@ const contract = @import("agent_contract");
 const error_code = @import("error_code.zig");
 const payload = @import("payload.zig");
 const checkpoint = @import("agent_checkpoint");
+const catalog = @import("agent_catalog");
 
 const control = contract.control;
 const surface = contract.surface;
@@ -312,6 +313,52 @@ pub const PendingUiRequest = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// A capability the far side composes, and the inputs it needs to
+// ---------------------------------------------------------------------------
+
+/// Where an exported checkpoint's bytes go. The sink itself is a byte callback
+/// and never crosses: the execution half composes its own against this
+/// destination and writes the blob, so the bytes stay on one side of the pipe
+/// and only the identity of the blob comes back in the outcome.
+pub const CheckpointDestination = struct {
+    task_id: u64,
+    /// The generation the caller expects to write, so a stale request cannot
+    /// overwrite a newer blob.
+    expected_generation: u64,
+    hard_bytes: u64,
+};
+
+/// The delivery root a Run may hand files into. The inspection callback is
+/// composed in the execution half against this root; the root is the authority
+/// and the caller states it, exactly as it does in process.
+pub const FileDeliveryRoot = struct {
+    canonical_root: []const u8,
+};
+
+// ---------------------------------------------------------------------------
+// A projection minus the arena that owns it
+// ---------------------------------------------------------------------------
+
+/// `catalog.Projection` without `storage`. Its contents are flat data; the
+/// struct merely carries a pointer to its own arena, which is the receiver's
+/// business and not the sender's.
+pub const CatalogProjection = struct {
+    revision: []const u8,
+    health: catalog.Health,
+    skills: []const catalog.Skill,
+    issues: []const catalog.Issue,
+
+    pub fn from(value: catalog.Projection) CatalogProjection {
+        return .{
+            .revision = value.revision,
+            .health = value.health,
+            .skills = value.skills,
+            .issues = value.issues,
+        };
+    }
+};
+
 comptime {
     // Every shape in this file is one the wire can actually carry. Without
     // this, a mirror could pick up a field that is itself unshippable and the
@@ -325,6 +372,9 @@ comptime {
     payload.requireStructural(CheckpointDescription);
     payload.requireStructural(CheckpointOutcome);
     payload.requireStructural(PendingUiRequest);
+    payload.requireStructural(CheckpointDestination);
+    payload.requireStructural(FileDeliveryRoot);
+    payload.requireStructural(CatalogProjection);
 }
 
 /// Asserts that a mirror and its original describe the same thing: every
@@ -351,6 +401,7 @@ comptime {
     mirrors(PendingUiRequest, surface.PendingUiRequest, &.{});
     mirrors(CheckpointDescription, checkpoint.Description, &.{});
     mirrors(BeginRunFailure, surface.BeginRunFailure, &.{"error_code"});
+    mirrors(CatalogProjection, catalog.Projection, &.{});
 }
 
 const testing = std.testing;
