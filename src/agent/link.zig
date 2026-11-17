@@ -25,8 +25,10 @@ pub const error_code = @import("link/error_code.zig");
 pub const method = @import("link/method.zig");
 pub const payload = @import("link/payload.zig");
 pub const crossings = @import("link/crossings.zig");
+pub const surface_invariant = @import("link/surface_invariant.zig");
 pub const handles = @import("link/handles.zig");
 pub const handle_table = @import("link/handle_table.zig");
+pub const pending = @import("link/pending.zig");
 pub const shapes = @import("link/shapes.zig");
 pub const channel = @import("link/channel.zig");
 
@@ -160,8 +162,10 @@ test {
     _ = method;
     _ = payload;
     _ = crossings;
+    _ = surface_invariant;
     _ = handles;
     _ = handle_table;
+    _ = pending;
     _ = shapes;
     _ = channel;
 }
