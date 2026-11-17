@@ -7460,7 +7460,7 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var configuration = fixture.productControlConfiguration();
     configuration.attachment_store = &store;
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .file_bytes,
         .context = null,
@@ -7622,7 +7622,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         configuration,
     );
@@ -7924,7 +7924,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         fixture.productControlConfiguration(),
     );
@@ -8643,7 +8643,7 @@ test "a dropped path stages a whole original without a byte round trip" {
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var configuration = fixture.productControlConfiguration();
     configuration.attachment_store = &store;
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .native_paths,
         .context = null,
@@ -8796,7 +8796,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var configuration = fixture.productControlConfiguration();
     configuration.attachment_store = &store;
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .native_paths,
         .context = null,
@@ -9200,7 +9200,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         fixture.shutdownTestComposition(runtime) catch unreachable;
         fixture.deinitTestComposition(runtime);
     }
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
     defer control.deinit();
     try fixture.installProductControlExecution(&control);
     var input = fixture.productControlTaskInput();
@@ -9939,7 +9939,7 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     Host.outcome = .opened;
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .context = null,
         .wake_fn = Host.wake,

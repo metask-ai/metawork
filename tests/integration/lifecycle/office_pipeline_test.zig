@@ -310,7 +310,7 @@ fn qualify(mode: []const u8) !void {
     configuration.directories.canonical_user_home = root;
     configuration.task_persistence = if (std.mem.eql(u8, mode, "slow-stop")) slow_history.capability() else typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
-    var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 1,
@@ -500,7 +500,7 @@ test "Skill resource context reads a managed import through tool and typed input
         }.now;
         configuration.skill_management = .{ .file_store = &store, .staging_root = stage };
         configuration.skill_enablement = .{ .file_store = &enablement };
-        var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
             .worker_count = 1,
             .queue_capacity = 4,
             .max_tasks = 1,

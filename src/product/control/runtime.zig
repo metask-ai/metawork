@@ -1379,23 +1379,13 @@ pub const Runtime = struct {
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
-    /// `agent` is the Agent Runtime port, or anything that can produce one.
-    ///
-    /// Transitional: accepting the producer keeps this commit free of the
-    /// mechanical call-site churn, which lands on its own. The next commit
-    /// narrows the parameter to `lifecycle.RuntimePort` and this
-    /// normalization goes with it.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        agent: anytype,
+        agent_port: lifecycle.RuntimePort,
         limits: Limits,
         configuration: Configuration,
     ) Error!Runtime {
-        const agent_port: lifecycle.RuntimePort = if (@TypeOf(agent) == lifecycle.RuntimePort)
-            agent
-        else
-            agent.runtimePort();
         // The adapter contexts below are addresses, and this Runtime is
         // returned by value, so the port cannot live in the returned struct.
         const agent_runtime = try allocator.create(lifecycle.RuntimePort);

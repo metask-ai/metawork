@@ -295,7 +295,7 @@ const App = struct {
         control_storage.* = try product_control.Runtime.init(
             std.heap.c_allocator,
             self.io,
-            agent_runtime,
+            agent_runtime.runtimePort(),
             .{
                 .worker_count = host_worker_count,
                 .queue_capacity = 8,
@@ -1472,7 +1472,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
         agent_runtime.shutdown() catch unreachable;
         agent_runtime.deinit();
     }
-    var control = try product_control.Runtime.init(allocator, std.testing.io, agent_runtime, .{ .worker_count = 1, .queue_capacity = 1 }, .{ .mcp = .{
+    var control = try product_control.Runtime.init(allocator, std.testing.io, agent_runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1 }, .{ .mcp = .{
         .preparation = &preparation,
         .management = .{
             .persistence = .{ .available = true, .commit_journal_fn = Effects.commit, .commit_registry_fn = Effects.commit, .clear_journal_fn = Effects.clear },

@@ -234,6 +234,7 @@ pub const SessionPort = contract.port.SessionPort;
 pub const RuntimePort = contract.port.RuntimePort;
 pub const sessionPort = port_impl.sessionPort;
 pub const runtimePort = port_impl.runtimePort;
+pub const sessionBehind = port_impl.sessionBehind;
 
 pub const Run = struct {
     session: *Session,

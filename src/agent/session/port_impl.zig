@@ -39,6 +39,14 @@ pub fn sessionPort(session: *root.Session) port.SessionPort {
     return .{ .context = session, .vtable = &session_vtable };
 }
 
+/// The Session behind an in-process port. Only the implementation knows this
+/// representation; it is exposed for callers that legitimately hold the
+/// implementation already, such as an Agent test inspecting the ABI handle of
+/// a Session that Product opened.
+pub fn sessionBehind(value: port.SessionPort) *root.Session {
+    return sessionOf(value.context);
+}
+
 pub fn runtimePort(runtime: *root.Runtime) port.RuntimePort {
     return .{ .context = runtime, .vtable = &runtime_vtable };
 }

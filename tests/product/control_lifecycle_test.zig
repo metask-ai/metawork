@@ -29,7 +29,7 @@ test "Agent drain shares one event budget across both terminal observations" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_events_per_drain = 2,
         .max_event_drain_ns = std.math.maxInt(u64),
     }, productControlConfiguration());
@@ -60,7 +60,7 @@ test "only confirmed interactive Task choices remember a preference without repl
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1 }, productControlConfiguration());
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1 }, productControlConfiguration());
     defer workbench.deinit();
     var vault: TaskModelsVault = .{};
     try workbench.startCustomProviders(root, vault.port());
@@ -107,7 +107,7 @@ test "ordinary Task creation does not retry MCP errors on null Selection or gene
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
         }
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
             .worker_count = 1,
             .queue_capacity = 1,
             .max_tasks = 1,
@@ -255,7 +255,7 @@ test "history capacity creates one hundred Tasks with one live Session" {
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
         }
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -349,7 +349,7 @@ const ReviewScenario = struct {
         errdefer std.testing.allocator.destroy(self);
         self.* = .{
             .runtime = runtime,
-            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = max_runs, .max_tools_per_run = 1 }, configuration),
+            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = max_runs, .max_tools_per_run = 1 }, configuration),
             .task_id = 0,
         };
         errdefer self.control.deinit();
@@ -400,7 +400,7 @@ test "approval modes start with automatic review and restore the global choice w
     var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 3, .max_workspaces = 1 };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
     defer control.deinit();
     try installControlExecution(&control);
     try std.testing.expectEqual(.auto_review, control.defaultApprovalMode());
@@ -423,7 +423,7 @@ test "approval modes start with automatic review and restore the global choice w
     try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(reviewed));
     var restart = productControlConfiguration();
     restart.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
-    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, restart);
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, restart);
     defer restored.deinit();
     try std.testing.expectEqual(.full_access, restored.defaultApprovalMode());
     try std.testing.expectEqual(.auto_review, try restored.taskApprovalMode(reviewed));
@@ -445,7 +445,7 @@ test "approval modes restore each saved choice instead of applying the fresh-ins
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1 };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -454,7 +454,7 @@ test "approval modes restore each saved choice instead of applying the fresh-ins
         try std.testing.expectEqual(mode, control.defaultApprovalMode());
         var restart = productControlConfiguration();
         restart.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
-        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, restart);
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, restart);
         defer restored.deinit();
         try std.testing.expectEqual(mode, restored.defaultApprovalMode());
         try std.testing.expectEqual(mode, try restored.taskApprovalMode(task_id));
@@ -551,7 +551,7 @@ test "Control permission reviewer keeps repeated manual and full-access requests
         var transport: ReviewerTransport = .{};
         var configuration = productControlConfiguration();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -590,7 +590,7 @@ test "Control permission reviewer cannot preempt a valid manual command with a q
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         defer transport.released.store(true, .release);
         try installControlExecution(&control);
@@ -635,7 +635,7 @@ test "Control permission reviewer survives stale identities and unavailable manu
     var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
     defer control.deinit();
     defer transport.released.store(true, .release);
     try installControlExecution(&control);
@@ -706,7 +706,7 @@ test "Control permission reviewer commits once-only decisions and projects audit
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -765,7 +765,7 @@ test "Control permission reviewer scrubs decoded arguments for builtin MCP and H
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -793,7 +793,7 @@ test "Control permission reviewer cancellation survives manual response delete a
         transport.hold_cancel_cleanup = case == 1;
         var configuration = productControlConfiguration();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         defer transport.released.store(true, .release);
         try installControlExecution(&control);
@@ -843,7 +843,7 @@ test "Control permission reviewer requires confirmed persistence and never retri
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -873,7 +873,7 @@ test "Control permission reviewer capacity includes cancelled workers until they
     var transport: ReviewerTransport = .{ .hold_cancel_cleanup = true };
     var configuration = productControlConfiguration();
     configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 9, .queue_capacity = 9, .max_tasks = 9, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 9, .queue_capacity = 9, .max_tasks = 9, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
     defer control.deinit();
     defer transport.released.store(true, .release);
     try installControlExecution(&control);
@@ -1620,7 +1620,7 @@ test "Saved Workspace selection restores usable Manual roots without a picker" {
     const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 };
     var workspace_id: u64 = undefined;
     {
-        var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{
+        var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, .{
             .directories = .{ .canonical_user_home = home },
             .task_persistence = persistence.capability(),
         });
@@ -1632,7 +1632,7 @@ test "Saved Workspace selection restores usable Manual roots without a picker" {
     defer std.testing.allocator.free(restored_bytes);
 
     var probe: WorkspaceSkillQueryProbe = .{};
-    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, .{
         .directories = .{ .canonical_user_home = home },
         .task_persistence = persistence.capabilityRestored(restored_bytes),
     });
@@ -1668,7 +1668,7 @@ test "Saved Workspace selection rejects missing and non-directory roots after re
     const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 };
     var workspace_id: u64 = undefined;
     {
-        var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{ .task_persistence = persistence.capability() });
+        var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, .{ .task_persistence = persistence.capability() });
         defer original.deinit();
         workspace_id = try original.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted });
     }
@@ -1680,7 +1680,7 @@ test "Saved Workspace selection rejects missing and non-directory roots after re
             var file = try tmp.dir.createFile(std.testing.io, "saved", .{});
             file.close(std.testing.io);
         }
-        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{ .task_persistence = persistence.capabilityRestored(saved) });
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, .{ .task_persistence = persistence.capabilityRestored(saved) });
         defer restored.deinit();
         try std.testing.expectError(error.WorkspaceUnavailable, restored.workspace.taskCreateAuthority(workspace_id, try restored.workspaceEpoch(workspace_id), false));
         try expectWorkspaceSkillProjection(&restored, workspace_id, false);
@@ -1712,7 +1712,7 @@ test "Automatic catalog uses personal discovery after creation and waits for Ses
         var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
         defer enablement_store.deinit();
         var probe: WorkspaceSkillQueryProbe = .{};
-        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
             .worker_count = 1,
             .queue_capacity = 2,
             .max_workspaces = 1,
@@ -1782,7 +1782,7 @@ test "Automatic deletion retains Workspace authority until the catalog worker dr
     defer automatic_root.deinit();
     var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
     defer enablement_store.deinit();
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -1844,7 +1844,7 @@ test "Skill source authorization returns after close failures and checkpoint int
         defer checkpoint_store.deinit();
         var persistence: TaskPersistenceProbe = .{};
         var probe: WorkspaceSkillQueryProbe = .{};
-        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
             .worker_count = 1,
             .queue_capacity = 1,
             .max_workspaces = 1,
@@ -1961,7 +1961,7 @@ test "new Task model selection binds only the created Task and rejects stale aut
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -2021,7 +2021,7 @@ test "new Task model selection is independent of default execution admission" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_workspaces = 1,
@@ -2090,7 +2090,7 @@ test "new Task model selection uses the full custom connection with or without a
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_workspaces = 1,
@@ -2237,7 +2237,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
         }
-        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
             .worker_count = 1,
             .queue_capacity = 2,
             .max_workspaces = 1,
@@ -2389,7 +2389,7 @@ test "Task model rebind confirms a full target connection and restores the origi
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
         }
-        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
             .worker_count = 1,
             .queue_capacity = 2,
             .max_workspaces = 1,
@@ -2782,7 +2782,7 @@ test "Task model rebind candidate close releases an earlier shared writer waiter
     configuration.directories.canonical_user_home = home;
     configuration.task_persistence = .{ .context = &barrier, .enabled = true, .commit_fn = Barrier.save, .confirmed_commit_fn = Barrier.save };
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 2, .max_runs_per_task = 2 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 2, .max_runs_per_task = 2 }, configuration);
     defer workbench.deinit();
     defer {
         barrier.writer_released.store(true, .release);
@@ -2960,7 +2960,7 @@ test "Task model rebind shutdown settles completed and running close workers wit
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = persistence.capability();
         configuration.checkpoint_store = .{ .file_store = &checkpoints };
-        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3 }, configuration);
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3 }, configuration);
         defer workbench.deinit();
         var barrier = CloseBarrier{ .stop_at = if (candidate) 2 else 1 };
         workbench.task_runtime.test_rebind_close_join_observer = .{ .context = &barrier, .observe_fn = CloseBarrier.observeJoin };
@@ -3071,7 +3071,7 @@ test "detached Task restores its committed target across restart without a globa
         }
         var vault: TaskModelsVault = .{};
         defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
-        var first = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var first = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
         var first_live = true;
         defer if (first_live) {
             first.stopCustomProviders();
@@ -3113,7 +3113,7 @@ test "detached Task restores its committed target across restart without a globa
         first.deinit();
         first_live = false;
         configuration.task_persistence = persistence.capabilityRestored(history);
-        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
         defer restored.deinit();
         try restored.startCustomProviders(home, vault.port());
         defer restored.stopCustomProviders();
@@ -3189,7 +3189,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     }
     var vault: TaskModelsVault = .{};
     defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
-    var first = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+    var first = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
     var first_live = true;
     defer if (first_live) {
         fake_core.releaseControlled();
@@ -3271,7 +3271,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     first_live = false;
 
     configuration.task_persistence = persistence.capabilityRestored(history);
-    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
     defer restored.deinit();
     try std.testing.expect(restored.task_persistence_health != .degraded);
     try std.testing.expect(restored.testTaskConst(id) != null);
@@ -3422,7 +3422,7 @@ test "Product Control Task admission consumes the fixed MetaWork Agent tool surf
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -3457,7 +3457,7 @@ test "Task permission profile is immutable and successful interactive create rem
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -3589,7 +3589,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -3702,7 +3702,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -3733,7 +3733,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     var missing_restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -3810,7 +3810,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -3890,7 +3890,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -4082,7 +4082,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     var shutdown_restore = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -4170,7 +4170,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     var workspace_invalidation = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -4296,7 +4296,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -4353,7 +4353,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -4421,7 +4421,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     var continued = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -4509,7 +4509,7 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -4569,7 +4569,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         configuration,
     );
@@ -4628,7 +4628,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         restart_configuration,
     );
@@ -4680,7 +4680,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_compacts_per_task = 1, .max_tools_per_run = 1 },
         configuration,
     );
@@ -4813,7 +4813,7 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -4861,7 +4861,7 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -4964,7 +4964,7 @@ test "terminal drain candidate restarts without a stale active operation" {
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5018,7 +5018,7 @@ test "terminal drain candidate restarts without a stale active operation" {
     var restarted = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5076,7 +5076,7 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5124,7 +5124,7 @@ test "unavailable checkpoint store does not close Task admission" {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5281,7 +5281,7 @@ test "retired Schedule data starts empty without locking interactive Task creati
         var workbench = try product_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            runtime,
+            runtime.runtimePort(),
             .{
                 .worker_count = 1,
                 .queue_capacity = 1,
@@ -5338,7 +5338,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5446,7 +5446,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5518,7 +5518,7 @@ test "scheduled durable admission failure does not block an interactive Product 
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -5606,7 +5606,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5695,7 +5695,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
     var restarted = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -5757,7 +5757,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -5818,7 +5818,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -5992,7 +5992,7 @@ test "new accepted input does not inherit an abandoned direct Run preparation" {
     var configuration = productControlConfiguration();
     configuration.directories.canonical_user_home = home;
     configuration.skill_enablement = .{ .file_store = &enablement_store };
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -6055,7 +6055,7 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -6188,7 +6188,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -6251,7 +6251,7 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -6296,7 +6296,7 @@ test "Task model selection during a Run persists intent for the next explicit ad
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -6388,7 +6388,7 @@ test "Task model selection save failure preserves installed execution and unknow
         var workbench = try product_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            runtime,
+            runtime.runtimePort(),
             .{
                 .worker_count = 1,
                 .queue_capacity = 1,
@@ -6424,7 +6424,7 @@ test "Task model selection save failure preserves installed execution and unknow
         var workbench = try product_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
-            runtime,
+            runtime.runtimePort(),
             .{
                 .worker_count = 1,
                 .queue_capacity = 1,
@@ -6496,7 +6496,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -6665,7 +6665,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -6712,7 +6712,7 @@ fn testScheduledSourceAuthority(recurrence: product_control.ScheduledTaskRecurre
     defer automatic_root.deinit();
     var schedule: TestScheduleSupport = .{};
     var history: TaskPersistenceProbe = .{};
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -6818,7 +6818,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7007,7 +7007,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -7083,7 +7083,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7156,7 +7156,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7246,7 +7246,7 @@ test "Product Control refreshes an idle Task from committed policy after an enab
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7340,7 +7340,7 @@ test "Task deletion waits for a requested Session close before its worker starts
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
@@ -7378,7 +7378,7 @@ test "Task deletion retries an off-thread Session release failure" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_tasks = 2,
         .max_runs_per_task = 2,
         .max_tools_per_run = 2,
@@ -7418,7 +7418,7 @@ test "asynchronous Task deletion commit failure retains an unarchived record" {
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -7450,7 +7450,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
@@ -7480,7 +7480,7 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -7519,7 +7519,7 @@ test "Workspace removal failure remains a retryable Workspace fact" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_workspaces = 1,
@@ -7556,7 +7556,7 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
@@ -7602,7 +7602,7 @@ test "Product Control manual compact uses the active operation lane and appends 
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7675,7 +7675,7 @@ test "compact queue rejection persists a legal terminal record and returns its o
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -7743,7 +7743,7 @@ test "Product Control compact cancellation and Task deletion wait for the Agent 
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7791,7 +7791,7 @@ test "Product Control terminal compact result wins a too-late cancellation race"
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7834,7 +7834,7 @@ test "Product Control coverage saves queued Run cancellation before and after th
     var persistence: CoverageCommitProbe = .{};
     var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 2,
@@ -7890,7 +7890,7 @@ test "Product Control coverage saves queued compact cancellation without enterin
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -7962,7 +7962,7 @@ fn expectWorkerFailureCoverage(compact_operation: bool) !void {
     var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.change_notifier = .{ .context = &gate, .wake = TerminalPublicationGate.wake };
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 2,
@@ -8084,7 +8084,7 @@ test "Product Control shutdown terminates a waiting UI Run before joining worker
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 1,
@@ -8147,7 +8147,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8211,7 +8211,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8296,7 +8296,7 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8374,7 +8374,7 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8459,7 +8459,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8525,7 +8525,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8634,7 +8634,7 @@ test "poisoned Session closes and the same Task continues with a fresh Conversat
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8732,7 +8732,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8810,7 +8810,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -8861,7 +8861,7 @@ test "Product Control shutdown rejects new Task admission without creating produ
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
@@ -8890,7 +8890,7 @@ test "late event from a finalized Run is dropped and newer active work continues
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
@@ -8961,7 +8961,7 @@ test "expanded text and file limits reach AgentCore intact and reject overflow b
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        runtime,
+        runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 2,
@@ -9044,7 +9044,7 @@ test "approval mutation workers retain the same Session and historical Run permi
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = history.capability();
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -9191,7 +9191,7 @@ test "approval mutation workers retain the same Session and historical Run permi
         try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
         var restart_configuration = configuration;
         restart_configuration.task_persistence = history.capabilityRestored(bytes[0..history.len]);
-        var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, restart_configuration);
+        var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, restart_configuration);
         defer restarted.deinit();
         const saved = restarted.testTask(task_id).?;
         try std.testing.expectEqual(.full_access, try restarted.taskApprovalMode(task_id));
@@ -9269,7 +9269,7 @@ test "approval Core refusal and export failure keep the old mode or restore its 
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = history.capability();
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -9463,7 +9463,7 @@ test "approval recovery owns restore before waiting input" {
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = history.capability();
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -9634,7 +9634,7 @@ test "approval fresh recovery stays queued and one failure never starts an impli
     configuration.directories.canonical_user_home = home;
     configuration.task_persistence = history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
     defer control.deinit();
     try installControlExecution(&control);
     var input = productControlTaskInput();
@@ -9879,7 +9879,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         var task_id: u64 = undefined;
         var waiter_id: ?u64 = null;
         {
-            var seed = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+            var seed = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
             defer seed.deinit();
             try installControlExecution(&seed);
             if (case.writer_waiter) waiter_id = try seed.createTask(input, try product_control.TestSupport.fixtureModelSelection(&seed));
@@ -9888,7 +9888,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         const old_frame = try std.testing.allocator.dupe(u8, storage[0..history.len]);
         defer std.testing.allocator.free(old_frame);
         configuration.task_persistence = history.capability(old_frame);
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
         defer control.deinit();
         defer history.released.store(true, .release);
         defer {
@@ -10202,7 +10202,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         // Read canonical facts through the normal startup codec, not string
         // matching. A stale Session must not roll back its confirmed binding.
         configuration.task_persistence = history.capability(storage[0..history.len]);
-        var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
         defer restarted.deinit();
         const durable = restarted.testTask(task_id).?;
         try std.testing.expectEqual(task.durable.binding_epoch, durable.durable.binding_epoch);
@@ -10245,7 +10245,7 @@ test "approval delegation can change while the only Run worker waits for permiss
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = history.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1 }, configuration);
         defer control.deinit();
         defer transport.released.store(true, .release);
         try installControlExecution(&control);
@@ -10433,7 +10433,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         configuration.task_persistence = history.capability(null);
         configuration.checkpoint_store = .{ .file_store = &store };
         const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -10592,7 +10592,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
                 var restart_history = TaskPersistenceProbe{ .storage = restart_storage };
                 var restarted_configuration = configuration;
                 restarted_configuration.task_persistence = restart_history.capabilityRestored(storage[0..history.len]);
-                var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, restarted_configuration);
+                var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, restarted_configuration);
                 defer restarted.deinit();
                 try std.testing.expectEqual(@as(product_control.ApprovalMode, if (case.candidate_is_canonical) .full_access else .manual), try restarted.taskApprovalMode(task_id));
                 const saved = restarted.testTask(task_id).?;
@@ -10833,7 +10833,7 @@ test "active input persisted before adoption restores as unknown without executi
     defer std.testing.allocator.free(saved);
     var restart = productControlConfiguration();
     restart.task_persistence = history.capabilityRestored(saved);
-    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, restart);
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, restart);
     defer restored.deinit();
     const recovered = restored.testTask(scenario.task_id).?;
     try std.testing.expectEqual(.unknown, recovered.durable.runs[0].?.additional_inputs[0].?.state);
@@ -11694,7 +11694,7 @@ test "Task message acceptance during title cleanup remains stoppable and preserv
         defer std.testing.allocator.free(saved_bytes);
         var restored_configuration = configuration;
         restored_configuration.task_persistence = history.capabilityRestored(saved_bytes);
-        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, restored_configuration);
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, restored_configuration);
         defer restored.deinit();
         const saved_task = restored.testTask(scenario.task_id).?;
         try std.testing.expectEqual(@as(usize, 1), saved_task.input_submissions.items.len);
@@ -11801,7 +11801,7 @@ test "image permission review carries Host cost facts without trusting a same-na
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
         }
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, productControlConfiguration());
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, productControlConfiguration());
         defer control.deinit();
         try installControlExecution(&control);
         var image: ImageAdmissionProbe = .{};
@@ -11996,7 +11996,7 @@ test "built-in source replacement keeps canonical Task catalog pinned until expl
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
@@ -12108,7 +12108,7 @@ fn expectApprovalRecoveryWaitsForClose(close_running_task: bool) !void {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = if (close_running_task) 3 else 2,
@@ -12214,7 +12214,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 2 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 2 }, configuration);
     defer control.deinit();
     defer fake_core.releaseControlled();
     try installControlExecution(&control);
@@ -12376,7 +12376,7 @@ test "Control third consecutive denial keeps only current request manual then re
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
