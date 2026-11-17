@@ -42,6 +42,8 @@ const std = @import("std");
 const contract = @import("agent_contract");
 const payload = @import("payload.zig");
 const wire_types = @import("wire_types.zig");
+const channel = @import("channel.zig");
+const pending = @import("pending.zig");
 
 pub const Call = enum {
     /// Hand an install request to the caller and read whether it was admitted.
@@ -105,6 +107,95 @@ comptime {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Direction
+// ---------------------------------------------------------------------------
+
+/// Everything a forward call needs: a correlation to open, somewhere to send
+/// under it, and somewhere the answer lands. Named as one type so that "can
+/// this code make a forward call" becomes a question about types.
+pub const Caller = struct {
+    outbound: *channel.Outbound,
+    pending: *pending.Table,
+};
+
+/// Whether a type can reach a `Caller`, directly or through its fields.
+///
+/// An opaque pointer counts as reaching one, because it might be one and
+/// nothing can prove otherwise. That is deliberate: it is what stops a handler
+/// from smuggling the forward capability through a type-erased context, which
+/// is exactly how a rule like this normally gets around.
+/// Type-erased capabilities that are not the link and cannot become it.
+///
+/// An opaque pointer otherwise counts as reaching a caller, because it might
+/// be one and nothing can prove otherwise -- that is what stops a handler
+/// smuggling the forward capability through a type-erased context. But the
+/// platform's own erased capabilities would then poison every context that
+/// holds one, and a handler legitimately needs them. They are exempt because
+/// reaching the link requires the link's own types, which neither of these
+/// can produce. Adding to this list is a decision, not a convenience.
+const erased_exemptions = [_]type{ std.Io, std.mem.Allocator };
+
+fn exempt(comptime T: type) bool {
+    inline for (erased_exemptions) |Allowed| {
+        if (T == Allowed) return true;
+    }
+    return false;
+}
+
+pub fn reachesForwardCaller(comptime T: type) bool {
+    if (T == Caller) return true;
+    if (exempt(T)) return false;
+    return switch (@typeInfo(T)) {
+        .optional => |info| reachesForwardCaller(info.child),
+        .array => |info| reachesForwardCaller(info.child),
+        .vector => |info| reachesForwardCaller(info.child),
+        .pointer => |info| info.child == anyopaque or reachesForwardCaller(info.child),
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (reachesForwardCaller(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (reachesForwardCaller(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        // An opaque type's contents are unknown, so it could hold one.
+        .@"opaque" => true,
+        else => false,
+    };
+}
+
+/// The handler for one reverse call, over a context the link can inspect.
+///
+/// The third rule, and the one that closes the loop. A forward call's handler
+/// may nest a reverse call and wait: the installation tool does exactly that,
+/// and it is safe because of the first rule -- the caller answers on a thread
+/// that never blocks on a forward call. The reverse of that is not safe. If a
+/// reverse handler started a forward call and waited, the chain would close:
+/// the execution half waiting for an answer to its reverse call, the caller
+/// waiting for an answer to its forward call, and both sides' exhaustion codes
+/// saying the peer owes answers, with nothing naming the cycle.
+///
+/// So a reverse handler cannot be given the means. Its context must be a type
+/// this module can look inside, and it must not reach a `Caller`. Stating it
+/// now costs nothing, because no reverse handler exists yet; once some do,
+/// enforcing it would mean auditing what each one calls.
+pub fn Handler(comptime call: Call, comptime Context: type) type {
+    comptime {
+        if (reachesForwardCaller(Context)) @compileError(
+            "a reverse call's handler cannot reach a forward caller: " ++ @typeName(Context) ++
+                ". A handler that could call forward and wait closes a cross-process cycle " ++
+                "that neither side's capacity failure would name. An opaque context counts, " ++
+                "because it could hold one -- give the handler a type the link can inspect.",
+        );
+        return *const fn (*Context, Request(call)) Response(call);
+    }
+}
+
 /// The answer when the caller cannot be reached at all. A reverse call must
 /// have one, or the execution half would have to wait for a peer that is gone.
 pub fn unreachableAnswer(comptime call: Call) Response(call) {
@@ -147,4 +238,55 @@ test "the request carries the bytes but not their ownership" {
     // bytes and the receiving side owns its own copy, as everywhere else.
     try testing.expectEqual([]const u8, @FieldType(McpInstallationRequest, "request_json"));
     try testing.expect(!@hasField(McpInstallationRequest, "allocator"));
+}
+
+test "a reverse handler cannot be handed the forward caller, however it is wrapped" {
+    // The predicate the rule is built on, checked in both directions so the
+    // rule is a property rather than a promise.
+    const Plain = struct { task_id: u64, name: []const u8 };
+    try testing.expect(!reachesForwardCaller(Plain));
+    try testing.expect(!reachesForwardCaller(u64));
+    try testing.expect(!reachesForwardCaller(McpInstallationRequest));
+
+    // Directly.
+    try testing.expect(reachesForwardCaller(Caller));
+    try testing.expect(reachesForwardCaller(*Caller));
+    try testing.expect(reachesForwardCaller(?*Caller));
+
+    // One field down, and two.
+    const Nested = struct { link: *Caller };
+    const Deeper = struct { inner: Nested, count: u32 };
+    try testing.expect(reachesForwardCaller(Nested));
+    try testing.expect(reachesForwardCaller(Deeper));
+
+    // Through a union, which is where a hand-audit would most likely miss it.
+    const Either = union(enum) { nothing, link: Caller };
+    try testing.expect(reachesForwardCaller(Either));
+
+    // And type-erased, which is how a rule like this normally gets around.
+    const Erased = struct { context: ?*anyopaque };
+    try testing.expect(reachesForwardCaller(Erased));
+}
+
+test "the one registered reverse call has an inspectable handler" {
+    // Compiles only because the context is a type the link can look inside
+    // and it reaches no caller; a context that did would fail the build with
+    // the reason, which is the point of putting the check in `Handler`.
+    const Context = struct { task_id: u64 };
+    const Expected = *const fn (*Context, McpInstallationRequest) McpInstallationResponse;
+    try testing.expectEqual(Expected, Handler(.mcp_installation, Context));
+}
+
+test "the platform's own erased capabilities do not poison a handler context" {
+    // Without the exemption, any context holding an `std.Io` would be refused,
+    // because `Io` carries an opaque userdata pointer. A handler needs one, and
+    // neither it nor an allocator can reach the link: doing that takes the
+    // link's own types.
+    const WithIo = struct { io: std.Io, task_id: u64 };
+    const WithAllocator = struct { allocator: std.mem.Allocator };
+    try testing.expect(!reachesForwardCaller(WithIo));
+    try testing.expect(!reachesForwardCaller(WithAllocator));
+    // The exemption is narrow: an arbitrary erased pointer is still refused.
+    const WithErased = struct { io: std.Io, smuggled: *anyopaque };
+    try testing.expect(reachesForwardCaller(WithErased));
 }
