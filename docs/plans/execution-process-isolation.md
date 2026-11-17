@@ -91,6 +91,7 @@ parked UI 请求的并发上限是 16（`max_pending_ui_requests = host_worker_c
 | checkpoint sink / source | 字节回调，exec 直接读写文件；字节不过界 |
 | credential source | exec 侧自持副本，密钥因此过界（见 4.5） |
 | catalog lease | lease 留 exec，投影过界。`catalog.Projection` 的内容是扁平数据，但结构体本身带着 `storage: *anyopaque`（它自己的 arena），所以过界的是去掉该字段后的那些字段，不是结构体原样 |
+| 终态与 compact 终态 | `TerminalResult` 与 `CompactTerminalResult` 不是纯数据：它们持 `allocator` 与 `diagnostic_storage`，是自己那份诊断字节的 owner。过界的是诊断字节与 receipts 本身，所有权留在产生它的一侧 |
 | `rg.exe` | 跟 exec 走；它本来就随包分发并由 Core spawn |
 
 UI 侧保留的，一条都不交出去：Product 持久化与恢复权威、Task/Run 状态机、投影构建、Bridge 命令面，以及 checkpoint 记录向 Task 行的提交。
@@ -138,9 +139,11 @@ UI 不可达时 exec 的一期收口顺序是固定的，顺序本身是正确�
 
 断连后「排空观察」不能被读成「已完整观察」。`EventDrainStatus.pending(route_id)` 返回 0 时，Product 会把该 Run 的事件流判为完整并收口（`settleTerminalOutputAfterEventDrain` 与 `finalizeMarkedTerminalRunsAfterEventDrain` 都以 `!= 0` 跳过）。这个读法只对**来自 exec 的终态**成立，依据正是 4.2 的顺序不变量。但 `markTerminalRunsBeforeEventDrain` 只要 Run 有终态负载就打标记，不问终态由谁写下，所以凡是 Product 在**本地**写下的终态——begin-run 失败、本地契约失败，以及一期新增的「exec 不可达」——`pending() == 0` 对 exec 尚未发出的事件什么都没说。单进程里这无害，因为 pump 就是唯一的缓冲；拆开后管道与 exec 的出站队列是第二个缓冲，字节可以丢在那里。
 
-因此一期的规则是：**链路断开时，UI 侧为受影响的在飞 Run 记录事件交付缺口，而不是记录一次干净排空。** 不新增词汇，既有的就够：`terminal.event_delivery_lost` 经 `recordEventProjectionFailure` 表达，也就是架构既有的「记录完整性与执行结果是不同事实」。`EventDrainStatus` 因此要能分辨「已排空」与「链路已断」，不能只返回一个 `usize`；这项改动属于本步，而不是 transport 那一步——在「exec 不可达」这个本地终态存在之前，第二个缓冲并不存在。
+因此一期的规则是：**链路断开时，UI 侧为受影响的在飞 Run 记录事件交付缺口，而不是记录一次干净排空。** 不新增词汇，既有的就够：`terminal.event_delivery_lost` 经 `recordEventProjectionFailure` 表达，也就是架构既有的「记录完整性与执行结果是不同事实」。`EventDrainStatus` 因此要能分辨「已排空」与「链路已断」，不能只返回一个 `usize`；这项改动属于第 6 步，而不是 transport 那一步——在「exec 不可达」这个本地终态存在之前，第二个缓冲并不存在。
 
-**不得把 exec 挂在 UI 的 Windows Job 上**（`KILL_ON_JOB_CLOSE`，MCP 子进程在用的那种）。那等于对称死亡，2026-11-16 那次事故照样带走全部 Task，方案收益只剩一半。
+Windows Job 的归属有两个方向，而且它们相反，写错任何一边都是静默的。**不得把 exec 挂在 UI 的 Windows Job 上**（`KILL_ON_JOB_CLOSE`，MCP 子进程在用的那种）：那等于对称死亡，2026-11-16 那次事故照样带走全部 Task，方案收益只剩一半。**同时 exec 必须成为 MCP 子进程 Job 的所有者**，MCP 才会随 exec 一同收口；今天 `Job.init` 由发起连接的那一侧创建、`deinit` 关闭唯一引用从而终止整棵树，所以这件事随 transport owner 搬到 exec 而自动成立——前提是句柄确实由 exec 持有，不是由 UI 创建后传过去。
+
+这两条都不会在功能测试里暴露：挂错了 MCP 照常工作、Run 照常跑完，只有真崩的时候才显出 exec 被 UI 的 Job 带走。所以它需要自己的验收场景，而不是靠实现时记得。
 
 exec 死亡时 UI 侧：令牌桶重启，5 分钟窗口内至多 3 次，超限进入稳定的「执行不可用」态——历史可看、可导出，不能跑新 Run——而不是崩溃重启循环。该阈值是产品选择，没有频率数据支撑，#197 自己也没有。在飞 Run 的恢复复用既有的 `restoreTaskConversation` 从 checkpoint 重建，不发明 Session 迁移，也**不得**把这条既有的 checkpoint recovery 报告成 in-flight Run 或 Worker crash recovery。
 
@@ -181,12 +184,13 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | --- | --- |
 | 1 | 模式分叉与进程生命周期：exec 模式在建窗口前分出，UI 能启动、关闭、回收 exec；握手字段齐备且不符即拒绝。此步不搬 Runtime，Agent 仍在 UI 侧，用于单独验证分叉与握手 |
 | 2 | transport：帧、分片、typed 错误映射、调用相关 id、出站有界队列与 writer 线程、control 预留额度。以既有 port 方法集逐一对照，不得出现无映射的方法或错误 |
-| 3 | Runtime 与活对象搬迁：MCP 配置声明化重建、生图/生视频/交付根/checkpoint 字节/catalog lease 归位；UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` |
-| 4 | 关联身份：Session 创建与恢复协议带上 Product 指定身份；exec 侧持有至 Session 结束；二期字段位留出 |
-| 5 | disconnect 下行收口：按 4.6 的五步顺序实现，parked 解除先于终止；exec 孤儿自我收口 |
-| 6 | staged 导出与接纳：按第 5 节实现 stage 区、自描述记录与启动接纳，并确认 orphan 清理不吃掉待接纳条目 |
-| 7 | exec 侧故障记录：`Role` 增加 exec、自己的 install 与标记锚；两半各写各的记录 |
-| 8 | 契约同步与证据：按第 8 节改耐久文档，按第 7 节取得验收结果，报告完成 |
+| 3 | Runtime 与活对象搬迁（不含 MCP）：16 个欠 wire shape 的载荷逐项落形状、exec 侧句柄表、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。完成条件：`crossings.zig` 的记录与编译器一致且不再有 `untyped_pointer`、`allocator`、`open_value` 遗留，52 个转发全部填满 |
+| 4 | MCP 搬迁：UI 只送配置 generation 与 server 声明，exec 侧自建 `McpRuntimeInput` 与 transport owner，进程 spawn、Windows Job 归属、HTTP 栈与 OAuth 都在 exec 侧组合。完成条件含 4.6 的 Job 归属两个方向，以及第 7 节那条真杀 UI 之后 exec 与 MCP 子进程都还活着的验收 |
+| 5 | 关联身份：Session 创建与恢复协议带上 Product 指定身份；exec 侧持有至 Session 结束；二期字段位留出 |
+| 6 | disconnect 下行收口：按 4.6 的五步顺序实现，parked 解除先于终止；exec 孤儿自我收口；`EventDrainStatus` 分辨「已排空」与「链路已断」 |
+| 7 | staged 导出与接纳：按第 5 节实现 stage 区、自描述记录与启动接纳，并确认 orphan 清理不吃掉待接纳条目 |
+| 8 | exec 侧故障记录：`Role` 增加 exec、自己的 install 与标记锚；两半各写各的记录 |
+| 9 | 契约同步与证据：按第 8 节改耐久文档，按第 7 节取得验收结果，报告完成 |
 
 各步同步修改实际变化的规范和测试，不保留平行 active path，不发布只搬了进程而未实现收口的中间状态。
 
@@ -197,6 +201,7 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | 握手字段任一不符 | 明确拒绝附着并退出，不降级、不以旧 revision 继续；UI 侧呈现执行不可用而非伪造 Run 失败 |
 | 正常 Run 全链路 | 事件顺序、终态、回执、权限审批与今天逐项一致；Renderer 与 Bridge 无感知变化 |
 | UI pump 饱和 | 背压传到 exec 的 Core 回调线程，Run 变慢、事件不丢；无 Host fatal、无 Session poison |
+| 真杀 UI 进程后的 Job 归属 | exec 与它的 MCP 子进程都还活着，走完 4.6 的收口顺序后自行退出；两者都没有被 UI 的 Job 带走。功能通过不构成证据，判据是真杀之后谁还在 |
 | 链路在飞 Run 中途断开 | 受影响的 Run 不被判为事件流完整：要么没有终态因而不打排空标记，要么本地终态同时带事件交付缺口。`pending() == 0` 本身不构成「已完整观察」 |
 | 终态与事件的到达顺序 | 同一 Run 的全部事件先于其终态被读取方看到；只有 control 帧可以提前。该不变量有专门的回归，不靠人读代码保证 |
 | 出站队列饱和时 Stop | control 预留额度放行，Stop 不被大帧挡住；非 control 调用返回 typed busy 并走既有重试，不产生用户 timeout 或 Agent terminal cause |
@@ -232,7 +237,7 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 
 一期完成须同时满足：
 
-- 第 6 节八个步骤各自的完成条件达成，无平行 active path。
+- 第 6 节九个步骤各自的完成条件达成，无平行 active path。
 - 第 7 节的场景全部取得结果，其中跨进程与真杀 UI 的场景有绑定日期、revision、平台、artifact 与入口的证据。
 - 八项关注点在[高层架构](../architecture.md)中各有结论，而不是只在本文里。
 - **属于契约的结论已全部进入第 8 节所列耐久文档。** 本文是临时文档，最终会被移除；移除前若有结论只存在于本文，视为未完成。
