@@ -20,7 +20,13 @@
 
 ## 2. 真源与改动入口
 
-缝画在 **Product ↔ Agent 这道缝，不是 ABI**。决定缝只能画在这里的结构事实：`src/agent/session.zig` 的 `runText`/`runMultimodal` 是阻塞式 ABI 调用，Run 结束才返回，所以每个在飞 Run 占一个线程，而那个线程必须与 Runtime 同进程。`host_worker_count = 16`（`src/app.zig:116`）、`worker_stack_bytes = 4 MiB`（`src/product/control/executor.zig:36`）的池子因此整体属于执行侧；`src/product/task/execution.zig` 的 `executeRun` 与其 agent handoff 状态机两端都在执行侧，不跨界。
+缝画在 **Product ↔ Agent 这道缝，不是 ABI**。决定缝只能画在这里的结构事实：`src/agent/session.zig` 的 `runText`/`runMultimodal` 是阻塞式 ABI 调用，Run 结束才返回，所以每个在飞 Run 占一个线程，而那个线程必须与 Runtime 同进程。但这条推理只到「exec 侧必须有一个线程陪着每个在飞 Run」，**不到「驱动这个 Run 的 Product worker 必须就是那个线程」**。本文先前那句「`host_worker_count = 16` 的池子因此整体属于执行侧；`executeRun` 与其 agent handoff 状态机两端都在执行侧，不跨界」是错的，实施第 3 步时核出来的。
+
+`src/product/task/execution.zig` 的 `executeRun` 在**同一个线程上交替**调用 Agent 与改写 Product 状态:Agent 侧是 `beginRunOutcome`、`agent_run.execute()`（阻塞到终态）、`postprocessCheckpoint` 的导出、以及 Run 结束后的自动标题；Product 侧是 `run.agent_handoff` 的 4 次原子写、`commitBeginFailure` 与 `commitAgentTerminal` 经 `TextProjector` 落入 Product 记录、`run.checkpoint` 的 postprocess 状态、以及 3 次 `notifier.notify()`。所以它不可能「整体搬到执行侧」而仍然满足 §3 的归属表（Task/Run 状态机与持久化权威留在 UI 进程）。
+
+一旦更正这条前提，**既有规则下只剩一种形状**：驱动线程留在 UI，`execute` 成为一次阻塞的跨进程调用，exec 侧由自己的线程陪着 Core 的阻塞 ABI 调用。这与今天行为等价——那个线程本来就阻塞在一次阻塞式 ABI 调用上，只是改为阻塞在链路应答上——而 Product 的提交全部留在本地、不需要任何反向调用。另一种形状（池子搬去 exec、每次提交回调进 Product）会把热路径的方向反过来，让 exec 阻塞在一个 §4.6 已写明可能不可达的 UI 上，并把 Product 的 Run 状态机搬出持久化权威所在的进程，三条都与既定规则冲突，因此不是一个可选项。
+
+自动标题因此按 §4.3 既有的那条形状走：执行侧跑模型、Product 提交记录，与自动审批复核同形。
 
 前置重构已经落地（PR #211），一期不必再做：`src/agent/contract.zig` 是 archive-free 的契约模块根，`src/agent/session/surface.zig` 是纯数据声明，`src/agent/session/port.zig` 是 vtable 端口、`port_impl.zig` 是唯一的进程内实现。`src/product/` 整目录已无 `metawork_agent` 导入，Product 经 `metawork_agent_contract` 与 port 面访问 Agent。
 
@@ -87,6 +93,8 @@
 出站方向有一条硬约束：**UI 主线程绝不做阻塞管道写。** 主线程要守[验证规范](../validation.md)的投影预算，而管道缓冲满时的阻塞写是唯一能直接打穿该预算的写法。出站走有界队列加专用 writer 线程，并且：control 与终止类帧取预留额度，保证 Stop 不被大帧挡住；非 control 的主线程调用在队列满时返回 typed busy，映射到 Product 既有的接纳与重试状态（凭据续期已有 `deferred` 与重试状态机），**不得**把容量压力伪造成用户 timeout、用户拒绝或 Agent terminal cause。
 
 parked UI 请求的并发上限是 16（`max_pending_ui_requests = host_worker_count`），不是更小的数；收口设计要按 16 个同时 park 的 Core 回调线程来算。
+
+UI 主线程**确实会发起链路调用**,不只是出站写:`control/runtime.zig` 的主循环调 `restoreAdmission`（4 处）、`releaseClosedSession`、`requestRunTermination`、以及 skill restore inputs 的 narrow/release。这些都会变成主线程上的一次往返,落进同一份投影预算。spike 实测小帧往返约 11 µs,所以少量往返在预算内,但这件事必须被明说和设界,不能假设:主线程每次产品命令处理里的链路往返次数要有上限,超了就要把该调用挪出主线程或改为批量。`requestRunTermination` 属 control 类,所以它至少不会排在大帧后面。
 
 自动审批复核的并发上限 `permission_job.capacity = 8` 随复核一同搬到执行侧，不得在搬家时蒸发。它与上面那 16 是两件事：16 是可以同时 park 的请求数，8 是其中能同时跑复核的数，所以 auto 模式下仍可能有 park 的请求在等复核槽位。
 
