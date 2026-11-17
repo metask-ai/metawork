@@ -19,7 +19,7 @@ jobs:
   static:
     name: Static checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - &checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -51,7 +51,7 @@ jobs:
   node-tests:
     name: Node tests (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 15
     env: &platform-env
       METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
     strategy: &platforms
@@ -115,7 +115,14 @@ jobs:
   native-tests:
     name: Native tests (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # Every timeout in this workflow is about twice the job's measured wall
+    # clock rather than a value to give up at, so a job that has stopped making
+    # progress is reported in minutes instead of holding a runner until a round
+    # number expires. This graph measures 10.6 minutes on Windows and 11.3 on
+    # macOS with a warm compilation cache and 12.9 with an empty one, on
+    # 2026-11-17, so 30 keeps more than double the cold-cache time; the 60 it
+    # replaces meant an hour of runner time per hang.
+    timeout-minutes: 30
     env: *platform-env
     strategy: *platforms
     steps:
