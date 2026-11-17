@@ -28,6 +28,8 @@ const error_code = @import("error_code.zig");
 const payload = @import("payload.zig");
 const checkpoint = @import("agent_checkpoint");
 const catalog = @import("agent_catalog");
+const image_generation = contract.image_generation;
+const generate_video = contract.generate_video;
 
 const control = contract.control;
 const surface = contract.surface;
@@ -356,6 +358,50 @@ pub const FileDeliveryRoot = struct {
     asserted_root: []const u8,
 };
 
+/// `catalog.Query` with its borrowed source lifetime replaced by an id.
+///
+/// The lifetime is a retain/release pair over an object the caller owns -- the
+/// registered skill source -- which the Agent holds for as long as the lease
+/// it issues. That direction is worth noticing: every other handle in this
+/// file lives in the execution half and the caller names it, while this one
+/// lives in the caller and the execution half calls back into it. So a handle
+/// table is needed in both halves, not only in the execution half.
+pub const CatalogQuery = struct {
+    canonical_user_home: []const u8,
+    target: catalog.QueryTarget,
+    additional_sources: []const catalog.Source,
+    default_source_priority: i32,
+    /// Names the caller-side object whose retain and release become link
+    /// calls. Absent when the query has no source to hold.
+    source_lifetime: ?HandleId,
+};
+
+/// What crosses for a generated-image Run, which is the binding and nothing
+/// else. Three capabilities in the original are composed in the execution
+/// half instead of travelling: the HTTP transport, the output commit, and the
+/// credential reader that supplies a renewed credential mid-Run.
+///
+/// The reader matters for more than this one tool. Image, video, the automatic
+/// title and the approval reviewer all read a credential that `update_credential`
+/// renews over the link, so the execution half needs one credential source fed
+/// by the link rather than four readers wired separately.
+pub const ImageGenerationBinding = struct {
+    endpoint: []const u8,
+    source: []const u8,
+    model: []const u8,
+    credential: []const u8,
+};
+
+/// The same for a generated-video Run. Its original takes the credential only
+/// as a reader, never as bytes, so nothing secret crosses at request time at
+/// all: the execution half's credential source already holds what the link
+/// last delivered.
+pub const VideoGenerationBinding = struct {
+    endpoint: []const u8,
+    source: []const u8,
+    model: []const u8,
+};
+
 // ---------------------------------------------------------------------------
 // A projection minus the arena that owns it
 // ---------------------------------------------------------------------------
@@ -395,6 +441,9 @@ comptime {
     payload.requireStructural(CheckpointDestination);
     payload.requireStructural(FileDeliveryRoot);
     payload.requireStructural(CatalogProjection);
+    payload.requireStructural(CatalogQuery);
+    payload.requireStructural(ImageGenerationBinding);
+    payload.requireStructural(VideoGenerationBinding);
 }
 
 /// Asserts that a mirror and its original describe the same thing: every
@@ -422,6 +471,9 @@ comptime {
     mirrors(CheckpointDescription, checkpoint.Description, &.{});
     mirrors(BeginRunFailure, surface.BeginRunFailure, &.{"error_code"});
     mirrors(CatalogProjection, catalog.Projection, &.{});
+    mirrors(CatalogQuery, catalog.Query, &.{});
+    mirrors(ImageGenerationBinding, image_generation.BindingInput, &.{});
+    mirrors(VideoGenerationBinding, generate_video.Input, &.{});
 }
 
 const testing = std.testing;

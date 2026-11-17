@@ -200,20 +200,25 @@ pub const crossings = [_]Crossing{
         "its fields without the owning arena pointer",
         shapes.CatalogProjection,
     ),
-    crossing(
+    shaped(
         contract.CatalogQuery,
         .{ .substituted = .untyped_pointer },
-        "query fields without the borrowed source lifetime",
+        "query fields, with the borrowed source lifetime named by a caller-side id",
+        shapes.CatalogQuery,
     ),
-    crossing(
+    composed(
         contract.ImageGenerationRunInput,
         .{ .substituted = .untyped_pointer },
-        "binding fields; the transport is composed in the execution half",
+        "binding fields cross; transport, output commit and credential reader " ++
+            "are composed in the execution half",
+        &.{shapes.ImageGenerationBinding},
     ),
-    crossing(
+    composed(
         contract.VideoGenerationRunInput,
         .{ .substituted = .untyped_pointer },
-        "binding fields; the transport is composed in the execution half",
+        "binding fields cross; the credential arrives only through the " ++
+            "execution half's own reader, so nothing secret crosses per request",
+        &.{shapes.VideoGenerationBinding},
     ),
     composed(
         contract.FileDeliveryInput,
@@ -293,8 +298,8 @@ test "the inventory is still true, and says something about every entry" {
         .substituted => try std.testing.expect(entry.shape.len != 0),
     };
     try std.testing.expectEqual(@as(usize, 22), structural);
-    try std.testing.expectEqual(@as(usize, 10), shapedCount());
-    try std.testing.expectEqual(@as(usize, 7), owed());
+    try std.testing.expectEqual(@as(usize, 13), shapedCount());
+    try std.testing.expectEqual(@as(usize, 4), owed());
     try std.testing.expectEqual(crossings.len, structural + shapedCount() + owed());
 }
 

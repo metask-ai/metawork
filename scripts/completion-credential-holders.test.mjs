@@ -116,6 +116,15 @@ test("a Run's own credential reaches the model as a bounded copy", () => {
  * second constructor or a second handover, and both are far harder to spell
  * around than "whatever the factory field is called". These two counts are the
  * reason the consumer scan above does not have to be airtight.
+ *
+ * Both counts are stand-ins for a property that does not exist yet. Once the
+ * execution split lands, the UI half cannot reach the HTTP transport at all,
+ * so it cannot construct a Completion, and the module graph says so --
+ * an import restriction of the kind the AgentCore archive already has. At that
+ * point these assertions should be REPLACED by that restriction rather than
+ * kept beside it: an assertion that counts occurrences of a name, sitting next
+ * to a property the module graph guarantees, reads as if it were still load
+ * bearing when it is not.
  */
 test("there is exactly one Completion constructor, handed over exactly once", () => {
   const definitions = zigFiles("src/").flatMap((path) => {

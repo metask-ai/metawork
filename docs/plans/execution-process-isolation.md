@@ -130,7 +130,11 @@ UI 侧保留的，一条都不交出去：Product 持久化与恢复权威、Tas
 
 两个持有者今天的凭据处理并不对称，搬家时不得把弱的那一份带过去：自动标题走 `.copy()` 加 `defer credential.deinit()`，是第 6 节要求的 bounded copy；复核直接透传 `config.api_key`，生命周期挂在 `prepared` 上。
 
-**交付根过界之后是边界输入,必须在执行侧重新校验。** 进程内声明该 root 的就是确认过它的那一方,所以「canonical」是事实;过界之后它只是对端断言的一个字符串,而第 6 节明确 trusted Workspace 只能由 Host 原生选择和确认产生、且 Host 要重新校验路径与资源范围。所以执行侧不得把收到的 root 当成已经可信,须按写路径既有的约束(在 root 之下解析,而不是信任名字)重新校验。这与上面那条脱敏顺序是同一形状:**一个在进程内免费的性质,过界后必须被明说**,否则它会在搬家时静默消失。
+有一类性质在进程内免费、过界后必须重新建立,不要每次当新发现:**凡是进程内由同一个主体既声明又使用的性质,拆开后声明方与使用方就不是同一个主体了,该性质必须被明说并重新建立。** 目前两条属于这一类,遇到第三条按本条加进来即可。
+
+**第一条:复核的脱敏必须留在过界之前、由持有该数据的 Product 一侧完成。** 见 4.5。
+
+**第二条:交付根过界之后是边界输入,必须在执行侧重新校验。** 进程内声明该 root 的就是确认过它的那一方,所以「canonical」是事实;过界之后它只是对端断言的一个字符串,而第 6 节明确 trusted Workspace 只能由 Host 原生选择和确认产生、且 Host 要重新校验路径与资源范围。所以执行侧不得把收到的 root 当成已经可信,须按写路径既有的约束(在 root 之下解析,而不是信任名字)重新校验。这与上面那条脱敏顺序是同一形状:**一个在进程内免费的性质,过界后必须被明说**,否则它会在搬家时静默消失。
 
 **复核的脱敏必须留在过界之前、由持有该数据的 Product 一侧完成。** 复核输入含工具参数与用户历史，今天 `scrubPermissionArguments` 先跑、再建 Completion，顺序是对的；搬到执行侧后这个顺序必须保持，否则未脱敏的用户历史跨进程。这是本次移动**新造出来**的要求，不是既有约束。
 
@@ -204,7 +208,7 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | --- | --- |
 | 1 | 模式分叉与进程生命周期：exec 模式在建窗口前分出，UI 能启动、关闭、回收 exec；握手字段齐备且不符即拒绝。此步不搬 Runtime，Agent 仍在 UI 侧，用于单独验证分叉与握手 |
 | 2 | transport：帧、分片、typed 错误映射、调用相关 id、出站有界队列与 writer 线程、control 预留额度。以既有 port 方法集逐一对照，不得出现无映射的方法或错误 |
-| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、exec 侧句柄表、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 的 52 个转发全部填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
+| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、**两侧**句柄表(不只 exec 侧:`catalog.Query` 的 `source_lifetime` 是一对 retain/release,它所指的对象住在调用方,由执行侧回调进来,方向与其余句柄相反)、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 的 52 个转发全部填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
 | 4 | MCP 搬迁：UI 只送配置 generation 与 server 声明，exec 侧自建 `McpRuntimeInput` 与 transport owner，进程 spawn、Windows Job 归属、HTTP 栈与 OAuth 都在 exec 侧组合。完成条件含 4.6 的 Job 归属两个方向，以及第 7 节那条真杀 UI 之后 exec 与 MCP 子进程都还活着的验收 |
 | 5 | 关联身份：Session 创建与恢复协议带上 Product 指定身份；exec 侧持有至 Session 结束；二期字段位留出 |
 | 6 | disconnect 下行收口：按 4.6 的五步顺序实现，parked 解除先于终止；exec 孤儿自我收口；`EventDrainStatus` 分辨「已排空」与「链路已断」 |
