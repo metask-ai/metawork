@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
         artifacts.exe.headerpad_size = 0x1000;
     const target_id = agentCoreTargetId(app_target);
     const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
-    const bundle = agentcore_bundle.verify(b, root);
+    const bundle = agentcore_bundle.verify(b, root, target_id);
     const office_skill_shell_step = b.step("build-office-skill-shell", "Build canonical Core materialized Office Skill qualification");
     for (bundle.runtime_files) |file| {
         const install = b.addInstallBinFile(.{ .cwd_relative = file }, std.fs.path.basename(file));
