@@ -1451,16 +1451,32 @@ fn wireAgentCore(
         existingImport(runner, "app_manifest_zon"),
     );
     product_identity.addOptions("metawork_artifact_options", artifact_options);
-    const dependency_options = .{
+    // The bundle's own package attaches the static archive to its
+    // `metask_agentcore` module, which would put the archive on the link line
+    // of every compilation that merely needs the declarations or the JSON
+    // codec. Compose the same module here instead, from the same
+    // checksum-pinned sources, and attach the archive to the one module that
+    // reaches the ABI entry point. Declarations and codecs stay archive-free,
+    // and there is still exactly one instance of each so a decoded event keeps
+    // one type across the whole graph.
+    const sdk_types = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ bundle.bindings_source_root, "types.zig" }) },
         .target = target,
         .optimize = root_module.optimize,
-    };
-    const sdk = switch (bundle.sdk_dependency) {
-        .macos_arm64 => b.dependency("agentcore_macos_arm64", dependency_options),
-        .macos_x64 => b.dependency("agentcore_macos_x64", dependency_options),
-        .windows_arm64 => b.dependency("agentcore_windows_arm64", dependency_options),
-        .windows_x64 => b.dependency("agentcore_windows_x64", dependency_options),
-    }.module("metask_agentcore");
+    });
+    const sdk_protocol = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ bundle.bindings_source_root, "protocol.zig" }) },
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const sdk = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ bundle.bindings_source_root, "root.zig" }) },
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    sdk.addImport("metask_agentcore_types", sdk_types);
+    sdk.addImport("metask_agentcore_protocol", sdk_protocol);
+    sdk.link_libc = bundle.link_libc;
     const agent_protocol = b.createModule(.{
         .root_source_file = b.path("src/agent/protocol.zig"),
         .target = target,
@@ -1590,6 +1606,14 @@ fn wireAgentCore(
     core_identity.addOption(u16, "abi_revision", bundle.abi_revision);
     session.addOptions("agentcore_identity", core_identity);
     session.addImport("metask_agentcore", sdk);
+    // The ABI entry point is reached from this module only, so the archive and
+    // its link requirements belong here rather than on the shared bindings.
+    session.addObjectFile(.{ .cwd_relative = bundle.static_library });
+    session.link_libc = bundle.link_libc;
+    for (bundle.system_libraries) |library|
+        session.linkSystemLibrary(library, .{ .use_pkg_config = .no });
+    for (bundle.system_frameworks) |framework|
+        session.linkFramework(framework, .{});
     session.addImport("agent_file_delivery", agent_file_delivery);
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     session.addImport("agent_protocol", agent_protocol);

@@ -65,6 +65,15 @@ pub const Bundle = struct {
     link_libc: bool,
     sdk_dependency: SdkDependency,
     runtime_files: [2][]const u8,
+    /// Directory holding the bundle's source-free Zig bindings. The source
+    /// files below it are pure declarations and codecs: no ABI entry point and
+    /// nothing that requires the static library.
+    bindings_source_root: []const u8,
+    /// The checksum-pinned static archive. Only the module that reaches the
+    /// ABI entry point may carry it; see `wireAgentCore`.
+    static_library: []const u8,
+    system_libraries: []const []const u8,
+    system_frameworks: []const []const u8,
 };
 
 pub const SdkDependency = enum {
@@ -169,6 +178,10 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         .link_libc = lock.link.requires_c_runtime,
         .sdk_dependency = target.sdk_dependency,
         .runtime_files = .{ b.pathJoin(&.{ root, runtime_files[0] }), b.pathJoin(&.{ root, runtime_files[1] }) },
+        .bindings_source_root = b.pathJoin(&.{ root, "bindings/zig/src" }),
+        .static_library = b.pathJoin(&.{ root, static_library }),
+        .system_libraries = lock.link.system_libraries,
+        .system_frameworks = lock.link.system_frameworks,
     };
 }
 
