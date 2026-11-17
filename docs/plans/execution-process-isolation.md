@@ -28,6 +28,8 @@
 
 自动标题因此按 §4.3 既有的那条形状走：执行侧跑模型、Product 提交记录，与自动审批复核同形。
 
+**但这个形状有一处不得焊死:`execute` 的契约不得假定调用方正阻塞着等。** 拆开之后「UI 侧每个在飞 Run 占一个阻塞线程」从一个实现细节变成一条跨进程契约,而线程栈在这个产品里是量过的问题(#147:16 MiB 栈撑出约 780 MB commit)。拆开后显然的下一步是驱动改成完成式、UI 不再为在飞 Run 占线程。协议本身已经够用——`frame.Header` 带 `correlation: u64`,所以那是驱动侧的改动而不是重开协议。因此一期必须保证:**终态能被投给一个已经不在等的调用方。** 这与 §5 那条「一期必须预留关联身份字段,否则后续方向要重开协议」是同一条教训,换了个字段。
+
 前置重构已经落地（PR #211），一期不必再做：`src/agent/contract.zig` 是 archive-free 的契约模块根，`src/agent/session/surface.zig` 是纯数据声明，`src/agent/session/port.zig` 是 vtable 端口、`port_impl.zig` 是唯一的进程内实现。`src/product/` 整目录已无 `metawork_agent` 导入，Product 经 `metawork_agent_contract` 与 port 面访问 Agent。
 
 但 port 面**不是**边界的全部调用面，本文先前那句「换掉 `port_impl.zig` 这一组 vtable 就是边界的全部调用面」是错的，实施第 3 步时核出来的。除 port 的 52 个方法之外，Product 还在进程内**直接调用 Agent 自有 opaque 句柄上的方法**，这些调用一条都不经过 `port.zig`：
@@ -41,6 +43,25 @@
 合计约 59 处。它们全部是 MCP 形状的，所以归第 4 步；但第 4 步因此不只是「重建 transport owner」，还包括把这三个类型在 Product 侧的表达从 opaque 句柄换成数据投影。
 
 方向上这不应该变成 59 个新 RPC：这些读取的都是句柄创建后不再变化的数据，所以正确的形状是**投影随 activation/selection 过界一次，UI 侧本地回答这些读取**，与 `catalog.Projection` 过界的处理同构。`takeSelection` 与各 `deinit` 是例外，它们改变 exec 侧状态，必须成为 port 调用。该方向待评审，本文不先按它改步骤划分。
+
+### 2.1 本节前提审计（2026-11-18）
+
+本节已经出过五条错前提，全部是动手建才翻的、读类型面一条都没翻出来。五条集中在一节，这是关于**本节**的事实，不是五件独立的事，所以在声称后续步骤形状之前逐条审一遍。判据是对着代码核，不是对着注释核——翻掉的五条里有三条的来源正是一条没人核过的注释。
+
+| 前提 | 状态 | 依据 |
+| --- | --- | --- |
+| 缝在 Product ↔ Agent，不在 ABI | 已核实 | 阻塞式 ABI 调用见下条；Product 侧状态提交见 `executeRun` 那段 |
+| `runText`/`runMultimodal` 是阻塞调用，返回即终态 | 已核实（表述收紧） | 它们是 AgentCore 的 ABI 入口，由 `src/agent/session.zig:1999`/`:2007` 调用，不是本仓库的函数；`const status = switch (…) { … }` 取的就是返回值，所以同步阻塞成立。本文先前写成「`src/agent/session.zig` 的 `runText`」，归属不准 |
+| 16 worker 池与 `executeRun` 整体属于执行侧 | **已更正** | 同一线程交替调 Agent 与改写 Product 状态，见上 |
+| `contract.zig` 是 archive-free 的契约模块根 | 已核实 | 静态归档只由 `build.zig` 对 `session` 模块 `addObjectFile`，契约模块不在其列 |
+| `surface.zig` 是纯数据声明 | **已更正** | 该文件头注自称「Everything here is plain data」，但 `SessionOpenOptions` 与 `SessionRestoreOptions` 持 `?*CatalogLease` 与 `?*const McpSelection`、`ImageGenerationRunInput` 持 transport、`PendingUiRequest` 持 allocator。结构化 codec 把这四项分别判为 handle_pointer、handle_pointer、untyped_pointer、allocator。头注那句「A value that retains a live Session or Runtime belongs in `port.zig`」与文件自身内容不符 |
+| `port_impl.zig` 是唯一的进程内实现 | 已核实 | 全仓只有该文件填这组 vtable |
+| `src/product/` 已无 `metawork_agent` 导入 | 已核实 | 架构守卫断言，当前为 0 |
+| port 面是边界的全部调用面 | **已更正** | 句柄方法绕过 port，见下表 |
+| 句柄方法「约 59 处」 | **已更正为 68** | 先前那串是裸 grep：`isEmpty` 5 里只有 1 处是 `RestoreSelection`（其余是 `terminal_receipts.isEmpty`）、`state` 2 处漏列、`catalogIssues` 与 `registryGeneration` 实为 0 处。按接收者归属后 projected 48 + call 10 + release 10 = 68 |
+| 主线程只做出站写、不发起链路调用 | **已更正** | `control/runtime.zig` 里出现 19 个 port 方法名，含 `querySkillCatalog` 与 `activateMcp` 两个重调用。逐站点的线程归属仍欠，见 4.2 |
+
+**审计的结论不是「本节现在对了」，是「本节的错误率高到要用机制而不是用阅读来守」。** 凡本节声称的结构事实，只要能被编译器或测试表达，就必须被表达；不能被表达的，必须在本表里标明状态与依据。
 
 | 入口 | 本轮角色 |
 | --- | --- |
