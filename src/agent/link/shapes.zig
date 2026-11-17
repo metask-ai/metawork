@@ -323,17 +323,37 @@ pub const PendingUiRequest = struct {
 /// and only the identity of the blob comes back in the outcome.
 pub const CheckpointDestination = struct {
     task_id: u64,
-    /// The generation the caller expects to write, so a stale request cannot
-    /// overwrite a newer blob.
-    expected_generation: u64,
+    /// The generation this export belongs to. It travels because the caller's
+    /// admission compares it against the Task's current checkpoint, so it is a
+    /// correlation fact, not a defence: the store already makes an overwrite
+    /// structurally impossible, since a blob is named by its generation and
+    /// its digest and the commit refuses a name that exists.
+    ///
+    /// It deliberately does not promise an early refusal of a stale export.
+    /// Claiming that would need a result the caller can tell apart from any
+    /// other contract failure, and `SinkWriteResult` has no such value; folding
+    /// it into `contract_failed` would make a diagnostic name the wrong cause.
+    /// Adding one for an optimisation is not worth changing the sink contract
+    /// the Core writes through.
+    generation: u64,
     hard_bytes: u64,
 };
 
 /// The delivery root a Run may hand files into. The inspection callback is
-/// composed in the execution half against this root; the root is the authority
-/// and the caller states it, exactly as it does in process.
+/// composed in the execution half against this root.
+///
+/// The root is not trusted on arrival. In process the component that states it
+/// is the one that confirmed it, so "canonical" is a fact; across the link it
+/// is a string the peer asserted, and section 6 is explicit that a trusted
+/// Workspace comes only from a Host's own native selection and that the Host
+/// revalidates paths and resource scope. So the execution half revalidates it
+/// under the same constraint the write path already applies -- resolution
+/// beneath the root rather than trust in the name.
+///
+/// This is the second property that is free in process and has to be stated
+/// after the split, alongside the reviewer's redaction order.
 pub const FileDeliveryRoot = struct {
-    canonical_root: []const u8,
+    asserted_root: []const u8,
 };
 
 // ---------------------------------------------------------------------------

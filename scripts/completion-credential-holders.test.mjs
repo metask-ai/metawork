@@ -41,21 +41,13 @@ const expected_sites = [
   "src/product/task/execution.zig",
 ];
 
-// KNOWN LIMITATION, deliberately recorded rather than left to be rediscovered.
-//
-// This scan is anchored on the consumer's spelling, and the repository already
-// contains a shape that walks past it: src/product/control/runtime.zig around
-// line 8394 forwards `completion_factory.context` and `.create_fn` into
-// `task/execution.zig`'s own `CompletionFactory`, which is a second type with
-// the same name. Another re-wrap under a different field name would be
-// invisible here.
-//
-// The tighter anchor is the producer, and there is exactly one: `createCompletion`
-// is defined once in src/app/completion_http_transport.zig and handed over once
-// in src/app.zig. Pinning those two counts, alongside this scan, leaves far less
-// spelling freedom than "whatever the field is called". Scheduled with the next
-// change to this guard; until then, read this test as "no new consumer spelling",
-// not as "no new holder".
+// The scan below is anchored on the consumer's spelling, which the repository
+// can already walk past: src/product/control/runtime.zig around line 8394
+// forwards `completion_factory.context` and `.create_fn` into
+// `task/execution.zig`'s own `CompletionFactory`, a second type with the same
+// name, and another re-wrap under a different field name would be invisible to
+// it. So the consumer scan is not the guard -- the producer below is, and the
+// two together are what make a new holder hard to add quietly.
 test("the independent Completion holders are exactly the recorded set", () => {
   const sites = zigFiles("src/").filter((path) =>
     /completion_factory\.create\(/.test(read(path)),
@@ -114,4 +106,39 @@ test("a Run's own credential reaches the model as a bounded copy", () => {
   const execution = read("src/product/task/execution.zig");
   assert.match(execution, /\.copy\(std\.heap\.c_allocator\)/);
   assert.match(execution, /defer credential\.deinit\(\);/);
+});
+
+/**
+ * The producer side, which is the tighter anchor.
+ *
+ * Every independent Completion in the product comes from one function, handed
+ * to the owners exactly once. A new credential holder therefore needs either a
+ * second constructor or a second handover, and both are far harder to spell
+ * around than "whatever the factory field is called". These two counts are the
+ * reason the consumer scan above does not have to be airtight.
+ */
+test("there is exactly one Completion constructor, handed over exactly once", () => {
+  const definitions = zigFiles("src/").flatMap((path) => {
+    const matches = read(path).match(/pub fn createCompletion/g) ?? [];
+    return matches.map(() => path);
+  });
+  assert.deepEqual(
+    definitions,
+    ["src/app/completion_http_transport.zig"],
+    "the independent Completion constructor moved or gained a sibling; a " +
+      "second constructor is a second Metask credential holder",
+  );
+
+  const handovers = zigFiles("src/").flatMap((path) => {
+    // The constructor named as a value, which is the only way an owner can
+    // receive it. The definition itself is excluded by requiring no `pub fn`.
+    const matches = read(path).match(/(?<!pub fn )createCompletion/g) ?? [];
+    return matches.map(() => path);
+  });
+  assert.deepEqual(
+    handovers,
+    ["src/app.zig"],
+    "the independent Completion constructor is handed to someone new; a " +
+      "second handover is a second credential holder",
+  );
 });
