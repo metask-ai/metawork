@@ -28,6 +28,9 @@ const error_code = @import("error_code.zig");
 const payload = @import("payload.zig");
 const checkpoint = @import("agent_checkpoint");
 const catalog = @import("agent_catalog");
+const mcp_catalog = @import("agent_mcp_catalog");
+const checkpoint_restore = @import("agent_checkpoint_restore");
+const handle_table = @import("handle_table.zig");
 const image_generation = contract.image_generation;
 const generate_video = contract.generate_video;
 
@@ -436,6 +439,85 @@ pub const CatalogProjection = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// A borrowed handle becomes an id the far side's table resolves
+// ---------------------------------------------------------------------------
+
+/// `surface.SessionOpenOptions` with its two borrowed handles named by id.
+///
+/// The skill catalog lease and the MCP selection both live in the execution
+/// half, issued by an earlier call and handed straight back here. Nothing else
+/// in the options is a capability, so everything else is itself.
+pub const SessionOpenOptions = struct {
+    model_binding: model_binding_type,
+    permission_mode: control.PermissionMode,
+    shell_policy: control.ShellPolicy,
+    permission_interaction: surface.PermissionInteraction,
+    workspace: surface.WorkspaceInput,
+    canonical_user_home: []const u8,
+    workspace_epoch: []const u8,
+    skill_catalog: ?handle_table.Id,
+    skill_policy: ?surface.SkillPolicyInput,
+    mcp_selection: ?handle_table.Id,
+    operation_id_floor: surface.OperationIdFloor,
+};
+
+const model_binding_type = @FieldType(surface.SessionOpenOptions, "model_binding");
+
+/// Where a restore reads its checkpoint from. The source is a byte callback
+/// and does not cross; the execution half opens the blob itself, which is the
+/// same division the export already uses -- only the identity of the blob
+/// travels, never its bytes.
+pub const CheckpointSourceDescriptor = struct {
+    task_id: u64,
+    generation: u64,
+    digest: [32]u8,
+    byte_size: u64,
+};
+
+/// `surface.SessionRestoreOptions` with the session options above, a source
+/// descriptor in place of the read callback, and the expectation as data.
+pub const SessionRestoreOptions = struct {
+    session: SessionOpenOptions,
+    checkpoint_limits: contract.CheckpointLimits,
+    source: CheckpointSourceDescriptor,
+    expectation: checkpoint_restore.Expectation,
+};
+
+/// `catalog.Acquisition`: the lease stays behind as an id, the projection is
+/// data.
+pub const CatalogAcquisition = struct {
+    lease: handle_table.Id,
+    projection: CatalogProjection,
+};
+
+/// What an MCP activation projects. These are the eight reads `handles.zig`
+/// classifies as fixed once the activation is built, so they ride across with
+/// the handle and the caller answers them locally. `catalogAgeMs` is absent on
+/// purpose: it is elapsed time against the clock now, and a projected age is
+/// stale the instant it crosses while looking exactly like a fresh one.
+pub const McpActivationProjection = struct {
+    registry_generation: u64,
+    catalog_generation: u64,
+    state: mcp_catalog.ActivationState,
+    server_health: []const mcp_catalog.ActivationServer,
+    selected_tools: []const mcp_catalog.ActivationTool,
+    catalog_servers: []const mcp_catalog.Server,
+    catalog_tools: []const mcp_catalog.Tool,
+    catalog_issues: []const mcp_catalog.Issue,
+};
+
+/// `surface.McpActivationOutcome` with the activation named by id and its
+/// fixed reads projected beside it.
+pub const McpActivationOutcome = union(enum) {
+    empty,
+    activated: struct {
+        activation: handle_table.Id,
+        projection: McpActivationProjection,
+    },
+    unavailable: surface.McpActivationUnavailableReason,
+};
+
 comptime {
     // Every shape in this file is one the wire can actually carry. Without
     // this, a mirror could pick up a field that is itself unshippable and the
@@ -455,6 +537,12 @@ comptime {
     payload.requireStructural(CatalogQuery);
     payload.requireStructural(ImageGenerationBinding);
     payload.requireStructural(VideoGenerationBinding);
+    payload.requireStructural(SessionOpenOptions);
+    payload.requireStructural(CheckpointSourceDescriptor);
+    payload.requireStructural(SessionRestoreOptions);
+    payload.requireStructural(CatalogAcquisition);
+    payload.requireStructural(McpActivationProjection);
+    payload.requireStructural(McpActivationOutcome);
 }
 
 /// Asserts that a mirror and its original describe the same thing: every
@@ -485,6 +573,9 @@ comptime {
     mirrors(CatalogQuery, catalog.Query, &.{});
     mirrors(ImageGenerationBinding, image_generation.BindingInput, &.{});
     mirrors(VideoGenerationBinding, generate_video.Input, &.{});
+    mirrors(SessionOpenOptions, surface.SessionOpenOptions, &.{});
+    mirrors(SessionRestoreOptions, surface.SessionRestoreOptions, &.{});
+    mirrors(CatalogAcquisition, catalog.Acquisition, &.{});
 }
 
 const testing = std.testing;

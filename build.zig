@@ -1689,6 +1689,7 @@ fn wireAgentCore(
     agent_link.addImport("agent_mcp_catalog", agent_mcp_catalog);
     agent_link.addImport("agent_catalog", agent_catalog);
     agent_link.addImport("agent_checkpoint", agent_checkpoint);
+    agent_link.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
     // The two halves of the process seam. They live in their own modules so a
     // test fixture can stand in for the execution half without the Renderer
     // bundle the application executable carries.

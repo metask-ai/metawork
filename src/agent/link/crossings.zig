@@ -138,25 +138,29 @@ pub const crossings = [_]Crossing{
     crossing(contract.surface.McpActivationUnavailableReason, .structural, ""),
 
     // A borrowed lease, selection or activation lives in the execution half.
-    crossing(
+    shaped(
         contract.SessionOpenOptions,
         .{ .substituted = .handle_pointer },
         "skill lease id and MCP selection id",
+        shapes.SessionOpenOptions,
     ),
-    crossing(
+    shaped(
         contract.SessionRestoreOptions,
         .{ .substituted = .handle_pointer },
         "the open options' ids plus a checkpoint source descriptor",
+        shapes.SessionRestoreOptions,
     ),
-    crossing(
+    shaped(
         contract.CatalogAcquisition,
         .{ .substituted = .handle_pointer },
         "lease id plus the projection below",
+        shapes.CatalogAcquisition,
     ),
-    crossing(
+    shaped(
         contract.McpActivationOutcome,
         .{ .substituted = .handle_pointer },
         "activation id plus its projection",
+        shapes.McpActivationOutcome,
     ),
 
     // An owner that holds its bytes through an allocator: the bytes cross, the
@@ -298,8 +302,10 @@ test "the inventory is still true, and says something about every entry" {
         .substituted => try std.testing.expect(entry.shape.len != 0),
     };
     try std.testing.expectEqual(@as(usize, 22), structural);
-    try std.testing.expectEqual(@as(usize, 13), shapedCount());
-    try std.testing.expectEqual(@as(usize, 4), owed());
+    try std.testing.expectEqual(@as(usize, 17), shapedCount());
+    try std.testing.expectEqual(@as(usize, 0), owed());
+    // The criterion the step ends on, asserted rather than counted by hand.
+    try std.testing.expect(closed());
     try std.testing.expectEqual(crossings.len, structural + shapedCount() + owed());
 }
 
