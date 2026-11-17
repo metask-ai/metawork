@@ -322,8 +322,35 @@ function systemPrompt(payload) {
         .join("\n");
 }
 
+// The Windows download constraints are a host `host:` section, not a kernel
+// replacement, so the only proof they take effect is their text arriving in the
+// system content the provider is actually sent. This asserts that the section is
+// present exactly on the platform whose shell it constrains; whether the
+// resulting commands avoid a local security product's modal prompt is not
+// observable here, and no assertion claims it.
+function assertHostDownloadGuidance(prompt) {
+  const expected = [
+    "Windows network downloads: fetch bytes with `curl.exe`",
+    "bare `curl` is a PowerShell alias for `Invoke-WebRequest`",
+    "If one of them is unavoidable, pass `-UseBasicParsing`",
+    "Fetch several files in one command rather than one command per file.",
+  ];
+  for (const fragment of expected)
+    if (process.platform === "win32")
+      assert.ok(
+        prompt.includes(fragment),
+        `Windows download guidance must reach the provider: ${fragment}`,
+      );
+    else
+      assert.ok(
+        !prompt.includes(fragment),
+        `Windows-only guidance must not reach a ${process.platform} provider: ${fragment}`,
+      );
+}
+
 function assertHostIdentity(payload, child) {
   const prompt = systemPrompt(payload);
+  assertHostDownloadGuidance(prompt);
   assert.ok(
     prompt.includes(
       child
