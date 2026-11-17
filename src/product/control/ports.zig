@@ -3,7 +3,7 @@
 //! coordinators; these values are callback-scoped and must not enter jobs.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const account = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");

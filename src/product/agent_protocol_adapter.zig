@@ -5,7 +5,7 @@
 //! the admitted subset here exactly once.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const models_contract = @import("metawork_product_models_contract");
 
 pub fn toAgent(protocol: models_contract.Protocol) agent.Protocol {

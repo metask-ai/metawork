@@ -3,7 +3,7 @@
 //! projection buffer, or snapshot writer.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const task_state = @import("product_task_state");
 const task_attachment = @import("product_task_attachment");
 const task_recovery = @import("product_task_recovery");

@@ -6,7 +6,7 @@
 const std = @import("std");
 const credential_match = @import("product_credential_match");
 const search_casefold = @import("search_casefold.zig");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const models_contract = @import("metawork_product_models_contract");
 const task_state = @import("product_task_state");
 pub const SendInputResult = task_state.SendInputResult;
@@ -586,7 +586,7 @@ pub const RecoveryStartInput = struct {
     continuation_source_id: ?u64 = null,
     /// Pending approval transaction identity for synchronous recovery admission.
     approval_revision: ?u64 = null,
-    agent_runtime: *agent.Runtime,
+    agent_runtime: agent.RuntimePort,
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_limits: agent.CheckpointLimits,
     notifier: task_execution.Notifier,
@@ -658,7 +658,7 @@ pub const CreateWorkspaceTrust = union(enum) {
 };
 
 pub const CreateTaskInput = struct {
-    agent_runtime: *agent.Runtime,
+    agent_runtime: agent.RuntimePort,
     execution: models_contract.ConfigInput,
     protocol: task_state.Protocol,
     model: []const u8,
@@ -4094,7 +4094,7 @@ pub const Runtime = struct {
         startCloseWorker(task, notifier, false) catch |err| {
             task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
             task.runtime.restore_catalog = null;
-            task.runtime.parked_capabilities.?.deinit() catch {};
+            task.runtime.parked_capabilities.?.release() catch {};
             task.runtime.parked_capabilities = null;
             return err;
         };
@@ -6799,15 +6799,15 @@ pub const Runtime = struct {
         if (!effects.authorized_fn(effects.context, execution.provider_id)) return false;
         const capabilities = if (rebind.capabilities) |*value| value else return true;
         const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
-        defer if (current.skill) |value| value.deinit() catch {};
+        defer if (current.skill) |value| capabilities.original.agent.releaseSkillRestoreInputs(value) catch {};
         defer if (current.mcp) |value| value.deinit();
         return sameRestoreFilters(capabilities, current);
     }
 
     fn sameRestoreFilters(capabilities: *const RestoreCapabilities, current: RestoreFilters) bool {
         if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
-        const before_ids = if (capabilities.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
-        const after_ids = if (current.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        const before_ids = if (capabilities.skill) |value| capabilities.original.agent.borrowSkillRestoreInputs(value).policy.granted_skill_ids else &.{};
+        const after_ids = if (current.skill) |value| capabilities.original.agent.borrowSkillRestoreInputs(value).policy.granted_skill_ids else &.{};
         if (before_ids.len != after_ids.len) return false;
         for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
         const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
@@ -6824,9 +6824,9 @@ pub const Runtime = struct {
         const rebind = if (job.rebind) |*value| value else return false;
         const capabilities = if (rebind.capabilities) |*value| value else return true;
         const current = effects.prepare_fn(effects.context, task_id, &capabilities.original) catch return false;
-        if (capabilities.skill) |value| value.deinit() catch {
+        if (capabilities.skill) |value| capabilities.original.agent.releaseSkillRestoreInputs(value) catch {
             capabilities.skill = null;
-            if (current.skill) |replacement| replacement.deinit() catch {};
+            if (current.skill) |replacement| capabilities.original.agent.releaseSkillRestoreInputs(replacement) catch {};
             if (current.mcp) |replacement| replacement.deinit();
             return false;
         };
@@ -6868,8 +6868,8 @@ pub const Runtime = struct {
         var original = parked;
         original.skill = null;
         original.mcp = null;
-        errdefer original.deinit() catch {};
-        if (parked.skill) |skill| original.skill = try skill.clone();
+        errdefer original.release() catch {};
+        if (parked.skill) |skill| original.skill = try parked.agent.cloneSkillRestoreInputs(skill);
         if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
         return original;
     }
@@ -7539,7 +7539,7 @@ pub const Runtime = struct {
                 if (task.runtime.parked_capabilities != null and task.runtime.attached() != null) {
                     task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
                     task.runtime.restore_catalog = null;
-                    task.runtime.parked_capabilities.?.deinit() catch {};
+                    task.runtime.parked_capabilities.?.release() catch {};
                     task.runtime.parked_capabilities = null;
                 }
             },
@@ -8073,7 +8073,7 @@ pub const Runtime = struct {
                         pinned = task.runtime.restore_catalog;
                         task.runtime.restore_catalog = null;
                         if (pinned) |*snapshot| for (snapshot.skills) |*skill| {
-                            const granted = if (rebind.capabilities) |capabilities| if (capabilities.skill) |inputs| inputs.borrow().policy.granted_skill_ids else &.{} else &.{};
+                            const granted = if (rebind.capabilities) |capabilities| if (capabilities.skill) |inputs| capabilities.original.agent.borrowSkillRestoreInputs(inputs).policy.granted_skill_ids else &.{} else &.{};
                             skill.enabled = skill.enabled and for (granted) |id| {
                                 if (std.mem.eql(u8, id, skill.skill_id)) break true;
                             } else false;
@@ -8092,7 +8092,7 @@ pub const Runtime = struct {
                         .pinned_catalog = pinned,
                     } };
                     if (task.runtime.parked_capabilities) |*inputs| {
-                        inputs.deinit() catch {};
+                        inputs.release() catch {};
                         task.runtime.parked_capabilities = null;
                     }
                     task.conversation_observation = .{};
@@ -11184,7 +11184,7 @@ fn deinitTask(
     std.debug.assert(!task.runtime.worker_leases.hasLive());
     std.debug.assert(task.runtime.restore_job == null);
     if (task.runtime.parked_capabilities) |*inputs| {
-        inputs.deinit() catch {};
+        inputs.release() catch {};
         task.runtime.parked_capabilities = null;
     }
     if (task.runtime.restore_catalog) |*snapshot| {

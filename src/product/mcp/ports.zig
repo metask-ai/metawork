@@ -1,7 +1,7 @@
 //! Narrow effects consumed by the Product MCP aggregate and refresh worker.
 //! Capability values grant no Workbench, concrete Executor, or Agent Runtime identity.
 
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const std = @import("std");
 
 pub const CatalogError = agent.Error || std.mem.Allocator.Error;

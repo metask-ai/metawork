@@ -1,6 +1,6 @@
 //! One independently owned, bounded-lifetime review. No Task/Run references.
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const task = @import("metawork_product_task");
 const reviewer = @import("product_permission_review");
 

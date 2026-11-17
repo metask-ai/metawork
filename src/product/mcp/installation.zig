@@ -1,6 +1,6 @@
 //! Capacity-one, nonblocking Agent ingress. Canonical pending data stays on main.
 const std = @import("std");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const ports = @import("product_mcp_ports");
 
 pub const Payload = struct {

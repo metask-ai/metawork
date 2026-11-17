@@ -2462,7 +2462,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     var workbench_owner = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        agent_runtime,
+        agent_runtime.runtimePort(),
         .{ .worker_count = 1, .queue_capacity = 1 },
         .{ .mcp = .{
             .preparation = &preparation,
@@ -2697,7 +2697,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     var workbench_owner = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        agent_runtime,
+        agent_runtime.runtimePort(),
         .{
             .worker_count = 1,
             .queue_capacity = 1,

@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const agent = @import("metawork_agent");
+const agent = @import("metawork_agent_contract");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const task_state = @import("product_task_state");

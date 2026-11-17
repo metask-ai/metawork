@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
         artifacts.exe.headerpad_size = 0x1000;
     const target_id = agentCoreTargetId(app_target);
     const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
-    const bundle = agentcore_bundle.verify(b, root);
+    const bundle = agentcore_bundle.verify(b, root, target_id);
     const office_skill_shell_step = b.step("build-office-skill-shell", "Build canonical Core materialized Office Skill qualification");
     for (bundle.runtime_files) |file| {
         const install = b.addInstallBinFile(.{ .cwd_relative = file }, std.fs.path.basename(file));
@@ -303,6 +303,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-catalog", .root_module = test_modules.agent_catalog },
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
+        .{ .name = "metawork-agent-contract", .root_module = test_modules.agent_contract },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
@@ -364,6 +365,8 @@ pub fn build(b: *std.Build) void {
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_schedule_state or spec.root_module == test_modules.product_schedule_persistence or spec.root_module == test_modules.product_schedule_view or spec.root_module == test_modules.product_schedule_runtime)
             schedule_tests.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.agent_contract)
+            b.step("test-agent-contract", "Run the Agent contract declarations and codec tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -900,6 +903,7 @@ const WiredModules = struct {
     image_container: *std.Build.Module,
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
+    agent_contract: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -1451,16 +1455,32 @@ fn wireAgentCore(
         existingImport(runner, "app_manifest_zon"),
     );
     product_identity.addOptions("metawork_artifact_options", artifact_options);
-    const dependency_options = .{
+    // The bundle's own package attaches the static archive to its
+    // `metask_agentcore` module, which would put the archive on the link line
+    // of every compilation that merely needs the declarations or the JSON
+    // codec. Compose the same module here instead, from the same
+    // checksum-pinned sources, and attach the archive to the one module that
+    // reaches the ABI entry point. Declarations and codecs stay archive-free,
+    // and there is still exactly one instance of each so a decoded event keeps
+    // one type across the whole graph.
+    const sdk_types = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ bundle.bindings_source_root, "types.zig" }) },
         .target = target,
         .optimize = root_module.optimize,
-    };
-    const sdk = switch (bundle.sdk_dependency) {
-        .macos_arm64 => b.dependency("agentcore_macos_arm64", dependency_options),
-        .macos_x64 => b.dependency("agentcore_macos_x64", dependency_options),
-        .windows_arm64 => b.dependency("agentcore_windows_arm64", dependency_options),
-        .windows_x64 => b.dependency("agentcore_windows_x64", dependency_options),
-    }.module("metask_agentcore");
+    });
+    const sdk_protocol = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ bundle.bindings_source_root, "protocol.zig" }) },
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const sdk = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ bundle.bindings_source_root, "root.zig" }) },
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    sdk.addImport("metask_agentcore_types", sdk_types);
+    sdk.addImport("metask_agentcore_protocol", sdk_protocol);
+    sdk.link_libc = bundle.link_libc;
     const agent_protocol = b.createModule(.{
         .root_source_file = b.path("src/agent/protocol.zig"),
         .target = target,
@@ -1580,16 +1600,49 @@ fn wireAgentCore(
     agent_checkpoint_restore.addImport("metask_agentcore", sdk);
     agent_checkpoint_restore.addImport("agent_checkpoint", agent_checkpoint);
     agent_checkpoint_restore.addImport("agent_model_binding", agent_model_binding);
+    // Declarations, limits and codecs that the Product names, kept in a module
+    // of their own so they carry no path to the ABI entry point and no
+    // archive. `src/agent/contract.zig` states the rule it enforces.
+    const agent_contract = b.createModule(.{
+        .root_source_file = b.path("src/agent/contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_contract.addImport("metask_agentcore", sdk);
+    agent_contract.addImport("agent_protocol", agent_protocol);
+    agent_contract.addImport("agent_file_delivery", agent_file_delivery);
+    agent_contract.addImport("agent_http_transport", agent_http_transport);
+    agent_contract.addImport("image_container", image_container);
+    agent_contract.addImport("agent_model_binding", agent_model_binding);
+    agent_contract.addImport("agent_catalog", agent_catalog);
+    agent_contract.addImport("agent_mcp_catalog", agent_mcp_catalog);
+    agent_contract.addImport("agent_checkpoint", agent_checkpoint);
+    agent_contract.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
+    agent_contract.addImport("agent_mcp_runtime", agent_mcp_runtime);
+    agent_contract.addImport("event_pump", event_pump);
+    agent_contract.addImport("agent_completion", agent_completion);
+    agent_contract.addImport("agent_mcp_connector", agent_mcp_connector);
+    agent_contract.addImport("agent_mcp_stdio", agent_mcp_stdio);
+    agent_contract.addImport("agent_mcp_http", agent_mcp_http);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
+    session.addImport("agent_contract", agent_contract);
     const core_identity = b.addOptions();
     core_identity.addOption([]const u8, "manifest_sha256", &bundle.manifest_sha256);
     core_identity.addOption(u16, "abi_revision", bundle.abi_revision);
     session.addOptions("agentcore_identity", core_identity);
     session.addImport("metask_agentcore", sdk);
+    // The ABI entry point is reached from this module only, so the archive and
+    // its link requirements belong here rather than on the shared bindings.
+    session.addObjectFile(.{ .cwd_relative = bundle.static_library });
+    session.link_libc = bundle.link_libc;
+    for (bundle.system_libraries) |library|
+        session.linkSystemLibrary(library, .{ .use_pkg_config = .no });
+    for (bundle.system_frameworks) |framework|
+        session.linkFramework(framework, .{});
     session.addImport("agent_file_delivery", agent_file_delivery);
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     session.addImport("agent_protocol", agent_protocol);
@@ -1619,6 +1672,10 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    // Declared here because the contract module is composed before both of
+    // these exist; nothing else about its wiring depends on the order.
+    agent_contract.addImport("agent_provider_probe", agent_provider_probe);
+    agent_contract.addImport("agentcore_identity", existingImport(session, "agentcore_identity"));
     agent_provider_probe.addImport("agent_completion", agent_completion);
     agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
@@ -1637,7 +1694,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_agent_protocol_adapter.addImport("metawork_agent", agent);
+    product_agent_protocol_adapter.addImport("metawork_agent_contract", agent_contract);
     product_agent_protocol_adapter.addImport(
         "metawork_product_models_contract",
         models_contract,
@@ -2019,19 +2076,19 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    catalog_snapshot.addImport("metawork_agent", agent);
+    catalog_snapshot.addImport("metawork_agent_contract", agent_contract);
     const product_skill_sources = b.createModule(.{
         .root_source_file = b.path("src/product/skill/sources.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_skill_sources.addImport("metawork_agent", agent);
+    product_skill_sources.addImport("metawork_agent_contract", agent_contract);
     const product_skill_state = b.createModule(.{
         .root_source_file = b.path("src/product/skill/state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_skill_state.addImport("metawork_agent", agent);
+    product_skill_state.addImport("metawork_agent_contract", agent_contract);
     product_skill_state.addImport("product_skill_catalog", catalog_snapshot);
     product_skill_state.addImport("product_skill_enablement", skill_enablement);
     product_skill_state.addImport("product_skill_management", skill_management);
@@ -2041,7 +2098,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_skill_policy.addImport("metawork_agent", agent);
+    product_skill_policy.addImport("metawork_agent_contract", agent_contract);
     product_skill_policy.addImport("product_skill_catalog", catalog_snapshot);
     product_skill_policy.addImport("product_skill_enablement", skill_enablement);
     product_skill_policy.addImport("product_skill_management", skill_management);
@@ -2062,14 +2119,14 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_skill_ports.addImport("metawork_agent", agent);
+    product_skill_ports.addImport("metawork_agent_contract", agent_contract);
     product_skill_ports.addImport("product_skill_sources", product_skill_sources);
     const product_skill_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/skill/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_skill_runtime.addImport("metawork_agent", agent);
+    product_skill_runtime.addImport("metawork_agent_contract", agent_contract);
     product_skill_runtime.addImport("product_skill_catalog", catalog_snapshot);
     product_skill_runtime.addImport("product_skill_enablement", skill_enablement);
     product_skill_runtime.addImport("product_skill_management", skill_management);
@@ -2120,13 +2177,13 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    task_agent_session.addImport("metawork_agent", agent);
+    task_agent_session.addImport("metawork_agent_contract", agent_contract);
     const task_attachment = b.createModule(.{
         .root_source_file = b.path("src/product/task/attachment.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    task_attachment.addImport("metawork_agent", agent);
+    task_attachment.addImport("metawork_agent_contract", agent_contract);
     task_attachment.addImport("product_task_agent_session", task_agent_session);
     task_attachment.addImport("metawork_product_skill", product_skill);
     task_attachment.addImport("product_task_execution_binding", owned_task_execution);
@@ -2146,7 +2203,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    task_recovery_job.addImport("metawork_agent", agent);
+    task_recovery_job.addImport("metawork_agent_contract", agent_contract);
     task_recovery_job.addImport("metawork_product_models_contract", models_contract);
     task_recovery_job.addImport("product_task_agent_session", task_agent_session);
     task_recovery_job.addImport("product_task_checkpoint_record", checkpoint_record);
@@ -2167,7 +2224,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_state.addImport("product_task_view_contract", task_view_contract);
-    task_state.addImport("metawork_agent", agent);
+    task_state.addImport("metawork_agent_contract", agent_contract);
     task_state.addImport("metawork_product_models_contract", models_contract);
     task_state.addImport("product_task_checkpoint_record", checkpoint_record);
     task_state.addImport("product_task_attachment", task_attachment);
@@ -2175,7 +2232,7 @@ fn wireAgentCore(
     task_state.addImport("product_task_recovery", task_recovery);
     task_state.addImport("product_task_worker_lease", task_worker_lease);
     task_state.addImport("product_task_execution_binding", owned_task_execution);
-    task_persistence.addImport("metawork_agent", agent);
+    task_persistence.addImport("metawork_agent_contract", agent_contract);
     task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
     task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);
     task_persistence.addImport("product_task_state", task_state);
@@ -2185,7 +2242,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    task_policy.addImport("metawork_agent", agent);
+    task_policy.addImport("metawork_agent_contract", agent_contract);
     task_policy.addImport("product_task_state", task_state);
     task_policy.addImport("product_task_attachment", task_attachment);
     task_policy.addImport("product_task_recovery", task_recovery);
@@ -2195,7 +2252,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    task_approval_job.addImport("metawork_agent", agent);
+    task_approval_job.addImport("metawork_agent_contract", agent_contract);
     task_approval_job.addImport("product_task_agent_session", task_agent_session);
     task_approval_job.addImport("product_task_checkpoint_record", checkpoint_record);
     task_approval_job.addImport("product_task_checkpoint_store", checkpoint_store);
@@ -2217,7 +2274,7 @@ fn wireAgentCore(
     task_runtime.addImport("product_task_approval_job", task_approval_job);
     task_runtime.addImport("product_permission_review", product_permission_review);
     task_runtime.addImport("product_task_persistence", task_persistence);
-    task_runtime.addImport("metawork_agent", agent);
+    task_runtime.addImport("metawork_agent_contract", agent_contract);
     task_runtime.addImport("metawork_product_models_contract", models_contract);
     task_runtime.addImport("product_task_policy", task_policy);
     task_runtime.addImport("metawork_product_skill", product_skill);
@@ -2241,7 +2298,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_execution.addImport("product_credential_match", credential_match);
-    task_execution.addImport("metawork_agent", agent);
+    task_execution.addImport("metawork_agent_contract", agent_contract);
     task_execution.addImport("product_task_checkpoint_record", checkpoint_record);
     task_execution.addImport("product_task_checkpoint_store", checkpoint_store);
     task_execution.addImport("product_task_execution_binding", owned_task_execution);
@@ -2263,7 +2320,7 @@ fn wireAgentCore(
     const task_view_fixture = b.addOptions();
     task_view_fixture.addOption([]const u8, "interrupted_compact", @embedFile("frontend/src/bridge/__fixtures__/compact-interrupted.fixture"));
     task_view.addOptions("task_view_fixture", task_view_fixture);
-    task_view.addImport("metawork_agent", agent);
+    task_view.addImport("metawork_agent_contract", agent_contract);
     task_view.addImport("metawork_product_skill", product_skill);
     task_view.addImport("product_task_state", task_state);
     task_view.addImport("product_task_policy", task_policy);
@@ -2304,14 +2361,14 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_mcp_state.addImport("metawork_agent", agent);
+    product_mcp_state.addImport("metawork_agent_contract", agent_contract);
     product_mcp_state.addImport("product_mcp_configuration", mcp_configuration);
     const product_mcp_policy = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/policy.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_mcp_policy.addImport("metawork_agent", agent);
+    product_mcp_policy.addImport("metawork_agent_contract", agent_contract);
     product_mcp_policy.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp_policy.addImport("product_mcp_state", product_mcp_state);
     const product_mcp_view = b.createModule(.{
@@ -2327,20 +2384,20 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_mcp_ports.addImport("metawork_agent", agent);
+    product_mcp_ports.addImport("metawork_agent_contract", agent_contract);
     const product_mcp_refresh_job = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/refresh_job.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_mcp_refresh_job.addImport("metawork_agent", agent);
+    product_mcp_refresh_job.addImport("metawork_agent_contract", agent_contract);
     product_mcp_refresh_job.addImport("product_mcp_ports", product_mcp_ports);
     const product_mcp_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_mcp_runtime.addImport("metawork_agent", agent);
+    product_mcp_runtime.addImport("metawork_agent_contract", agent_contract);
     product_mcp_runtime.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp_runtime.addImport("product_mcp_state", product_mcp_state);
     product_mcp_runtime.addImport("product_mcp_policy", product_mcp_policy);
@@ -2377,7 +2434,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_control_ports.addImport("metawork_agent", agent);
+    product_control_ports.addImport("metawork_agent_contract", agent_contract);
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_models_contract", models_contract);
     product_control_ports.addImport("product_models_ports", models_ports);
@@ -2439,7 +2496,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control_runtime.addImport("product_credential_match", credential_match);
-    product_control_runtime.addImport("metawork_agent", agent);
+    product_control_runtime.addImport("metawork_agent_contract", agent_contract);
     product_control_runtime.addImport("metawork_product_update", product_update);
     product_control_runtime.addImport("metawork_product_identity", product_identity);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
@@ -2723,6 +2780,7 @@ fn wireAgentCore(
         .image_container = image_container,
         .product_permission_review = product_permission_review,
         .agent_session = session,
+        .agent_contract = agent_contract,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

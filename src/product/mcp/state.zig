@@ -2,7 +2,7 @@
 //! This module owns product state, not Workbench executor workers.
 
 const std = @import("std");
-const lifecycle = @import("metawork_agent");
+const lifecycle = @import("metawork_agent_contract");
 const mcp_configuration = @import("product_mcp_configuration");
 
 pub const McpHostCapabilities = struct {

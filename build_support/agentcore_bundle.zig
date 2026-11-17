@@ -63,19 +63,26 @@ pub const Bundle = struct {
     abi_revision: u16,
     deployment_target: ?std.SemanticVersion,
     link_libc: bool,
-    sdk_dependency: SdkDependency,
     runtime_files: [2][]const u8,
+    /// Directory holding the bundle's source-free Zig bindings. The source
+    /// files below it are pure declarations and codecs: no ABI entry point and
+    /// nothing that requires the static library.
+    bindings_source_root: []const u8,
+    /// The checksum-pinned static archive. Only the module that reaches the
+    /// ABI entry point may carry it; see `wireAgentCore`.
+    static_library: []const u8,
+    system_libraries: []const []const u8,
+    system_frameworks: []const []const u8,
 };
 
-pub const SdkDependency = enum {
-    macos_arm64,
-    macos_x64,
-    windows_arm64,
-    windows_x64,
-};
-
-pub fn verify(b: *std.Build, root: []const u8) Bundle {
+/// `expected_target_id` is the bundle the consumer is building against. The
+/// locked manifest has to name exactly that target: nothing else in this file
+/// ties the bundle on disk to the compilation it is about to be linked into,
+/// and the bundle's own package -- which used to assert this as a side effect
+/// of being a dependency -- is no longer part of the build graph.
+pub fn verify(b: *std.Build, root: []const u8, expected_target_id: []const u8) Bundle {
     if (!std.fs.path.isAbsolute(root)) @panic("AgentCore bundle root must be absolute");
+    if (expected_target_id.len == 0) @panic("AgentCore bundle target id is required");
     const manifest_path = b.pathJoin(&.{ root, "manifest.json" });
     const manifest_bytes = readFile(b, manifest_path, 1024 * 1024, "cannot read AgentCore bundle manifest");
     const manifest = parseManifest(b, manifest_bytes);
@@ -93,6 +100,10 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     if (!std.mem.eql(u8, lock_bytes, manifest_bytes))
         @panic("AgentCore manifest bytes do not match the repository lock");
     const lock = parseManifest(b, lock_bytes);
+    if (!std.mem.eql(u8, lock.target.id, expected_target_id)) std.debug.panic(
+        "AgentCore bundle target mismatch: building {s}, locked bundle is {s}",
+        .{ expected_target_id, lock.target.id },
+    );
 
     if (lock.schema_version != 1 or
         !std.mem.eql(u8, lock.vendor, "metask") or
@@ -167,14 +178,16 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         .abi_revision = @intCast(lock.contract.binary_abi_revision),
         .deployment_target = target.deployment_target,
         .link_libc = lock.link.requires_c_runtime,
-        .sdk_dependency = target.sdk_dependency,
         .runtime_files = .{ b.pathJoin(&.{ root, runtime_files[0] }), b.pathJoin(&.{ root, runtime_files[1] }) },
+        .bindings_source_root = b.pathJoin(&.{ root, "bindings/zig/src" }),
+        .static_library = b.pathJoin(&.{ root, static_library }),
+        .system_libraries = lock.link.system_libraries,
+        .system_frameworks = lock.link.system_frameworks,
     };
 }
 
 fn validateTarget(manifest: Manifest) struct {
     deployment_target: ?std.SemanticVersion,
-    sdk_dependency: SdkDependency,
 } {
     if (!manifest.link.requires_c_runtime or manifest.link.system_frameworks.len != 0)
         @panic("unsupported AgentCore system link inputs");
@@ -186,7 +199,7 @@ fn validateTarget(manifest: Manifest) struct {
         std.mem.eql(u8, manifest.target.zig_target, "aarch64-windows.win10...win11_dt-msvc") and
         stringListsEqual(manifest.link.system_libraries, &.{ "advapi32", "crypt32" }))
     {
-        return .{ .deployment_target = null, .sdk_dependency = .windows_arm64 };
+        return .{ .deployment_target = null };
     }
     if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-msvc") and
         std.mem.eql(u8, manifest.target.os, "windows") and
@@ -196,7 +209,7 @@ fn validateTarget(manifest: Manifest) struct {
         std.mem.eql(u8, manifest.target.zig_target, "x86_64-windows.win10...win11_dt-msvc") and
         stringListsEqual(manifest.link.system_libraries, &.{ "advapi32", "crypt32" }))
     {
-        return .{ .deployment_target = null, .sdk_dependency = .windows_x64 };
+        return .{ .deployment_target = null };
     }
     if (std.mem.eql(u8, manifest.target.id, "aarch64-macos") and
         std.mem.eql(u8, manifest.target.os, "macos") and
@@ -208,7 +221,6 @@ fn validateTarget(manifest: Manifest) struct {
     {
         return .{
             .deployment_target = std.SemanticVersion.parse("13.0.0") catch unreachable,
-            .sdk_dependency = .macos_arm64,
         };
     }
     if (std.mem.eql(u8, manifest.target.id, "x86_64-macos") and
@@ -221,7 +233,6 @@ fn validateTarget(manifest: Manifest) struct {
     {
         return .{
             .deployment_target = std.SemanticVersion.parse("13.0.0") catch unreachable,
-            .sdk_dependency = .macos_x64,
         };
     }
     @panic("unsupported locked AgentCore target identity");
