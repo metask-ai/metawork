@@ -129,6 +129,9 @@ pub const TaskMutation = union(enum) {
     approval_mode: struct { profile_changes: bool },
     /// A manual compaction the user asked for.
     manual_compact,
+    /// An edited earlier message: the Conversation rewinds to that message's
+    /// position and the edited text reruns in its place.
+    rewind,
 };
 
 pub const MutationImpact = struct {
@@ -167,6 +170,17 @@ pub fn mutationImpact(mutation: TaskMutation) MutationImpact {
             .core_quiescence = .required,
             .queued_input = .held,
             .model_access = .required,
+        },
+        // Queued messages were written to follow a continuation this rewind
+        // removes, and a rewind performed after them would drop their turns
+        // too. Hand the text back for an explicit resend instead. The rewind
+        // itself calls no model; the Run that follows it is admitted through
+        // the ordinary input path, which requires the credential of its own.
+        .rewind => MutationImpact{
+            .execution_config = .unchanged,
+            .core_quiescence = .required,
+            .queued_input = .{ .resendable = .edit_and_rerun },
+            .model_access = .none,
         },
     };
 }
@@ -829,11 +843,37 @@ pub fn hasPendingConversationCoverage(task: *const task_state.Task) bool {
     return false;
 }
 
+/// Whether a rewind has taken this Run's turn out of the Conversation.
+///
+/// A rewind is only as durable as the Run that performed it. Core keeps no
+/// record of one, and the rewind reaches disk only when a committed
+/// checkpoint covers that Run; until then a restart restores a Conversation
+/// that predates it. So a supersession attributed to a Run that never made it
+/// into the Conversation is not in force, and the turn it named is back.
+pub fn runSuperseded(task: *const task_state.Task, run: *const task_state.RunRecord) bool {
+    const by = run.superseded_by_run_id orelse return false;
+    const performer = task_state.findRunConst(task.durable.runs, by) orelse return true;
+    return performer.coverage != .excluded;
+}
+
+/// The Run a rewind replaced the Conversation from, if this Run performed
+/// one. Reading it from the Runs it superseded keeps one fact in one place:
+/// the position itself is that Run's own recorded position.
+pub fn rewoundRunCount(task: *const task_state.Task, run_id: u64) u32 {
+    var count: u32 = 0;
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.superseded_by_run_id == run_id and runSuperseded(task, run)) count += 1;
+    }
+    return count;
+}
+
 pub fn lastConversationRunId(task: *const task_state.Task) ?u64 {
     var latest: u64 = 0;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (run.coverage == .excluded or
+            runSuperseded(task, run) or
             !run.event_stream_finalized or
             task_state.productTerminalFacts(run) == null)
             continue;

@@ -238,6 +238,14 @@ pub const Access = struct {
         return self.get().updatePermissionMode(expected, target);
     }
 
+    pub fn conversationBounds(self: *Access) !agent.ConversationBounds {
+        return self.get().conversationBounds();
+    }
+
+    pub fn rewindToUserMessage(self: *Access, position: u64) !agent.RewindOutcome {
+        return self.get().rewindToUserMessage(position);
+    }
+
     pub fn updateCredential(self: *Access, credential: []const u8) !void {
         return self.get().updateCredential(credential);
     }

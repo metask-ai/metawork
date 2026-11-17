@@ -718,6 +718,9 @@ pub const TaskWire = struct {
     binding: BindingWire,
     model_intent: ?ModelIntentWire = null,
     next_run_generation: u64,
+    /// The highest compaction boundary this Task has observed. Positions at
+    /// or below it were summarized away and can no longer be named.
+    compact_boundary: u64 = 0,
     active_operation: ?OperationWire,
     runs: []RunWire,
     input_submissions: []InputSubmissionWire = &.{},
@@ -843,6 +846,11 @@ pub const ModelErrorWire = struct {
 pub const RunWire = struct {
     id: u64,
     coverage: []const u8,
+    /// The Conversation position this Run's input took, read from `describe`
+    /// at submission. Null for history written before it was recorded.
+    conversation_position: ?u64 = null,
+    /// The Run whose rewind took this one's turn out of the Conversation.
+    superseded_by_run_id: ?u64 = null,
     generation: u64,
     execution_generation: u64,
     execution_protocol: []const u8,
@@ -979,6 +987,9 @@ pub const InputFailureReason = enum {
     resource_limit,
     checkpoint_budget_required,
     admission_failed,
+    rewind_compacted,
+    rewind_position_rejected,
+    rewind_failed,
 
     fn fromRuntime(reason: task_state.SendInputReason) ?InputFailureReason {
         return switch (reason) {
@@ -991,6 +1002,10 @@ pub const InputFailureReason = enum {
             .too_late,
             .continuation_cancelled,
             .approval_mode_change,
+            // Like an approval change, this one retires queued text and hands
+            // it back for an explicit resend; nothing about it outlives the
+            // process that decided it.
+            .edit_and_rerun,
             .combined_input_too_large,
             .checkpoint_failed,
             .schedule_failed,
@@ -1010,6 +1025,9 @@ pub const InputSubmissionWire = struct {
     submission: SubmissionWire,
     input: RunInputWire,
     state: []const u8,
+    /// An edited earlier message: the position the Conversation rewinds to
+    /// before this submission starts its Run.
+    rewind_to_position: ?u64 = null,
     failure_reason: ?InputFailureReason = null,
     blocking_task_id: ?u64 = null,
 };
@@ -1421,6 +1439,7 @@ pub fn projectTask(
             .model = task.durable.execution_model,
         },
         .next_run_generation = task.durable.next_run_generation,
+        .compact_boundary = task.durable.compact_boundary,
         .active_operation = switch (task.runtime.active_operation) {
             .none => null,
             .run => |id| .{ .kind = "run", .id = id },
@@ -1688,6 +1707,8 @@ fn projectRun(
     return .{
         .id = run.id,
         .coverage = @tagName(run.coverage),
+        .conversation_position = run.conversation_position,
+        .superseded_by_run_id = run.superseded_by_run_id,
         .generation = run.generation,
         .execution_generation = run.execution_generation,
         .execution_protocol = @tagName(run.execution_protocol),
@@ -2052,6 +2073,7 @@ pub fn restoreTask(
             .runs = runs,
             .compacts = compacts,
             .next_run_generation = wire.next_run_generation,
+            .compact_boundary = wire.compact_boundary,
             .ui_history = ui_history,
             .ui_history_count = wire.ui_history.len,
             .ui_history_next = wire.ui_history.len,
@@ -2287,6 +2309,8 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
     return .{
         .id = wire.id,
         .coverage = if (persisted_coverage == .pending) .excluded else persisted_coverage,
+        .conversation_position = wire.conversation_position,
+        .superseded_by_run_id = wire.superseded_by_run_id,
         .generation = wire.generation,
         .execution_generation = wire.execution_generation,
         .execution_protocol = parseEnum(task_state.Protocol, wire.execution_protocol) orelse
