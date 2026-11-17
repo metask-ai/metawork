@@ -125,7 +125,6 @@ import {
   WorkspaceFileTree,
   useWorkspaceFileTree,
 } from "../features/workspaces/WorkspaceFileTree.tsx";
-import { WorkspaceReferenceMenu } from "../features/workspaces/WorkspaceReferenceMenu.tsx";
 import {
   MediaLightbox,
   type MediaViewerTarget,
@@ -1762,28 +1761,6 @@ export default function App() {
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
-  const workspaceReferenceTarget =
-    !bridgeUnavailable &&
-    composerWorkspace?.authorization === "available" &&
-    !composerWorkspace.redacted &&
-    ((newTaskDraftActive &&
-      workbench.draftWorkspaceId === composerWorkspace.id &&
-      !composerWorkspace.projectRemoved) ||
-      (!newTaskDraftActive && activeTask))
-      ? {
-          taskId: newTaskDraftActive ? null : (activeTask?.id ?? null),
-          workspaceId: composerWorkspace.id,
-          workspaceEpoch: composerWorkspace.epoch,
-        }
-      : null;
-  const workspaceReferenceScope = JSON.stringify([
-    composerDraftScope,
-    bridgeGeneration,
-    snapshot.securityEpoch,
-    workspaceReferenceTarget,
-  ]);
-  const workspaceReferenceScopeRef = useRef(workspaceReferenceScope);
-  workspaceReferenceScopeRef.current = workspaceReferenceScope;
   const composerWorkspaceLabel =
     composerWorkspace?.canonicalRoot || t("workspace.select");
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
@@ -3354,14 +3331,10 @@ export default function App() {
   }
 
   async function addAttachments(
-    source: AddSource = { kind: "picker" },
-    referenceScope?: string,
+    source: Exclude<AddSource, { kind: "workspace_reference" }> = {
+      kind: "picker",
+    },
   ) {
-    const reference =
-      source.kind === "workspace_reference" ? source.reference : null;
-    const referenceCurrent = () =>
-      !reference || referenceScope === workspaceReferenceScopeRef.current;
-    if (!referenceCurrent()) return;
     if (attachmentBusyRef.current || attachmentRemoval.current.busy) {
       setAttachmentError("input_busy");
       return;
@@ -3390,9 +3363,7 @@ export default function App() {
         ? source.files.length
         : source.kind === "native_paths"
           ? source.paths.length
-          : source.kind === "workspace_reference"
-            ? 1
-            : null;
+          : null;
     if (
       remainingFiles === 0 ||
       (selectedCount !== null && selectedCount > remainingFiles)
@@ -3421,7 +3392,6 @@ export default function App() {
       attachmentOperation.current === operation &&
       composerDraftScopeRef.current === requestedScope &&
       bridgeGenerationRef.current === requestedGeneration &&
-      referenceCurrent() &&
       !operation.cancelled;
     try {
       // Ready grants from rejected sends yield when the user adds new files.
@@ -3461,16 +3431,9 @@ export default function App() {
         if (
           attachmentOperation.current === operation &&
           composerDraftScopeRef.current === requestedScope &&
-          referenceCurrent() &&
           (result.reason === "cleanup_failed" || !operation.cancelled)
         )
-          setAttachmentError(
-            reference && result.reason === "unsupported_type"
-              ? "workspace_reference_type"
-              : reference && result.reason === "text_file_too_large"
-                ? "workspace_reference_size"
-                : result.reason,
-          );
+          setAttachmentError(result.reason);
         return;
       }
       const current = target.currentDraft(targetId);
@@ -3500,11 +3463,7 @@ export default function App() {
         text: current.text,
         attachments: [
           ...(current.kind === "multimodal" ? current.attachments : []),
-          ...result.attachments.map((attachment) =>
-            reference
-              ? { ...attachment, workspacePath: reference.path }
-              : attachment,
-          ),
+          ...result.attachments,
         ],
       };
       const handedOff = add.handoff(() => {
@@ -4868,32 +4827,6 @@ export default function App() {
         }
         onDraftChange={updateComposerDraft}
         onChooseAttachments={() => void addAttachments()}
-        workspaceReferenceScope={
-          workspaceReferenceTarget ? workspaceReferenceScope : undefined
-        }
-        workspaceReferenceMenu={
-          workspaceReferenceTarget ? (
-            <WorkspaceReferenceMenu
-              files={{
-                scope: workspaceReferenceScope,
-                target: workspaceReferenceTarget,
-                load: (taskId, workspaceId, epoch, path, options) =>
-                  client.listWorkspaceDirectory(
-                    taskId,
-                    workspaceId,
-                    epoch,
-                    path,
-                    options,
-                  ),
-                choose: (reference) =>
-                  void addAttachments(
-                    { kind: "workspace_reference", reference },
-                    workspaceReferenceScope,
-                  ),
-              }}
-            />
-          ) : undefined
-        }
         onDropFiles={(files) => {
           if (
             client.attachmentInputMode === "file_bytes" &&

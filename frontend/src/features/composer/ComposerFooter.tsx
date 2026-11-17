@@ -96,8 +96,6 @@ function attachmentTypeLabel(
 
 function attachmentErrorMessage(reason: string): MessageId {
   const messages: Record<string, MessageId> = {
-    workspace_reference_type: "composer.reference_workspace_type",
-    workspace_reference_size: "composer.reference_workspace_size",
     unsupported_type: "attachment.error.unsupported_type",
     file_too_large: "attachment.error.file_too_large",
     text_file_too_large: "attachment.error.file_too_large",
@@ -164,8 +162,6 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
-  workspaceReferenceMenu,
-  workspaceReferenceScope,
   onDropFiles,
   onPasteImages,
   onCancelAttachments,
@@ -230,8 +226,6 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
-  workspaceReferenceMenu?: ReactNode;
-  workspaceReferenceScope?: string;
   onDropFiles?: (files: File[]) => void;
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
@@ -953,14 +947,13 @@ export function ComposerFooter({
                   </Button>
                 ) : (
                   <ComposerAddMenu
-                    key={workspaceReferenceScope ?? draftScope}
+                    key={draftScope}
                     triggerRef={attachmentButtonRef}
                     disabled={composeDisabled || attachmentActionsDisabled}
                     attachmentsEnabled={attachmentsEnabled}
                     skillText={draft.kind === "text" ? draft.text : null}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
-                    workspaceReferenceMenu={workspaceReferenceMenu}
                     onRefreshSkills={onRefreshSkillCatalog}
                     onChooseSkill={chooseCandidate}
                   />

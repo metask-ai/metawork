@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from "react";
+import type { RefObject } from "react";
 
 import type { SkillCatalogView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
@@ -14,7 +14,6 @@ export function ComposerAddMenu({
   skillText,
   skillCatalog,
   onChooseAttachments,
-  workspaceReferenceMenu,
   onRefreshSkills,
   onChooseSkill,
 }: {
@@ -24,7 +23,6 @@ export function ComposerAddMenu({
   skillText: string | null;
   skillCatalog: SkillCatalogView;
   onChooseAttachments: () => void;
-  workspaceReferenceMenu?: ReactNode;
   onRefreshSkills: () => void;
   onChooseSkill: (
     candidate: Extract<SlashCandidate, { kind: "skill" }>,
@@ -69,7 +67,6 @@ export function ComposerAddMenu({
                 {t("attachment.add")}
               </Menu.Item>
             )}
-            {attachmentsEnabled && workspaceReferenceMenu}
             <Menu.SubmenuRoot
               onOpenChange={(open) => {
                 if (open) onRefreshSkills();

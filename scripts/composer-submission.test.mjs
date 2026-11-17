@@ -2141,6 +2141,18 @@ async function selectManualSubmissionWorkspace(user) {
   );
 }
 
+for (const kind of ["manual", "automatic"])
+  test(`App offers files and Skills in the add menu for a ${kind} Workspace`, async (ctx) => {
+    await renderSubmissionApp(ctx, { workspace: { kind } });
+    const user = userEvent.setup({ document });
+    await user.click(screen.getByRole("button", { name: "Add to message" }));
+    await screen.findByRole("menuitem", { name: "Add files" });
+    assert.deepEqual(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+      ["Add files", "Add Skill"],
+    );
+  });
+
 test("App creates a separate Task when the same Workspace is used for another new task", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
