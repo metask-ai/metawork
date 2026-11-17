@@ -54,22 +54,33 @@ const scratch = await mkdtemp(
 // The Conversation the Provider is handed is the only evidence of what a
 // rewound-then-restored Session would actually rerun; the describe counter
 // alone could not tell a dropped turn from a renumbered one.
+//
+// The compaction phase pushes megabytes of filler through here, so only the
+// first few requests are kept whole. The rest keep a digest: the turn
+// markers present, which is all the later assertions read.
 const requests = [];
-const answers = [
-  "alpha answer",
-  "beta answer",
-  "gamma answer",
-  "compact summary",
-];
+const retain_whole = 3;
+const answers = ["alpha answer", "beta answer", "gamma answer"];
 let requestError;
 const server = createServer(async (request, response) => {
   try {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const body = Buffer.concat(chunks).toString("utf8");
+    const payload = JSON.parse(body);
     assert.equal(request.url, "/v1/chat/completions");
-    requests.push(payload.messages);
-    const answer = answers[requests.length - 1] ?? "unexpected extra answer";
+    requests.push({
+      messages: requests.length < retain_whole ? payload.messages : null,
+      roles: payload.messages.map((message) => message.role),
+      markers: [...new Set(body.match(/drift-marker-\d{3}/g) ?? [])].sort(),
+      bytes: body.length,
+    });
+    // A short reply throughout: the filler that has to reach the model's
+    // context window is the Host's own input, which the probe controls, so
+    // the summarization reply stays small enough for a compact to shrink
+    // anything.
+    const answer =
+      answers[requests.length - 1] ?? `fill reply ${requests.length}`;
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(
       `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: answer }, finish_reason: null }] })}\n\n` +
@@ -130,6 +141,8 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(executable);
     run.setEnvironmentVariable("RG_BIN", b.pathFromRoot("bundle/${bundle.manifest.runtime_assets[0].path}"));
     run.setEnvironmentVariable("METAWORK_REWIND_PROBE_URL", "${baseUrl}");
+    run.setEnvironmentVariable("METAWORK_REWIND_PROBE_REPORT", "report.json");
+    run.setCwd(b.path("."));
     b.step("run", "Probe AgentCore rewind_to_user_message").dependOn(&run.step);
 }
 `,
@@ -158,7 +171,14 @@ pub fn build(b: *std.Build) void {
       `-Dtarget=${bundle.target}`,
       "-Doptimize=Debug",
     ],
-    { cwd: zigConsumerRoot, label: "isolated AgentCore rewind probe" },
+    // The compaction phase pushes a Conversation up to the model's context
+    // window one large Run at a time, so this has no useful upper bound -
+    // unbounded like the compilation it shares the invocation with.
+    {
+      cwd: zigConsumerRoot,
+      label: "isolated AgentCore rewind probe",
+      timeoutMs: null,
+    },
   );
   await validateAgentCoreBundle(bundle.root, {
     expectedManifest: lock.manifest,
@@ -178,18 +198,26 @@ pub fn build(b: *std.Build) void {
     const tail = content.slice(-72).replaceAll("\n", " ");
     return { role: message.role, tail, bytes: content.length };
   };
-  for (const [index, messages] of requests.entries())
+  for (const [index, request] of requests.entries())
     console.log(
-      `rewind-probe provider request ${index + 1}: ${JSON.stringify(messages.map(identify))}`,
+      `rewind-probe provider request ${index + 1}: ${
+        request.messages
+          ? JSON.stringify(request.messages.map(identify))
+          : JSON.stringify({
+              roles: request.roles,
+              markers: request.markers,
+              bytes: request.bytes,
+            })
+      }`,
     );
 
   assert.ok(
     requests.length >= 3,
     "two fresh Runs and one post-restore Run must reach Provider",
   );
-  const [first, second, third] = requests.map((messages) =>
-    JSON.stringify(messages),
-  );
+  const [first, second, third] = requests
+    .slice(0, retain_whole)
+    .map((request) => JSON.stringify(request.messages));
   assert.ok(first.includes("rewind alpha question"));
   assert.ok(!first.includes("rewind beta question"));
   assert.ok(second.includes("rewind alpha question"));
@@ -219,6 +247,64 @@ pub fn build(b: *std.Build) void {
   );
   console.log(
     "rewind-probe provider evidence: the restored Run reran without the dropped turn",
+  );
+
+  const report = JSON.parse(
+    await readFile(path.join(zigConsumerRoot, "report.json"), "utf8"),
+  );
+  console.log(`rewind-probe report: ${JSON.stringify(report, null, 2)}`);
+  assert.equal(report.rewind_slot_non_null, true);
+  assert.equal(report.count_after_first_turn + 1, report.rewound_position);
+  assert.equal(report.count_after_rewind, report.rewound_position - 1);
+  assert.equal(report.checkpoint_remembers_rewind, true);
+
+  const { compaction } = report;
+  assert.equal(
+    compaction.engaged,
+    true,
+    `the canonical compact policy never acted: outcome_code ${compaction.outcome_code} at ${compaction.before_context_tokens} context tokens after ${compaction.turns} turns`,
+  );
+  // The premise the whole "record a position once, never recompute it"
+  // design rests on. Unchanged message_count across a compact means the
+  // compacted prefix is still counted and nothing was renumbered.
+  assert.equal(
+    compaction.count_after,
+    compaction.count_before,
+    "a compact that changed message_count would move every recorded position",
+  );
+  assert.ok(compaction.boundary_after > 0, "a compact must leave a boundary");
+  // Measured precedence under the boundary: a user position reports 33, an
+  // assistant position reports 32. Both were refused and changed nothing.
+  assert.ok(
+    compaction.compacted_user_position > 0,
+    "a user position under the boundary must have been probed for code 33",
+  );
+  assert.equal(
+    compaction.position_rewound,
+    true,
+    "a position recorded before the compact must still be rewindable after it",
+  );
+  assert.equal(compaction.probed_position_status, "ok");
+  assert.equal(
+    compaction.count_after_probed_rewind,
+    compaction.probed_position - 1,
+    "the rewind must land exactly below the recorded position",
+  );
+  // Behavioural half: the turn that position named is the turn that went,
+  // and only it. The turn before it has to still be there, or the rewind
+  // landed somewhere else entirely.
+  const tail = requests.at(-1);
+  const predecessor = `drift-marker-${String(compaction.turns - 1).padStart(3, "0")}`;
+  assert.ok(
+    !tail.markers.includes(compaction.probed_marker),
+    `the Conversation after the rewind still carries ${compaction.probed_marker}`,
+  );
+  assert.ok(
+    tail.markers.includes(predecessor),
+    `the rewind went past its position: ${predecessor} is gone too (kept: ${tail.markers.join(", ")})`,
+  );
+  console.log(
+    `rewind-probe compaction evidence: position ${compaction.probed_position} named the same message before and after a compact that set boundary ${compaction.boundary_after}; ${compaction.probed_marker} is gone from the rerun`,
   );
 } finally {
   await new Promise((resolve) => server.close(resolve));

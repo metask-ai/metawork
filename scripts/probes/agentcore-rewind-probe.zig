@@ -515,61 +515,335 @@ pub fn main(init: std.process.Init) !void {
     defer after_gamma.deinit(allocator);
     after_gamma.report("after post-restore run");
 
-    // Compaction is the other premise #114 rests on: a position recorded
-    // before a compact must still name the same message afterwards, which
-    // holds only if message_count keeps counting the compacted prefix. The
-    // canonical policy is best-effort and may well decline a Conversation
-    // this small, so this is an observation, not an assertion -- the
-    // outcome code says which it was.
-    var compact_result = std.mem.zeroes(wire.CompactResultV1);
-    var compact_diagnostic = emptyOwnedBytes();
-    defer releaseOwned(api, &compact_diagnostic);
-    const compact_status_code = api.sessionControl().compact()(
-        restored,
-        1,
-        &compact_result,
-        &compact_diagnostic,
-    );
-    const compact_status = agentcore.Status.fromCode(compact_status_code) catch
-        return error.UnknownCompactStatus;
-    std.debug.print(
-        "rewind-probe compact: status={s} outcome_code={d} before_context_tokens={d} after_context_tokens={d}\n",
-        .{
-            @tagName(compact_status),
-            compact_result.outcome_code,
-            compact_result.before_context_tokens,
-            compact_result.after_context_tokens,
-        },
-    );
-    if (compact_status == .ok) {
-        var after_compact = try describe(allocator, api, restored);
-        defer after_compact.deinit(allocator);
-        after_compact.report("after compact");
-        std.debug.print(
-            "rewind-probe compaction: count_before={d} count_after={d} boundary_after={d} prefix_still_counted={}\n",
-            .{
-                after_gamma.message_count,
-                after_compact.message_count,
-                after_compact.compact_boundary,
-                after_compact.message_count >= after_gamma.message_count,
-            },
-        );
-        if (after_compact.compact_boundary > 0)
-            try expectRefused(
-                allocator,
-                api,
-                restored,
-                after_compact.compact_boundary,
-                "at the compact boundary",
-                .message_position_compacted,
-                after_compact,
-            );
-    }
-
     try destroySession(api, restored);
     restored_session_live = false;
     try destroyRuntime(api, restored_runtime);
     restored_runtime_live = false;
 
+    const compaction = try probeCompaction(allocator, api, &host, &callbacks);
+
+    if (init.environ_map.get("METAWORK_REWIND_PROBE_REPORT")) |file_path| {
+        const report = Report{
+            .abi_revision = api.raw.abi_revision,
+            .rewind_slot_non_null = api.sessionControl().raw.rewind_to_user_message != null,
+            .count_empty = empty.message_count,
+            .count_after_first_turn = after_first.message_count,
+            .count_before_rewind = before_rewind.message_count,
+            .rewound_position = second_user_position,
+            .count_after_rewind = after_rewind.message_count,
+            .count_after_restore = after_restore.message_count,
+            .checkpoint_bytes = sink_context.len,
+            .checkpoint_remembers_rewind = after_restore.message_count == after_rewind.message_count,
+            .compaction = compaction,
+        };
+        const encoded = try std.json.Stringify.valueAlloc(allocator, report, .{});
+        defer allocator.free(encoded);
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = file_path, .data = encoded });
+    }
+
     std.debug.print("rewind-probe passed\n", .{});
+}
+
+/// What the probe measured, written out for the runner to assert against.
+/// The conclusions are numbers, not prose, so they can be checked rather
+/// than read.
+const Report = struct {
+    abi_revision: u32,
+    rewind_slot_non_null: bool,
+    count_empty: u64,
+    count_after_first_turn: u64,
+    count_before_rewind: u64,
+    rewound_position: u64,
+    count_after_rewind: u64,
+    count_after_restore: u64,
+    checkpoint_bytes: usize,
+    checkpoint_remembers_rewind: bool,
+    compaction: Compaction,
+};
+
+/// The compaction half. `positions_stable` is the load-bearing one: #114
+/// records a position once, at submit time, and never recomputes it, which
+/// only works if a compact leaves the numbering alone.
+const Compaction = struct {
+    engaged: bool,
+    turns: u64,
+    outcome_code: u32,
+    before_context_tokens: u64,
+    after_context_tokens: u64,
+    count_before: u64,
+    count_after: u64,
+    boundary_before: u64,
+    boundary_after: u64,
+    /// message_count unchanged across the compact: the compacted prefix is
+    /// still counted, so no position moved.
+    positions_stable: bool,
+    /// A position recorded before the compact, rewound to after it.
+    probed_position: u64,
+    probed_position_status: []const u8,
+    count_after_probed_rewind: u64,
+    /// The marker carried by the user message at `probed_position`. The
+    /// runner asserts the Conversation after the rewind no longer has it.
+    probed_marker: []const u8,
+    position_rewound: bool,
+    /// Which status each kind of below-boundary position reported. The
+    /// precedence is measured, not documented: 32 outranks 33.
+    compacted_user_position: u64,
+    compacted_assistant_position: u64,
+};
+
+const fill_text_bytes = 256 * 1024;
+const max_fill_turns = 18;
+
+/// Varied filler. A long run of one byte would tokenize far cheaper than
+/// prose and never reach the model's window, so the bytes have to look like
+/// words. The marker sits at both ends so a truncated log still identifies
+/// the turn.
+fn fillText(allocator: std.mem.Allocator, turn: u64) ![]u8 {
+    const buffer = try allocator.alloc(u8, fill_text_bytes);
+    errdefer allocator.free(buffer);
+    var state: u64 = 0x9e3779b97f4a7c15 ^ turn;
+    for (buffer, 0..) |*byte, index| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        byte.* = if ((index + 1) % 9 == 0) ' ' else 'a' + @as(u8, @intCast((state >> 33) % 26));
+    }
+    const marker = try fillMarker(allocator, turn);
+    defer allocator.free(marker);
+    @memcpy(buffer[0..marker.len], marker);
+    buffer[marker.len] = ' ';
+    @memcpy(buffer[buffer.len - marker.len ..], marker);
+    buffer[buffer.len - marker.len - 1] = ' ';
+    return buffer;
+}
+
+fn fillMarker(allocator: std.mem.Allocator, turn: u64) ![]u8 {
+    return std.fmt.allocPrint(allocator, "drift-marker-{d:0>3}", .{turn});
+}
+
+/// Compaction is the other premise #114 rests on. If a compact collapsed the
+/// prefix and renumbered what follows, every position persisted at submit
+/// time would silently name the wrong message afterwards, and the design
+/// would need an anchor instead of a number. The canonical policy is
+/// best-effort and declines a small Conversation, so the only way to ask is
+/// to fill one until it acts: large user messages, a tiny reply each time,
+/// and a compact attempt after every turn whose declined `before_context_
+/// tokens` reports the climb for free.
+fn probeCompaction(
+    allocator: std.mem.Allocator,
+    api: agentcore.Api,
+    host: *const wire.SessionHostConfigV1,
+    callbacks: *const wire.SessionCallbacksV1,
+) !Compaction {
+    const runtime = try makeRuntime(api);
+    var runtime_live = true;
+    defer if (runtime_live) destroyRuntime(api, runtime) catch {};
+
+    var create_config = std.mem.zeroes(wire.SessionCreateConfigV1);
+    create_config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
+    create_config.host = host;
+    create_config.model = agentcore.bytesView("gpt-5-mini");
+    var created: ?*wire.SessionHandle = null;
+    try expectStatus(api, "session_create", api.session().create()(
+        runtime,
+        &create_config,
+        callbacks,
+        &created,
+        null,
+    ));
+    const session = created orelse return error.MissingSession;
+    var session_live = true;
+    defer if (session_live) destroySession(api, session) catch {};
+
+    var result = std.mem.zeroes(wire.CompactResultV1);
+    var user_positions = [_]u64{0} ** (max_fill_turns + 1);
+    var count_before: u64 = 0;
+    var boundary_before: u64 = 0;
+    var turn: u64 = 1;
+    var engaged = false;
+    while (turn <= max_fill_turns) : (turn += 1) {
+        var before_turn = try describe(allocator, api, session);
+        defer before_turn.deinit(allocator);
+        // The mapping under test: the position this turn's user message will
+        // take, recorded before the Run, exactly as #114 would persist it.
+        user_positions[turn] = before_turn.message_count + 1;
+
+        const text = try fillText(allocator, turn);
+        defer allocator.free(text);
+        try runText(api, session, turn, text);
+
+        var after_turn = try describe(allocator, api, session);
+        defer after_turn.deinit(allocator);
+
+        result = std.mem.zeroes(wire.CompactResultV1);
+        var diagnostic = emptyOwnedBytes();
+        defer releaseOwned(api, &diagnostic);
+        const status_code = api.sessionControl().compact()(session, turn, &result, &diagnostic);
+        const status = agentcore.Status.fromCode(status_code) catch
+            return error.UnknownCompactStatus;
+        std.debug.print(
+            "rewind-probe fill turn {d}: message_count={d} user_position={d} compact_status={s} outcome_code={d} context_tokens={d}->{d}\n",
+            .{
+                turn,
+                after_turn.message_count,
+                user_positions[turn],
+                @tagName(status),
+                result.outcome_code,
+                result.before_context_tokens,
+                result.after_context_tokens,
+            },
+        );
+        if (status != .ok) return error.CompactRefused;
+        if (result.outcome_code != wire.COMPACT_NO_CHANGE) {
+            engaged = true;
+            count_before = after_turn.message_count;
+            boundary_before = after_turn.compact_boundary;
+            break;
+        }
+    }
+    if (!engaged) {
+        std.debug.print(
+            "rewind-probe compaction: never engaged within {d} turns of {d} bytes\n",
+            .{ max_fill_turns, fill_text_bytes },
+        );
+        return .{
+            .engaged = false,
+            .turns = max_fill_turns,
+            .outcome_code = result.outcome_code,
+            .before_context_tokens = result.before_context_tokens,
+            .after_context_tokens = result.after_context_tokens,
+            .count_before = 0,
+            .count_after = 0,
+            .boundary_before = 0,
+            .boundary_after = 0,
+            .positions_stable = false,
+            .probed_position = 0,
+            .probed_position_status = "not attempted",
+            .count_after_probed_rewind = 0,
+            .probed_marker = "",
+            .position_rewound = false,
+            .compacted_user_position = 0,
+            .compacted_assistant_position = 0,
+        };
+    }
+
+    var after_compact = try describe(allocator, api, session);
+    defer after_compact.deinit(allocator);
+    after_compact.report("after compact");
+    const positions_stable = after_compact.message_count == count_before;
+    std.debug.print(
+        "rewind-probe compaction: turns={d} outcome_code={d} count={d}->{d} boundary={d}->{d} positions_stable={}\n",
+        .{
+            turn,
+            result.outcome_code,
+            count_before,
+            after_compact.message_count,
+            boundary_before,
+            after_compact.compact_boundary,
+            positions_stable,
+        },
+    );
+
+    // Code 33, refused first because a refusal changes nothing while the
+    // rewind below spends the history. Measured here, and not what the
+    // status list alone suggests: under the boundary NOT_USER_MESSAGE wins
+    // over MESSAGE_POSITION_COMPACTED, so a below-boundary assistant
+    // position reports 32, not 33. Only a user position under the boundary
+    // reports 33. That is exactly why #114 must refuse a compacted position
+    // locally: without that check, 32 would carry two meanings and could no
+    // longer be reported as our own mapping bug.
+    var compacted_user_position: u64 = 0;
+    var compacted_assistant_position: u64 = 0;
+    if (after_compact.compact_boundary > 0) {
+        compacted_user_position = if (after_compact.compact_boundary % 2 == 1)
+            after_compact.compact_boundary
+        else
+            after_compact.compact_boundary - 1;
+        if (compacted_user_position >= 1) try expectRefused(
+            allocator,
+            api,
+            session,
+            compacted_user_position,
+            "user message under the boundary",
+            .message_position_compacted,
+            after_compact,
+        );
+        if (after_compact.compact_boundary % 2 == 0) {
+            compacted_assistant_position = after_compact.compact_boundary;
+            try expectRefused(
+                allocator,
+                api,
+                session,
+                compacted_assistant_position,
+                "assistant reply under the boundary",
+                .not_user_message,
+                after_compact,
+            );
+        }
+    }
+
+    // The drift verdict. This position was recorded before the compact; if
+    // the numbering held, it still names that turn's user message, so the
+    // call returns OK and the count lands one below it. A drifted numbering
+    // shows up as NOT_USER_MESSAGE, a refusal, or the wrong count.
+    const probed = user_positions[turn];
+    const marker = try fillMarker(allocator, turn);
+    var probed_status = agentcore.Status.ok;
+    var count_after_probed: u64 = 0;
+    var rewound = false;
+    if (probed > after_compact.compact_boundary) {
+        probed_status = try rewind(api, session, probed, "pre-compaction position");
+        if (probed_status == .ok) {
+            var after_probed = try describe(allocator, api, session);
+            defer after_probed.deinit(allocator);
+            after_probed.report("after rewinding to the pre-compaction position");
+            count_after_probed = after_probed.message_count;
+            rewound = true;
+            // Behavioural confirmation: the runner checks this Run's request
+            // no longer carries the marker of the turn just dropped.
+            try runText(api, session, turn + 1, "drift tail question");
+        }
+        std.debug.print(
+            "rewind-probe drift: position={d} marker={s} status={s} count_after={d} expected_count={d} verdict={s}\n",
+            .{
+                probed,
+                marker,
+                @tagName(probed_status),
+                count_after_probed,
+                probed - 1,
+                if (probed_status == .ok and count_after_probed == probed - 1)
+                    "positions did not drift"
+                else
+                    "POSITIONS DRIFTED",
+            },
+        );
+    } else {
+        std.debug.print(
+            "rewind-probe drift: position={d} is at or under the boundary {d}; no pre-compaction position survived above it\n",
+            .{ probed, after_compact.compact_boundary },
+        );
+    }
+
+    try destroySession(api, session);
+    session_live = false;
+    try destroyRuntime(api, runtime);
+    runtime_live = false;
+
+    return .{
+        .engaged = true,
+        .turns = turn,
+        .outcome_code = result.outcome_code,
+        .before_context_tokens = result.before_context_tokens,
+        .after_context_tokens = result.after_context_tokens,
+        .count_before = count_before,
+        .count_after = after_compact.message_count,
+        .boundary_before = boundary_before,
+        .boundary_after = after_compact.compact_boundary,
+        .positions_stable = positions_stable,
+        .probed_position = probed,
+        .probed_position_status = @tagName(probed_status),
+        .count_after_probed_rewind = count_after_probed,
+        .probed_marker = marker,
+        .position_rewound = rewound,
+        .compacted_user_position = compacted_user_position,
+        .compacted_assistant_position = compacted_assistant_position,
+    };
 }
