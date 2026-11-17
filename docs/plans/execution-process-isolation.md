@@ -22,7 +22,19 @@
 
 缝画在 **Product ↔ Agent 这道缝，不是 ABI**。决定缝只能画在这里的结构事实：`src/agent/session.zig` 的 `runText`/`runMultimodal` 是阻塞式 ABI 调用，Run 结束才返回，所以每个在飞 Run 占一个线程，而那个线程必须与 Runtime 同进程。`host_worker_count = 16`（`src/app.zig:116`）、`worker_stack_bytes = 4 MiB`（`src/product/control/executor.zig:36`）的池子因此整体属于执行侧；`src/product/task/execution.zig` 的 `executeRun` 与其 agent handoff 状态机两端都在执行侧，不跨界。
 
-前置重构已经落地（PR #211），一期不必再做：`src/agent/contract.zig` 是 archive-free 的契约模块根，`src/agent/session/surface.zig` 是纯数据声明，`src/agent/session/port.zig` 是 vtable 端口、`port_impl.zig` 是唯一的进程内实现。`src/product/` 整目录已无 `metawork_agent` 导入，Product 经 `metawork_agent_contract` 与 port 面访问 Agent。换掉 `port_impl.zig` 这一组 vtable、改由转发到另一个进程，就是边界的全部调用面。
+前置重构已经落地（PR #211），一期不必再做：`src/agent/contract.zig` 是 archive-free 的契约模块根，`src/agent/session/surface.zig` 是纯数据声明，`src/agent/session/port.zig` 是 vtable 端口、`port_impl.zig` 是唯一的进程内实现。`src/product/` 整目录已无 `metawork_agent` 导入，Product 经 `metawork_agent_contract` 与 port 面访问 Agent。
+
+但 port 面**不是**边界的全部调用面，本文先前那句「换掉 `port_impl.zig` 这一组 vtable 就是边界的全部调用面」是错的，实施第 3 步时核出来的。除 port 的 52 个方法之外，Product 还在进程内**直接调用 Agent 自有 opaque 句柄上的方法**，这些调用一条都不经过 `port.zig`：
+
+| 句柄 | Product 直接调用的方法 | 调用点 |
+| --- | --- | --- |
+| `McpActivation` | `serverHealth` 12、`catalogServers` 8、`catalogGeneration` 8、`catalogAgeMs` 6、`catalogTools` 4、`takeSelection` 3、`catalogIssues`、`deinit` | `mcp/{runtime,state,view,refresh_job}.zig`、`task/runtime.zig` |
+| `McpSelection` | `selectedTools` 13、`deinit` | 同上 |
+| `McpRestoreSelection` | `isEmpty` 5、`clone`、`deinit` | 同上 |
+
+合计约 59 处。它们全部是 MCP 形状的，所以归第 4 步；但第 4 步因此不只是「重建 transport owner」，还包括把这三个类型在 Product 侧的表达从 opaque 句柄换成数据投影。
+
+方向上这不应该变成 59 个新 RPC：这些读取的都是句柄创建后不再变化的数据，所以正确的形状是**投影随 activation/selection 过界一次，UI 侧本地回答这些读取**，与 `catalog.Projection` 过界的处理同构。`takeSelection` 与各 `deinit` 是例外，它们改变 exec 侧状态，必须成为 port 调用。该方向待评审，本文不先按它改步骤划分。
 
 | 入口 | 本轮角色 |
 | --- | --- |
