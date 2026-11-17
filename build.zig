@@ -304,6 +304,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
         .{ .name = "metawork-agent-contract", .root_module = test_modules.agent_contract },
+        .{ .name = "metawork-agent-link", .root_module = test_modules.agent_link },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
@@ -367,6 +368,8 @@ pub fn build(b: *std.Build) void {
             schedule_tests.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.agent_contract)
             b.step("test-agent-contract", "Run the Agent contract declarations and codec tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.agent_link)
+            b.step("test-agent-link", "Run the execution link frame, registry and channel tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -904,6 +907,7 @@ const WiredModules = struct {
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_contract: *std.Build.Module,
+    agent_link: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -1624,6 +1628,15 @@ fn wireAgentCore(
     agent_contract.addImport("agent_mcp_connector", agent_mcp_connector);
     agent_contract.addImport("agent_mcp_stdio", agent_mcp_stdio);
     agent_contract.addImport("agent_mcp_http", agent_mcp_http);
+    // The execution link. It frames bytes and numbers the port's methods and
+    // errors; it imports the contract module only, so a binary that links it
+    // still links no AgentCore archive.
+    const agent_link = b.createModule(.{
+        .root_source_file = b.path("src/agent/link.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_link.addImport("agent_contract", agent_contract);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -2692,6 +2705,8 @@ fn wireAgentCore(
     // instead of repeating it as a literal.
     app.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     app.addImport("metawork_agent", agent);
+    app.addImport("metawork_agent_link", agent_link);
+    app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
     app.addImport("metawork_product_workspace", product_workspace);
@@ -2781,6 +2796,7 @@ fn wireAgentCore(
         .product_permission_review = product_permission_review,
         .agent_session = session,
         .agent_contract = agent_contract,
+        .agent_link = agent_link,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

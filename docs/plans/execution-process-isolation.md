@@ -64,7 +64,7 @@
 
 帧：`u32 length | u8 kind | payload`，kind 区分 event、request、response、ui_request、ui_response、control。request/response 带调用相关 id（见 4.4）。超过 64 KiB 的 payload 分片，使一个 control 帧最多排在一个分片之后。
 
-错误域必须是 typed 的。`surface.Error` 是九十余项的封闭集合且是契约的一部分，跨进程后它必须有显式的 wire 映射；对端给出未登记的码时 fail closed 为契约违约，**不得**退化成一个通用失败码——那会让 Product 把链路问题记成 Agent 终态原因。
+错误域必须是 typed 的。`surface.Error` 是 71 项的封闭集合且是契约的一部分，跨进程后它必须有显式的 wire 映射；加上 port 的 `Allocating` 带来的 `OutOfMemory` 共 72 个码。对端给出未登记的码时 fail closed 为契约违约，**不得**退化成一个通用失败码——那会让 Product 把链路问题记成 Agent 终态原因。映射的完整性不靠人工维护的表保证：方法与错误两张注册表都在编译期双向闭合，少一项不编译。
 
 ### 4.2 capacity / backpressure
 

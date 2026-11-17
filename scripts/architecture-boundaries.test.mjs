@@ -3040,8 +3040,18 @@ test("all active test roots are connected without test-count assertions", () => 
   );
   const sessionRoot = read("src/agent/session.zig");
   const completionRoot = read("src/agent/completion.zig");
+  const linkRoot = read("src/agent/link.zig");
   for (const path of inlineAgentTests) {
     if (build.includes(`"${path}"`)) continue;
+    if (path.startsWith("src/agent/link/")) {
+      const relative = path.slice("src/agent/link/".length, -4);
+      assert.match(
+        linkRoot,
+        new RegExp(`@import\\("link/${relative}\\.zig"\\)`),
+        `${path} is not aggregated by link.zig`,
+      );
+      continue;
+    }
     if (path.startsWith("src/agent/completion/")) {
       const relative = path.slice("src/agent/completion/".length, -4);
       assert.match(
