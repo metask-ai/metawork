@@ -45,11 +45,14 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
           use-cache: false
 
-      # `npm ci` writes 245 MB across 15,010 files, which costs 3.0 minutes
-      # on Windows against 0.6 on macOS, and every leg pays it. Restoring the
-      # installed tree skips that write. The key carries the runner because the
-      # tree holds platform-specific optional binaries, and the lock file
-      # because that is what decides the tree's contents.
+      # `npm ci` writes 245 MB across 15,010 files, which costs 2.2 to 2.9
+      # minutes on Windows and about half a minute elsewhere, on every leg.
+      # Restoring that tree took 5 seconds on both platforms instead, measured
+      # on 2026-11-17 across two attempts of one commit. The key carries the
+      # runner because the tree holds platform-specific optional binaries, and
+      # the lock file because that is what decides its contents, which makes
+      # this three entries of 46 MB in a cache budget that has been at its
+      # limit.
       - &cache-node-modules
         name: Cache installed npm dependencies
         id: node-modules-cache
