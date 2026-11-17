@@ -200,6 +200,18 @@ fresh create 同步传入该 profile。checkpoint restore 完成原有 report、
 
 profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码均由官方 SDK 拥有。旧 checkpoint 先恢复再应用当前身份；下一次正常导出持久化该 profile，不改写历史或批量迁移。带 profile 的官方 checkpoint 不能通过删除 profile 或降级依赖来兼容早期 SDK。`describe.prompt` 与 Run `prompt_manifest` 仅有界消费和验证，不成为上层投影。
 
+### Session 行为指引
+
+除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
+
+- 只用 `PROMPT_OP_ADD`，不替换也不移除 AgentCore 的内核段。替换内核段会让 MetaWork 永久跟踪上游对那段文字的改动，而行为约束不需要改写内核规则；
+- `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
+- 平台条件由 Host 侧决定，不写进段文字。`interpolate` 能替换 `{{platform}}` 却不能据此分支，所以按平台选段发生在组合处，非目标平台不携带该平台专有的建议；
+- 这类注入改变的是模型倾向，不构成保证，也不是能力或权限控制的替代品。必须被阻止的事情由 built-in tool 选择与 Task-owned `PermissionProfile` 决定，不靠提示段；
+- 段文字进入每个 Session 的 system prompt，长度有真实成本：写成约束，不写成教程。
+
+首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
+
 ## 6. Session 与 Runtime 生命周期
 
 ### 状态机
@@ -543,6 +555,7 @@ Workspace 选择、一次性授权和 registry 事务由 [Product 架构](produc
 - Product 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力只构成外部上限；
 - unknown name、未验证名称和空集合使 Agent 初始化失败，不得静默编码为 `allowed_tools = null`；
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
+- `WebFetch` 按设计只产出文本，不是下载路径：参数只有 `url` 与 `prompt`，没有落盘路径，额外加的路径参数被静默忽略而不报 schema 错；非 ASCII 字节在交给模型之前被替换成 U+FFFD，结果过大时投影到的 artifact blob 里同样已被替换，字节在任何可观察点都不再存在。“把 URL 字节按调用方指定路径存成文件”是 MetaWork 当前没有的能力，提示段不得把 `WebFetch` 写成下载手段；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
 - Session 使用 Task-owned PermissionProfile，映射及 mutation 规则见 [UI request callback](#ui-request-callback)；

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const multimodal = contract.multimodal;
-const identity_profile = @import("identity.zig");
+const prompt_profile = @import("prompt.zig");
 const sdk = @import("metask_agentcore");
 const contract = @import("agent_contract");
 const wire = sdk.types;
@@ -1027,7 +1027,7 @@ pub const Runtime = struct {
         config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
         config.host = &host_config;
         config.model = sdk.bytesView(binding.target.model);
-        config.prompt_profile = &identity_profile.profile;
+        config.prompt_profile = &prompt_profile.profile;
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;
@@ -1299,10 +1299,11 @@ pub const Runtime = struct {
         var metadata_live = true;
         defer if (metadata_live) success.deinitMetadata();
 
-        // Updating identity is part of restore admission. Keep the candidate
-        // unpublished and the Runtime fenced until mutation and cleanup finish.
-        const identity_error: ?Error = blk: {
-            identity_profile.apply(self.api, success.raw_session) catch |err|
+        // Updating the prompt profile is part of restore admission. Keep the
+        // candidate unpublished and the Runtime fenced until mutation and
+        // cleanup finish.
+        const profile_error: ?Error = blk: {
+            prompt_profile.apply(self.api, success.raw_session) catch |err|
                 break :blk err;
             break :blk null;
         };
@@ -1310,7 +1311,7 @@ pub const Runtime = struct {
         std.debug.assert(self.active_restore_calls > 0);
         std.debug.assert(self.session_reservations[session_slot]);
         std.debug.assert(self.sessions[session_slot] == null);
-        const reject = identity_error != null or self.shutting_down.load(.acquire) or self.runtime != raw_runtime;
+        const reject = profile_error != null or self.shutting_down.load(.acquire) or self.runtime != raw_runtime;
         if (!reject) {
             session.raw = success.raw_session;
             self.sessions[session_slot] = session;
@@ -1344,7 +1345,7 @@ pub const Runtime = struct {
             self.finishRestoreReservation(session_slot);
         }
         if (!destroyed) return error.RestoreContractFailed;
-        return identity_error orelse error.RuntimeShuttingDown;
+        return profile_error orelse error.RuntimeShuttingDown;
     }
 
     fn retainFailedRestoreCandidate(

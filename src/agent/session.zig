@@ -26,6 +26,8 @@ const ModelBinding = model_binding.ModelBinding;
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
 const session_runtime = @import("session/runtime.zig");
+const session_prompt = @import("session/prompt.zig");
+const session_guidance = @import("session/guidance.zig");
 const image_generation = contract.image_generation;
 const generate_image = contract.generate_image;
 const generate_video = contract.generate_video;
@@ -3951,6 +3953,8 @@ test {
     _ = session_model_error;
     _ = session_binding;
     _ = session_runtime;
+    _ = session_prompt;
+    _ = session_guidance;
 }
 
 test "generated image attestation requires one matching committed Host receipt" {
