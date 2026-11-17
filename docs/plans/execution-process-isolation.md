@@ -88,6 +88,8 @@
 
 parked UI 请求的并发上限是 16（`max_pending_ui_requests = host_worker_count`），不是更小的数；收口设计要按 16 个同时 park 的 Core 回调线程来算。
 
+自动审批复核的并发上限 `permission_job.capacity = 8` 随复核一同搬到执行侧，不得在搬家时蒸发。它与上面那 16 是两件事：16 是可以同时 park 的请求数，8 是其中能同时跑复核的数，所以 auto 模式下仍可能有 park 的请求在等复核槽位。
+
 事件与终态共用同一条有序数据队列，这不是实现细节而是一条必须保住的不变量：`event` 帧与承载 Run 终态的 `response` 都走数据队列，只有不分片的 `control` 帧可以在分片之间插入，所以**一个 Run 的终态不可能先于它自己的事件到达**。正是这一条让读取方可以把「我的 pump 里这条 route 没有待处理事件」读成「该终态所属 Run 的全部事件都已到达」。把终态挪到 control、或者开第二条数据通道，都会无声地破坏它——读取方只会看到更少的事件并据此认为流已完整。
 
 ### 4.3 ownership
@@ -124,7 +126,11 @@ UI 侧保留的，一条都不交出去：Product 持久化与恢复权威、Tas
 
 ### 4.5 credential
 
-凭据会经链路过界，exec 进程里也会有明文副本：Metask token（Run 本身、compaction、自动标题）、生图/生视频 binding、MCP static/client secret 与 OAuth 结果、Custom Provider key。按已定决定，自动标题与图像、视频 HTTP 留执行侧，所以这些凭据的持有者数量不增加，只是换了进程。
+凭据会经链路过界，exec 进程里也会有明文副本：Metask token（Run 本身、compaction、自动标题、自动审批的复核）、生图/生视频 binding、MCP static/client secret 与 OAuth 结果、Custom Provider key。按已定决定，自动标题、自动审批复核与图像、视频 HTTP 都留执行侧，所以这些凭据的持有者数量不增加，只是换了进程。把复核留在 UI 侧会让 UI 进程仅为一个用途持有一份 Metask 凭据，并凭空多出一个续期点——#175 那个缺口正是「每个模型入口各自负责续期」长出来的。复核另有两条独立理由：它运行期间有一个 Core 回调线程 parked，留 UI 侧会让 UI 的存活成为 Run 推进的前提；而 auto 模式下 UI 不可达时按 4.6 解除 parked 请求，会连带解除一批本来不需要人的请求，违背用户选 auto 的本意。设计稿「不碰 AgentCore」那条理由不转移：它回答的是要不要扩 AgentCore 的 permission 协议，对落在进程边界哪一侧不构成理由。
+
+两个持有者今天的凭据处理并不对称，搬家时不得把弱的那一份带过去：自动标题走 `.copy()` 加 `defer credential.deinit()`，是第 6 节要求的 bounded copy；复核直接透传 `config.api_key`，生命周期挂在 `prepared` 上。
+
+**复核的脱敏必须留在过界之前、由持有该数据的 Product 一侧完成。** 复核输入含工具参数与用户历史，今天 `scrubPermissionArguments` 先跑、再建 Completion，顺序是对的；搬到执行侧后这个顺序必须保持，否则未脱敏的用户历史跨进程。这是本次移动**新造出来**的要求，不是既有约束。
 
 要求：
 
