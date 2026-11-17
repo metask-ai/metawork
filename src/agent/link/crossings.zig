@@ -12,9 +12,17 @@
 //! recorded type whose shape changes fails the build with both the recorded
 //! and the actual classification in the message, so the inventory cannot drift
 //! while looking green -- the same discipline the method and error registries
-//! use. Twenty-two of the thirty-eight types cross as they are, including the
-//! two largest (a Run's multimodal input and a model binding), which is why
-//! the move needs no hand-written encoder for the bulk of its payload.
+//! use. Most types cross as they are, including the two largest (a Run's
+//! multimodal input and a model binding), which is why the move needs no
+//! hand-written encoder for the bulk of its payload.
+//!
+//! No count appears in this prose. `structuralCount`, `shapedCount` and
+//! `owed` compute them, and a number repeated in a sentence is a copy that
+//! only looks maintained: this header said "thirty-eight" while the table held
+//! thirty-nine, because the seventeenth substituted type was found by building
+//! rather than by reading and the sentence did not follow. Guarding the copy
+//! would be worse than deleting it -- it would keep two places in step without
+//! making either right.
 
 const std = @import("std");
 const contract = @import("agent_contract");
@@ -280,6 +288,15 @@ pub fn closed() bool {
     return owed() == 0;
 }
 
+/// How many types the structural codec carries as they are.
+pub fn structuralCount() usize {
+    var total: usize = 0;
+    for (crossings) |entry| {
+        if (entry.expected == .structural) total += 1;
+    }
+    return total;
+}
+
 /// How many substituted types already have their shape, by mirror or by
 /// composition.
 pub fn shapedCount() usize {
@@ -293,20 +310,18 @@ pub fn shapedCount() usize {
 test "the inventory is still true, and says something about every entry" {
     // `crossing` fails the build on a stale record, so reaching here means
     // every classification above still holds against the compiler.
-    var structural: usize = 0;
     for (crossings) |entry| switch (entry.expected) {
-        .structural => {
-            structural += 1;
-            try std.testing.expectEqualStrings("", entry.shape);
-        },
+        .structural => try std.testing.expectEqualStrings("", entry.shape),
         .substituted => try std.testing.expect(entry.shape.len != 0),
     };
-    try std.testing.expectEqual(@as(usize, 22), structural);
-    try std.testing.expectEqual(@as(usize, 17), shapedCount());
-    try std.testing.expectEqual(@as(usize, 0), owed());
-    // The criterion the step ends on, asserted rather than counted by hand.
+    // The criterion the step ends on. No expected totals here: a count
+    // asserted against itself proves nothing, and `closed` is the fact.
     try std.testing.expect(closed());
-    try std.testing.expectEqual(crossings.len, structural + shapedCount() + owed());
+    try std.testing.expectEqual(@as(usize, 0), owed());
+    try std.testing.expectEqual(
+        crossings.len,
+        structuralCount() + shapedCount() + owed(),
+    );
 }
 
 test "every obstruction the codec can report is represented, so none is unplanned" {

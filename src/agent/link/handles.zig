@@ -226,6 +226,31 @@ comptime {
     );
 }
 
+/// The methods of `T` with a given disposition, by name. Used by the shape
+/// that has to carry exactly the projected ones, so the two files cannot
+/// disagree about which reads are fixed.
+pub fn methodsWith(comptime T: type, comptime disposition: Disposition) []const [:0]const u8 {
+    comptime {
+        var matched: usize = 0;
+        for (handles) |handle| {
+            if (std.mem.eql(u8, handle.name, @typeName(T))) matched += 1;
+        }
+        if (matched != 1) @compileError(
+            "expected exactly one handle record for " ++ @typeName(T) ++
+                "; found " ++ std.fmt.comptimePrint("{d}", .{matched}),
+        );
+        var names: []const [:0]const u8 = &.{};
+        for (handles) |handle| {
+            if (!std.mem.eql(u8, handle.name, @typeName(T))) continue;
+            for (handle.methods) |method| {
+                if (method.disposition != disposition) continue;
+                names = names ++ [_][:0]const u8{method.name};
+            }
+        }
+        return names;
+    }
+}
+
 pub fn count(disposition: Disposition) usize {
     var total: usize = 0;
     for (handles) |handle| {

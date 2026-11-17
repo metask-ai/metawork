@@ -31,6 +31,7 @@ const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const handle_table = @import("handle_table.zig");
+const handles = @import("handles.zig");
 const image_generation = contract.image_generation;
 const generate_video = contract.generate_video;
 
@@ -506,6 +507,50 @@ pub const McpActivationProjection = struct {
     catalog_tools: []const mcp_catalog.Tool,
     catalog_issues: []const mcp_catalog.Issue,
 };
+
+// The projection above must carry exactly the reads `handles.zig` records as
+// fixed once the activation is built -- no more, no fewer.
+//
+// This is a cross-file invariant, not a duplicated number, which is why it is
+// checked rather than deleted. Drift in either direction is the failure this
+// change keeps refusing: a field here for a read that is no longer fixed would
+// answer a caller with a stale value indistinguishable from a fresh one, and a
+// projected read with no field here would leave the caller with no way to
+// answer at all.
+comptime {
+    const projected = handles.methodsWith(mcp_catalog.Activation, .projected);
+    const fields = @typeInfo(McpActivationProjection).@"struct".fields;
+    if (fields.len != projected.len) @compileError(
+        "the MCP activation projection carries " ++
+            std.fmt.comptimePrint("{d}", .{fields.len}) ++ " fields but " ++
+            std.fmt.comptimePrint("{d}", .{projected.len}) ++
+            " of its reads are recorded as fixed; see src/agent/link/handles.zig",
+    );
+    for (projected) |method| {
+        const field = snakeCase(method);
+        if (!@hasField(McpActivationProjection, field)) @compileError(
+            "the MCP activation projection has no `" ++ field ++ "` for the fixed read `" ++
+                method ++ "`; add it, or record that read as a call in handles.zig",
+        );
+    }
+}
+
+/// `registryGeneration` becomes `registry_generation`. The record names
+/// methods and the projection names fields, so one of them has to convert, and
+/// converting is what lets the check compare them at all.
+fn snakeCase(comptime camel: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (camel) |character| {
+            if (std.ascii.isUpper(character)) {
+                out = out ++ "_" ++ [_]u8{std.ascii.toLower(character)};
+            } else {
+                out = out ++ [_]u8{character};
+            }
+        }
+        return out;
+    }
+}
 
 /// `surface.McpActivationOutcome` with the activation named by id and its
 /// fixed reads projected beside it.
