@@ -195,6 +195,8 @@ pub const SessionPort = struct {
         capture_restore_inputs: *const fn (?*anyopaque) Allocating!SessionRestoreInputs,
         snapshot: *const fn (?*anyopaque) surface.SessionSnapshot,
         update_permission_mode: *const fn (?*anyopaque, session_control.PermissionMode, session_control.PermissionMode) Error!surface.PermissionModeUpdate,
+        conversation_observation: *const fn (?*anyopaque) Error!surface.ConversationObservation,
+        rewind_to_user_message: *const fn (?*anyopaque, u64) Error!surface.RewindOutcome,
         update_credential: *const fn (?*anyopaque, []const u8) Error!void,
         request_termination: *const fn (?*anyopaque, u64, session_control.TerminationSignal) Error!void,
         prepare_run: *const fn (?*anyopaque, surface.RunInput) Allocating!u64,
@@ -274,6 +276,25 @@ pub const SessionPort = struct {
         target: session_control.PermissionMode,
     ) Error!surface.PermissionModeUpdate {
         return self.vtable.update_permission_mode(self.context, expected, target);
+    }
+
+    /// The Conversation numbering a rewind position is expressed in. A caller
+    /// submitting a Run input records that input's position as
+    /// `message_count + 1`; see `surface.ConversationObservation`.
+    pub fn conversationObservation(self: SessionPort) Error!surface.ConversationObservation {
+        return self.vtable.conversation_observation(self.context);
+    }
+
+    /// Drops the user message at `position` and everything after it. Only the
+    /// Conversation changes: files and other effects of the dropped turns
+    /// stay.
+    ///
+    /// Core keeps no record that this happened and starts no generation, so
+    /// the caller's own history is the only place a rewind is ever written
+    /// down. The refusals stay typed for the same reason: see
+    /// `surface.RewindRefusal`.
+    pub fn rewindToUserMessage(self: SessionPort, position: u64) Error!surface.RewindOutcome {
+        return self.vtable.rewind_to_user_message(self.context, position);
     }
 
     pub fn updateCredential(self: SessionPort, credential: []const u8) Error!void {

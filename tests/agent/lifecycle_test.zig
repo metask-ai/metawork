@@ -6145,3 +6145,168 @@ test "MCP retirement rechecks shared members after each released list" {
         try std.testing.expectEqual(@as(usize, 1), transport.deinits);
     }
 }
+
+fn runFixtureTurn(session: *lifecycle.Session, prompt: []const u8) !void {
+    const id = try session.prepareRun(.{ .text = prompt });
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    run.deinit();
+    terminal.deinit();
+}
+
+test "idle rewind names a recorded position and keeps every refusal apart" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    try std.testing.expectEqual(
+        lifecycle.ConversationObservation{ .message_count = 0, .compact_boundary = 0 },
+        try session.conversationObservation(),
+    );
+
+    // Positions are recorded the way Product records them: the count read
+    // before the input is submitted, plus one. Never counted from our own Run
+    // list, which has no entry for a reply, a tool result or runtime text.
+    const first_position = (try session.conversationObservation()).message_count + 1;
+    try runFixtureTurn(session, "first turn");
+    const second_position = (try session.conversationObservation()).message_count + 1;
+    try runFixtureTurn(session, "second turn");
+    try std.testing.expectEqual(@as(u64, 1), first_position);
+    try std.testing.expectEqual(@as(u64, 3), second_position);
+    const two_turns = try session.conversationObservation();
+    try std.testing.expectEqual(@as(u64, 4), two_turns.message_count);
+
+    // The position a Run whose input never reached Core would carry: the
+    // Conversation already ends there, so Core is not called at all.
+    try std.testing.expectEqual(
+        lifecycle.RewindOutcome.unchanged,
+        try session.rewindToUserMessage(two_turns.message_count + 1),
+    );
+    const host_refusals = [_]struct { position: u64, refusal: lifecycle.RewindRefusal }{
+        .{ .position = 0, .refusal = .invalid_position },
+        .{ .position = 6, .refusal = .out_of_range },
+    };
+    for (host_refusals) |case| {
+        const outcome = try session.rewindToUserMessage(case.position);
+        try std.testing.expectEqual(case.refusal, outcome.refused.refusal);
+        try std.testing.expectEqual(.host, outcome.refused.source);
+    }
+    // Every refusal so far was decided here, against the describe this Session
+    // had just taken.
+    try std.testing.expectEqual(@as(usize, 0), fake_core.rewind_calls);
+    try std.testing.expectEqual(two_turns, try session.conversationObservation());
+
+    // An assistant reply position. Product records user positions only, so
+    // this can only mean our own mapping is wrong, and it stays its own code
+    // instead of becoming an unsupported operation.
+    const mapping_bug = try session.rewindToUserMessage(2);
+    try std.testing.expectEqual(lifecycle.RewindRefusal.not_user_message, mapping_bug.refused.refusal);
+    try std.testing.expectEqual(.core, mapping_bug.refused.source);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.rewind_calls);
+    try std.testing.expectEqual(two_turns, try session.conversationObservation());
+
+    // The real thing: the second turn's recorded position drops that turn and
+    // leaves the one before it standing. No generation moves with it.
+    try std.testing.expectEqual(
+        lifecycle.RewindOutcome.rewound,
+        try session.rewindToUserMessage(second_position),
+    );
+    const rewound = try session.conversationObservation();
+    try std.testing.expectEqual(@as(u64, 2), rewound.message_count);
+    try std.testing.expectEqual(@as(u64, 0), rewound.compact_boundary);
+    const authority = try session.updatePermissionMode(.default, .default);
+    try std.testing.expectEqual(@as(u64, 1), authority.policy_generation);
+
+    // The rerun takes the dropped turn's place.
+    try runFixtureTurn(session, "edited second turn");
+    try std.testing.expectEqual(@as(u64, 4), (try session.conversationObservation()).message_count);
+}
+
+test "a compacted position is refused before Core is called, and a Run blocks a rewind" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    try runFixtureTurn(session, "first turn");
+    try runFixtureTurn(session, "second turn");
+    const compact_id = try session.prepareCompact();
+    var compacted = try session.executePreparedCompact(compact_id);
+    compacted.deinit();
+    // Measured against the real Core: a compaction raises the boundary and
+    // leaves message_count alone, which is what keeps a recorded position
+    // valid for as long as its message stays above the boundary.
+    const after_compact = try session.conversationObservation();
+    try std.testing.expectEqual(@as(u64, 4), after_compact.message_count);
+    try std.testing.expectEqual(@as(u64, 2), after_compact.compact_boundary);
+
+    const compacted_position = try session.rewindToUserMessage(1);
+    try std.testing.expectEqual(lifecycle.RewindRefusal.compacted, compacted_position.refused.refusal);
+    try std.testing.expectEqual(.host, compacted_position.refused.source);
+    try std.testing.expectEqual(@as(usize, 0), fake_core.rewind_calls);
+    // A position above the boundary still names its own message.
+    try std.testing.expectEqual(
+        lifecycle.RewindOutcome.rewound,
+        try session.rewindToUserMessage(3),
+    );
+    try std.testing.expectEqual(@as(u64, 2), (try session.conversationObservation()).message_count);
+
+    const prepared = try session.prepareRun(.{ .text = "hold admission" });
+    try std.testing.expectError(error.SessionNotIdle, session.rewindToUserMessage(1));
+    try std.testing.expectError(error.SessionNotIdle, session.conversationObservation());
+    try session.cancelPreparedRun(prepared);
+}
+
+test "rewind failures stay typed and a disagreeing Core closes admission" {
+    const cases = [_]struct {
+        status: u32,
+        expected: anyerror = error.RewindFailed,
+        refusal: ?lifecycle.RewindRefusal = null,
+        poisoned: bool = false,
+    }{
+        .{ .status = wire.STATUS_MESSAGE_POSITION_OUT_OF_RANGE, .refusal = .out_of_range },
+        .{ .status = wire.STATUS_MESSAGE_POSITION_COMPACTED, .refusal = .compacted },
+        .{ .status = wire.STATUS_NOT_USER_MESSAGE, .refusal = .not_user_message },
+        .{ .status = wire.STATUS_BUSY, .expected = error.SessionNotIdle },
+        .{ .status = wire.STATUS_INVALID_ARGUMENT },
+        .{ .status = wire.STATUS_RESOURCE_LIMIT },
+        .{ .status = wire.STATUS_OUT_OF_MEMORY },
+        .{ .status = wire.STATUS_INVALID_STATE, .poisoned = true },
+        .{ .status = wire.STATUS_CORE_ERROR, .poisoned = true },
+        .{ .status = wire.STATUS_STALE_RUN, .poisoned = true },
+        .{ .status = 0xffff, .poisoned = true },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        try runFixtureTurn(session, "first turn");
+        fake_core.forceNextRewindStatus(case.status);
+        if (case.refusal) |refusal| {
+            // Core refusing a position this Session had just admitted means
+            // the two readings of one history disagree, which is a Host-side
+            // defect however Core phrased it.
+            const outcome = try session.rewindToUserMessage(1);
+            try std.testing.expectEqual(refusal, outcome.refused.refusal);
+            try std.testing.expectEqual(.core, outcome.refused.source);
+        } else {
+            try std.testing.expectError(case.expected, session.rewindToUserMessage(1));
+        }
+        try std.testing.expectEqual(
+            @as(lifecycle.SessionState, if (case.poisoned) .poisoned else .idle),
+            session.snapshot().state,
+        );
+        // A refusal changes nothing, so the position is still there.
+        if (!case.poisoned)
+            try std.testing.expectEqual(@as(u64, 2), (try session.conversationObservation()).message_count);
+    }
+}

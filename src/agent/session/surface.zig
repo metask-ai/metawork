@@ -61,6 +61,65 @@ pub const PermissionModeUpdate = struct {
     policy_generation: u64,
 };
 
+/// What `describe` reports about the Conversation: the numbering every rewind
+/// position is expressed in.
+///
+/// Positions are 1-based over the full history, the compacted prefix
+/// included, and a plain turn occupies two of them: the user message, then
+/// the assistant reply. A caller about to submit a Run input therefore names
+/// that input's own position as `message_count + 1` -- and must read this
+/// again before the next submission rather than counting its own records,
+/// because tool results and runtime text occupy positions too.
+///
+/// Measured against the real Core: a compaction leaves `message_count`
+/// unchanged and only raises `compact_boundary`, so a position recorded once
+/// stays valid for as long as its message is above the boundary.
+pub const ConversationObservation = struct {
+    message_count: u64,
+    /// Positions at or below this have been summarized away. The invariant
+    /// `compact_boundary <= message_count` is Core's, not ours.
+    compact_boundary: u64,
+};
+
+/// Why a rewind was refused. Each of these means something different to the
+/// caller, so none of them may be collapsed into one failure.
+pub const RewindRefusal = enum {
+    /// The position is zero: nothing names message zero.
+    invalid_position,
+    /// The position is past the end of the Conversation. Reaching this means
+    /// the recorded position and Core's history disagree -- a restore from an
+    /// older checkpoint, say -- not that the user asked for anything invalid.
+    out_of_range,
+    /// The position is at or below `compact_boundary`: its message was
+    /// summarized away and can no longer be named. This one is by design and
+    /// is the only refusal a caller may present to the user as such.
+    compacted,
+    /// The position names a message that is not a user message. A caller that
+    /// records `message_count + 1` at submission can only reach this by
+    /// having mapped a position wrongly, so it means *our* bug, and must stay
+    /// reportable as one instead of being shown as an unsupported operation.
+    not_user_message,
+};
+
+pub const RewindOutcome = union(enum) {
+    /// Core dropped the named user message and everything after it. Only the
+    /// Conversation changed: files and other effects of the dropped turns
+    /// stay, which is the one thing a caller's confirmation step has to say.
+    rewound,
+    /// The Conversation already ends before the named position, so there was
+    /// nothing to drop and Core was not called. A Run whose input never
+    /// reached Core leaves its recorded position exactly here.
+    unchanged,
+    refused: struct {
+        refusal: RewindRefusal,
+        /// Where the refusal was decided. `host` is this Host's own check
+        /// against the `describe` it just took; `core` means Core refused a
+        /// position that check had admitted, so the two readings of the same
+        /// history disagree -- as much our bug as `not_user_message` is.
+        source: enum { host, core },
+    },
+};
+
 pub const PermissionInteraction = enum {
     interactive,
     noninteractive,
@@ -212,6 +271,7 @@ pub const Error = error{
     CoreCallFailed,
     PermissionModeUpdateFailed,
     PermissionModeBudgetRequired,
+    RewindFailed,
     QueueFull,
     SessionNotIdle,
     SessionPoisoned,
