@@ -313,9 +313,6 @@ test("clipboard HTML keeps the LaTeX source, not MathML", async () => {
     String.raw`$$a \\ b$$`,
     "$$\n\\frac{a}{b}\n$$",
     "the value $$x+1$$ holds",
-    // The fenced spelling keeps its own fence, so what is pasted parses back
-    // to the same formula.
-    "```math\n\\frac{a}{b}\n```",
   ]) {
     const markup = await renderMarkdownForClipboard(source);
     assert.doesNotMatch(markup, /<math/);
@@ -326,4 +323,31 @@ test("clipboard HTML keeps the LaTeX source, not MathML", async () => {
         `clipboard markup lost ${JSON.stringify(fragment)}: ${markup}`,
       );
   }
+});
+
+test("a copied fence leaves in the spelling that pastes back as a formula", async () => {
+  // Rich text is pasted back through someone else's Markdown reader. `$$…$$`
+  // in a paragraph is read back as a formula; a fence could only travel
+  // inside a code block, where every character is literal -- the fence it
+  // carries included -- so it would paste as text that never becomes a
+  // formula again. Both spellings therefore copy to the same bytes.
+  const fence = await renderMarkdownForClipboard("```math\n\\frac{a}{b}\n```");
+  assert.equal(
+    fence,
+    await renderMarkdownForClipboard("$$\n\\frac{a}{b}\n$$"),
+    "the fenced spelling does not copy as the dollar spelling",
+  );
+  assert.equal(fence, "<p>$$\n\\frac{a}{b}\n$$</p>");
+  // No code block, so nothing that would make the formula literal on arrival,
+  // and no fence marker left to be read as one.
+  assert.doesNotMatch(fence, /<pre|<code|`/);
+  assert.doesNotMatch(fence, /<math|katex/);
+
+  const tilde = await renderMarkdownForClipboard("~~~math\n\\frac{a}{b}\n~~~");
+  assert.equal(tilde, fence);
+
+  // A formula the author has not closed is not handed over closed, so a copy
+  // taken mid-stream pastes as the text the reader was looking at.
+  const arriving = await renderMarkdownForClipboard("```math\n\\frac{a}{b}");
+  assert.equal(arriving, "<p>$$\n\\frac{a}{b}</p>");
 });

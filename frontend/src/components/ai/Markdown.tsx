@@ -261,17 +261,39 @@ function terminated(source: string): boolean {
   );
 }
 
-function literal(node: MathNode, source: string): Text | Paragraph | Code {
-  // A fence keeps the shape it was written in. It is multi-line by
-  // construction, so a paragraph would collapse the lines the author typed;
-  // every other unclosed fence in the document already streams in as a code
-  // block; and this is the only form that parses back to the same formula once
-  // it has been pasted somewhere else.
+function paragraph(value: string): Paragraph {
+  return { type: "paragraph", children: [{ type: "text", value }] };
+}
+
+// What the reader sees while a formula is still arriving: the source as far as
+// it has been typed. A fence keeps the shape it was written in, because it is
+// multi-line by construction -- a paragraph would collapse the lines the
+// author typed -- and because every other unclosed fence on this root already
+// streams in as a code block.
+function arriving(node: MathNode, source: string): Text | Paragraph | Code {
   if (node.type === "code") return { type: "code", value: source };
-  const text: Text = { type: "text", value: source };
+  if (node.type === "inlineMath") return { type: "text", value: source };
+  return paragraph(source);
+}
+
+// What a rich-text copy carries. It is pasted back through someone else's
+// Markdown reader, and only the dollar spelling survives that trip: `$$…$$`
+// in a paragraph is read back as a formula, while a fence can only travel
+// inside a code block, where every character is literal -- a nested fence
+// included. So a fenced formula is handed over in the dollar spelling, the
+// same normalization an unrenderable formula's fallback makes, and both
+// spellings of one formula copy to the same bytes.
+function copied(node: MathNode & MdastNodes, source: string): Text | Paragraph {
+  if (node.type === "code") {
+    // Closed only if the author has closed it, so copying a formula that is
+    // still arriving does not hand over a finished one -- the same thing the
+    // dollar spelling does on this root, and the same thing the reader sees.
+    const close = terminated(source) ? `\n${delimiter}` : "";
+    return paragraph(`${delimiter}\n${node.value}${close}`);
+  }
   return node.type === "inlineMath"
-    ? text
-    : { type: "paragraph", children: [text] };
+    ? { type: "text", value: source }
+    : paragraph(source);
 }
 
 // Every mdast parent holds plain content; the union of their child arrays is
@@ -325,7 +347,7 @@ function remarkMathSource() {
       (node, source, index, parent) => {
         if (!terminated(source)) {
           // Show what has arrived, verbatim, until the closing delimiter does.
-          replaceChild(parent, index, literal(node, source));
+          replaceChild(parent, index, arriving(node, source));
           return;
         }
         // A formula written as its own line is display math, which micromark
@@ -350,7 +372,7 @@ function remarkMathSource() {
   };
 }
 
-/// Replaces every math node with its own delimited source, for the rich-text
+/// Replaces every math node with its delimited source, for the rich-text
 /// clipboard root. Pasted `$$…$$` stays usable somewhere else; pasted MathML
 /// would not be.
 function remarkMathAsSource() {
@@ -358,7 +380,7 @@ function remarkMathAsSource() {
     eachMath(
       tree,
       (node, source, index, parent) => {
-        replaceChild(parent, index, literal(node, source));
+        replaceChild(parent, index, copied(node, source));
       },
       file,
     );
