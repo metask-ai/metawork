@@ -62,6 +62,13 @@ jobs:
             runner: windows-2022
             target: x86_64-windows-msvc
             lock: build_support/agentcore-bundle.windows-x86_64.lock.json
+          # One image behind the macos-26 release.yml and the packaging job
+          # pin, deliberately, and not a drift to reconcile: the application's
+          # declared macOS baseline is 13.0, no hosted image runs 13 any more,
+          # so the test jobs take the oldest image that still exists. The
+          # packaging legs are pinned forward instead because the Icon Composer
+          # gate only accepts reviewed actool builds. Neither image covers 13.0
+          # itself, which docs/validation.md still carries as an open gap.
           - name: macOS arm64
             runner: macos-15
             target: aarch64-macos
