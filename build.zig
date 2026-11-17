@@ -1613,6 +1613,11 @@ fn wireAgentCore(
     agent_contract.addImport("agent_file_delivery", agent_file_delivery);
     agent_contract.addImport("agent_http_transport", agent_http_transport);
     agent_contract.addImport("image_container", image_container);
+    agent_contract.addImport("agent_model_binding", agent_model_binding);
+    agent_contract.addImport("agent_catalog", agent_catalog);
+    agent_contract.addImport("agent_mcp_catalog", agent_mcp_catalog);
+    agent_contract.addImport("agent_checkpoint", agent_checkpoint);
+    agent_contract.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,

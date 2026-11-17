@@ -13,6 +13,7 @@
 //! flat re-exports stay in `src/agent.zig`.
 
 pub const control = @import("session/control.zig");
+pub const surface = @import("session/surface.zig");
 pub const wire = @import("session/wire.zig");
 pub const multimodal = @import("session/multimodal.zig");
 pub const model_error = @import("session/model_error.zig");
@@ -24,6 +25,7 @@ pub const mcp_install = @import("mcp_install.zig");
 
 test {
     _ = control;
+    _ = surface;
     _ = wire;
     _ = multimodal;
     _ = model_error;
