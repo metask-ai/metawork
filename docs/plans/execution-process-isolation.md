@@ -90,7 +90,7 @@ parked UI 请求的并发上限是 16（`max_pending_ui_requests = host_worker_c
 | DeliverFile 交付根 | exec 侧要同一个根 |
 | checkpoint sink / source | 字节回调，exec 直接读写文件；字节不过界 |
 | credential source | exec 侧自持副本，密钥因此过界（见 4.5） |
-| catalog lease | lease 留 exec；`catalog.Projection` 是 arena 自持、不含句柄的扁平拷贝，投影过界 |
+| catalog lease | lease 留 exec，投影过界。`catalog.Projection` 的内容是扁平数据，但结构体本身带着 `storage: *anyopaque`（它自己的 arena），所以过界的是去掉该字段后的那些字段，不是结构体原样 |
 | `rg.exe` | 跟 exec 走；它本来就随包分发并由 Core spawn |
 
 UI 侧保留的，一条都不交出去：Product 持久化与恢复权威、Task/Run 状态机、投影构建、Bridge 命令面，以及 checkpoint 记录向 Task 行的提交。

@@ -23,6 +23,8 @@ pub const frame = @import("link/frame.zig");
 pub const handshake = @import("link/handshake.zig");
 pub const error_code = @import("link/error_code.zig");
 pub const method = @import("link/method.zig");
+pub const payload = @import("link/payload.zig");
+pub const crossings = @import("link/crossings.zig");
 pub const channel = @import("link/channel.zig");
 
 pub const revision = handshake.revision;
@@ -153,6 +155,8 @@ test {
     _ = handshake;
     _ = error_code;
     _ = method;
+    _ = payload;
+    _ = crossings;
     _ = channel;
 }
 
