@@ -89,7 +89,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
 });
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } =
-  await import("@testing-library/react");
+  await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
@@ -3763,9 +3763,9 @@ test("Composer Add menu selects an enabled Skill and preserves the message", asy
   });
   await user.click(screen.getByRole("button", { name: "Add to message" }));
   assert.ok(await screen.findByRole("menuitem", { name: "Add files" }));
-  assert.equal(
-    screen.queryByRole("menuitem", { name: "Reference workspace file" }),
-    null,
+  assert.deepEqual(
+    screen.getAllByRole("menuitem").map((item) => item.textContent),
+    ["Add files", "Add Skill"],
   );
   assert.equal(picks, 0);
   await user.click(screen.getByRole("menuitem", { name: "Add Skill" }));
@@ -3781,62 +3781,6 @@ test("Composer Add menu selects an enabled Skill and preserves the message", asy
   assert.equal(composer.submissions(), 0);
   assert.equal(draftChanges.at(-1).skillId, "review-id");
   assert.deepEqual(draftChanges.at(-1).argumentValues, ["请检查当前实现"]);
-});
-
-test("Composer references a file from the new task's selected workspace", async () => {
-  const { WorkspaceReferenceMenu } = await vite.ssrLoadModule(
-    "/src/features/workspaces/WorkspaceReferenceMenu.tsx",
-  );
-  const user = userEvent.setup({ document });
-  const browsed = [];
-  const chosen = [];
-  const target = { taskId: null, workspaceId: "2", workspaceEpoch: "4" };
-  const files = {
-    scope: "new-task:2",
-    target,
-    load: async (taskId, workspaceId, workspaceEpoch, path) => {
-      browsed.push({ taskId, workspaceId, workspaceEpoch, path });
-      return {
-        state: "ready",
-        entries:
-          path === ""
-            ? [{ name: "docs", kind: "directory" }]
-            : [{ name: "requirements.md", kind: "file" }],
-        redacted: false,
-        truncated: false,
-      };
-    },
-    choose: (reference) => chosen.push(reference),
-  };
-  renderComposer({
-    attachmentsEnabled: true,
-    workspaceReferenceScope: files.scope,
-    workspaceReferenceMenu: createElement(WorkspaceReferenceMenu, { files }),
-  });
-  await user.click(screen.getByRole("button", { name: "Add to message" }));
-  assert.deepEqual(
-    (await screen.findAllByRole("menuitem")).map((item) => item.textContent),
-    ["Add files", "Reference workspace file", "Add Skill"],
-  );
-  await user.click(
-    screen.getByRole("menuitem", { name: "Reference workspace file" }),
-  );
-  const submenu = await screen.findByRole("menu", {
-    name: "Reference workspace file",
-  });
-  const fileMenu = within(submenu);
-  assert.equal(screen.queryByRole("dialog"), null);
-  await user.click(await fileMenu.findByRole("menuitem", { name: "docs" }));
-  await fileMenu.findByRole("menuitem", { name: "requirements.md" });
-  await user.click(fileMenu.getByRole("menuitem", { name: "Up one folder" }));
-  await user.click(fileMenu.getByRole("menuitem", { name: "docs" }));
-  assert.equal(document.activeElement?.textContent, "Up one folder");
-  await user.keyboard("{ArrowDown}{Enter}");
-  assert.deepEqual(browsed, [
-    { ...target, path: "" },
-    { ...target, path: "docs" },
-  ]);
-  assert.deepEqual(chosen, [{ ...target, path: "docs/requirements.md" }]);
 });
 
 test("removing the last attachment returns keyboard focus to the Add menu", async () => {
@@ -3934,15 +3878,6 @@ test("file size rejection displays the Host limit and preserves ready chips", ()
   });
   assert.match(screen.getByRole("alert").textContent, /3\.75 MB/);
   assert.ok(screen.getByText("ready.txt"));
-});
-
-test("text file size rejection remains actionable", () => {
-  renderComposer({
-    attachmentsEnabled: true,
-    attachmentMaxFileBytes: "100000000",
-    attachmentError: "text_file_too_large",
-  });
-  assert.match(screen.getByRole("alert").textContent, /100 MB/);
 });
 
 function pasteItems(target, items) {

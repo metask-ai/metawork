@@ -83,7 +83,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
 });
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } =
-  await import("@testing-library/react");
+  await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
@@ -128,6 +128,7 @@ async function renderSubmissionApp(
     attachmentsEnabled,
     active = false,
     inputReady = true,
+    workspace,
   } = {},
 ) {
   window.sessionStorage.clear();
@@ -148,6 +149,7 @@ async function renderSubmissionApp(
     ),
   );
   snapshot.capabilities.automaticWorkspaces = true;
+  if (workspace) Object.assign(snapshot.workspaces[0], workspace);
   if (attachmentsEnabled !== undefined)
     snapshot.capabilities.attachments.enabled = attachmentsEnabled;
   const task = structuredClone(snapshot.tasks[0]);
@@ -2139,6 +2141,18 @@ async function selectManualSubmissionWorkspace(user) {
   );
 }
 
+for (const kind of ["manual", "automatic"])
+  test(`App offers files and Skills in the add menu for a ${kind} Workspace`, async (ctx) => {
+    await renderSubmissionApp(ctx, { workspace: { kind } });
+    const user = userEvent.setup({ document });
+    await user.click(screen.getByRole("button", { name: "Add to message" }));
+    await screen.findByRole("menuitem", { name: "Add files" });
+    assert.deepEqual(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+      ["Add files", "Add Skill"],
+    );
+  });
+
 test("App creates a separate Task when the same Workspace is used for another new task", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
@@ -2153,12 +2167,22 @@ test("App creates a separate Task when the same Workspace is used for another ne
   fireEvent.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
-  await selectManualSubmissionWorkspace(user);
+  const workspace = fixture.snapshot.workspaces[0];
+  assert.equal(
+    screen.getByRole("combobox", { name: "Choose working directory" })
+      .textContent,
+    workspace.displayName,
+  );
   fireEvent.change(fixture.textarea, {
     target: { value: "second Task input" },
   });
   fireEvent.keyDown(fixture.textarea, { key: "Enter" });
   assert.equal(fixture.creations(), 2);
+  assert.deepEqual(fixture.createRequests[1][0], {
+    kind: "manual",
+    workspaceId: workspace.id,
+    expectedWorkspaceEpoch: workspace.epoch,
+  });
   assert.equal(fixture.inputs.length, 1);
 
   const secondTask = {
@@ -2176,6 +2200,56 @@ test("App creates a separate Task when the same Workspace is used for another ne
     ["first Task input", "second Task input"],
   );
 });
+
+test("changing the inherited working directory before sending creates the Task in the selected project", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const workspace = {
+    ...fixture.snapshot.workspaces[0],
+    id: "2",
+    epoch: "3",
+    displayName: "Project B",
+    canonicalRoot: "/tmp/project-b",
+  };
+  fixture.snapshot.workspaces.push(workspace);
+  await fixture.publish();
+
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  const picker = screen.getByRole("combobox", {
+    name: "Choose working directory",
+  });
+  assert.equal(picker.textContent, fixture.snapshot.workspaces[0].displayName);
+  await user.click(picker);
+  await user.click(await screen.findByRole("option", { name: "Project B" }));
+  assert.equal(picker.textContent, workspace.displayName);
+
+  fireEvent.change(fixture.textarea, { target: { value: "Use Project B" } });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.deepEqual(fixture.createRequests[0][0], {
+    kind: "manual",
+    workspaceId: workspace.id,
+    expectedWorkspaceEpoch: workspace.epoch,
+  });
+});
+
+for (const [scenario, workspace] of [
+  ["an Automatic directory", { kind: "automatic" }],
+  ["a removed project", { projectRemoved: true }],
+  ["a project requiring access", { authorization: "reauthorization_required" }],
+])
+  test(`New task uses the default for a Task with ${scenario}`, async (ctx) => {
+    const fixture = await renderSubmissionApp(ctx, { workspace });
+    fireEvent.click(
+      screen.getByRole("button", { name: "New task", exact: true }),
+    );
+    fireEvent.change(fixture.textarea, {
+      target: { value: "Use the default" },
+    });
+    fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+    assert.deepEqual(fixture.createRequests[0][0], { kind: "automatic" });
+  });
 
 test("late Workspace creation cannot attach old messages or selection to a newly opened draft", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });

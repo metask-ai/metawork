@@ -72,7 +72,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
 });
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } =
-  await import("@testing-library/react");
+  await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
@@ -325,7 +325,7 @@ test("the collapsed sidebar exposes New task after Search and focuses the new dr
   ctx.after(() => {
     window.innerWidth = initialWidth;
   });
-  const { user } = await renderApp(ctx);
+  const { user, snapshot } = await renderApp(ctx);
   const leading = within(document.querySelector(".commandbar-leading-actions"));
   const sidebar = leading.getByRole("button", { name: "Toggle task sidebar" });
   const newTask = { name: "New task", exact: true };
@@ -341,6 +341,11 @@ test("the collapsed sidebar exposes New task after Search and focuses the new dr
   await user.click(launcher);
   const draft = document.querySelector('[data-view="new-task"]');
   assert.ok(draft);
+  assert.equal(
+    within(draft).getByRole("combobox", { name: "Choose working directory" })
+      .textContent,
+    snapshot.workspaces[0].displayName,
+  );
   await waitFor(() => assertFocused(draft.querySelector("textarea")));
   assert.equal(sidebar.getAttribute("aria-expanded"), "false");
 
@@ -585,6 +590,11 @@ test("Composer recalls only the current Task's saved text after remount and page
     );
     fireEvent.keyDown(window, { key: "n", metaKey: true });
     await waitFor(() => assert.equal(textarea.value, ""));
+    assert.equal(
+      screen.getByRole("combobox", { name: "Choose working directory" })
+        .textContent,
+      app.snapshot.workspaces[0].displayName,
+    );
     fireEvent.keyDown(textarea, { key: "ArrowUp" });
     await act(async () => {});
     assert.equal(textarea.value, "");
