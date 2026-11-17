@@ -857,15 +857,15 @@ pub fn writeRun(
     now_ms: ?u64,
 ) Error!void {
     const terminal = projection.terminal;
-    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"editAdmitted\":{},\"superseded\":{},\"rewoundRuns\":{d},\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
+    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"editAdmitted\":{},\"superseded\":{},\"rewoundRuns\":{d},\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
         run.id,
         if (run.coverage == .excluded) "excluded" else "included",
-        rewind.edit_admitted,
-        rewind.superseded,
-        rewind.rewound_runs,
         @tagName(projection.phase),
         @tagName(run.permission_profile),
         @tagName(run.permission_interaction),
+        rewind.edit_admitted,
+        rewind.superseded,
+        rewind.rewound_runs,
         run.execution_generation,
         @tagName(run.execution_protocol),
     }) catch return error.SnapshotTooLarge;

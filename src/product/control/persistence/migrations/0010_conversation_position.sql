@@ -50,3 +50,9 @@ BEGIN SELECT RAISE(ABORT, 'invalid task compact boundary'); END;
 CREATE TRIGGER tasks_compact_boundary_update BEFORE UPDATE OF compact_boundary ON tasks
 WHEN typeof(NEW.compact_boundary)<>'blob' OR length(NEW.compact_boundary)<>8
 BEGIN SELECT RAISE(ABORT, 'invalid task compact boundary'); END;
+
+-- An edit has to rewind the Conversation, which only an idle Task can do, so
+-- it stops the Run in the way. The user did not press Stop, and history says
+-- which of the two happened.
+ALTER TABLE runs DROP CONSTRAINT runs_cause_domain;
+ALTER TABLE runs ADD CONSTRAINT runs_cause_domain CHECK(cause IS NULL OR cause IN ('user_cancel','approval_mode_change','edit_and_rerun','timeout','session_close','app_shutdown','event_pipeline_failure','event_payload_too_large','queue_capacity_failure','ui_pipeline_failure','permission_required','agent_failure','provider_failure','tool_failure','image_input_unsupported','stale_catalog','skill_not_found','invalid_skill_arguments','skill_policy_violation','skill_unavailable','resource_limit','dependency_contract_failure'));

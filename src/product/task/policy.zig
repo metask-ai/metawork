@@ -221,8 +221,9 @@ pub fn pendingTerminationSignal(
     return .{
         .interrupted = switch (run.pending_termination.load(.acquire)) {
             .none => unreachable,
-            // Core has no approval-change interruption; it sees a cancellation.
-            .user_cancel, .approval_mode_change => .user_cancel,
+            // Core has no Product stop reason of its own; every one of these
+            // reaches it as a cancellation.
+            .user_cancel, .approval_mode_change, .edit_and_rerun => .user_cancel,
             .timeout => .timeout,
             .session_close => .session_close,
             .app_shutdown => .app_shutdown,
@@ -234,9 +235,10 @@ pub fn pendingExternalInterruption(
     compact: *const task_state.CompactRecord,
 ) agent.ExternalInterruption {
     return switch (compact.pending_interruption.load(.acquire)) {
-        // An approval change never interrupts a Compact: neither mutation is
-        // admitted while the other is running.
-        .none, .approval_mode_change => unreachable,
+        // Neither an approval change nor an edit interrupts a Compact: an
+        // edited message waits behind it, and neither mutation is admitted
+        // while the other is running.
+        .none, .approval_mode_change, .edit_and_rerun => unreachable,
         .user_cancel => .user_cancel,
         .timeout => .timeout,
         .session_close => .session_close,
@@ -283,6 +285,7 @@ pub fn productCancelCause(
     if (cause != .user_cancel) return cause;
     return switch (run.pending_termination.load(.acquire)) {
         .approval_mode_change => .approval_mode_change,
+        .edit_and_rerun => .edit_and_rerun,
         else => cause,
     };
 }
@@ -899,6 +902,13 @@ pub fn rewoundRunCount(task: *const task_state.Task, run_id: u64) u32 {
     return count;
 }
 
+/// The newest Run whose turn is still in the Conversation. It is also the
+/// `last_run_id` a checkpoint export expects Core to report, and skipping
+/// superseded Runs cannot break that: a rewind leaves Core's `last_run_id`
+/// alone, and the Run that performed one is always newer than the Runs it
+/// superseded, so it is the maximum either way. Should that Run itself leave
+/// the Conversation, its supersessions lapse with it and the Runs it named
+/// are the frontier again.
 pub fn lastConversationRunId(task: *const task_state.Task) ?u64 {
     var latest: u64 = 0;
     for (task.durable.runs) |*entry| {

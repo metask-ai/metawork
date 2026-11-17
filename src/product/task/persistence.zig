@@ -4020,6 +4020,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         if (run.cause) |cause| if (!oneOf(cause, &.{
             "user_cancel",
             "approval_mode_change",
+            "edit_and_rerun",
             "timeout",
             "session_close",
             "app_shutdown",

@@ -1704,6 +1704,7 @@ export const enUS = {
   "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.approval_mode_change": "Stopped to change the approval mode",
+  "cause.edit_and_rerun": "Stopped to rerun from an edited message",
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",
   "cause.app_shutdown": "MetaWork closed",

@@ -855,7 +855,7 @@ pub const PreparedRun = struct {
             task_execution.publishAutomaticTitleFallback(run_record);
             task_execution.cancelPreparedRunOrPanic(self.job.sessionAccess(), self.run_id);
             self.job.destroy();
-            run_record.coverage = .excluded;
+            task_state.excludeRunFromConversation(self.task, run_record);
             _ = task_execution.commitRunTerminal(
                 self.effects.worker.projector,
                 run_record,
@@ -3524,18 +3524,15 @@ pub const Runtime = struct {
                 },
             }
         }
-        const run_id = access.prepareRunWithTools(agent_input, image, delivery, mcp_installation, video) catch |err| {
-            // A rewind is only as durable as the Run that performed it, and
-            // there is now no such Run. Poisoning the attachment closes this
-            // Session so the next operation restores the committed
-            // checkpoint, which predates the rewind and puts the dropped
-            // turns back. Product history recorded nothing, so the two agree
-            // again.
-            if (rewound) if (task.runtime.attached()) |attached| {
-                attached.health = .session_poisoned;
-            };
-            return err;
+        // A rewind is only as durable as the Run that performs it, and from
+        // here on any failure leaves no such Run. Poisoning the attachment
+        // closes this Session so the next operation restores the committed
+        // checkpoint, which predates the rewind and puts the dropped turns
+        // back. Product history recorded nothing, so the two agree again.
+        errdefer if (rewound) if (task.runtime.attached()) |attached| {
+            attached.health = .session_poisoned;
         };
+        const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation, video);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -3737,6 +3734,17 @@ pub const Runtime = struct {
             .previous_active_operation = previous_active_operation,
             .previous_recent_order = previous_recent_order,
             .previous_next_recent_order = previous_next_recent_order,
+        };
+    }
+
+    /// The Run this Task is executing, if it is executing one. A caller that
+    /// only needs the Run stopped reads this instead of `stopOperation`,
+    /// which would also cancel a compaction or a restore the user asked for.
+    pub fn activeRunId(self: *const Runtime, task_id: u64) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        return switch (task.runtime.active_operation) {
+            .run => |id| id,
+            .compact, .restore, .none => null,
         };
     }
 

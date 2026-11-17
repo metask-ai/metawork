@@ -1400,6 +1400,8 @@ export function TaskContent({
                         onEditInput &&
                         run.editAdmitted &&
                         synchronized &&
+                        task.lifecycle !== "closing" &&
+                        !task.sessionCloseRetryAvailable &&
                         editableRunText(run.input) !== null
                           ? () =>
                               setEditing({

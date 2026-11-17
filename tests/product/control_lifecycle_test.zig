@@ -10770,6 +10770,46 @@ test "an edited message rewinds the Conversation and reruns in its place" {
     );
 }
 
+test "editing during a Run stops it under its own cause and reruns once idle" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    defer fake_core.releaseControlled();
+    const task = scenario.control.testTask(scenario.task_id).?;
+    const running = task.runtime.active_run_id;
+    try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, running).?.conversation_position);
+
+    // The Run is held at the fixture, so this edit has to stop it first. The
+    // edited message waits in the ordinary queue until the Task is idle.
+    const accepted = try scenario.control.editTaskInput(
+        "edit-the-running-turn",
+        scenario.task_id,
+        running,
+        .{ .text = "edited while running" },
+    );
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    try std.testing.expectEqual(@as(usize, 0), fake_core.rewind_calls);
+
+    fake_core.setNextPlan(.immediate);
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+
+    // A Stop the user did not press. History says which of the two happened.
+    const stopped = task_state.findRun(task.durable.runs, running).?;
+    try std.testing.expectEqual(
+        task_state.RunCause.edit_and_rerun,
+        task_state.productTerminalFacts(stopped).?.cause.?,
+    );
+    const rerun = for (task.durable.runs) |entry| {
+        const run = entry orelse continue;
+        if (run.id != running) break run.id;
+    } else return error.TestUnexpectedResult;
+    // The interrupted turn never left a reply behind, so the Conversation
+    // already ended where the rerun needed it to and Core was not called.
+    try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
+    try std.testing.expect(task_policy.runSuperseded(task, stopped));
+    try std.testing.expectEqual(@as(u32, 1), task_policy.rewoundRunCount(task, rerun));
+}
+
 test "active input continues exactly once after normal completion and never repeats adopted input" {
     for ([_]bool{ false, true }) |gap| {
         for ([_]bool{ false, true }) |adopt| {

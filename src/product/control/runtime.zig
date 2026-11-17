@@ -4491,7 +4491,11 @@ pub const Runtime = struct {
             return result;
         };
         result.outcome = .accepted;
-        self.task_runtime.stopOperation(task_id, self.taskRuntimeOperationEffects()) catch {};
+        // Only a Run is in the way. A compaction or a restore the user asked
+        // for finishes on its own, and the edited message waits behind it.
+        if (self.task_runtime.activeRunId(task_id)) |run| {
+            _ = self.task_runtime.cancelRun(task_id, run, .edit_and_rerun, self.taskRuntimeOperationEffects()) catch false;
+        }
         self.reapTaskInputResources();
         self.advanceTaskInputs();
         self.commitTaskStateNoFail();

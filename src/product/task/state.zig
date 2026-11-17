@@ -122,6 +122,7 @@ pub const ActiveOperation = task_attachment.ActiveOperation;
 pub const RunCause = enum {
     user_cancel,
     approval_mode_change,
+    edit_and_rerun,
     timeout,
     session_close,
     app_shutdown,
@@ -391,6 +392,11 @@ pub const PendingInterruption = enum(u8) {
     /// A Run stopped because an approval change crossed the Core profile
     /// boundary. Core still observes a user cancellation.
     approval_mode_change,
+    /// A Run stopped because the user edited an earlier message, which has to
+    /// rewind the Conversation and can only do so once the Task is idle. The
+    /// user did not press Stop, and history says which of the two happened.
+    /// Core still observes a user cancellation.
+    edit_and_rerun,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.
@@ -1538,6 +1544,7 @@ pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservati
         .resource_limit => terminal.phase == .stopped,
         .user_cancel,
         .approval_mode_change,
+        .edit_and_rerun,
         .timeout,
         .session_close,
         .app_shutdown,
@@ -1737,6 +1744,25 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
     return changed;
 }
 
+/// Takes a Run out of the Conversation.
+///
+/// A Run that performed a rewind cannot leave the Conversation quietly while
+/// its Session is still attached: Core has already dropped those turns, and
+/// the history that is about to say they are back no longer describes the
+/// live Conversation. Poisoning the attachment closes that Session, and the
+/// next operation restores the committed checkpoint, which predates the
+/// rewind. A Session that is already closing needs none of this: the restore
+/// is what it will do anyway.
+pub fn excludeRunFromConversation(task: *Task, run: *RunRecord) void {
+    run.coverage = .excluded;
+    for (task.durable.runs) |*entry| {
+        const other = &(entry.* orelse continue);
+        if (other.superseded_by_run_id != run.id) continue;
+        if (task.runtime.attached()) |attached| attached.health = .session_poisoned;
+        return;
+    }
+}
+
 pub fn finalizeMarkedTerminalRunsAfterEventDrain(
     task: *Task,
     finished_at_ms: ?u64,
@@ -1763,7 +1789,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         }
         freezeRunElapsedMs(run, finished_at_ms);
         if (terminalPayload(run).?.exclude_on_product_terminal and run.coverage == .pending)
-            run.coverage = .excluded;
+            excludeRunFromConversation(task, run);
         run.noteProjectionChange();
         run.event_stream_finalized = true;
         if (run.finished_at_unix_ms == null)

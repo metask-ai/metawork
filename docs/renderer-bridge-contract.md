@@ -102,7 +102,7 @@ Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`
 
 `taskIndex` 摘要必填 `archiveBlocker`（归档或恢复归档）及 `deleteBlocker`，`taskPage.task` 详情必填 `compactBlocker`。值为 `null` 时表示当次投影允许发起动作，其余值为 `busy | closing | deleting | history_read_only | no_history | unavailable`。Host 使用 Task 的动作准入和当前外部事实产生这些字段，执行命令时重新校验。Renderer 从这些字段呈现资格和原因，另保留连接及本地在途提交门禁。活动 Run 可以进入停止并删除，手动 compact 资格取 Task 的对话覆盖与操作状态，与已加载的历史页无关。
 
-Run terminal cause `approval_mode_change` 表示该 Run 因跨 Core profile 的审批模式切换被停止，与用户 Stop 的 `user_cancel` 区分；Core 仍只观察到一次取消。`event_payload_too_large` 表示单次执行事件超过 Host 有界接收上限；`queue_capacity_failure` 表示执行或事件队列无法继续准入。两者不代表磁盘空间不足。文件修改 observation 的 incomplete 只表示未能完整确认修改情况，不推断已保存文件损坏。
+Run terminal cause `approval_mode_change` 表示该 Run 因跨 Core profile 的审批模式切换被停止，`edit_and_rerun` 表示它为了从一条编辑后的消息重跑而被停止（回退只能在 Task idle 时进行），两者都与用户 Stop 的 `user_cancel` 区分；Core 仍只观察到一次取消。`event_payload_too_large` 表示单次执行事件超过 Host 有界接收上限；`queue_capacity_failure` 表示执行或事件队列无法继续准入。两者不代表磁盘空间不足。文件修改 observation 的 incomplete 只表示未能完整确认修改情况，不推断已保存文件损坏。
 
 每个 Run 另精确发布 `fileChanges = null | { observation, changes }`。null 表示没有建立 typed observation，不能解释为“确认没有修改”；observation 只取 `collecting | complete | incomplete`。`changes[]` entry 精确为 `{ id, order, kind, status, displayPath, fromDisplayPath, beforeBytes, afterBytes, diffAvailable, diffComplete, redacted }`：id 是 Run 内 opaque identity，order、beforeBytes、afterBytes 是 canonical decimal `u64` string；kind 只取 `created | modified | deleted | moved`，status 只取 `applied | partial`，fromDisplayPath 只在 moved 时非空，其余安全标志均为 boolean。同一 Run 的 id 和 order 必须唯一并按 order 严格递增；同路径多次记录不得合并。该投影不运输 raw locator、absolute path、AgentCore handle、agent depth、unified diff、credential 或文件当前内容。根 capability `typedFileChanges` 为 true 时 Renderer 才可消费此字段。
 

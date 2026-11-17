@@ -1481,6 +1481,7 @@ export const zhCN: Record<MessageId, string> = {
   "outcome.dependency_contract_failure": "任务运行环境失败",
   "cause.user_cancel": "由你停止",
   "cause.approval_mode_change": "为切换审批模式而停止",
+  "cause.edit_and_rerun": "为从编辑后的消息重跑而停止",
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",
   "cause.app_shutdown": "MetaWork 已关闭",
