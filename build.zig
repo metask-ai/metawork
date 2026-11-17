@@ -641,6 +641,56 @@ pub fn build(b: *std.Build) void {
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
     ).dependOn(&storage_tests_run.step);
+    // Fault capture installs process-wide handlers, so a test binary that
+    // installed them would take the test runner's own faults, and a test that
+    // crashes cannot report a result. The capability is verified the only way
+    // it can be: a child that faults on purpose, with the parent reading the
+    // record through the real decoder. A missing fixture must fail the run,
+    // never skip it.
+    const fault_capture_fixture_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/fault_capture_fixture.zig"),
+        .target = test_modules.app_fault.resolved_target,
+        .optimize = test_modules.app_fault.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    fault_capture_fixture_module.addImport("app_fault", test_modules.app_fault);
+    const fault_capture_fixture = b.addExecutable(.{
+        .name = "metawork-fault-capture-fixture",
+        .root_module = fault_capture_fixture_module,
+    });
+    const install_fault_capture_fixture = b.addInstallArtifact(fault_capture_fixture, .{});
+    const fault_capture_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/fault_capture_test.zig"),
+        .target = test_modules.app_fault.resolved_target,
+        .optimize = test_modules.app_fault.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    fault_capture_module.addImport("app_fault", test_modules.app_fault);
+    fault_capture_module.addImport("fault_capture_fixture", fault_capture_fixture_module);
+    const fault_capture_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-fault-capture",
+        .root_module = fault_capture_module,
+    }));
+    fault_capture_tests_run.step.dependOn(&install_fault_capture_fixture.step);
+    fault_capture_tests_run.setEnvironmentVariable("METAWORK_FAULT_CAPTURE_FIXTURE", b.getInstallPath(
+        .bin,
+        if (test_modules.app_fault.resolved_target.?.result.os.tag == .windows)
+            "metawork-fault-capture-fixture.exe"
+        else
+            "metawork-fault-capture-fixture",
+    ));
+    const fault_unit_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-fault",
+        .root_module = test_modules.app_fault,
+    }));
+    artifacts.tests.step.dependOn(&fault_unit_tests_run.step);
+    artifacts.tests.step.dependOn(&fault_capture_tests_run.step);
+    const fault_capture_step = b.step(
+        "test-fault-capture",
+        "Run the fault record, breadcrumb ring and child-process capture tests",
+    );
+    fault_capture_step.dependOn(&fault_unit_tests_run.step);
+    fault_capture_step.dependOn(&fault_capture_tests_run.step);
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
     const sqlite_a_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_memory.zig"),
@@ -840,6 +890,7 @@ const WiredModules = struct {
     metask_transport: *std.Build.Module,
     metask_client: *std.Build.Module,
     app: *std.Build.Module,
+    app_fault: *std.Build.Module,
     mcp_platform: *std.Build.Module,
     mcp_oauth: *std.Build.Module,
     agent: *std.Build.Module,
@@ -1536,6 +1587,7 @@ fn wireAgentCore(
     });
     const core_identity = b.addOptions();
     core_identity.addOption([]const u8, "manifest_sha256", &bundle.manifest_sha256);
+    core_identity.addOption(u16, "abi_revision", bundle.abi_revision);
     session.addOptions("agentcore_identity", core_identity);
     session.addImport("metask_agentcore", sdk);
     session.addImport("agent_file_delivery", agent_file_delivery);
@@ -1634,6 +1686,14 @@ fn wireAgentCore(
         .root_source_file = b.path("src/app/select_start.zig"),
         .target = target,
         .optimize = root_module.optimize,
+    });
+    // A module of its own, not a relative import, because the fault-capture
+    // child fixture has to link the same code the Application installs.
+    const app_fault = b.createModule(.{
+        .root_source_file = b.path("src/app/fault.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
     });
     const metawork_http_memory = b.createModule(.{
         .root_source_file = b.path("src/foundation/http_memory.zig"),
@@ -2604,6 +2664,7 @@ fn wireAgentCore(
     app.addImport("account_loopback", account_loopback);
     app.addImport("oauth_loopback_transport", oauth_loopback_transport);
     app.addImport("app_select_start", app_select_start);
+    app.addImport("app_fault", app_fault);
     app.addImport("metawork_http_memory", metawork_http_memory);
     app.addImport("metawork_http_transport", metawork_http_transport);
     app.addImport("account_ports", account_ports);
@@ -2652,6 +2713,7 @@ fn wireAgentCore(
         .metask_transport = metask_transport,
         .metask_client = metask_client,
         .app = app,
+        .app_fault = app_fault,
         .mcp_platform = mcp_platform,
         .mcp_oauth = mcp_oauth,
         .agent = agent,

@@ -73,6 +73,7 @@ pub const DeletionEffects = runtime.DeletionEffects;
 pub const OperationEffects = runtime.OperationEffects;
 pub const WorkspaceOrderEffect = runtime.WorkspaceOrderEffect;
 pub const RunClock = runtime.RunClock;
+pub const RunTrace = runtime.RunTrace;
 pub const RunNotification = runtime.RunNotification;
 pub const RunNotificationKind = runtime.RunNotificationKind;
 pub const RunNotifier = runtime.RunNotifier;

@@ -34,13 +34,66 @@ const office_skills = @import("app/office_skills.zig");
 const app_platform = @import("app/platform.zig");
 const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
+const fault = @import("app_fault");
 const app_stores = @import("app/stores.zig");
 const app_window = @import("app/window.zig");
 const product_update = @import("metawork_product_update");
 const update_coordinator = @import("app/update_coordinator.zig");
 const update_http = @import("app/update_http_transport.zig");
 
-pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
+pub const panic = std.debug.FullPanic(capturePanic);
+
+/// The SDK still owns the panic artifact (`last-panic.txt`). This only adds
+/// the Runs the panic interrupted, which that artifact cannot carry, and then
+/// hands the panic on unchanged.
+fn capturePanic(message: []const u8, first_trace_address: ?usize) noreturn {
+    @branchHint(.cold);
+    fault.capturePanic(first_trace_address);
+    native_sdk.debug.capturePanic(message, first_trace_address);
+}
+
+/// `std.debug`'s own fault handler, reached through its documented root hook
+/// (`src/main.zig` re-exports this namespace). It records what the vectored
+/// handler deliberately leaves alone -- access violations and misaligned
+/// access, which only `std.debug`'s own policy declares fatal -- and then
+/// hands the fault straight back, so the process still dies exactly as it
+/// does today.
+pub const debug = struct {
+    pub fn handleSegfault(
+        address: ?usize,
+        name: []const u8,
+        context: ?std.debug.CpuContextPtr,
+    ) noreturn {
+        fault.captureStandardSegfault(
+            address,
+            if (context) |value| value.getPc() else 0,
+            if (context) |value| value.getFp() else 0,
+        );
+        std.debug.defaultHandleSegfault(address, name, context);
+    }
+};
+
+/// Fault breadcrumbs for Product Control: the worker owning a Run publishes
+/// its identity for the length of the Run. `role` is the Application's, and
+/// there is one caller.
+fn beginRunBreadcrumb(_: ?*anyopaque, task_id: u64, run_id: u64) u32 {
+    return fault.beginRun(task_id, run_id);
+}
+
+fn finishRunBreadcrumb(_: ?*anyopaque, claim: u32, task_id: u64, run_id: u64) void {
+    fault.finishRun(claim, task_id, run_id);
+}
+
+const fault_identity: fault.Identity = .{
+    .version = product_identity.version,
+    .artifact_kind = switch (product_identity.artifact_kind) {
+        .development => .development,
+        .release => .release,
+        .automation => .automation,
+    },
+    .core_manifest_sha256 = fault.digestFromHex(agent.core_manifest_sha256),
+    .core_abi_revision = agent.core_abi_revision,
+};
 
 fn canonicalArchiveFile(io: std.Io, path: []const u8) ![]u8 {
     if (path.len == 0 or path.len > product_control.AttachmentArchiveTool.max_path_bytes or
@@ -670,6 +723,45 @@ pub fn run(init: std.process.Init) !void {
         single_instance_state.deinit();
     }
 
+    // Fault capture belongs to the instance that owns the data root, and only
+    // this one does: a forwarding launch exits in milliseconds and would
+    // otherwise share the record file with the live instance. Holding the
+    // lease exclusively is also what makes a leftover marker mean "the last
+    // exit was not clean" rather than "another instance is running", which
+    // matters on a machine where the installed build and the development
+    // build share a data root. The previous process's record is read before
+    // installing: installing keeps it, a fault here overwrites it in place.
+    const fault_options: fault.Options = .{
+        .role = .ui,
+        .data_root = paths_state.dataDir(),
+        .identity = fault_identity,
+    };
+    var previous_record_storage: [fault.record_bytes]u8 = undefined;
+    const previous_record = fault.readRecord(
+        init.io,
+        paths_state.dataDir(),
+        &previous_record_storage,
+    );
+    fault.install(init.io, fault_options) catch |failure|
+        std.log.warn("fault capture unavailable: {s}", .{@errorName(failure)});
+    const previous_run: fault.PreviousRun = .{
+        .marker = fault.adoptInstanceMarker(single_instance_state.leaseFile(), fault_options),
+        .record = previous_record,
+    };
+    // Registered after the marker is published and before the Coordinator's
+    // own teardown, so a clean exit always clears it with the lease still open.
+    defer fault.clearInstanceMarker(single_instance_state.leaseFile());
+    if (previous_run.marker != null) {
+        var summary_storage: [8 * 1024]u8 = undefined;
+        const summary = fault.reportPreviousRun(
+            init.io,
+            paths_state.dataDir(),
+            previous_run,
+            &summary_storage,
+        );
+        std.log.warn("{s}", .{summary});
+    }
+
     const builtin_skill_root: ?[:0]u8 = if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .macos)
         office_skills.prepare(std.heap.c_allocator, init.io, paths_state.dataDir()) catch |failure| failed: {
             std.log.warn("Office Skill publication unavailable: {s}", .{@errorName(failure)});
@@ -722,6 +814,10 @@ pub fn run(init: std.process.Init) !void {
             .context = &app.platform,
             .now_ms_fn = app_platform.Adapter.runNowMonotonicMs,
             .now_unix_ms_fn = app_platform.Adapter.runNowUnixMs,
+        },
+        .run_trace = .{
+            .begin_fn = beginRunBreadcrumb,
+            .finish_fn = finishRunBreadcrumb,
         },
         .mcp_refresh_timer = .{
             .context = &app.platform,
@@ -945,6 +1041,34 @@ test "Windows window chrome Application test roots" {
 test "main-loop wake Application test roots" {
     std.testing.refAllDecls(app_platform);
     std.testing.refAllDecls(app_single_instance);
+}
+
+test "fault capture Application test roots" {
+    std.testing.refAllDecls(fault);
+}
+
+test "the fault breadcrumb ring covers every Run this host can execute at once" {
+    // The ring has to hold every live Run, so it is sized against the pool
+    // this composition root creates rather than against a number of its own.
+    try std.testing.expect(fault.breadcrumb_capacity >= host_worker_count);
+    fault.resetBreadcrumbs();
+    const port: @FieldType(product_control.Configuration, "run_trace") = .{
+        .begin_fn = beginRunBreadcrumb,
+        .finish_fn = finishRunBreadcrumb,
+    };
+    var claims: [host_worker_count]?u32 = undefined;
+    for (&claims, 0..) |*claim, index| claim.* = port.begin(1, index + 1);
+    const live = fault.breadcrumbSnapshot();
+    for (claims, 0..) |claim, index| {
+        try std.testing.expectEqual(@as(u64, 1), live[claim.?].task_id);
+        try std.testing.expectEqual(@as(u64, index + 1), live[claim.?].run_id);
+        try std.testing.expectEqual(fault.BreadcrumbPhase.running, live[claim.?].phaseValue());
+    }
+    port.finish(claims[0], 1, 1);
+    try std.testing.expectEqual(
+        fault.BreadcrumbPhase.finished,
+        fault.breadcrumbSnapshot()[claims[0].?].phaseValue(),
+    );
 }
 
 test "main-loop wake joins the required relay after Agent shutdown failure" {

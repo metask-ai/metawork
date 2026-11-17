@@ -66,6 +66,14 @@ pub const Coordinator = struct {
         return .primary;
     }
 
+    /// The lease file itself, for the Application-owned startup and exit
+    /// marker. Valid only while this Coordinator is started: `deinit` closes
+    /// it with the lease.
+    pub fn leaseFile(self: *const Coordinator) std.Io.File {
+        std.debug.assert(self.started);
+        return self.lease.file;
+    }
+
     pub fn bindWakeAndDrain(self: *Coordinator, notifier: protocol.Notifier) bool {
         if (!self.started) return false;
         return self.queue.bindWakeAndDrain(notifier);
