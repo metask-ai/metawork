@@ -76,6 +76,8 @@
 
 parked UI 请求的并发上限是 16（`max_pending_ui_requests = host_worker_count`），不是更小的数；收口设计要按 16 个同时 park 的 Core 回调线程来算。
 
+事件与终态共用同一条有序数据队列，这不是实现细节而是一条必须保住的不变量：`event` 帧与承载 Run 终态的 `response` 都走数据队列，只有不分片的 `control` 帧可以在分片之间插入，所以**一个 Run 的终态不可能先于它自己的事件到达**。正是这一条让读取方可以把「我的 pump 里这条 route 没有待处理事件」读成「该终态所属 Run 的全部事件都已到达」。把终态挪到 control、或者开第二条数据通道，都会无声地破坏它——读取方只会看到更少的事件并据此认为流已完整。
+
 ### 4.3 ownership
 
 `src/agent/**` 连同它提供给 AgentCore 的活对象整体属于 exec；`src/product/**`、`src/bridge`、`src/storage`、Renderer 留在 UI。下列是含函数指针的活对象，不可能序列化，必须跟 Runtime 一起走：
@@ -134,6 +136,10 @@ UI 不可达时 exec 的一期收口顺序是固定的，顺序本身是正确�
 
 无 UI 超过宽限期即自我收口退出，避免孤儿进程。
 
+断连后「排空观察」不能被读成「已完整观察」。`EventDrainStatus.pending(route_id)` 返回 0 时，Product 会把该 Run 的事件流判为完整并收口（`settleTerminalOutputAfterEventDrain` 与 `finalizeMarkedTerminalRunsAfterEventDrain` 都以 `!= 0` 跳过）。这个读法只对**来自 exec 的终态**成立，依据正是 4.2 的顺序不变量。但 `markTerminalRunsBeforeEventDrain` 只要 Run 有终态负载就打标记，不问终态由谁写下，所以凡是 Product 在**本地**写下的终态——begin-run 失败、本地契约失败，以及一期新增的「exec 不可达」——`pending() == 0` 对 exec 尚未发出的事件什么都没说。单进程里这无害，因为 pump 就是唯一的缓冲；拆开后管道与 exec 的出站队列是第二个缓冲，字节可以丢在那里。
+
+因此一期的规则是：**链路断开时，UI 侧为受影响的在飞 Run 记录事件交付缺口，而不是记录一次干净排空。** 不新增词汇，既有的就够：`terminal.event_delivery_lost` 经 `recordEventProjectionFailure` 表达，也就是架构既有的「记录完整性与执行结果是不同事实」。`EventDrainStatus` 因此要能分辨「已排空」与「链路已断」，不能只返回一个 `usize`；这项改动属于本步，而不是 transport 那一步——在「exec 不可达」这个本地终态存在之前，第二个缓冲并不存在。
+
 **不得把 exec 挂在 UI 的 Windows Job 上**（`KILL_ON_JOB_CLOSE`，MCP 子进程在用的那种）。那等于对称死亡，2026-11-16 那次事故照样带走全部 Task，方案收益只剩一半。
 
 exec 死亡时 UI 侧：令牌桶重启，5 分钟窗口内至多 3 次，超限进入稳定的「执行不可用」态——历史可看、可导出，不能跑新 Run——而不是崩溃重启循环。该阈值是产品选择，没有频率数据支撑，#197 自己也没有。在飞 Run 的恢复复用既有的 `restoreTaskConversation` 从 checkpoint 重建，不发明 Session 迁移，也**不得**把这条既有的 checkpoint recovery 报告成 in-flight Run 或 Worker crash recovery。
@@ -191,6 +197,8 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | 握手字段任一不符 | 明确拒绝附着并退出，不降级、不以旧 revision 继续；UI 侧呈现执行不可用而非伪造 Run 失败 |
 | 正常 Run 全链路 | 事件顺序、终态、回执、权限审批与今天逐项一致；Renderer 与 Bridge 无感知变化 |
 | UI pump 饱和 | 背压传到 exec 的 Core 回调线程，Run 变慢、事件不丢；无 Host fatal、无 Session poison |
+| 链路在飞 Run 中途断开 | 受影响的 Run 不被判为事件流完整：要么没有终态因而不打排空标记，要么本地终态同时带事件交付缺口。`pending() == 0` 本身不构成「已完整观察」 |
+| 终态与事件的到达顺序 | 同一 Run 的全部事件先于其终态被读取方看到；只有 control 帧可以提前。该不变量有专门的回归，不靠人读代码保证 |
 | 出站队列饱和时 Stop | control 预留额度放行，Stop 不被大帧挡住；非 control 调用返回 typed busy 并走既有重试，不产生用户 timeout 或 Agent terminal cause |
 | 主线程预算 | 拆分后仍满足[验证规范](../validation.md)的投影预算；主线程无阻塞管道写，用真实链路而非 fixture 计时 |
 | 16 个 Run 同时 park 于 UI 请求，UI 随后消失 | 全部 parked 请求按 ABI 既有不可用路径解除，16 个 Core 回调线程全部释放，无一常驻；解除不是超时 |

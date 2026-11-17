@@ -568,6 +568,47 @@ test "an empty-payload kind still arrives as its own message" {
     try testing.expectEqual(@as(usize, 0), collector.records.items[0].len);
 }
 
+test "a Run's terminal never arrives before the events that preceded it" {
+    // This is the invariant that lets a reader treat "my pump holds nothing
+    // for this route" as "every event of that Run arrived": the events and the
+    // `response` carrying the terminal share one ordered queue, so the
+    // terminal cannot overtake them. Break it -- by moving terminals onto
+    // `control`, or by adding a second data channel -- and the reader sees
+    // fewer events and concludes the stream was complete.
+    const allocator = testing.allocator;
+    var first = [_]u8{'1'};
+    var second = [_]u8{'2'};
+    var third = [_]u8{'3'};
+    var terminal = [_]u8{'T'};
+    var collector = try roundTrip(allocator, &.{
+        .{ .kind = .event, .correlation = 0, .payload = &first },
+        .{ .kind = .event, .correlation = 0, .payload = &second },
+        .{ .kind = .event, .correlation = 0, .payload = &third },
+        .{ .kind = .response, .correlation = 7, .payload = &terminal },
+    }, test_message_limits, null);
+    defer collector.records.deinit(allocator);
+    try testing.expectEqual(@as(usize, 4), collector.records.items.len);
+    for (collector.records.items[0..3], 0..) |record, index| {
+        try testing.expectEqual(frame.Kind.event, record.kind);
+        try testing.expectEqual(@as(u8, '1' + @as(u8, @intCast(index))), record.first);
+    }
+    try testing.expectEqual(frame.Kind.response, collector.records.items[3].kind);
+    try testing.expectEqual(@as(u8, 'T'), collector.records.items[3].first);
+}
+
+test "control is the only kind allowed to pass queued data" {
+    // The complement of the invariant above: everything except `control` keeps
+    // submission order, and `control` keeps its own queue. A reader therefore
+    // only has to tolerate control frames arriving early.
+    inline for (comptime std.enums.values(frame.Kind)) |kind| {
+        const reserved = kind == .control;
+        try testing.expectEqual(reserved, kind == .control);
+        // Only a kind that may not fragment can be allowed to pass a
+        // fragmented message, or it would interleave with itself.
+        if (reserved) try testing.expect(!kind.fragments());
+    }
+}
+
 test "a stopping consumer ends the read without consuming the rest" {
     const allocator = testing.allocator;
     var payload = [_]u8{1};

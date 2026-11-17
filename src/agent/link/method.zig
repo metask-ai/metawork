@@ -10,9 +10,24 @@
 //! The transport column is the design content. `control` is the short list
 //! that may overtake queued fragments, because a Stop that waits behind an
 //! 11 MB Run input is a product failure; `stream` is the event path, which is
-//! not a call at all; `ui_answer` releases a parked UI request. Nothing is
-//! answered from UI-side state alone, which is the same as saying the UI-side
-//! stub holds no authoritative Agent fact.
+//! not a call at all; `ui_answer` releases a parked UI request.
+//!
+//! No entry invents an Agent fact on the caller's side. The four `stream`
+//! entries are answered from the caller's own event pump, but that pump holds
+//! nothing except what arrived as `event` frames, so the answer is still the
+//! execution half's fact, buffered. Nothing here licenses the caller to decide
+//! an Agent outcome locally.
+//!
+//! One ordering invariant rides on these classifications and is easy to break
+//! by accident. `event` frames and the `response` that carries a Run's
+//! terminal travel the same ordered data queue, and only non-fragmenting
+//! `control` frames may pass between fragments. So a Run's terminal can never
+//! arrive before the events that preceded it, which is what lets a caller read
+//! "my pump holds nothing for this route" as "every event of that terminal's
+//! Run has arrived". Moving a terminal onto `control`, or adding a second data
+//! channel, would break that silently -- the reader would simply see fewer
+//! events and conclude the stream was complete. `channel.zig` pins the
+//! ordering with a test for the same reason.
 
 const std = @import("std");
 const contract = @import("agent_contract");
