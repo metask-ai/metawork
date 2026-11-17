@@ -45,8 +45,27 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
           use-cache: false
 
+      # `npm ci` writes 245 MB across 15,010 files, which costs 3.0 minutes
+      # on Windows against 0.6 on macOS, and every leg pays it. Restoring the
+      # installed tree skips that write. The key carries the runner because the
+      # tree holds platform-specific optional binaries, and the lock file
+      # because that is what decides the tree's contents.
+      - &cache-node-modules
+        name: Cache installed npm dependencies
+        id: node-modules-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            node_modules
+            frontend/node_modules
+          key: node-modules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+
       - &npm-ci
         name: Install npm dependencies
+        # Skipped on a hit: `npm ci` deletes node_modules before installing, so
+        # running it over a restored tree would throw the restore away. A job
+        # without the cache step above has no such output, so it still installs.
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
 
       - name: Check formatting
@@ -101,6 +120,7 @@ jobs:
           New-Item -ItemType Directory -Force (Join-Path $cache 'tmp') | Out-Null
           "ZIG_GLOBAL_CACHE_DIR=$cache" >> $env:GITHUB_ENV
 
+      - *cache-node-modules
       - *npm-ci
 
       - &restore-agentcore
@@ -163,6 +183,7 @@ jobs:
 
       - *cache-zig-packages
       - *prepare-zig-cache
+      - *cache-node-modules
       - *npm-ci
       - *restore-agentcore
       - *stage-agentcore
@@ -227,6 +248,7 @@ jobs:
       # build, so compiling from nothing costs the run no wall clock.
       - *cache-zig-packages
       - *prepare-zig-cache
+      - *cache-node-modules
       - *npm-ci
       - *restore-agentcore
       - *stage-agentcore
