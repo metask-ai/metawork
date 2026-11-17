@@ -264,6 +264,8 @@ pub const FakePromptProfile = struct {
     id_lens: [4]usize = @splat(0),
     texts: [4][2048]u8 = @splat(@splat(0)),
     text_lens: [4]usize = @splat(0),
+    ops: [4]u32 = @splat(0),
+    orders: [4]i64 = @splat(0),
 
     fn copy(input: ?*const wire.PromptProfileV1) ?FakePromptProfile {
         var result = FakePromptProfile{};
@@ -276,18 +278,35 @@ pub const FakePromptProfile = struct {
         result.count = @intCast(profile.section_count);
         for (sections[0..result.count], 0..) |section, i| {
             if (section.struct_size != @sizeOf(wire.PromptSectionV1) or
-                section.op_code != wire.PROMPT_OP_REPLACE or section.order != 0 or
                 section.interpolate != 0 or section.reserved0 != 0 or
                 !std.mem.allEqual(u64, &section.reserved, 0)) return null;
             const id = sdk.borrowedBytes(section.id) catch return null;
             const text = sdk.borrowedBytes(section.text) catch return null;
+            // Per-op ABI rules, so a malformed edit fails here and not at Core.
+            switch (section.op_code) {
+                wire.PROMPT_OP_REPLACE => if (section.order != 0 or
+                    !std.mem.startsWith(u8, id, "metacodes:") or text.len == 0) return null,
+                wire.PROMPT_OP_ADD => if (!std.mem.startsWith(u8, id, "host:") or
+                    text.len == 0) return null,
+                else => return null,
+            }
             if (id.len > result.ids[i].len or text.len > result.texts[i].len) return null;
             @memcpy(result.ids[i][0..id.len], id);
             @memcpy(result.texts[i][0..text.len], text);
             result.id_lens[i] = id.len;
             result.text_lens[i] = text.len;
+            result.ops[i] = section.op_code;
+            result.orders[i] = section.order;
         }
         return result;
+    }
+
+    pub fn sectionId(self: *const FakePromptProfile, index: usize) []const u8 {
+        return self.ids[index][0..self.id_lens[index]];
+    }
+
+    pub fn sectionText(self: *const FakePromptProfile, index: usize) []const u8 {
+        return self.texts[index][0..self.text_lens[index]];
     }
 };
 

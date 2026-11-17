@@ -1,5 +1,6 @@
 //! Real Host acceptance. Driven by run-agentcore-provider-test.mjs --staged --host.
 const std = @import("std");
+const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 
 const Checkpoint = struct {
@@ -262,13 +263,34 @@ fn validateManifest(manifest: anytype, child: bool) !void {
     var env_seen = false;
     var safety_seen = false;
     var system_seen = false;
-    for (manifest.sections) |section| {
+    // Sections arrive in render order, so the indices pin placement, not just
+    // the declared order value.
+    var using_tools_index: ?usize = null;
+    var downloads_index: ?usize = null;
+    for (manifest.sections, 0..) |section, index| {
         if (std.mem.eql(u8, section.id, if (child) "metacodes:subagent" else "metacodes:identity")) identity_seen = section.origin == .host;
         if (std.mem.eql(u8, section.id, "metacodes:env")) env_seen = section.class == .generated;
         if (std.mem.eql(u8, section.id, "metacodes:safety-policy")) safety_seen = section.class == .locked and section.origin == .kernel;
         if (std.mem.eql(u8, section.id, "metacodes:system")) system_seen = section.class == .locked and section.origin == .kernel;
+        if (std.mem.eql(u8, section.id, "metacodes:using-tools")) using_tools_index = index;
+        if (std.mem.eql(u8, section.id, "host:windows-downloads")) {
+            // A host addition, never a kernel section we would have to track
+            // upstream.
+            if (section.origin != .host or section.order != 1100) return error.InvalidPromptManifest;
+            downloads_index = index;
+        }
     }
     if (!identity_seen or !env_seen or (!child and (!safety_seen or !system_seen))) return error.InvalidPromptManifest;
+    // Present exactly on the platform whose shell the constraints describe.
+    if ((builtin.target.os.tag == .windows) != (downloads_index != null)) return error.InvalidPromptManifest;
+    if (downloads_index) |downloads| {
+        // A narrowing of the general tool rules renders after them. The main
+        // assistant's manifest always has that kernel section, so require it
+        // there rather than letting the comparison pass vacuously.
+        if (!child and using_tools_index == null) return error.InvalidPromptManifest;
+        if (using_tools_index) |using_tools|
+            if (downloads < using_tools) return error.InvalidPromptManifest;
+    }
 }
 
 // Simulate a historical unprofiled Session using the existing internal Runtime
