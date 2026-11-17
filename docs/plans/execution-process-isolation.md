@@ -128,6 +128,10 @@ UI 侧保留的，一条都不交出去：Product 持久化与恢复权威、Tas
 
 凭据会经链路过界，exec 进程里也会有明文副本：Metask token（Run 本身、compaction、自动标题、自动审批的复核）、生图/生视频 binding、MCP static/client secret 与 OAuth 结果、Custom Provider key。按已定决定，自动标题、自动审批复核与图像、视频 HTTP 都留执行侧，所以这些凭据的持有者数量不增加，只是换了进程。把复核留在 UI 侧会让 UI 进程仅为一个用途持有一份 Metask 凭据，并凭空多出一个续期点——#175 那个缺口正是「每个模型入口各自负责续期」长出来的。复核另有两条独立理由：它运行期间有一个 Core 回调线程 parked，留 UI 侧会让 UI 的存活成为 Run 推进的前提；而 auto 模式下 UI 不可达时按 4.6 解除 parked 请求，会连带解除一批本来不需要人的请求，违背用户选 auto 的本意。设计稿「不碰 AgentCore」那条理由不转移：它回答的是要不要扩 AgentCore 的 permission 协议，对落在进程边界哪一侧不构成理由。
 
+执行侧只持有**一份**由链路喂送的 Metask 凭据来源,不是每个入口各接一个 reader:Run 本身、compaction、自动标题、自动审批复核、生图、生视频读的都是同一份。生图的 binding 因此不再携带凭据字节——`execute` 在有 reader 时根本不读它,送过去只会被 `secureZero` 然后忽略,而第 6 节列举凭据可以存在的地方里没有「链路载荷」。
+
+**喂送路径本身是凭据的新载体,必须按第 6 节对待。** 它只能是专用的 typed 路径,且必须被排除在链路对调用的任何记录、以及故障记录的 breadcrumb 环之外;续期必须就地失效执行侧手里那一份,不得让执行侧按 Run 各缓存一份拷贝——否则 #175 的「每个模型入口各自负责续期」会换个形状复发。
+
 两个持有者今天的凭据处理并不对称，搬家时不得把弱的那一份带过去：自动标题走 `.copy()` 加 `defer credential.deinit()`，是第 6 节要求的 bounded copy；复核直接透传 `config.api_key`，生命周期挂在 `prepared` 上。
 
 有一类性质在进程内免费、过界后必须重新建立,不要每次当新发现:**凡是进程内由同一个主体既声明又使用的性质,拆开后声明方与使用方就不是同一个主体了,该性质必须被明说并重新建立。** 目前两条属于这一类,遇到第三条按本条加进来即可。
@@ -208,7 +212,7 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | --- | --- |
 | 1 | 模式分叉与进程生命周期：exec 模式在建窗口前分出，UI 能启动、关闭、回收 exec；握手字段齐备且不符即拒绝。此步不搬 Runtime，Agent 仍在 UI 侧，用于单独验证分叉与握手 |
 | 2 | transport：帧、分片、typed 错误映射、调用相关 id、出站有界队列与 writer 线程、control 预留额度。以既有 port 方法集逐一对照，不得出现无映射的方法或错误 |
-| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、**两侧**句柄表(不只 exec 侧:`catalog.Query` 的 `source_lifetime` 是一对 retain/release,它所指的对象住在调用方,由执行侧回调进来,方向与其余句柄相反)、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 的 52 个转发全部填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
+| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、exec 侧句柄表(只需这一侧:唯一一个方向相反的 `catalog.Query.source_lifetime` 已确定不过界——它的合同要求 nonblocking 的引用计数,而跨进程调用必然阻塞,所以改为调用方在过界前 retain、lease 释放时 release,执行侧收到的是保证而不是回调钩子)、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 的 52 个转发全部填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
 | 4 | MCP 搬迁：UI 只送配置 generation 与 server 声明，exec 侧自建 `McpRuntimeInput` 与 transport owner，进程 spawn、Windows Job 归属、HTTP 栈与 OAuth 都在 exec 侧组合。完成条件含 4.6 的 Job 归属两个方向，以及第 7 节那条真杀 UI 之后 exec 与 MCP 子进程都还活着的验收 |
 | 5 | 关联身份：Session 创建与恢复协议带上 Product 指定身份；exec 侧持有至 Session 结束；二期字段位留出 |
 | 6 | disconnect 下行收口：按 4.6 的五步顺序实现，parked 解除先于终止；exec 孤儿自我收口；`EventDrainStatus` 分辨「已排空」与「链路已断」 |

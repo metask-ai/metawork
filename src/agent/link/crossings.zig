@@ -203,7 +203,7 @@ pub const crossings = [_]Crossing{
     shaped(
         contract.CatalogQuery,
         .{ .substituted = .untyped_pointer },
-        "query fields, with the borrowed source lifetime named by a caller-side id",
+        "query fields; the source lifetime does not cross, the caller pins before sending",
         shapes.CatalogQuery,
     ),
     composed(

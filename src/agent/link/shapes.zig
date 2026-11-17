@@ -358,44 +358,55 @@ pub const FileDeliveryRoot = struct {
     asserted_root: []const u8,
 };
 
-/// `catalog.Query` with its borrowed source lifetime replaced by an id.
+/// `catalog.Query` without its borrowed source lifetime.
 ///
 /// The lifetime is a retain/release pair over an object the caller owns -- the
-/// registered skill source -- which the Agent holds for as long as the lease
-/// it issues. That direction is worth noticing: every other handle in this
-/// file lives in the execution half and the caller names it, while this one
-/// lives in the caller and the execution half calls back into it. So a handle
-/// table is needed in both halves, not only in the execution half.
+/// registered skill source -- and its own contract requires the callbacks to
+/// be "thread-safe, nonblocking reference accounting only". A cross-process
+/// call is blocking by construction, so that contract rules out forwarding it
+/// over the link at all; and the blocking would run the wrong way, with the
+/// execution half waiting on a UI the architecture says may be unreachable.
+///
+/// So nothing crosses for it. The caller retains before the query goes out and
+/// releases when the lease it got back is released, and the execution half
+/// receives a guarantee instead of a hook: these sources are pinned for this
+/// lease's life. That keeps the decision to pin with the owner, and it is why
+/// a handle table is needed only in the execution half -- this was the one
+/// capability that pointed the other way.
 pub const CatalogQuery = struct {
     canonical_user_home: []const u8,
     target: catalog.QueryTarget,
     additional_sources: []const catalog.Source,
     default_source_priority: i32,
-    /// Names the caller-side object whose retain and release become link
-    /// calls. Absent when the query has no source to hold.
-    source_lifetime: ?HandleId,
 };
 
-/// What crosses for a generated-image Run, which is the binding and nothing
-/// else. Three capabilities in the original are composed in the execution
-/// half instead of travelling: the HTTP transport, the output commit, and the
-/// credential reader that supplies a renewed credential mid-Run.
+/// What crosses for a generated-image Run: the endpoint, the execution source
+/// and the model, and deliberately not the credential.
+///
+/// Three capabilities in the original are composed in the execution half
+/// instead of travelling -- the HTTP transport, the output commit, and the
+/// credential reader -- and the reader is why the bytes stay behind. `execute`
+/// reads the reader live and never looks at the binding's bytes when one is
+/// present, so a credential sent per request would cross, be `secureZero`ed,
+/// and never be read. It would also be the one secret on this wire that no
+/// rule requires: section 6 lists where a credential may live and a link
+/// payload is not among them.
 ///
 /// The reader matters for more than this one tool. Image, video, the automatic
-/// title and the approval reviewer all read a credential that `update_credential`
-/// renews over the link, so the execution half needs one credential source fed
-/// by the link rather than four readers wired separately.
+/// title and the approval reviewer all read a credential that
+/// `update_credential` renews over the link, so the execution half holds one
+/// credential source fed by the link rather than four readers wired
+/// separately -- which is also what keeps #175 from recurring in another
+/// shape, since a per-Run cached copy is a renewal point that can be missed.
 pub const ImageGenerationBinding = struct {
     endpoint: []const u8,
     source: []const u8,
     model: []const u8,
-    credential: []const u8,
 };
 
-/// The same for a generated-video Run. Its original takes the credential only
-/// as a reader, never as bytes, so nothing secret crosses at request time at
-/// all: the execution half's credential source already holds what the link
-/// last delivered.
+/// The same for a generated-video Run, which never had the question: its
+/// original takes the credential only as a reader. Both tools now cross the
+/// same three fields for the same reason.
 pub const VideoGenerationBinding = struct {
     endpoint: []const u8,
     source: []const u8,
