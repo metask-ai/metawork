@@ -44,7 +44,7 @@ if (!HTMLElement.prototype.releasePointerCapture)
   HTMLElement.prototype.releasePointerCapture = () => undefined;
 
 const { cleanup, render, screen, waitFor } =
-  await import("@testing-library/react");
+  await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
