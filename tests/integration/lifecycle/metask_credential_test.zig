@@ -144,7 +144,7 @@ fn runAndExpect(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Run
         return error.RunDidNotSettle;
     }
     try std.testing.expectEqual(previous_calls + 1, runCalls());
-    const run = fixture.product_task.testing.policy_module.latestTerminalRun(task.durable.runs).?;
+    const run = fixture.product_task.testing.policy_module.latestTerminalRun(task).?;
     const terminal = fixture.product_task.testing.state_module.productTerminalFacts(run).?;
     try std.testing.expectEqual(expected, terminal.outcome);
     if (expected == .failed) {
@@ -1041,7 +1041,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                 if (runCalls() == 2 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.ImageRetryDidNotFinish;
-            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old.durable.runs).?;
+            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old).?;
             try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(run).?.outcome);
             try std.testing.expectEqualStrings("new-image-operation", run.submission.?.operationId());
             return;
@@ -1172,7 +1172,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                 if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.RunDidNotSettle;
-            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old.durable.runs).?;
+            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old).?;
             try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(run).?.outcome);
             return;
         }

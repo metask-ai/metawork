@@ -925,9 +925,6 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.partial_stopped": "工作已停止，回复未完整生成",
   "run.terminal.partial_interrupted": "工作意外中断，回复未完整生成",
   "run.terminal.partial_failed": "工作失败，回复未完整生成",
-  "run.rewound_here": "这次重跑取代了上面 {count} 轮对话，它们已不在上下文里。",
-  "run.superseded":
-    "这轮对话已被编辑后的消息取代，不在上下文里了；它产生的文件和改动仍然保留。",
   "run.conversation_history_excluded":
     "本轮消息仍保留在任务记录中，但未包含在恢复后的模型上下文中。后续消息仍可继续。",
   "run.process.title": "执行详情",

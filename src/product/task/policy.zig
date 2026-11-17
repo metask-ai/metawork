@@ -711,13 +711,19 @@ pub fn checkpointFailureAttempt(
     };
 }
 
+/// The latest terminal Run the user is told about: the Task row's state, the
+/// unread completion badge, the acknowledgement that clears it and a Run
+/// notification all read this one answer. A Run a rewind replaced is not among
+/// them -- the edited message took its turn's place, so the outcome of that
+/// turn is not the Task's latest news either.
 pub fn latestTerminalRun(
-    runs: []?task_state.RunRecord,
+    task: *const task_state.Task,
 ) ?*const task_state.RunRecord {
     var latest: ?*const task_state.RunRecord = null;
-    for (runs) |*entry| {
+    for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (task_state.productTerminalFacts(run) == null) continue;
+        if (!runProjected(task, run)) continue;
         if (latest == null or run.id > latest.?.id) latest = run;
     }
     return latest;
@@ -726,7 +732,7 @@ pub fn latestTerminalRun(
 pub fn unreadCompletionRunId(task: *const task_state.Task) ?u64 {
     // A read-only Task cannot record acknowledgement, so it never reminds.
     if (task.durable.archived or task.read_only_history != null) return null;
-    const run = latestTerminalRun(task.durable.runs) orelse return null;
+    const run = latestTerminalRun(task) orelse return null;
     const terminal = task_state.productTerminalFacts(run) orelse unreachable;
     if (terminal.outcome != .completed or
         task.durable.completion_seen_run_id == run.id)
@@ -763,7 +769,7 @@ pub fn navigationSignal(task: *const task_state.Task) ?NavigationSignal {
         .none, .run => {},
     }
     if (task.deletion == .failed) return .failed;
-    const run = latestTerminalRun(task.durable.runs) orelse return null;
+    const run = latestTerminalRun(task) orelse return null;
     return switch (task_state.productTerminalFacts(run).?.outcome) {
         .failed, .dependency_contract_failure => .failed,
         .interrupted => .interrupted,
@@ -859,6 +865,17 @@ pub fn runSuperseded(task: *const task_state.Task, run: *const task_state.RunRec
     return performer.coverage != .excluded;
 }
 
+/// Whether the Renderer sees this Run at all. An edited message stands in the
+/// place of the turn a rewind replaced, so a superseded Run is projected
+/// nowhere: not in the snapshot, not in a history page, and not in the Run
+/// manifest -- which is also what closes a file-change panel still pointed at
+/// it. The record stays in Product history and in the store, which is what
+/// restore and the file-change record read. Stated here so every projection
+/// asks the same question.
+pub fn runProjected(task: *const task_state.Task, run: *const task_state.RunRecord) bool {
+    return !runSuperseded(task, run);
+}
+
 pub const EditUnavailable = enum {
     /// No position was ever recorded for this Run: history written before
     /// #114, or a submission that could not read the Conversation. Product
@@ -888,22 +905,6 @@ pub fn editablePosition(
     const position = run.conversation_position orelse return .{ .unavailable = .no_position };
     if (position <= task.durable.compact_boundary) return .{ .unavailable = .compacted };
     return .{ .position = position };
-}
-
-/// The Run a rewind replaced the Conversation from, if this Run performed
-/// one. Reading it from the Runs it superseded keeps one fact in one place:
-/// the position itself is that Run's own recorded position.
-pub fn rewoundRunCount(task: *const task_state.Task, run_id: u64) u32 {
-    // Whether these supersessions are in force is one question about the Run
-    // that made them, answered once rather than per Run it named.
-    const performer = task_state.findRunConst(task.durable.runs, run_id) orelse return 0;
-    if (performer.coverage == .excluded) return 0;
-    var count: u32 = 0;
-    for (task.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        if (run.superseded_by_run_id == run_id) count += 1;
-    }
-    return count;
 }
 
 /// The newest Run whose turn is still in the Conversation. It is also the
@@ -1448,7 +1449,8 @@ test "a rewind leaves its turns in history and out of the Conversation" {
     task.durable.runs[1].?.superseded_by_run_id = 5;
     try std.testing.expect(runSuperseded(&task, &task.durable.runs[1].?));
     try std.testing.expect(!runSuperseded(&task, &task.durable.runs[0].?));
-    try std.testing.expectEqual(@as(u32, 1), rewoundRunCount(&task, 5));
+    try std.testing.expect(!runProjected(&task, &task.durable.runs[1].?));
+    try std.testing.expect(runProjected(&task, &task.durable.runs[0].?));
     try std.testing.expectEqual(@as(u64, 5), runHistoryHighWater(&task));
     // The replacement is the frontier, which is also what Core reports as its
     // `last_run_id`: a rewind leaves that alone, and the Run that performed
@@ -1460,7 +1462,7 @@ test "a rewind leaves its turns in history and out of the Conversation" {
     // predates the rewind, so the turn it named is back.
     task.durable.runs[2].?.coverage = .excluded;
     try std.testing.expect(!runSuperseded(&task, &task.durable.runs[1].?));
-    try std.testing.expectEqual(@as(u32, 0), rewoundRunCount(&task, 5));
+    try std.testing.expect(runProjected(&task, &task.durable.runs[1].?));
     try std.testing.expectEqual(@as(?u64, 3), lastConversationRunId(&task));
     task.durable.runs[2].?.coverage = .covered;
 

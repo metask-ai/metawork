@@ -6724,18 +6724,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin: 8px 0 0;
 }
 
-/* A rerun starts here: the exchanges below it are out of the conversation. */
-.run-rewind-notice {
-  margin: 0 0 20px;
-}
-
-/* An exchange an edited message replaced. It stays readable, because what it
-   produced is still real: only the conversation lost it. */
-.ai-exchange[data-superseded] .ai-message,
-.ai-exchange[data-superseded] .run-reading-flow {
-  opacity: 0.62;
-}
-
 .ai-intervention {
   position: relative;
   padding: 18px 0 2px;

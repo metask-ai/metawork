@@ -1286,22 +1286,13 @@ export function TaskContent({
                   }
                 />
               </div>
-              {run.superseded ? (
+              {run.conversationCoverage === "excluded" && (
                 <p
                   className="projection-notice run-conversation-coverage-notice"
                   role="note"
                 >
-                  {t("run.superseded")}
+                  {t("run.conversation_history_excluded")}
                 </p>
-              ) : (
-                run.conversationCoverage === "excluded" && (
-                  <p
-                    className="projection-notice run-conversation-coverage-notice"
-                    role="note"
-                  >
-                    {t("run.conversation_history_excluded")}
-                  </p>
-                )
               )}
             </>
           );
@@ -1309,14 +1300,8 @@ export function TaskContent({
             <section
               className="ai-exchange"
               data-run-id={run.id}
-              data-superseded={run.superseded || undefined}
               key={`${task.id}:${run.id}`}
             >
-              {run.rewoundRuns > 0 && (
-                <p className="projection-notice run-rewind-notice" role="note">
-                  {t("run.rewound_here", { count: run.rewoundRuns })}
-                </p>
-              )}
               {showRoot &&
                 (editing?.runId === run.id ? (
                   <form

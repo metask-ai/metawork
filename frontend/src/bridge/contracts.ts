@@ -930,10 +930,6 @@ export type RunView = {
   conversationCoverage: ConversationCoverage;
   /** Whether this run's own message can still be edited and rerun from. */
   editAdmitted: boolean;
-  /** A later edit rewound the conversation past this turn. */
-  superseded: boolean;
-  /** How many turns this run's own rewind replaced; 0 if it replaced none. */
-  rewoundRuns: number;
   phase: RunPhase;
   permissionProfile: PermissionProfile;
   permissionInteraction: PermissionInteraction;

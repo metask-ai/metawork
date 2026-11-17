@@ -261,7 +261,7 @@ pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: 
     writer.writeAll(",\"lastCompactPhase\":") catch return error.SnapshotTooLarge;
     if (last_phase) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"latestTerminal\":") catch return error.SnapshotTooLarge;
-    const latest_terminal = if (task_policy.latestTerminalRun(task.durable.runs)) |run| task_state.productTerminalFacts(run) else null;
+    const latest_terminal = if (task_policy.latestTerminalRun(task)) |run| task_state.productTerminalFacts(run) else null;
     if (latest_terminal) |terminal| {
         writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
         if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -358,6 +358,7 @@ pub fn writeRunManifest(writer: *std.Io.Writer, text: TextProjection, task: *con
     var count: usize = 0;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
+        if (!task_policy.runProjected(task, run)) continue;
         if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         count += 1;
         const facts = task_state.runProjectionFacts(run);
@@ -546,6 +547,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     for (task.durable.runs, 0..) |*entry, run_index| {
         if (run_index < input.run_start or run_index >= input.run_end) continue;
         const run = &(entry.* orelse continue);
+        if (!task_policy.runProjected(task, run)) continue;
         if (run_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         run_count += 1;
         const projection = if (current_run_projection) |current|
@@ -561,7 +563,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
             run,
             projection,
             resendAdmitted(task, input.shutting_down),
-            rewindProjection(task, run, input.shutting_down),
+            editAdmitted(task, run, input.shutting_down),
             input.now_ms,
         );
     }
@@ -823,28 +825,17 @@ pub fn resendAdmitted(task: *const task_state.Task, shutting_down: bool) bool {
         task.deletion == .idle and !shutting_down;
 }
 
-/// What the Renderer needs to show about one turn's place in the
-/// Conversation: whether its own message can still be edited and rerun,
-/// whether a rewind has taken it out, and how many turns this Run's own
-/// rewind replaced. Computed beside the Run because each answer needs the
-/// whole Task.
-pub const RewindProjection = struct {
-    edit_admitted: bool = false,
-    superseded: bool = false,
-    rewound_runs: u32 = 0,
-};
-
-pub fn rewindProjection(
+/// Whether this turn's own message can still be edited and rerun. Computed
+/// beside the Run because the answer needs the whole Task. Nothing else about
+/// a rewind reaches the Renderer: a replaced turn is not projected at all, so
+/// the Conversation it shows is simply the one that exists.
+pub fn editAdmitted(
     task: *const task_state.Task,
     run: *const task_state.RunRecord,
     shutting_down: bool,
-) RewindProjection {
-    return .{
-        .edit_admitted = resendAdmitted(task, shutting_down) and
-            task_policy.editablePosition(task, run) == .position,
-        .superseded = task_policy.runSuperseded(task, run),
-        .rewound_runs = task_policy.rewoundRunCount(task, run.id),
-    };
+) bool {
+    return resendAdmitted(task, shutting_down) and
+        task_policy.editablePosition(task, run) == .position;
 }
 
 pub fn writeRun(
@@ -853,19 +844,17 @@ pub fn writeRun(
     run: *const task_state.RunRecord,
     projection: task_state.RunProjectionFacts,
     resend_admitted: bool,
-    rewind: RewindProjection,
+    edit_admitted: bool,
     now_ms: ?u64,
 ) Error!void {
     const terminal = projection.terminal;
-    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"editAdmitted\":{},\"superseded\":{},\"rewoundRuns\":{d},\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
+    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"editAdmitted\":{},\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
         run.id,
         if (run.coverage == .excluded) "excluded" else "included",
         @tagName(projection.phase),
         @tagName(run.permission_profile),
         @tagName(run.permission_interaction),
-        rewind.edit_admitted,
-        rewind.superseded,
-        rewind.rewound_runs,
+        edit_admitted,
         run.execution_generation,
         @tagName(run.execution_protocol),
     }) catch return error.SnapshotTooLarge;

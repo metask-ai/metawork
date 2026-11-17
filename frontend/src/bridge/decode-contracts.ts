@@ -2801,8 +2801,6 @@ function decodeRun(value: unknown, path: string): RunView {
     "id",
     "conversationCoverage",
     "editAdmitted",
-    "superseded",
-    "rewoundRuns",
     "phase",
     "permissionProfile",
     "permissionInteraction",
@@ -2920,8 +2918,6 @@ function decodeRun(value: unknown, path: string): RunView {
       ["included", "excluded"] as const,
     ),
     editAdmitted: booleanValue(item.editAdmitted, `${path}.editAdmitted`),
-    superseded: booleanValue(item.superseded, `${path}.superseded`),
-    rewoundRuns: nonNegativeNumber(item.rewoundRuns, `${path}.rewoundRuns`),
     phase,
     permissionProfile: enumValue(
       item.permissionProfile,

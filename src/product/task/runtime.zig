@@ -2597,13 +2597,14 @@ pub const Runtime = struct {
         // Never joins a Run already in flight: adoption would put the edited
         // text into the very turn the rewind is about to drop.
         record.force_new_run = true;
-        // The declared impact of this mutation, applied to both halves of the
-        // queue: messages already adopted into the running turn, and messages
-        // still waiting behind it. Both were written to follow a continuation
-        // this rewind removes, and their text comes back for an explicit
-        // resend instead of running after it.
+        // The declared impact of this mutation, applied to the half of the
+        // queue Core already adopted: those messages went into the turn this
+        // rewind removes, and their text comes back for an explicit resend
+        // while the turn is still shown, which it is until the rewind lands.
         self.applyMutationImpact(task_id, .rewind);
-        _ = self.cancelWaitingInputs(task_id, .edit_and_rerun, .{ .except = index });
+        // The other half never reached Core and never will. It leaves the
+        // record with the turns it was written to follow.
+        self.dropWaitingInputsExcept(task_id, index, effects.release);
         return submission;
     }
 
@@ -2956,9 +2957,6 @@ pub const Runtime = struct {
     /// Which of the waiting batch a retirement leaves alone.
     pub const WaitingInputScope = union(enum) {
         all,
-        /// The one submission the caller has just accepted and is about to
-        /// drive: an edit-and-rerun retires the rest without retiring itself.
-        except: usize,
         /// Edited messages waiting for their own rewind. One of them is the
         /// reason the Run that just ended was stopped, so it waits for its
         /// turn instead of failing with it.
@@ -2970,10 +2968,9 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return false;
         task.skill_preparation = null;
         var changed = false;
-        for (task.input_submissions.items, 0..) |*record, index| {
+        for (task.input_submissions.items) |*record| {
             switch (scope) {
                 .all => {},
-                .except => |keep| if (keep == index) continue,
                 .except_rewinds => if (record.rewind_to_position != null) continue,
             }
             if (record.state != .waiting) continue;
@@ -2983,6 +2980,31 @@ pub const Runtime = struct {
             changed = true;
         }
         return changed;
+    }
+
+    /// An edited message takes the place of every turn after it, so the
+    /// messages the user had queued behind those turns were written for a
+    /// Conversation that is about to go away. They leave the record outright
+    /// instead of being retired in place: a retired message would keep
+    /// standing in a conversation nothing shows any more, and it would hold
+    /// the Task's pending-input budget for a batch that can never run. The
+    /// Renderer hands their text back to the composer as a draft before it
+    /// sends the edit, so nothing the user wrote disappears silently. `keep`
+    /// is the edited message itself, which is driving this.
+    fn dropWaitingInputsExcept(self: *Runtime, task_id: u64, keep: usize, effects: ReleaseEffects) void {
+        const task = self.find(task_id) orelse return;
+        task.skill_preparation = null;
+        var index = task.input_submissions.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (index == keep) continue;
+            if (task.input_submissions.items[index].state != .waiting) continue;
+            var record = task.input_submissions.orderedRemove(index);
+            self.releaseSubmissionPayload(&record);
+            self.releaseRetryInput(task_id, &record, effects);
+            deinitRunInput(self, effects, &record.input);
+            effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
+        }
     }
 
     pub fn stopInputs(self: *Runtime, task_id: u64) bool {
@@ -3576,7 +3598,7 @@ pub const Runtime = struct {
             observed.message_count + 1
         else
             null;
-        if (rewound) supersedeFrom(task, rewind.?, run_id);
+        if (rewound) supersedeFrom(self, task, rewind.?, run_id);
         if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
         if (effects.image_execution) |owned| {
             run_record.image_execution = owned.*;
@@ -5118,7 +5140,7 @@ pub const Runtime = struct {
         if (run_id == 0) return false;
         const task = self.find(task_id) orelse return false;
         if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting) return false;
-        const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return false;
+        const latest = task_policy.latestTerminalRun(task) orelse return false;
         const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
         if (latest.id != run_id or terminal.outcome != .completed or
             task.durable.completion_seen_run_id == run_id)
@@ -5192,7 +5214,7 @@ pub const Runtime = struct {
     fn announceableTerminal(
         task: *const task_state.Task,
     ) ?struct { run_id: u64, kind: RunNotificationKind } {
-        const run = task_policy.latestTerminalRun(task.durable.runs) orelse return null;
+        const run = task_policy.latestTerminalRun(task) orelse return null;
         return .{
             .run_id = run.id,
             .kind = switch (task_state.productTerminalFacts(run).?.outcome) {
@@ -6820,7 +6842,11 @@ pub const Runtime = struct {
 
     /// Missing Task is explicit null. A history cursor must name a retained
     /// Run belonging to this Task; it cannot silently become another page.
-    const RunBounds = struct { start: usize, end: usize, older: bool };
+    /// `next_before_run_id` is the oldest Run this page shows, which the next
+    /// request pages before, and null once nothing older is left. A Run a
+    /// rewind replaced is counted nowhere here: it is projected nowhere, so a
+    /// page that counted it would come back short of its limit.
+    const RunBounds = struct { start: usize, end: usize, next_before_run_id: ?u64 };
 
     fn runBounds(task: *const task_state.Task, before_run_id: ?u64, limit: u8) error{InvalidViewRequest}!RunBounds {
         if (limit == 0 or limit > 4) return error.InvalidViewRequest;
@@ -6837,12 +6863,17 @@ pub const Runtime = struct {
         var count: usize = 0;
         while (start > 0 and count < limit) {
             start -= 1;
-            if (task.durable.runs[start] != null) count += 1;
+            if (task.durable.runs[start]) |*run| {
+                if (task_policy.runProjected(task, run)) count += 1;
+            }
         }
-        const older = for (task.durable.runs[0..start]) |entry| {
-            if (entry != null) break true;
+        const older = for (task.durable.runs[0..start]) |*entry| {
+            if (entry.*) |*run| if (task_policy.runProjected(task, run)) break true;
         } else false;
-        return .{ .start = start, .end = end, .older = older };
+        const oldest_shown = for (task.durable.runs[start..end]) |*entry| {
+            if (entry.*) |*run| if (task_policy.runProjected(task, run)) break run.id;
+        } else null;
+        return .{ .start = start, .end = end, .next_before_run_id = if (older) oldest_shown else null };
     }
 
     pub fn writeHistoryPage(self: *const Runtime, writer: *std.Io.Writer, effects: ProjectionEffects, task_id: u64, before_run_id: u64, limit: u8) (task_view.Error || error{InvalidViewRequest})!void {
@@ -6853,11 +6884,12 @@ pub const Runtime = struct {
         const bounds = try runBounds(task, before_run_id, limit);
         const shutting_down = effects.authority(projectionAuthorityQuery(task)).shutting_down;
         writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
-        if (bounds.older) writer.print("\"{d}\"", .{task.durable.runs[bounds.start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (bounds.next_before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
         var count: usize = 0;
         for (task.durable.runs[bounds.start..bounds.end]) |*entry| {
             const run = &(entry.* orelse continue);
+            if (!task_policy.runProjected(task, run)) continue;
             if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             count += 1;
             try task_view.writeRun(
@@ -6866,7 +6898,7 @@ pub const Runtime = struct {
                 run,
                 task_state.runProjectionFacts(run),
                 task_view.resendAdmitted(task, shutting_down),
-                task_view.rewindProjection(task, run, shutting_down),
+                task_view.editAdmitted(task, run, shutting_down),
                 effects.now_ms,
             );
         }
@@ -6889,7 +6921,6 @@ pub const Runtime = struct {
         const bounds = try runBounds(task, before_run_id, limit);
         const start = bounds.start;
         const end = bounds.end;
-        const older = bounds.older;
         var pending_ui_context = PendingUiContext{ .runtime = self, .max_json_bytes = effects.max_pending_ui_json_bytes };
         const external = effects.authority(projectionAuthorityQuery(task));
         const recovery = self.recoveryProjectionWithAuthority(task, external);
@@ -6897,7 +6928,7 @@ pub const Runtime = struct {
         writer.writeAll("{\"beforeRunId\":") catch return error.SnapshotTooLarge;
         if (before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"nextBeforeRunId\":") catch return error.SnapshotTooLarge;
-        if (older) writer.print("\"{d}\"", .{task.durable.runs[start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (bounds.next_before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runManifest\":") catch return error.SnapshotTooLarge;
         try task_view.writeRunManifest(writer, effects.text, task);
         writer.writeAll(",\"task\":") catch return error.SnapshotTooLarge;
@@ -10108,7 +10139,7 @@ fn copyRunInput(
 /// do the files and other effects they produced: only the Conversation lost
 /// them. A Run with no recorded position cannot be placed against the
 /// position, so it is left alone rather than guessed at.
-fn supersedeFrom(task: *task_state.Task, position: u64, by_run_id: u64) void {
+fn supersedeFrom(self: *Runtime, task: *task_state.Task, position: u64, by_run_id: u64) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (run.id == by_run_id or run.superseded_by_run_id != null) continue;
@@ -10116,6 +10147,11 @@ fn supersedeFrom(task: *task_state.Task, position: u64, by_run_id: u64) void {
         if (recorded < position) continue;
         run.superseded_by_run_id = by_run_id;
         run.noteProjectionChange();
+        // The one explicit resend a retired message gets is offered in its own
+        // turn's card, and this turn no longer has one. Nothing can reach that
+        // text again, so it is released here instead of being held for a
+        // resend that can never be offered.
+        for (run.additional_inputs) |*input| if (input.*) |*record| self.releaseAdditionalRetryText(record);
     }
 }
 
@@ -10331,7 +10367,7 @@ fn cancelTaskAutomaticTitles(task: *task_state.Task) void {
 }
 
 fn acknowledgeLatestCompletion(task: *task_state.Task) void {
-    const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return;
+    const latest = task_policy.latestTerminalRun(task) orelse return;
     const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
     if (terminal.outcome == .completed)
         task.durable.completion_seen_run_id = latest.id;

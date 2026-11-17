@@ -3286,6 +3286,45 @@ export default function App() {
    * knows which conversation position it belongs to, so nothing is sent from
    * here but the run it replaces.
    */
+  // The messages the user had queued behind the turns an edit replaces never
+  // ran, and the Host drops them along with those turns. Their text comes back
+  // to the composer instead of disappearing: it is read before the command and
+  // applied only once the edit is accepted, so a rejected edit leaves the
+  // queue and the draft exactly as they were.
+  function queuedDraftText(taskId: string): readonly string[] {
+    const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+    return (task?.inputSubmissions ?? [])
+      .filter((record) => record.state === "waiting")
+      .map((record) =>
+        record.input.kind === "text" && !record.input.redacted
+          ? record.input.text
+          : "",
+      )
+      .filter((part) => part.trim().length !== 0);
+  }
+
+  function restoreQueuedDraftText(taskId: string, queued: readonly string[]) {
+    if (queued.length === 0) return;
+    const draft = taskDrafts.getDraft(taskId);
+    // An attachment or Skill draft is the user's own composition, so recovered
+    // text never replaces it.
+    if (draft.kind !== "text") return;
+    const parts = [...queued, draft.text].filter(
+      (part) => part.trim().length !== 0,
+    );
+    // The composer holds a bounded draft, so the oldest recovered messages
+    // give way to the newest instead of the draft refusing to hold anything.
+    for (let start = 0; start < parts.length; start++) {
+      const candidate: ComposerDraft = {
+        kind: "text",
+        text: parts.slice(start).join("\n\n"),
+      };
+      if (!composerDraftWithinLimits(candidate)) continue;
+      if (candidate.text !== draft.text) taskDrafts.setDraft(taskId, candidate);
+      return;
+    }
+  }
+
   async function editRunInput(taskId: string, runId: string, text: string) {
     const key = `input-edit:${taskId}:${runId}`;
     if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
@@ -3293,11 +3332,13 @@ export default function App() {
     const audience = { scope: "task" as const, taskId };
     const feedback = beginOperationFeedback(key, audience);
     const operationId = newComposerOperationId();
+    const queued = queuedDraftText(taskId);
     try {
       const result = await client.editInput(operationId, taskId, runId, {
         kind: "text",
         text,
       });
+      if (result.outcome === "accepted") restoreQueuedDraftText(taskId, queued);
       settleOperationFeedback(
         feedback,
         result.outcome === "accepted"

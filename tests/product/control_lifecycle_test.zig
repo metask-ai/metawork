@@ -10700,6 +10700,13 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
     return error.TestUnexpectedResult;
 }
 
+fn findSubmission(task: *task_state.Task, operation_id: []const u8) ?*task_state.InputSubmission {
+    for (task.input_submissions.items) |*record| {
+        if (std.mem.eql(u8, record.submission.operationId(), operation_id)) return record;
+    }
+    return null;
+}
+
 fn expectFakeConversation(index: usize, message_count: usize) !void {
     const session = &fake_core.sessions[index];
     session.lock();
@@ -10752,12 +10759,42 @@ test "an edited message rewinds the Conversation and reruns in its place" {
         if (run.id != first and run.superseded_by_run_id == null) break run.id;
     } else return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
-    try std.testing.expectEqual(@as(u32, 3), task_policy.rewoundRunCount(task, rerun));
     try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
+    // The rerun is the only turn the Renderer still sees. The three it
+    // replaced are projected nowhere, which is how the edited message takes
+    // their place with nothing standing in for them.
+    var projected: u32 = 0;
     for (task.durable.runs) |entry| if (entry) |run| {
-        if (run.id == rerun) continue;
+        if (run.id == rerun) {
+            try std.testing.expect(task_policy.runProjected(task, &run));
+            projected += 1;
+            continue;
+        }
         try std.testing.expect(task_policy.runSuperseded(task, &run));
+        try std.testing.expect(!task_policy.runProjected(task, &run));
     };
+    try std.testing.expectEqual(@as(u32, 1), projected);
+
+    // Rendered the way the Renderer receives it: the replaced turns are in no
+    // projection at all -- not the page, not the manifest that keeps a file
+    // change panel open -- so the edited message simply stands where the
+    // original one did, with nothing marking the turns it replaced.
+    var snapshot_buffer: [128 * 1024]u8 = undefined;
+    const page_json = try scenario.control.writeViewFixture(&snapshot_buffer, .{ .task_id = scenario.task_id });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page_json, .{});
+    defer parsed.deinit();
+    const page = parsed.value.object.get("taskPage").?.object;
+    var rerun_text: [24]u8 = undefined;
+    const rerun_id = std.fmt.bufPrint(&rerun_text, "{d}", .{rerun}) catch unreachable;
+    const manifest = page.get("runManifest").?.array;
+    try std.testing.expectEqual(@as(usize, 1), manifest.items.len);
+    try std.testing.expectEqualStrings(rerun_id, manifest.items[0].object.get("id").?.string);
+    const page_runs = page.get("task").?.object.get("runs").?.array;
+    try std.testing.expectEqual(@as(usize, 1), page_runs.items.len);
+    try std.testing.expectEqualStrings(rerun_id, page_runs.items[0].object.get("id").?.string);
+    // Nothing older is left to page to, because the only turns before this one
+    // are the ones it replaced.
+    try std.testing.expect(page.get("nextBeforeRunId").? == .null);
     // One turn after the rewind: the Conversation the next Run extends is the
     // context before the edited message plus the rerun itself.
     try expectFakeConversation(0, 2);
@@ -10806,9 +10843,62 @@ test "editing during a Run stops it under its own cause and reruns once idle" {
     try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
     try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
     try std.testing.expect(task_policy.runSuperseded(task, stopped));
-    try std.testing.expectEqual(@as(u32, 1), task_policy.rewoundRunCount(task, rerun));
+    try std.testing.expect(!task_policy.runProjected(task, stopped));
+    try std.testing.expect(task_policy.runProjected(task, task_state.findRun(task.durable.runs, rerun).?));
     // The Conversation is the context before the edited message plus the
     // rerun's own turn.
+    try expectFakeConversation(0, 2);
+}
+
+test "an edit drops the messages still waiting for a Run of their own" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    defer fake_core.releaseControlled();
+    const task = scenario.control.testTask(scenario.task_id).?;
+    const running = task.runtime.active_run_id;
+
+    // A message that cannot join the Run in flight waits for a Run of its
+    // own: an attachment, a resend, or -- as here -- an edited message, held
+    // in the queue while the stop it asked for is still in flight. Whatever
+    // put it there, its text was written for a Conversation the next rewind
+    // changes.
+    const first_edit = try scenario.control.editTaskInput(
+        "edit-once",
+        scenario.task_id,
+        running,
+        .{ .text = "first edit" },
+    );
+    try std.testing.expectEqual(.accepted, first_edit.outcome);
+    try std.testing.expect(findSubmission(task, "edit-once").?.state == .waiting);
+
+    // The user changes their mind before any of it has run.
+    const second_edit = try scenario.control.editTaskInput(
+        "edit-again",
+        scenario.task_id,
+        running,
+        .{ .text = "second edit" },
+    );
+    try std.testing.expectEqual(.accepted, second_edit.outcome);
+    // The first message left the record outright. Nothing retired stands in a
+    // conversation it no longer belongs to, and the Renderer puts its text
+    // back in the composer instead.
+    try std.testing.expect(findSubmission(task, "edit-once") == null);
+    try std.testing.expect(findSubmission(task, "edit-again").?.state == .waiting);
+
+    fake_core.setNextPlan(.immediate);
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+
+    // One rewind, one rerun, and it is the message that survived.
+    try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
+    const rerun = for (task.durable.runs) |entry| {
+        const run = entry orelse continue;
+        if (run.id != running) break run.id;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "second edit",
+        task_state.findRun(task.durable.runs, rerun).?.input.text.value,
+    );
     try expectFakeConversation(0, 2);
 }
 

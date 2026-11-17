@@ -1079,10 +1079,6 @@ export const enUS = {
   "run.terminal.partial_interrupted":
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
-  "run.rewound_here":
-    "This rerun replaced {count} exchanges above it, which are no longer part of the conversation.",
-  "run.superseded":
-    "An edited message replaced this exchange. It is no longer part of the conversation; the files and other changes it made stay.",
   "run.conversation_history_excluded":
     "This message remains in the task history, but is not included in the restored model context. You can still continue with a new message.",
   "run.process.title": "Execution details",
