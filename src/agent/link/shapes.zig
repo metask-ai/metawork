@@ -444,6 +444,73 @@ pub const CatalogProjection = struct {
 // A borrowed handle becomes an id the far side's table resolves
 // ---------------------------------------------------------------------------
 
+/// `port.SessionRoute`: the route id the Runtime assigned, plus the Session
+/// handle the caller will name in later calls.
+pub const SessionRoute = struct {
+    route_id: u64,
+    session: handle_table.Id,
+};
+
+/// The same, plus the restore report, which is already plain data.
+pub const SessionRestoreRoute = struct {
+    route_id: u64,
+    session: handle_table.Id,
+    report: checkpoint_restore.Report,
+};
+
+/// A Run handed to its executor. The original keeps its identity inline and
+/// its control lease as a pointer pair; across the link the identity travels
+/// as it is and the lease becomes an id.
+pub const RunRoute = struct {
+    run_id: u64,
+    generation: u64,
+    control: handle_table.Id,
+};
+
+/// `port.BeginRunOutcome` with the Run named as above.
+pub const BeginRunOutcome = union(enum) {
+    run: RunRoute,
+    failure: BeginRunFailure,
+};
+
+/// What crosses for the MCP installation host tool: the Task the install
+/// belongs to, and nothing else.
+///
+/// The original is a capability whose `try_put_fn` hands an install request to
+/// Product **and reads Product's answer back**, because the tool has to tell
+/// the model whether the request was accepted. That is a call from the
+/// execution half into the caller, and it is the first one: every other
+/// capability either composes locally or, like a catalog source lifetime, was
+/// ruled out from crossing. So `handle_table.zig`'s claim that nothing calls
+/// back into the caller is not true in general -- it is true of everything
+/// except this.
+///
+/// The reverse path is a question about the protocol's shape rather than a
+/// detail inside a stub, and the tool is MCP-shaped, so it belongs to the MCP
+/// step. Recorded here so it is a known debt rather than a surprise when that
+/// step starts.
+pub const McpInstallationTarget = struct {
+    task_id: u64,
+};
+
+/// `port.SessionRestoreInputs`: the handles a caller only retains and hands
+/// back. The Runtime it names does not travel -- across the link the Runtime
+/// *is* the link -- and the two capabilities become ids.
+pub const SessionRestoreInputs = struct {
+    skill: ?handle_table.Id,
+    mcp: ?handle_table.Id,
+    permission_mode: control.PermissionMode,
+    shell_policy: control.ShellPolicy,
+    permission_interaction: surface.PermissionInteraction,
+};
+
+/// `port.SkillRestoreBorrow`: what a captured skill capability grants, read
+/// without taking it. The lease stays behind as an id.
+pub const SkillRestoreBorrow = struct {
+    catalog: handle_table.Id,
+    policy: surface.SkillPolicyInput,
+};
+
 /// `surface.SessionOpenOptions` with its two borrowed handles named by id.
 ///
 /// The skill catalog lease and the MCP selection both live in the execution
@@ -588,6 +655,13 @@ comptime {
     payload.requireStructural(CatalogAcquisition);
     payload.requireStructural(McpActivationProjection);
     payload.requireStructural(McpActivationOutcome);
+    payload.requireStructural(SessionRoute);
+    payload.requireStructural(SessionRestoreRoute);
+    payload.requireStructural(RunRoute);
+    payload.requireStructural(BeginRunOutcome);
+    payload.requireStructural(SkillRestoreBorrow);
+    payload.requireStructural(SessionRestoreInputs);
+    payload.requireStructural(McpInstallationTarget);
 }
 
 /// Asserts that a mirror and its original describe the same thing: every

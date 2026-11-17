@@ -2,10 +2,16 @@
 //! hold.
 //!
 //! A port method that returns a live lease, selection or activation cannot send
-//! the pointer, so it sends an id and keeps the object here. Only this half
-//! needs a table: the one capability that pointed the other way, a catalog
-//! query's source lifetime, turned out to be forbidden from crossing by its own
-//! contract, so nothing calls back into the caller.
+//! the pointer, so it sends an id and keeps the object here.
+//!
+//! This half needs a table for every handle but one. The catalog query's
+//! source lifetime pointed the other way and turned out to be forbidden from
+//! crossing by its own contract. The MCP installation tool, though, really
+//! does call back: it hands an install request to the caller and reads the
+//! answer, because it has to tell the model whether the request was accepted.
+//! That path is recorded as owed in `shapes.McpInstallationTarget` and belongs
+//! to the MCP step; until it is designed, do not read this file as proof that
+//! calls only go one way.
 //!
 //! The id carries a generation, and that is the whole design. A table that
 //! handed out bare slot indices would resolve a stale id to whatever object
