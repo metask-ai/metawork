@@ -12,8 +12,21 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
-import type { InlineCode, Link, Parent, Root, RootContent, Text } from "mdast";
+import remarkMath from "remark-math";
+import type { Element, ElementContent, Root as HastRoot } from "hast";
+import type {
+  Code,
+  InlineCode,
+  Link,
+  Nodes as MdastNodes,
+  Paragraph,
+  Parent,
+  Root,
+  RootContent,
+  Text,
+} from "mdast";
 
 import { CodeBlock } from "./CodeBlock.tsx";
 import { Button } from "../ui/button.tsx";
@@ -159,6 +172,285 @@ function referencePlugin(
       });
     }
     visit(tree);
+  };
+}
+
+// LaTeX math for the shared Markdown root. KaTeX renders to MathML only: the
+// WebView lays the formula out, so the app ships no math font, no stylesheet
+// and no inline `style`, and the release CSP (`style-src 'self'`, with no
+// 'unsafe-inline') stays untouched.
+
+// Whatever unified hands a transformer as the file: only its source matters.
+type Source = { toString(): string };
+
+type MdastParent = Extract<MdastNodes, { children: MdastNodes[] }>;
+// The shapes a formula arrives in: `remark-math`'s flow and text nodes, and
+// GitHub's other block spelling, ` ```math `, which `remark-math` does not
+// parse at all -- it stays a fenced code node, which `rehype-katex` then
+// recognizes by its `language-math` class. Holding all of them as one math
+// node here is what keeps a single streaming guard, a single fallback and a
+// single copy path for both spellings.
+type MathNode = {
+  type: "math" | "inlineMath" | "code";
+  data?: Record<string, unknown>;
+};
+
+const katexOptions = {
+  output: "mathml",
+  // Model output is untrusted input. `\href`, `\url` and `\includegraphics`
+  // stay unexpanded and render as their own visible source.
+  trust: false,
+  // Questionable-but-parseable constructs render instead of failing the
+  // document; a genuinely unknown command still falls back to its source.
+  strict: false,
+  // A self-recursive `\def` is a denial-of-service reachable from every
+  // source this renderer accepts. Real formulas expand a handful of times;
+  // this bound stops a bomb in under a millisecond and reaches the same
+  // visible-source fallback as any other unparseable input.
+  maxExpand: 256,
+} as const;
+
+// The one spelling a formula is handed back in when it cannot be rendered,
+// whichever of the two block spellings it was written in: by then the failure
+// has come from the typesetting layer, which no longer carries the author's.
+const delimiter = "$$";
+const displayClass = ["language-math", "math-display"];
+// Chromium does not make a `math` element itself a scroll container, so the
+// wrapper KaTeX puts around a display formula carries the class the
+// stylesheet scrolls. Marking it here keeps the rule off `:has`.
+const blockMathClass = "ai-markdown-math-block";
+
+function isMath(node: MdastNodes): node is MathNode & MdastNodes {
+  return (
+    node.type === "math" ||
+    node.type === "inlineMath" ||
+    (node.type === "code" && node.lang === "math")
+  );
+}
+
+// The delimited source exactly as the document spells it. A parsed `value` is
+// unusable for an unterminated block: micromark reads the opening line as the
+// fence's meta and leaves the value empty, so the text would simply vanish.
+function mathSource(document: string, node: MdastNodes): string | null {
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  return start === undefined || end === undefined
+    ? null
+    : document.slice(start, end);
+}
+
+// What the document opened the formula with: a run of dollars, or the marker
+// of the fence the ` ```math ` spelling opened.
+function openingDelimiter(source: string): string {
+  return /^[ \t]*(\$+|`{3,}|~{3,})/.exec(source)?.[1] ?? "";
+}
+
+// A finished formula carries its closing delimiter. An Assistant still
+// streaming one has not written it yet, and neither has a user who typed a
+// lone `$$` or opened a fence. A fence closes on a line of its own carrying at
+// least as many markers as it opened with -- the rule micromark itself applies
+// before it reports the block closed, so a shorter run is still mid-formula.
+function terminated(source: string): boolean {
+  const opening = openingDelimiter(source);
+  if (opening === "") return false;
+  const body = source.trimEnd();
+  if (opening.startsWith("$"))
+    return body.length >= opening.length * 2 && body.endsWith(opening);
+  return new RegExp(`\\n[ \\t]*${opening[0]}{${opening.length},}[ \\t]*$`).test(
+    body,
+  );
+}
+
+function paragraph(value: string): Paragraph {
+  return { type: "paragraph", children: [{ type: "text", value }] };
+}
+
+// What the reader sees while a formula is still arriving: the source as far as
+// it has been typed. A fence keeps the shape it was written in, because it is
+// multi-line by construction -- a paragraph would collapse the lines the
+// author typed -- and because every other unclosed fence on this root already
+// streams in as a code block.
+function arriving(node: MathNode, source: string): Text | Paragraph | Code {
+  if (node.type === "code") return { type: "code", value: source };
+  if (node.type === "inlineMath") return { type: "text", value: source };
+  return paragraph(source);
+}
+
+// What a rich-text copy carries. It is pasted back through someone else's
+// Markdown reader, and only the dollar spelling survives that trip: `$$…$$`
+// in a paragraph is read back as a formula, while a fence can only travel
+// inside a code block, where every character is literal -- a nested fence
+// included. So a fenced formula is handed over in the dollar spelling, the
+// same normalization an unrenderable formula's fallback makes, and both
+// spellings of one formula copy to the same bytes.
+function copied(node: MathNode & MdastNodes, source: string): Text | Paragraph {
+  if (node.type === "code") {
+    // Closed only if the author has closed it, so copying a formula that is
+    // still arriving does not hand over a finished one -- the same thing the
+    // dollar spelling does on this root, and the same thing the reader sees.
+    const close = terminated(source) ? `\n${delimiter}` : "";
+    return paragraph(`${delimiter}\n${node.value}${close}`);
+  }
+  return node.type === "inlineMath"
+    ? { type: "text", value: source }
+    : paragraph(source);
+}
+
+// Every mdast parent holds plain content; the union of their child arrays is
+// what TypeScript cannot splice directly.
+function replaceChild(
+  parent: MdastParent,
+  index: number,
+  node: MdastNodes,
+): void {
+  (parent.children as MdastNodes[]).splice(index, 1, node);
+}
+
+function visitMdast(
+  parent: MdastParent,
+  each: (node: MdastNodes, index: number, parent: MdastParent) => void,
+): void {
+  // Backwards, so replacing a node cannot shift one not yet visited.
+  for (let index = parent.children.length - 1; index >= 0; index -= 1) {
+    const node = parent.children[index];
+    if (node === undefined) continue;
+    if ("children" in node) visitMdast(node, each);
+    each(node, index, parent);
+  }
+}
+
+function eachMath(
+  tree: Root,
+  each: (
+    node: MathNode & MdastNodes,
+    source: string,
+    index: number,
+    parent: MdastParent,
+  ) => void,
+  file: Source,
+): void {
+  const document = String(file);
+  visitMdast(tree, (node, index, parent) => {
+    if (!isMath(node)) return;
+    const source = mathSource(document, node);
+    if (source !== null) each(node, source, index, parent);
+  });
+}
+
+/// Runs after `remark-math`, on the one GFM tree. It introduces no second
+/// parser: every decision reads the original source through the positions that
+/// same parse recorded.
+function remarkMathSource() {
+  return (tree: Root, file: Source) => {
+    eachMath(
+      tree,
+      (node, source, index, parent) => {
+        if (!terminated(source)) {
+          // Show what has arrived, verbatim, until the closing delimiter does.
+          replaceChild(parent, index, arriving(node, source));
+          return;
+        }
+        // A formula written as its own line is display math, which micromark
+        // reports as inline when the closing run is on that same line. One
+        // inside running text stays inline, so it does not break the line.
+        if (
+          node.type !== "inlineMath" ||
+          openingDelimiter(source).length < 2 ||
+          parent.type !== "paragraph" ||
+          parent.children.length !== 1
+        )
+          return;
+        const data = (node.data ?? {}) as Record<string, unknown>;
+        const properties = (data.hProperties ?? {}) as Record<string, unknown>;
+        node.data = {
+          ...data,
+          hProperties: { ...properties, className: displayClass },
+        };
+      },
+      file,
+    );
+  };
+}
+
+/// Replaces every math node with its delimited source, for the rich-text
+/// clipboard root. Pasted `$$…$$` stays usable somewhere else; pasted MathML
+/// would not be.
+function remarkMathAsSource() {
+  return (tree: Root, file: Source) => {
+    eachMath(
+      tree,
+      (node, source, index, parent) => {
+        replaceChild(parent, index, copied(node, source));
+      },
+      file,
+    );
+  };
+}
+
+function classList(node: Element): string[] {
+  const value = node.properties.className;
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function textOf(node: ElementContent): string {
+  if (node.type === "text") return node.value;
+  return node.type === "element" ? node.children.map(textOf).join("") : "";
+}
+
+function stripStyle(node: ElementContent): void {
+  if (node.type !== "element") return;
+  if ("style" in node.properties) delete node.properties.style;
+  for (const child of node.children) stripStyle(child);
+}
+
+function visitHast(
+  parent: Element | HastRoot,
+  each: (
+    node: ElementContent,
+    index: number,
+    parent: Element | HastRoot,
+  ) => void,
+): void {
+  for (let index = parent.children.length - 1; index >= 0; index -= 1) {
+    const node = parent.children[index];
+    if (node === undefined) continue;
+    if (node.type === "element") visitHast(node, each);
+    each(node as ElementContent, index, parent);
+  }
+}
+
+/// Runs after `rehype-katex`. KaTeX's MathML needs no CSS, but both its own
+/// error span and rehype-katex's fallback carry an inline `style`, which the
+/// release CSP blocks. Neither may reach the document, so a formula KaTeX
+/// cannot render falls back to the delimited source it was written as.
+function rehypeMathSafety() {
+  return (tree: HastRoot) => {
+    visitHast(tree, (node, index, parent) => {
+      if (node.type !== "element") return;
+      const classes = classList(node);
+      if (classes.includes("katex-error")) {
+        // What KaTeX was handed is the formula's LaTeX, and that is what comes
+        // back, in one spelling whichever the author used. A fenced formula
+        // reaches here through the generic code-block handler, which appends a
+        // newline to a block's text; it is not part of the formula, so it is
+        // not part of the source handed back either.
+        const source = textOf(node).replace(/\n+$/, "");
+        parent.children.splice(index, 1, {
+          type: "text",
+          value: `${delimiter}${source}${delimiter}`,
+        });
+        return;
+      }
+      if (!classes.some((name) => name.startsWith("katex"))) return;
+      stripStyle(node);
+      const display = node.children.some(
+        (child) =>
+          child.type === "element" &&
+          child.tagName === "math" &&
+          child.properties.display === "block",
+      );
+      if (display) node.properties.className = [...classes, blockMathClass];
+    });
   };
 }
 
@@ -348,6 +640,13 @@ function clipboardHref(href: string | undefined): string | null {
   return value && /^(?:https?:|mailto:)/i.test(value) ? value : null;
 }
 
+// Only `$$…$$` is a formula. Single-dollar text math would read ordinary
+// prose such as "costs $5 and $7" as one, and swallow both amounts.
+const mathSyntax: [typeof remarkMath, { singleDollarTextMath: false }] = [
+  remarkMath,
+  { singleDollarTextMath: false },
+];
+
 const clipboardComponents: Components = {
   a: ({ href, children }) => {
     const value = clipboardHref(href);
@@ -369,7 +668,7 @@ export async function renderMarkdownForClipboard(
   return renderToStaticMarkup(
     <ReactMarkdown
       skipHtml
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, mathSyntax, remarkMathAsSource]}
       components={clipboardComponents}
     >
       {markdown}
@@ -413,14 +712,17 @@ const MarkdownBody = memo(
     return (
       <ReactMarkdown
         skipHtml
-        remarkPlugins={
-          references?.size || localLinks
-            ? [
-                remarkGfm,
-                referencePlugin(references ?? noReferences, localLinks),
-              ]
-            : [remarkGfm]
-        }
+        remarkPlugins={[
+          remarkGfm,
+          mathSyntax,
+          ...(references?.size || localLinks
+            ? [referencePlugin(references ?? noReferences, localLinks)]
+            : []),
+          // Last: it reads the source the same parse recorded, so no earlier
+          // plugin can have rewritten a formula's positions.
+          remarkMathSource,
+        ]}
+        rehypePlugins={[[rehypeKatex, katexOptions], rehypeMathSafety]}
         components={textResourcesOnly ? textResourceComponents : components}
       >
         {children}
