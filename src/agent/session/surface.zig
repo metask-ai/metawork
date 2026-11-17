@@ -74,7 +74,7 @@ pub const PermissionModeUpdate = struct {
 /// Measured against the real Core: a compaction leaves `message_count`
 /// unchanged and only raises `compact_boundary`, so a position recorded once
 /// stays valid for as long as its message is above the boundary.
-pub const ConversationObservation = struct {
+pub const ConversationBounds = struct {
     message_count: u64,
     /// Positions at or below this have been summarized away. The invariant
     /// `compact_boundary <= message_count` is Core's, not ours.

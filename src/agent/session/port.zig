@@ -195,7 +195,7 @@ pub const SessionPort = struct {
         capture_restore_inputs: *const fn (?*anyopaque) Allocating!SessionRestoreInputs,
         snapshot: *const fn (?*anyopaque) surface.SessionSnapshot,
         update_permission_mode: *const fn (?*anyopaque, session_control.PermissionMode, session_control.PermissionMode) Error!surface.PermissionModeUpdate,
-        conversation_observation: *const fn (?*anyopaque) Error!surface.ConversationObservation,
+        conversation_bounds: *const fn (?*anyopaque) Error!surface.ConversationBounds,
         rewind_to_user_message: *const fn (?*anyopaque, u64) Error!surface.RewindOutcome,
         update_credential: *const fn (?*anyopaque, []const u8) Error!void,
         request_termination: *const fn (?*anyopaque, u64, session_control.TerminationSignal) Error!void,
@@ -280,9 +280,9 @@ pub const SessionPort = struct {
 
     /// The Conversation numbering a rewind position is expressed in. A caller
     /// submitting a Run input records that input's position as
-    /// `message_count + 1`; see `surface.ConversationObservation`.
-    pub fn conversationObservation(self: SessionPort) Error!surface.ConversationObservation {
-        return self.vtable.conversation_observation(self.context);
+    /// `message_count + 1`; see `surface.ConversationBounds`.
+    pub fn conversationBounds(self: SessionPort) Error!surface.ConversationBounds {
+        return self.vtable.conversation_bounds(self.context);
     }
 
     /// Drops the user message at `position` and everything after it. Only the

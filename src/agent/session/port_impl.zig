@@ -190,9 +190,9 @@ const session_vtable: port.SessionPort.VTable = .{
             return sessionOf(context).updatePermissionMode(expected, target);
         }
     }.call,
-    .conversation_observation = struct {
-        fn call(context: ?*anyopaque) surface.Error!surface.ConversationObservation {
-            return sessionOf(context).conversationObservation();
+    .conversation_bounds = struct {
+        fn call(context: ?*anyopaque) surface.Error!surface.ConversationBounds {
+            return sessionOf(context).conversationBounds();
         }
     }.call,
     .rewind_to_user_message = struct {

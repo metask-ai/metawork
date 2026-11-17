@@ -6163,20 +6163,20 @@ test "idle rewind names a recorded position and keeps every refusal apart" {
     }
     const session = try openSession(runtime);
     try std.testing.expectEqual(
-        lifecycle.ConversationObservation{ .message_count = 0, .compact_boundary = 0 },
-        try session.conversationObservation(),
+        lifecycle.ConversationBounds{ .message_count = 0, .compact_boundary = 0 },
+        try session.conversationBounds(),
     );
 
     // Positions are recorded the way Product records them: the count read
     // before the input is submitted, plus one. Never counted from our own Run
     // list, which has no entry for a reply, a tool result or runtime text.
-    const first_position = (try session.conversationObservation()).message_count + 1;
+    const first_position = (try session.conversationBounds()).message_count + 1;
     try runFixtureTurn(session, "first turn");
-    const second_position = (try session.conversationObservation()).message_count + 1;
+    const second_position = (try session.conversationBounds()).message_count + 1;
     try runFixtureTurn(session, "second turn");
     try std.testing.expectEqual(@as(u64, 1), first_position);
     try std.testing.expectEqual(@as(u64, 3), second_position);
-    const two_turns = try session.conversationObservation();
+    const two_turns = try session.conversationBounds();
     try std.testing.expectEqual(@as(u64, 4), two_turns.message_count);
 
     // The position a Run whose input never reached Core would carry: the
@@ -6197,7 +6197,7 @@ test "idle rewind names a recorded position and keeps every refusal apart" {
     // Every refusal so far was decided here, against the describe this Session
     // had just taken.
     try std.testing.expectEqual(@as(usize, 0), fake_core.rewind_calls);
-    try std.testing.expectEqual(two_turns, try session.conversationObservation());
+    try std.testing.expectEqual(two_turns, try session.conversationBounds());
 
     // An assistant reply position. Product records user positions only, so
     // this can only mean our own mapping is wrong, and it stays its own code
@@ -6206,7 +6206,7 @@ test "idle rewind names a recorded position and keeps every refusal apart" {
     try std.testing.expectEqual(lifecycle.RewindRefusal.not_user_message, mapping_bug.refused.refusal);
     try std.testing.expectEqual(.core, mapping_bug.refused.source);
     try std.testing.expectEqual(@as(usize, 1), fake_core.rewind_calls);
-    try std.testing.expectEqual(two_turns, try session.conversationObservation());
+    try std.testing.expectEqual(two_turns, try session.conversationBounds());
 
     // The real thing: the second turn's recorded position drops that turn and
     // leaves the one before it standing. No generation moves with it.
@@ -6214,7 +6214,7 @@ test "idle rewind names a recorded position and keeps every refusal apart" {
         lifecycle.RewindOutcome.rewound,
         try session.rewindToUserMessage(second_position),
     );
-    const rewound = try session.conversationObservation();
+    const rewound = try session.conversationBounds();
     try std.testing.expectEqual(@as(u64, 2), rewound.message_count);
     try std.testing.expectEqual(@as(u64, 0), rewound.compact_boundary);
     const authority = try session.updatePermissionMode(.default, .default);
@@ -6222,7 +6222,7 @@ test "idle rewind names a recorded position and keeps every refusal apart" {
 
     // The rerun takes the dropped turn's place.
     try runFixtureTurn(session, "edited second turn");
-    try std.testing.expectEqual(@as(u64, 4), (try session.conversationObservation()).message_count);
+    try std.testing.expectEqual(@as(u64, 4), (try session.conversationBounds()).message_count);
 }
 
 test "a compacted position is refused before Core is called, and a Run blocks a rewind" {
@@ -6241,7 +6241,7 @@ test "a compacted position is refused before Core is called, and a Run blocks a 
     // Measured against the real Core: a compaction raises the boundary and
     // leaves message_count alone, which is what keeps a recorded position
     // valid for as long as its message stays above the boundary.
-    const after_compact = try session.conversationObservation();
+    const after_compact = try session.conversationBounds();
     try std.testing.expectEqual(@as(u64, 4), after_compact.message_count);
     try std.testing.expectEqual(@as(u64, 2), after_compact.compact_boundary);
 
@@ -6254,11 +6254,11 @@ test "a compacted position is refused before Core is called, and a Run blocks a 
         lifecycle.RewindOutcome.rewound,
         try session.rewindToUserMessage(3),
     );
-    try std.testing.expectEqual(@as(u64, 2), (try session.conversationObservation()).message_count);
+    try std.testing.expectEqual(@as(u64, 2), (try session.conversationBounds()).message_count);
 
     const prepared = try session.prepareRun(.{ .text = "hold admission" });
     try std.testing.expectError(error.SessionNotIdle, session.rewindToUserMessage(1));
-    try std.testing.expectError(error.SessionNotIdle, session.conversationObservation());
+    try std.testing.expectError(error.SessionNotIdle, session.conversationBounds());
     try session.cancelPreparedRun(prepared);
 }
 
@@ -6307,6 +6307,6 @@ test "rewind failures stay typed and a disagreeing Core closes admission" {
         );
         // A refusal changes nothing, so the position is still there.
         if (!case.poisoned)
-            try std.testing.expectEqual(@as(u64, 2), (try session.conversationObservation()).message_count);
+            try std.testing.expectEqual(@as(u64, 2), (try session.conversationBounds()).message_count);
     }
 }

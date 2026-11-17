@@ -38,7 +38,7 @@ pub const stream_retry_budget = surface.stream_retry_budget;
 pub const max_submitted_inputs = surface.max_submitted_inputs;
 pub const max_submitted_input_bytes = surface.max_submitted_input_bytes;
 pub const PermissionModeUpdate = surface.PermissionModeUpdate;
-pub const ConversationObservation = surface.ConversationObservation;
+pub const ConversationBounds = surface.ConversationBounds;
 pub const RewindRefusal = surface.RewindRefusal;
 pub const RewindOutcome = surface.RewindOutcome;
 pub const PermissionInteraction = surface.PermissionInteraction;
@@ -1237,7 +1237,7 @@ pub const Session = struct {
     /// Idle-only, like the rewind it feeds: a count read while a Run or a
     /// compaction is in flight would be recorded against a Conversation that
     /// is still moving.
-    pub fn conversationObservation(self: *Session) Error!ConversationObservation {
+    pub fn conversationBounds(self: *Session) Error!ConversationBounds {
         self.lock();
         defer self.unlock();
         if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
@@ -1247,7 +1247,7 @@ pub const Session = struct {
             .closing, .closed => return error.SessionClosing,
             else => return error.SessionNotIdle,
         }
-        return self.conversationObservationLocked();
+        return self.conversationBoundsLocked();
     }
 
     /// Drops the user message at `position` and everything after it, so the
@@ -1275,7 +1275,7 @@ pub const Session = struct {
             self.abort_calls_in_progress != 0 or self.credential_updates_in_progress != 0)
             return error.SessionNotIdle;
         if (position == 0) return refusedRewind(.invalid_position, .host);
-        const before = try self.conversationObservationLocked();
+        const before = try self.conversationBoundsLocked();
         // The input recorded at this position never reached Core, so the
         // Conversation already ends where the rerun needs it to.
         if (position == before.message_count + 1) return .unchanged;
@@ -1298,7 +1298,7 @@ pub const Session = struct {
             else => return self.failRewindContract(),
         }
         // A rewind that reported OK must show up as a shorter Conversation.
-        const after = self.conversationObservationLocked() catch return self.poisonRewind();
+        const after = self.conversationBoundsLocked() catch return self.poisonRewind();
         if (after.message_count != position - 1 or after.compact_boundary != before.compact_boundary)
             return self.failRewindContract();
         return .rewound;
@@ -1322,7 +1322,7 @@ pub const Session = struct {
     /// Deliberate read-only use of describe: it invokes no Host callback, and
     /// the Session mutex is held across the describe and the call that reads
     /// its numbers, so no Run can start between them.
-    fn conversationObservationLocked(self: *Session) Error!ConversationObservation {
+    fn conversationBoundsLocked(self: *Session) Error!ConversationBounds {
         var encoded = emptyOwnedBytes();
         defer releaseOwned(self.agent_runtime.api, &encoded);
         var diagnostic = emptyOwnedBytes();
