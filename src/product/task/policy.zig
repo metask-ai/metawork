@@ -894,10 +894,14 @@ pub fn editablePosition(
 /// one. Reading it from the Runs it superseded keeps one fact in one place:
 /// the position itself is that Run's own recorded position.
 pub fn rewoundRunCount(task: *const task_state.Task, run_id: u64) u32 {
+    // Whether these supersessions are in force is one question about the Run
+    // that made them, answered once rather than per Run it named.
+    const performer = task_state.findRunConst(task.durable.runs, run_id) orelse return 0;
+    if (performer.coverage == .excluded) return 0;
     var count: u32 = 0;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        if (run.superseded_by_run_id == run_id and runSuperseded(task, run)) count += 1;
+        if (run.superseded_by_run_id == run_id) count += 1;
     }
     return count;
 }
@@ -1446,8 +1450,10 @@ test "a rewind leaves its turns in history and out of the Conversation" {
     try std.testing.expect(!runSuperseded(&task, &task.durable.runs[0].?));
     try std.testing.expectEqual(@as(u32, 1), rewoundRunCount(&task, 5));
     try std.testing.expectEqual(@as(u64, 5), runHistoryHighWater(&task));
-    // The Conversation now ends at the Run before the one that was replaced.
-    try std.testing.expectEqual(@as(?u64, 1), lastConversationRunId(&task));
+    // The replacement is the frontier, which is also what Core reports as its
+    // `last_run_id`: a rewind leaves that alone, and the Run that performed
+    // one is always newer than the Runs it superseded.
+    try std.testing.expectEqual(@as(?u64, 5), lastConversationRunId(&task));
 
     // A rewind is only as durable as the Run that performed it: while that
     // Run is out of the Conversation, a restart restores a checkpoint that
