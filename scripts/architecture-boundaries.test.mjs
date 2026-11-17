@@ -510,7 +510,7 @@ test("Product maps admitted protocols to Agent at one exhaustive boundary", () =
 
   assert.match(build, /src\/product\/agent_protocol_adapter\.zig/);
   assert.match(build, /product_agent_protocol_adapter/);
-  assert.match(adapter, /@import\("metawork_agent"\)/);
+  assert.match(adapter, /@import\("metawork_agent_contract"\)/);
   assert.match(adapter, /@import\("metawork_product_models_contract"\)/);
   assert.match(
     adapter,
@@ -1612,7 +1612,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     productSkill,
     /@import\("product_skill_(?:package|policy|state|view|management_runtime)"\)/,
   );
-  assert.match(catalog, /@import\("metawork_agent"\)/);
+  assert.match(catalog, /@import\("metawork_agent_contract"\)/);
   assert.doesNotMatch(
     catalog,
     /Workbench|Task|Workspace|product_control_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
@@ -1654,7 +1654,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     managementRuntime,
     /Workbench|WorkspaceView|TaskView|product_control_executor|std\.Thread|@import\("metawork_agent"\)|\*agent\.(?:Runtime|Session)/,
   );
-  assert.match(state, /@import\("metawork_agent"\)/);
+  assert.match(state, /@import\("metawork_agent_contract"\)/);
   assert.match(state, /@import\("product_skill_catalog"\)/);
   assert.match(state, /@import\("product_skill_enablement"\)/);
   assert.match(state, /@import\("product_skill_management"\)/);
@@ -1665,7 +1665,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(state, /pub const State = struct/);
   assert.match(state, /pub const CatalogControl = struct/);
   assert.match(state, /pub const CatalogLeaseRelease = struct/);
-  assert.match(policy, /@import\("metawork_agent"\)/);
+  assert.match(policy, /@import\("metawork_agent_contract"\)/);
   assert.match(policy, /@import\("product_skill_catalog"\)/);
   assert.match(policy, /@import\("product_skill_enablement"\)/);
   assert.match(policy, /@import\("product_skill_management"\)/);
@@ -1677,7 +1677,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     policy,
     /Workbench|WorkspaceView|TaskView|product_control_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session|FileStore|\.commit\(|bumpRevision|scheduleSkill/,
   );
-  assert.match(ports, /@import\("metawork_agent"\)/);
+  assert.match(ports, /@import\("metawork_agent_contract"\)/);
   assert.match(ports, /pub const Ports = struct/);
   assert.doesNotMatch(
     ports,
@@ -2038,7 +2038,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     assert.match(consumer, /task_state\.compactProjectionFacts\(/);
     assert.doesNotMatch(consumer, /task_state\.compactTerminalPayload\(/);
   }
-  assert.match(taskState, /@import\("metawork_agent"\)/);
+  assert.match(taskState, /@import\("metawork_agent_contract"\)/);
   assert.doesNotMatch(
     taskState,
     /Workbench|product_control_executor|std\.Thread|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
@@ -2107,7 +2107,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     assert.doesNotMatch(projection, new RegExp(`fn ${policyFn}\\(`));
   }
   assert.match(taskPolicy, /@import\("product_task_state"\)/);
-  assert.match(taskPolicy, /@import\("metawork_agent"\)/);
+  assert.match(taskPolicy, /@import\("metawork_agent_contract"\)/);
   assert.doesNotMatch(
     taskPolicy,
     /Workbench|product_control_executor|std\.Thread|commitTaskState|bumpRevision|agent_runtime\.takeEvent|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
@@ -2205,7 +2205,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskRuntime, /task_view\.writeProjection\(/);
   assert.match(taskRuntime, /task_view\.writePendingUi\(/);
   assert.match(taskRuntime, /access\.copyPendingUiRequest\(/);
-  assert.match(taskAgentSession, /session: \?\*agent\.Session/);
+  assert.match(taskAgentSession, /session: \?agent\.SessionPort/);
   assert.match(taskAgentSession, /pub const Binding = struct/);
   assert.match(taskAgentSession, /pub const Access = struct/);
   assert.match(taskAgentSession, /session\.retainReference\(\)/);
@@ -2326,7 +2326,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
   // Product MCP state intentionally consumes MetaWork Agent's public
   // Activation/Selection surface; the AgentCore SDK remains forbidden here.
-  assert.match(state, /@import\("metawork_agent"\)/);
+  assert.match(state, /@import\("metawork_agent_contract"\)/);
   assert.match(state, /@import\("product_mcp_configuration"\)/);
   assert.doesNotMatch(
     state,
@@ -2345,7 +2345,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(state, /pub fn mcpRefreshDeadlineMs/);
   // Product MCP policy prepares Agent-owned allowlist values and returns
   // borrowed Selection facts, but never owns an Agent runtime or worker.
-  assert.match(policy, /@import\("metawork_agent"\)/);
+  assert.match(policy, /@import\("metawork_agent_contract"\)/);
   assert.match(policy, /@import\("product_mcp_configuration"\)/);
   assert.match(policy, /@import\("product_mcp_state"\)/);
   assert.doesNotMatch(
@@ -2434,7 +2434,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(build, /src\/product\/mcp\/policy\.zig/);
   assert.match(
     build,
-    /product_mcp_policy\.addImport\("metawork_agent", agent\)/,
+    /product_mcp_policy\.addImport\("metawork_agent_contract", agent_contract\)/,
   );
   assert.match(
     build,
@@ -2810,6 +2810,10 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
     (file) => file !== "src/agent.zig" && !file.startsWith("src/agent/"),
   );
   assertNoImports(nonAgentFiles, ["metask_agentcore"]);
+  // Product reaches Agent only through the contract module. Naming the
+  // implementation would put the AgentCore archive back on Product's link
+  // line, which is the whole reason the contract module exists.
+  assertNoImports(zigFiles("src/product/"), ["metawork_agent"]);
 
   const build = read("build.zig");
   const bundleVerifier = read("build_support/agentcore_bundle.zig");
@@ -2827,6 +2831,7 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
       "agent_catalog",
       "agent_checkpoint",
       "agent_checkpoint_restore",
+      "agent_contract",
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
@@ -2836,6 +2841,18 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
       "session",
     ].sort(),
   );
+  // The archive belongs to the one module that reaches the ABI entry point.
+  // Every other receiver above needs the declarations or the JSON codec only,
+  // and must not drag a 9.8 MB static archive onto its consumers' link lines:
+  // that is what lets Product compile without it.
+  const archiveReceivers = [
+    ...build.matchAll(/([A-Za-z_]\w*)\s*\.\s*addObjectFile\s*\(/g),
+  ].map((match) => match[1]);
+  assert.deepEqual(archiveReceivers, ["session"]);
+  assert.match(
+    build,
+    /session\.addObjectFile\(\.\{ \.cwd_relative = bundle\.static_library \}\)/,
+  );
   const buildManifest = read("build.zig.zon");
   assert.match(build, /target\.abi != \.msvc/);
   for (const source of [build, buildManifest, bundleVerifier, bundlePolicy]) {
@@ -2844,14 +2861,10 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
       /(?:aarch64|x86_64)-windows-gnu|windows-gnullvm/,
     );
   }
-  for (const target of [
-    "aarch64-macos",
-    "x86_64-macos",
-    "aarch64-windows-msvc",
-    "x86_64-windows-msvc",
-  ]) {
-    assert.match(buildManifest, new RegExp(`\\.agentcore/bundles/${target}`));
-  }
+  // The bundles are no longer Zig package dependencies, so the manifest pins
+  // the directory rather than four package paths. Per-target coverage is
+  // asserted on the verifier and the bundle policy below.
+  assert.match(buildManifest, /\.agentcore\/bundles/);
   assert.match(build, /\.agentcore\/bundles/);
   assert.doesNotMatch(build, /\.agentcore\/bundle(?:["/])/);
   for (const file of filesWithExtensions("scripts/", [".mjs"]).filter(
@@ -2863,7 +2876,6 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
       `${file} references the retired single-bundle path`,
     );
   }
-  assert.doesNotMatch(build, /\.addObjectFile\(/);
   for (const [target, lock] of [
     ["aarch64-windows-msvc", "agentcore-bundle.windows-aarch64.lock.json"],
     ["x86_64-windows-msvc", "agentcore-bundle.windows-x86_64.lock.json"],
