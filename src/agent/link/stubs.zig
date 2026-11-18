@@ -362,6 +362,114 @@ fn notForwarded(comptime owner: method.Owner, comptime name: []const u8) noretur
         " is not forwarded by this build -- " ++ entry.why);
 }
 
+/// What a stub answers when the call did not reach an answer, by which fact
+/// stopped it.
+///
+/// One `catch return gone` used to cover all of these, and that merged facts
+/// that call for opposite behaviour. A refusal for capacity says "ask again";
+/// the gone answer says "stop asking". `runtime.zig` turns a compact
+/// cancellation's `DependencyUnreachable` into `.session_closing` and stops
+/// following that compact -- so a cancellation refused because the outbound
+/// queue was full, reported as unreachable, would abandon a compact that is
+/// still running. `client.Failure`'s own comment says "nobody is there" and
+/// "not right now" are two facts; this is where that stops being a comment.
+///
+/// The split is by whether the condition is permanent, because that is what
+/// decides whether the gone answer leads the caller to the same action as
+/// the truth would:
+///
+///   * Gone, unreadable, and a handle this half no longer names are all
+///     permanent. The gone answer is the restricting one and no retry would
+///     help, so it is the right answer for each -- the *diagnostic*
+///     difference between them is real and belongs in a log this layer does
+///     not yet have, which is worth saying out loud rather than leaving to
+///     whoever next reads the merge.
+///   * Capacity -- the send queue, this half's box table, an allocation --
+///     is transient, and the correct behaviour is to ask again. No return
+///     type in the surface can say it (`unreachability.pressureCounts`),
+///     so there is nothing to answer with and this refuses loudly.
+/// Every way a call can stop before it has an answer, as one set.
+///
+/// Written as a union of the two paths' own sets rather than listed, so the
+/// switch below is exhaustive by construction: a new member on either path
+/// fails the build instead of landing in an `else` that would quietly give
+/// it the gone answer -- which is how the merge this function removes got
+/// there in the first place.
+const Stopped = outbound.Error || inbound.InvokeError;
+
+/// What a stopped call is, for answering purposes.
+const Reason = enum {
+    /// Permanent: no retry would reach a different outcome, so the gone
+    /// answer leads the caller to the same action the truth would.
+    gone,
+    /// Transient: the far side was reached, or would have been, and the
+    /// correct behaviour is to ask again.
+    no_room,
+};
+
+/// Split out from `linkAnswer` so it can be tested over every member of the
+/// set. The answer itself is a value of the method's own return type and a
+/// panic on the other branch, neither of which a test can compare.
+fn stoppedBy(err: Stopped) Reason {
+    return switch (err) {
+        // Nothing is there, or nothing will be.
+        error.Unreachable => .gone,
+        // An answer this build cannot decode means the peer is not this
+        // build, so nothing usable will come from it either.
+        error.Unreadable => .gone,
+        // A handle already released, or one this half never issued. The
+        // object is not there, permanently; asking again names the same
+        // missing thing.
+        error.UnknownHandle, error.UnknownBox => .gone,
+        // Room, not reachability.
+        error.Busy, error.BoxCapacity, error.OutOfMemory => .no_room,
+    };
+}
+
+fn linkAnswer(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    gone: Returns(owner, name),
+    err: Stopped,
+) Returns(owner, name) {
+    return switch (stoppedBy(err)) {
+        .gone => gone,
+        .no_room => noRoom(owner, name, err),
+    };
+}
+
+/// Reached, and no room. This build has nothing to answer with.
+///
+/// A panic rather than the gone answer, for the same reason `notForwarded`
+/// is one: the gone answer is a statement about the link, and the link is
+/// fine. What is missing is a piece of this build -- here, a return type
+/// that can say "not now", which is a change to the Agent contract rather
+/// than something a stub can decide. Until it lands, the condition is loud
+/// where it happens instead of silently becoming a different fact somewhere
+/// Product can act on it.
+///
+/// `unreachability.pressureCounts().owed` is how many methods are in this
+/// state, and the plan's §4.2 row -- a saturated queue returns typed busy
+/// and never a user timeout, a user refusal or an Agent terminal cause -- is
+/// what closes it.
+fn noRoom(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    err: Stopped,
+) noreturn {
+    if (comptime unreachability.saysPressure(Returns(owner, name))) @compileError(
+        @tagName(owner) ++ "." ++ name ++ "'s return type can say it was refused for " ++
+            "capacity, so it must say so rather than panic: answer with its " ++
+            "`" ++ unreachability.pressure_decl ++ "` or `" ++
+            unreachability.pressure_error ++ "`",
+    );
+    std.debug.panic(
+        "agent link: {s}.{s} was refused for capacity ({s}) and its return type cannot " ++
+            "say so; see `unreachability.pressureCounts`",
+        .{ @tagName(owner), name, @errorName(err) },
+    );
+}
+
 fn body(
     comptime owner: method.Owner,
     comptime name: []const u8,
@@ -380,10 +488,13 @@ fn body(
     const receiver = if (comptime owner == .runtime)
         handle_table.Id.none
     else
-        client.Client.receiverFrom(context) catch return gone;
+        client.Client.receiverFrom(context) catch |err|
+            return linkAnswer(owner, name, gone, err);
 
-    const arguments = send(owner, name, half, parameters) catch return gone;
-    const outcome = inbound.invoke(owner, name, half, receiver, arguments) catch return gone;
+    const arguments = send(owner, name, half, parameters) catch |err|
+        return linkAnswer(owner, name, gone, err);
+    const outcome = inbound.invoke(owner, name, half, receiver, arguments) catch |err|
+        return linkAnswer(owner, name, gone, err);
     return switch (outcome) {
         .returned => |value| value,
         .failed => |err| answered(owner, name, gone, err),
@@ -1241,6 +1352,28 @@ test "a call through the port Product already uses reaches a real Session" {
     try testing.expectEqual(@as(usize, 1), half.boxes.liveCount());
     try testing.expectEqual(frame.Kind.request, peer.arrived_on.?);
     _ = sessions.take(id);
+}
+
+test "capacity is never answered as a gone link" {
+    // The one `catch return gone` this replaces gave all seven of these the
+    // same answer. Named one by one, because the harm is specific: a compact
+    // cancellation refused for queue capacity, reported as unreachable,
+    // makes `runtime.zig` call the compact closing and stop following a
+    // compact that is still running.
+    try testing.expectEqual(Reason.no_room, stoppedBy(error.Busy));
+    try testing.expectEqual(Reason.no_room, stoppedBy(error.BoxCapacity));
+    try testing.expectEqual(Reason.no_room, stoppedBy(error.OutOfMemory));
+
+    try testing.expectEqual(Reason.gone, stoppedBy(error.Unreachable));
+    try testing.expectEqual(Reason.gone, stoppedBy(error.Unreadable));
+    try testing.expectEqual(Reason.gone, stoppedBy(error.UnknownHandle));
+    try testing.expectEqual(Reason.gone, stoppedBy(error.UnknownBox));
+
+    // Every member is accounted for above. The switch in `stoppedBy` is
+    // exhaustive, so this is about the *list here* staying complete: a new
+    // way for a call to stop would otherwise be classified in code and
+    // unexamined in the suite.
+    try testing.expectEqual(@as(usize, 7), @typeInfo(Stopped).error_set.?.len);
 }
 
 test "a Stop travels on the transport it is registered with" {
