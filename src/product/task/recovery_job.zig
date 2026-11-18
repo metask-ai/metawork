@@ -526,6 +526,15 @@ pub const Job = struct {
             .unavailable => return .{ .failure = .runtime_unavailable },
         };
         const options: agent.SessionOpenOptions = .{
+            .task_id = self.attempt.task_id,
+            // The epoch the Session is being opened *under*, not the one the
+            // adoption may move to: `advances_binding` is decided later, when
+            // the binding is installed. A record made under this epoch is
+            // exactly what `checkpoint_record.adoptBindingEpoch(previous,
+            // next)` already expects to see and migrate, so carrying the
+            // attempt's epoch keeps a staged record on the path that handles
+            // it rather than inventing a second rule.
+            .binding_epoch = self.attempt.binding_epoch,
             .model_binding = .{
                 .image_capabilities = image_capabilities[0..execution.target.image_capabilities.len],
                 .target = .{

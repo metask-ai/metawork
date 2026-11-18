@@ -1296,6 +1296,13 @@ test "Task model intent owns independent bounded identity and revision" {
 }
 
 pub const DurableTaskRecord = struct {
+    /// What a fresh Task's binding epoch is.
+    ///
+    /// Named because a Session now carries the epoch it was opened at, so the
+    /// one place that opens a Session for a brand-new Task has to agree with
+    /// the default below rather than repeat the literal.
+    pub const initial_binding_epoch: u64 = 1;
+
     next_presentation_order: u64 = 1,
 
     id: u64,
@@ -1307,7 +1314,7 @@ pub const DurableTaskRecord = struct {
     model_intent: ?ModelIntent = null,
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
-    binding_epoch: u64 = 1,
+    binding_epoch: u64 = initial_binding_epoch,
     approval_revision: u64 = 1,
     /// Persisted current Task delegation; Run authority is captured separately.
     permission_review_delegated: bool = false,

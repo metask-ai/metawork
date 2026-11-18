@@ -738,6 +738,8 @@ test "an options mirror is read back with its handle resolved and its absence ke
     const lease_id = try leases.insert(lease);
 
     const mirror: shapes.SessionOpenOptions = .{
+        .task_id = 11,
+        .binding_epoch = 3,
         .model_binding = .{
             .image_capabilities = &.{},
             .target = .{

@@ -1,3 +1,9 @@
+/// A Session belongs to a Task, and these tests do not model one. The values
+/// are therefore fixed and nonzero: zero is invalid by construction on the
+/// acceptance path, so a test opening a Session at Task 0 would be exercising
+/// a state Product never produces.
+const test_task_id: u64 = 1;
+const test_binding_epoch: u64 = 1;
 pub const std = @import("std");
 pub const lifecycle = @import("metawork_agent");
 pub const product_control = @import("metawork_product_control");
@@ -3277,6 +3283,8 @@ pub fn openSession(runtime: *lifecycle.Runtime) !*lifecycle.Session {
     const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{
             .target = .{
                 .provider_id = "fixture-provider",

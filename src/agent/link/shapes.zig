@@ -719,6 +719,12 @@ pub const SkillRestoreBorrow = struct {
 /// half, issued by an earlier call and handed straight back here. Nothing else
 /// in the options is a capability, so everything else is itself.
 pub const SessionOpenOptions = struct {
+    /// Product's own identity for the Session. Plain data, and the reason it
+    /// crosses is in `surface.SessionOpenOptions`: a checkpoint the execution
+    /// half stages without being asked still has to be a record Product can
+    /// accept.
+    task_id: u64,
+    binding_epoch: u64,
     model_binding: model_binding_type,
     permission_mode: control.PermissionMode,
     shell_policy: control.ShellPolicy,
@@ -886,6 +892,7 @@ comptime {
 /// is a decision with a reason rather than an omission.
 fn mirrors(comptime Mirror: type, comptime Origin: type, comptime decided: Decided) void {
     comptime {
+        @setEvalBranchQuota(100_000);
         for (@typeInfo(Mirror).@"struct".fields) |field| {
             for (decided.reshaped) |name| {
                 if (std.mem.eql(u8, name, field.name)) break;

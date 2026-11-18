@@ -1,5 +1,12 @@
 const fixture = @import("lifecycle_fixture");
 const builtin = @import("builtin");
+
+/// A Session belongs to a Task, and these tests do not model one. The values
+/// are therefore fixed and nonzero: zero is invalid by construction on the
+/// acceptance path, so a test opening a Session at Task 0 would be exercising
+/// a state Product never produces.
+const test_task_id: u64 = 1;
+const test_binding_epoch: u64 = 1;
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const product_control_executor = fixture.product_control_executor;
@@ -54,6 +61,8 @@ test "canonical Core accepts Agent abort from its starting callback" {
     }
     consumer.runtime = runtime;
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{ .target = .{ .provider_id = "canonical-fixture", .protocol = .anthropic_messages, .base_url = "http://127.0.0.1:1/v1/messages", .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-unused-key" },
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -486,6 +495,8 @@ test "model error is owned and delivered for Text multimodal and Skill Runs" {
         var catalog = try runtime.querySkillCatalog(.{ .canonical_user_home = root, .target = .{ .workspace = .{ .canonical_root = root, .epoch = "model-error-workspace" } } });
         defer catalog.projection.deinit();
         const session = try runtime.createSession(.{
+            .task_id = test_task_id,
+            .binding_epoch = test_binding_epoch,
             .model_binding = fixtureModelBinding(.anthropic_messages),
             .permission_mode = .default,
             .shell_policy = .disabled,
@@ -1605,6 +1616,8 @@ fn restoreOptions(
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
         .session = .{
+            .task_id = test_task_id,
+            .binding_epoch = test_binding_epoch,
             .model_binding = fixtureModelBinding(.anthropic_messages),
             .permission_mode = .default,
             .shell_policy = .disabled,
@@ -1727,6 +1740,8 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     );
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -1973,6 +1988,8 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         "/tmp/metawork-mcp-selection";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -2029,6 +2046,8 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     const selection = try runtime.createMcpSelection(projection, &.{});
     defer selection.deinit();
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -2514,6 +2533,8 @@ test "canonical AgentCore resolves additional Skill sources conflicts and Worksp
     try std.testing.expectEqualStrings("compat.b", winner.projection.skills[0].source_instance_id);
     try std.testing.expectEqual(lifecycle.CatalogSourceScope.workspace, winner.projection.skills[0].source_scope);
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -2547,6 +2568,8 @@ test "captured Skill restore inputs retain the exact lease policy and Runtime sh
     const expected = try std.testing.allocator.dupe(u8, acquisition.projection.skills[0].skill_id);
     defer std.testing.allocator.free(expected);
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -2617,6 +2640,8 @@ test "final Skill restore reference release failure retains the closing Session 
     var acquisition = try runtime.querySkillCatalog(.{ .canonical_user_home = root, .target = .{ .workspace = .{ .canonical_root = root, .epoch = "release-failure" } } });
     defer acquisition.projection.deinit();
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -2655,6 +2680,8 @@ test "Skill restore capture allocation failures preserve Session authority and l
     defer acquisition.projection.deinit();
     defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -3080,6 +3107,8 @@ test "Management catalog leases cannot bind create restore or idle refresh even 
     defer management.projection.deinit();
     defer runtime.releaseSkillCatalog(management.lease) catch unreachable;
     var options: lifecycle.SessionOpenOptions = .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -3162,6 +3191,8 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
     });
     defer acquisition.projection.deinit();
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -3251,6 +3282,8 @@ test "Skill rejection statuses leave the Session reusable" {
             .target = .{ .workspace = .{ .canonical_root = root, .epoch = "workspace-1" } },
         });
         const session = try runtime.createSession(.{
+            .task_id = test_task_id,
+            .binding_epoch = test_binding_epoch,
             .model_binding = fixtureModelBinding(.anthropic_messages),
             .permission_mode = .default,
             .shell_policy = .disabled,
@@ -3306,6 +3339,8 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     defer current.projection.deinit();
     defer runtime.releaseSkillCatalog(current.lease) catch unreachable;
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -3551,6 +3586,8 @@ test "Session creation maps the selected protocol to the Core adapter and protoc
         }
         var provider_id = "service-instance-a".*;
         const session = try runtime.createSession(.{
+            .task_id = test_task_id,
+            .binding_epoch = test_binding_epoch,
             .model_binding = .{
                 .target = .{
                     .provider_id = &provider_id,
@@ -3596,6 +3633,8 @@ test "model binding limits reject before Session and checkpoint Core calls" {
     var invalid_binding = fixtureModelBinding(.anthropic_messages);
     invalid_binding.credential = &oversized_credential;
     try std.testing.expectError(error.CoreCallFailed, runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = invalid_binding,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -3656,6 +3695,8 @@ test "Agent Runtime applies the fixed MetaWork built-in and Host tool surface to
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
     const workspace_root = root_storage[0..root_len];
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -3697,12 +3738,16 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         deinitTestComposition(runtime);
     }
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
         .workspace = .{ .canonical_root = "relative", .trust = .explicitly_trusted },
     }));
     try std.testing.expectError(error.WorkspaceNotTrusted, runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -3712,6 +3757,8 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         },
     }));
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -4500,6 +4547,8 @@ test "Session UI requests allocate above the Product history floor" {
         "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -4530,6 +4579,8 @@ fn openNoninteractivePermissionSession(
         "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .accept_edits,
         .shell_policy = .unrestricted,
@@ -6095,6 +6146,8 @@ test "canonical AgentCore loads builtin document and ZIP resources and binds the
         ids[index] = skill.skill_id;
     }
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,

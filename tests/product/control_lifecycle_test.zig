@@ -1,4 +1,11 @@
 const fixture = @import("lifecycle_fixture");
+
+/// A Session belongs to a Task, and these tests do not model one. The values
+/// are therefore fixed and nonzero: zero is invalid by construction on the
+/// acceptance path, so a test opening a Session at Task 0 would be exercising
+/// a state Product never produces.
+const test_task_id: u64 = 1;
+const test_binding_epoch: u64 = 1;
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const product_control = fixture.product_control;
@@ -1232,6 +1239,8 @@ fn taskSessionOpenOptions() lifecycle.SessionOpenOptions {
         "/tmp/metawork-task-session-gateway";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{
             .target = .{
                 .provider_id = "fixture-provider",

@@ -9,6 +9,13 @@ const state = task_api.testing.state_module;
 const options = @import("office_pipeline_options");
 const builtin = @import("builtin");
 
+/// A Session belongs to a Task, and these tests do not model one. The values
+/// are therefore fixed and nonzero: zero is invalid by construction on the
+/// acceptance path, so a test opening a Session at Task 0 would be exercising
+/// a state Product never produces.
+const test_task_id: u64 = 1;
+const test_binding_epoch: u64 = 1;
+
 const Provider = struct {
     child: std.process.Child,
     endpoint: []u8,
@@ -74,6 +81,8 @@ test "canonical finalizing Stop can abort while terminal Stop preserves authenti
         }
         consumer.runtime = runtime;
         const session = try runtime.createSession(.{
+            .task_id = test_task_id,
+            .binding_epoch = test_binding_epoch,
             .model_binding = .{ .target = .{ .provider_id = "boundary-fixture", .protocol = .anthropic_messages, .base_url = provider.endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-boundary-key" },
             .permission_mode = .default,
             .shell_policy = .unrestricted,
