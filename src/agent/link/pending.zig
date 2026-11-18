@@ -177,6 +177,30 @@ pub const Table = struct {
         slot.abandoned = true;
     }
 
+    /// Takes a slot back for a request that never left.
+    ///
+    /// Distinct from `abandon`, and the distinction is the whole point.
+    /// Abandoning says "I stopped waiting, the peer may still answer", so the
+    /// slot stays live until that answer arrives or the link ends -- which is
+    /// right when something was sent. When nothing was sent no answer can
+    /// come, so holding the slot would spend capacity on a call that never
+    /// happened, and a caller that is refused repeatedly would exhaust the
+    /// table on requests it never made.
+    ///
+    /// Only for a correlation whose bytes did not reach the peer. Calling it
+    /// after a send would leave a later response with no slot -- `deposit`
+    /// releases those rather than mis-filing them, so it is not a corruption,
+    /// but the answer would be lost silently.
+    pub fn discardUnsent(self: *Table, correlation: Correlation) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const index = self.indexOf(correlation) orelse return;
+        const slot = &self.slots[index];
+        if (slot.response) |bytes| self.allocator.free(bytes);
+        slot.* = .{};
+        self.live -= 1;
+    }
+
     /// The reader's side. Takes ownership of `bytes` on success; on an
     /// abandoned or unknown correlation it frees them, because a response with
     /// nobody to take it is still the table's to release.
