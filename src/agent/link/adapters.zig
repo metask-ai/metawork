@@ -647,3 +647,113 @@ test "a field the wire drops arrives as its default, and the default is the deci
     // the call is what replaces it.
     try testing.expect(query.source_lifetime == null);
 }
+
+// ---------------------------------------------------------------------------
+// The other direction
+// ---------------------------------------------------------------------------
+//
+// A dispatcher has to encode what the method returned, and that is not the
+// mirror image of decoding what it was called with. Rebuilding an argument
+// reads a table; returning a value may have to *put something in one*, and an
+// entry put in has an owner, a lifetime and a release. So the two directions
+// are counted separately, and this one starts where the other one did: with
+// what is already answered, and a list of what is not.
+
+pub const ResultError = ResolveError || handle_table.InsertError;
+
+pub fn ResultAdapter(comptime T: type) type {
+    return struct {
+        apply: *const fn (Bindings, T) ResultError!wire_types.Wire(T),
+    };
+}
+
+/// How one return type becomes its wire form, or `null` when nothing does it
+/// yet.
+pub fn resultAdapter(comptime T: type) ?ResultAdapter(T) {
+    // Plain data again, and again it is most of them: a Run id, a count, a
+    // bool, `void`. Nothing to own and nothing to decide.
+    if (wire_types.Wire(T) == T) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!T {
+            return value;
+        }
+    }.apply };
+
+    // Mirrors the execution half can state without owning anything new: each
+    // is a plain-data reading of a value it already has.
+    if (T == surface.CloseOutcome) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.CloseOutcome {
+            return shapes.CloseOutcome.from(value);
+        }
+    }.apply };
+
+    return null;
+}
+
+/// One return type still owed, with the same discipline as the argument side:
+/// never "nobody got to it yet".
+pub const OwedResult = struct {
+    owner: method.Owner,
+    name: []const u8,
+    result: []const u8,
+};
+
+pub fn owedResults() []const OwedResult {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var list: []const OwedResult = &.{};
+        for (method.entries) |entry| {
+            if (entry.transport == .stream) continue;
+            const blocked = switch (entry.owner) {
+                inline else => |owner| blockingResult(owner, entry.name),
+            };
+            if (blocked) |name| list = list ++ [_]OwedResult{.{
+                .owner = entry.owner,
+                .name = entry.name,
+                .result = name,
+            }};
+        }
+        return list;
+    }
+}
+
+fn blockingResult(comptime owner: method.Owner, comptime name: []const u8) ?[]const u8 {
+    comptime {
+        const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+        const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
+        if (Returned == void) return null;
+        if (resultAdapter(Returned) != null) return null;
+        return @typeName(Returned);
+    }
+}
+
+test "the return direction is counted on its own, because it is not the mirror image" {
+    const owed = comptime owedResults();
+    const callable = comptime callableCount();
+
+    // Most returns are plain data and need nothing, which is the same reason
+    // most arguments needed nothing.
+    try testing.expectEqual(@as(usize, 50), callable);
+    try testing.expectEqual(@as(usize, 15), owed.len);
+
+    for (owed) |entry| {
+        try testing.expect(entry.name.len > 0);
+        try testing.expect(entry.result.len > 0);
+    }
+
+    // The one written mirror, to show the mechanism carries a real contract
+    // type rather than only compiling.
+    const closed = resultAdapter(surface.CloseOutcome).?;
+    const bindings = testBindings();
+    const encoded = try closed.apply(bindings, .closed);
+    try testing.expect(encoded == .closed);
+}
+
+test "a return that puts something in a table is owed, not assumed trivial" {
+    // The asymmetry this direction exists for: reading a handle out of a
+    // table is settled, but putting one in decides who owns the entry and
+    // when it leaves. Until that is decided these stay owed, because a
+    // half-decided owner is how a handle leaks or is released twice.
+    try testing.expect(resultAdapter(port.SessionRoute) == null);
+    try testing.expect(resultAdapter(port.BeginRunOutcome) == null);
+    try testing.expect(resultAdapter(port.SkillRestoreBorrow) == null);
+}
