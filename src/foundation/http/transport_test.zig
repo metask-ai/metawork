@@ -118,8 +118,8 @@ const Faults = struct {
         return original.vtable.netWrite(userdata, handle, header, data, splat);
     }
 
-    fn startedAfter(first: usize, second: usize) i64 {
-        return starts[first].durationTo(starts[second]).raw.toMilliseconds();
+    fn startedSince(origin: Io.Clock.Timestamp, index: usize) i64 {
+        return origin.durationTo(starts[index]).raw.toMilliseconds();
     }
 
     fn lookup(userdata: ?*anyopaque, host: Io.net.HostName, queue: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
@@ -430,17 +430,42 @@ test "HTTP starts later addresses 250 ms apart and caps only attempts with addre
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://fixture.test:{d}/post", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
+    // Starts are measured from before the call, not from the first attempt:
+    // the engine paces reservations, and the fixture sees an attempt only once
+    // its connect thread runs, which can be late for the first attempt as much
+    // as for any other.
+    const called: Io.Clock.Timestamp = .now(io, .awake);
     // 6 s over three addresses: the first attempt is capped at max(2 s, 6 s / 3).
-    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = called.addDuration(.{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
     try std.testing.expectEqual(@as(usize, 3), Faults.attempts.load(.acquire));
-    const second = Faults.startedAfter(0, 1);
-    try std.testing.expect(second >= 240 and second < 600);
-    const third = Faults.startedAfter(0, 2);
-    try std.testing.expect(third >= 1900 and third < 2700);
+    // `ConnectRace.reserve` starts the next address no earlier than 250 ms
+    // after the previous reservation, the first no earlier than the call, and a
+    // lane sleeps until its reservation. The second address is released by
+    // that pacing, not by the first attempt's 2 s cap ending.
+    try expectStartedWithin(called, 1, 250 - timer_tick_ms, 2000);
+    // The last address waits for a free lane. The first attempt's 2 s cap
+    // frees one no earlier than 2 s after the call; the second attempt, started
+    // at t >= 250 ms with two addresses left, is capped at (6 s - t) / 2 and so
+    // frees the other no earlier than (6 s + t) / 2 >= 3125 ms.
+    try expectStartedWithin(called, 2, 2000 - timer_tick_ms, 3125);
     try std.testing.expectEqual(@as(usize, 0), Faults.active.load(.acquire));
+}
+
+/// A timed wait is due on the kernel's timer ticks, not on the awake clock the
+/// starts are read from, so a lower bound allows one tick at the default
+/// resolution (15.625 ms). Under load a start paced 250 ms after the call was
+/// read at 249 ms.
+const timer_tick_ms = 16;
+
+/// Reports the measured start when it falls outside [at_least, below) ms.
+fn expectStartedWithin(called: Io.Clock.Timestamp, index: usize, at_least: i64, below: i64) !void {
+    const started = Faults.startedSince(called, index);
+    if (started >= at_least and started < below) return;
+    std.debug.print("attempt {d} started {d} ms after the call, expected at least {d} and below {d}\n", .{ index, started, at_least, below });
+    return error.TestUnexpectedResult;
 }
 
 test "HTTP connect budget ends DNS and TCP with their typed failures before any send" {
