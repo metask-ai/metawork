@@ -126,7 +126,7 @@ pub const RunControl = struct {
         try_retain: *const fn (?*anyopaque) bool,
         release: *const fn (?*anyopaque) void,
         submit_input: *const fn (?*anyopaque, u64, u64, u64, []const u8) session_control.InputSubmission,
-        input_observation: *const fn (?*anyopaque, u64, u64) session_control.InputObservation,
+        input_observation: *const fn (?*anyopaque, u64, u64) ?session_control.InputObservation,
         request_termination: *const fn (?*anyopaque, u64, u64, session_control.TerminationSignal) session_control.TerminationRequestResult,
     };
 
@@ -154,7 +154,17 @@ pub const RunControlLease = struct {
         );
     }
 
-    pub fn inputObservation(self: *const RunControlLease) session_control.InputObservation {
+    /// `null` when no observation could be made at all, because the far side
+    /// is unreachable.
+    ///
+    /// Deliberately not an empty observation. Its fields point opposite ways:
+    /// a caller reading `ready` treats a zeroed value as not ready, which
+    /// restricts, while a caller reading `blocksAutomaticAllow` reads the same
+    /// zeroed value as nothing blocking, which releases automatic approval. No
+    /// default value is safe for both, and no added field makes one safe, so
+    /// the absence is handed to the caller and each one says which side it
+    /// chose.
+    pub fn inputObservation(self: *const RunControlLease) ?session_control.InputObservation {
         std.debug.assert(!self.released);
         return self.control.vtable.?.input_observation(
             self.control.context,

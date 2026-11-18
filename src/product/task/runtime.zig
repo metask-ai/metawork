@@ -2573,7 +2573,10 @@ pub const Runtime = struct {
                 if (!has_slot) return .wait;
                 var lease = run.execution.?.run_control.tryAcquireLease() orelse return .wait;
                 defer lease.deinit();
-                if (!lease.inputObservation().ready) return .wait;
+                // No answer is not readiness, which is the same choice the
+                // lease acquisition one line up already makes.
+                const observation = lease.inputObservation() orelse return .wait;
+                if (!observation.ready) return .wait;
                 return .{ .submit = .{ .index = index, .run_id = id } };
             },
         }
@@ -2998,7 +3001,9 @@ pub const Runtime = struct {
         if (run.agent_handoff.load(.acquire) != .running) return error.RunNotReady;
         var lease = run.execution.?.run_control.tryAcquireLease() orelse return error.RunNotReady;
         defer lease.deinit();
-        if (!lease.inputObservation().ready) return error.RunNotReady;
+        // As above: a Run whose readiness cannot be observed is not ready.
+        const observation = lease.inputObservation() orelse return error.RunNotReady;
+        if (!observation.ready) return error.RunNotReady;
         if (!std.unicode.utf8ValidateSlice(text) or std.mem.trim(u8, text, " \t\r\n").len == 0) return error.MissingInstruction;
         if (text.len > effects.limits.max_user_message_bytes) return error.ProjectionCapacity;
         if (run.next_input_id == std.math.maxInt(u64)) return error.ProjectionCapacity;
@@ -10592,7 +10597,13 @@ fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
     if (run.agent_handoff.load(.acquire) != .running) return true;
     var lease = run.execution.?.run_control.tryAcquireLease() orelse return true;
     defer lease.deinit();
-    return lease.inputObservation().blocksAutomaticAllow();
+    // The one caller whose restricting answer is `true`, and this function
+    // already answers that way twice: a Run that is not running, and a lease
+    // that cannot be acquired, both block automatic approval. An unreachable
+    // link is the third of the same kind, and the only one that could not
+    // happen while both halves shared an address space.
+    const observation = lease.inputObservation() orelse return true;
+    return observation.blocksAutomaticAllow();
 }
 
 fn hasWaitingInputs(task: *const task_state.Task) bool {

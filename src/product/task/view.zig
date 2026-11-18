@@ -764,7 +764,10 @@ fn inputReady(task: *const task_state.Task) bool {
         run.agent_handoff.load(.acquire) != .running) return false;
     var lease = run.execution.?.run_control.tryAcquireLease() orelse return false;
     defer lease.deinit();
-    return lease.inputObservation().ready;
+    // The view offers an input box only to a Run that says it is ready, so an
+    // observation that could not be made offers none.
+    const observation = lease.inputObservation() orelse return false;
+    return observation.ready;
 }
 
 fn writeInputId(writer: *std.Io.Writer, id: ?u64) Error!void {

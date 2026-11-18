@@ -246,17 +246,6 @@ pub const Pending = struct {
 pub const pending = [_]Pending{
     .{
         .owner = .run_control,
-        .name = "input_observation",
-        .lands = "Four consumers read the same struct and two of its fields have opposite " ++
-            "polarity: three read `ready` and treat a zero value as not-ready, which " ++
-            "restricts, while inputBlocksAutomaticAllow reads blocksAutomaticAllow() and " ++
-            "treats a zero value as not-blocking, which releases automatic approval. No " ++
-            "default value and no added field can be safe for both, which is why the " ++
-            "return type has to change rather than its contents.",
-        .step = "this change",
-    },
-    .{
-        .owner = .run_control,
         .name = "request_termination",
         .lands = "All five TerminationRequestResult variants assert a concrete fact about " ++
             "the far side -- requested, already_requested, already_terminal, stale_run, " ++
@@ -435,16 +424,16 @@ test "the surface divides into expressible, exempt and pending, with nothing lef
     // The numbers themselves, so a method moving between buckets is visible
     // in the suite and not only in a build that happened to succeed.
     try testing.expectEqual(@as(usize, 52), tally.total);
-    try testing.expectEqual(@as(usize, 39), tally.expressible);
+    try testing.expectEqual(@as(usize, 40), tally.expressible);
     try testing.expectEqual(@as(usize, 9), tally.exempt);
-    try testing.expectEqual(@as(usize, 4), tally.owed);
+    try testing.expectEqual(@as(usize, 3), tally.owed);
 }
 
 test "the pending list is the rule's output, named one by one" {
     // Written out rather than counted: this is the list the change works
-    // from, and three of the four are owed by this step.
+    // from. `input_observation` has left it: its answer is now an optional,
+    // which is what put the choice at each of its four call sites.
     const expected = [_][]const u8{
-        "input_observation",
         "request_termination",
         "borrow_skill_restore_inputs",
         "pending_event_count",
@@ -456,7 +445,7 @@ test "the pending list is the rule's output, named one by one" {
     for (pending) |entry| {
         if (std.mem.eql(u8, entry.step, "this change")) this_step += 1;
     }
-    try testing.expectEqual(@as(usize, 3), this_step);
+    try testing.expectEqual(@as(usize, 2), this_step);
 }
 
 test "each way of expressing it is recognised, and nothing else is" {
@@ -492,6 +481,12 @@ test "each way of expressing it is recognised, and nothing else is" {
     try testing.expect(expressibility(bool) == null);
     try testing.expect(expressibility(usize) == null);
     try testing.expect(expressibility(contract.control.InputObservation) == null);
+    // ... and it is now returned as `?InputObservation`, which is why the
+    // method no longer appears above.
+    try testing.expectEqual(
+        Expressibility.optional,
+        expressibility(ReturnType(.run_control, "input_observation")).?,
+    );
     try testing.expect(expressibility(contract.control.TerminationRequestResult) == null);
     try testing.expect(expressibility(port.SkillRestoreBorrow) == null);
 }

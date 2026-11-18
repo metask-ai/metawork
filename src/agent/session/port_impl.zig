@@ -122,7 +122,9 @@ const control_vtable: port.RunControl.VTable = .{
         }
     }.call,
     .input_observation = struct {
-        fn call(context: ?*anyopaque, run_id: u64, generation: u64) session_control.InputObservation {
+        // In process the observation is always made; the optional exists for
+        // the half that may not be there.
+        fn call(context: ?*anyopaque, run_id: u64, generation: u64) ?session_control.InputObservation {
             return blockOf(context).session.controlledInputObservation(run_id, generation);
         }
     }.call,
