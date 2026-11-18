@@ -6,6 +6,16 @@
 //! the method's registered number, and a response payload opens with the
 //! registered error number -- zero meaning the call succeeded.
 //!
+//! A request also names the object it is for, when its owner has more than
+//! one. `wire_types.Request` derives a method's arguments from its parameters
+//! *after* the context pointer, because in process the context is the
+//! receiver and a pointer cannot cross. There is exactly one Runtime, so a
+//! `runtime` method needs nothing; a Session, a Run and a Run's control
+//! handle all exist many at a time, so those requests carry the receiver's
+//! handle id between the method number and the arguments. Which it is follows
+//! from the method number, so there is nothing to disambiguate and no way for
+//! the two sides to disagree about whether a receiver is present.
+//!
 //! Both are decoded strictly. A method number this build does not register, or
 //! an error number it does not register, is a protocol violation rather than
 //! something to approximate: the peer is our own binary, so an unknown number
@@ -13,6 +23,7 @@
 
 const std = @import("std");
 const error_code = @import("error_code.zig");
+const handle_table = @import("handle_table.zig");
 const method = @import("method.zig");
 const payload = @import("payload.zig");
 
@@ -38,23 +49,75 @@ pub const DecodeError = error{
     UnknownMethod,
     /// An error number this build does not register.
     UnknownError,
+    /// A method whose owner has many instances arrived naming none.
+    MissingReceiver,
 };
 
 pub const header_bytes: usize = 2;
 
-pub fn encodeRequestHeader(output: *[header_bytes]u8, code: u16) void {
-    std.mem.writeInt(u16, output, code, .little);
+/// Bytes a receiver id occupies when the method has one.
+pub const receiver_bytes: usize = @sizeOf(u64);
+
+/// Which table the receiver of a method belongs to, or `null` for the one
+/// Runtime there is.
+///
+/// A property of the owner rather than of the method, and exhaustive, so an
+/// owner added later cannot default into "needs no receiver" -- which would
+/// send every one of its calls to whatever object the far side had last.
+pub fn receiverOf(owner: method.Owner) ?Receiver {
+    return switch (owner) {
+        .runtime => null,
+        .session => .session,
+        // A Run and its control handle are named by the same id: in process
+        // both are reached through the Session's control block, and the Run's
+        // own identity travels as ordinary arguments.
+        .run, .run_control => .run,
+    };
 }
 
-/// The method a request is for, and the bytes after it.
+pub const Receiver = enum { session, run };
+
+pub fn requestHeaderBytes(owner: method.Owner) usize {
+    return header_bytes + if (receiverOf(owner) == null) 0 else receiver_bytes;
+}
+
+pub fn encodeRequestHeader(output: []u8, entry: method.Entry, receiver: handle_table.Id) void {
+    std.debug.assert(output.len == requestHeaderBytes(entry.owner));
+    std.mem.writeInt(u16, output[0..header_bytes], entry.code, .little);
+    if (receiverOf(entry.owner) == null) {
+        std.debug.assert(!receiver.valid());
+        return;
+    }
+    std.debug.assert(receiver.valid());
+    std.mem.writeInt(u64, output[header_bytes..][0..receiver_bytes], receiver.bits(), .little);
+}
+
+/// The method a request is for, the object it is for, and the bytes after
+/// both.
 pub fn decodeRequest(bytes: []const u8) DecodeError!struct {
     entry: method.Entry,
+    /// `handle_table.Id.none` for a method whose owner has one instance.
+    receiver: handle_table.Id,
     arguments: []const u8,
 } {
     if (bytes.len < header_bytes) return error.Truncated;
     const code = std.mem.readInt(u16, bytes[0..header_bytes], .little);
     const entry = method.find(code) catch return error.UnknownMethod;
-    return .{ .entry = entry, .arguments = bytes[header_bytes..] };
+    if (receiverOf(entry.owner) == null)
+        return .{ .entry = entry, .receiver = .none, .arguments = bytes[header_bytes..] };
+    if (bytes.len < header_bytes + receiver_bytes) return error.Truncated;
+    const id = handle_table.Id.fromBits(
+        std.mem.readInt(u64, bytes[header_bytes..][0..receiver_bytes], .little),
+    );
+    // A zero id is invalid by construction, so a request that names no
+    // receiver where one is required is a protocol violation rather than a
+    // call on whatever the table happens to hold.
+    if (!id.valid()) return error.MissingReceiver;
+    return .{
+        .entry = entry,
+        .receiver = id,
+        .arguments = bytes[header_bytes + receiver_bytes ..],
+    };
 }
 
 pub fn encodeResponseHeader(output: *[header_bytes]u8, code: u16) void {
@@ -80,15 +143,51 @@ pub fn decodeResponse(bytes: []const u8) DecodeError!Outcome {
 
 const testing = std.testing;
 
-test "a request names its method and hands back the rest" {
-    var storage: [header_bytes + 3]u8 = undefined;
-    const code = method.codeOf(.session, "set_model");
-    encodeRequestHeader(storage[0..header_bytes], code);
-    @memcpy(storage[header_bytes..], "abc");
+test "a request names its method, its receiver, and hands back the rest" {
+    const entry = try method.find(method.codeOf(.session, "set_model"));
+    const header = requestHeaderBytes(entry.owner);
+    try testing.expectEqual(header_bytes + receiver_bytes, header);
+
+    var storage: [header_bytes + receiver_bytes + 3]u8 = undefined;
+    const receiver: handle_table.Id = .{ .slot = 4, .generation = 7 };
+    encodeRequestHeader(storage[0..header], entry, receiver);
+    @memcpy(storage[header..], "abc");
+
     const decoded = try decodeRequest(&storage);
-    try testing.expectEqual(code, decoded.entry.code);
+    try testing.expectEqual(entry.code, decoded.entry.code);
     try testing.expectEqualStrings("set_model", decoded.entry.name);
+    try testing.expectEqual(receiver.bits(), decoded.receiver.bits());
     try testing.expectEqualStrings("abc", decoded.arguments);
+}
+
+test "the one Runtime needs no receiver, and the many-instance owners refuse a missing one" {
+    const runtime_entry = try method.find(method.codeOf(.runtime, "has_pending_events"));
+    try testing.expect(receiverOf(runtime_entry.owner) == null);
+    try testing.expectEqual(header_bytes, requestHeaderBytes(runtime_entry.owner));
+
+    var runtime_request: [header_bytes]u8 = undefined;
+    encodeRequestHeader(&runtime_request, runtime_entry, .none);
+    const runtime_decoded = try decodeRequest(&runtime_request);
+    try testing.expect(!runtime_decoded.receiver.valid());
+    try testing.expectEqual(@as(usize, 0), runtime_decoded.arguments.len);
+
+    // A Session method whose receiver is all zeroes names nothing, and is
+    // refused rather than answered against whatever a table holds.
+    const session_entry = try method.find(method.codeOf(.session, "set_model"));
+    var zeroed: [header_bytes + receiver_bytes]u8 = @splat(0);
+    std.mem.writeInt(u16, zeroed[0..header_bytes], session_entry.code, .little);
+    try testing.expectError(error.MissingReceiver, decodeRequest(&zeroed));
+
+    // And one that stops before its receiver is truncated, not receiverless.
+    try testing.expectError(error.Truncated, decodeRequest(zeroed[0 .. header_bytes + 1]));
+}
+
+test "a Run and its control handle are named by the same receiver" {
+    // They are one object in process -- the Session's control block -- so two
+    // ids would be two names for it, and the second could go stale alone.
+    try testing.expectEqual(Receiver.run, receiverOf(.run).?);
+    try testing.expectEqual(Receiver.run, receiverOf(.run_control).?);
+    try testing.expectEqual(Receiver.session, receiverOf(.session).?);
 }
 
 test "a response is a value or an error, and never both" {
@@ -115,8 +214,9 @@ test "a response is a value or an error, and never both" {
 }
 
 test "an unregistered number is refused in both directions" {
+    // Written by hand: there is no entry to encode from, which is the point.
     var request: [header_bytes]u8 = undefined;
-    encodeRequestHeader(&request, 0x0999);
+    std.mem.writeInt(u16, &request, 0x0999, .little);
     try testing.expectError(error.UnknownMethod, decodeRequest(&request));
 
     var response: [header_bytes]u8 = undefined;
