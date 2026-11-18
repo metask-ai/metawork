@@ -1,13 +1,14 @@
 import { useCallback, useRef, useState } from "react";
 
 import {
-  clearNewTaskDraft,
   clearTaskDraft,
   newTaskDraftMoveDecision,
   pruneTaskDrafts,
   readNewTaskDraft,
   readTaskDraft,
-  writeNewTaskDraft,
+  readNewTaskDraftRecord,
+  writeNewTaskDraftRecord,
+  type NewTaskDirectory,
   writeTaskDraft,
 } from "./drafts.ts";
 import {
@@ -182,10 +183,74 @@ export function useTaskDrafts(activeTaskId: string | null) {
 }
 
 export function useNewTaskDrafts(activeDraftId: string | null) {
-  return useDrafts(
-    activeDraftId,
-    readNewTaskDraft,
-    writeNewTaskDraft,
-    clearNewTaskDraft,
+  const [directories, setDirectories] = useState<
+    Record<string, NewTaskDirectory>
+  >({});
+  const directoriesRef = useRef(directories);
+  const getDirectory = useCallback(
+    (id: string) =>
+      directoriesRef.current[id] ?? readNewTaskDraftRecord(id).directory,
+    [],
   );
+  const write = useCallback(
+    (id: string, content: ComposerDraft) => {
+      writeNewTaskDraftRecord(id, { directory: getDirectory(id), content });
+    },
+    [getDirectory],
+  );
+  const clear = useCallback(
+    (id: string) => write(id, emptyComposerDraft()),
+    [write],
+  );
+  const drafts = useDrafts(activeDraftId, readNewTaskDraft, write, clear);
+  const setDirectoryFor = useCallback(
+    (id: string, directory: NewTaskDirectory) => {
+      const next = { ...directoriesRef.current, [id]: directory };
+      directoriesRef.current = next;
+      setDirectories(next);
+      writeNewTaskDraftRecord(id, { directory, content: drafts.getDraft(id) });
+    },
+    [drafts.getDraft],
+  );
+  const moveDraft = useCallback(
+    (from: string, to: string) => {
+      if (from === to) return "same" as const;
+      const source = drafts.getDraft(from),
+        target = drafts.getDraft(to);
+      const sourceDirectory = getDirectory(from),
+        targetDirectory = getDirectory(to);
+      const decision = newTaskDraftMoveDecision(
+        source,
+        target,
+        sourceDirectory.kind === "explicit",
+        targetDirectory.kind === "explicit",
+      );
+      if (decision === "preserve_both") return decision;
+      if (decision === "move") {
+        drafts.setDraft(to, source);
+        setDirectoryFor(to, sourceDirectory);
+      }
+      drafts.clearDraft(from);
+      setDirectoryFor(from, { kind: "project_default" });
+      return decision;
+    },
+    [
+      drafts.getDraft,
+      drafts.setDraft,
+      drafts.clearDraft,
+      getDirectory,
+      setDirectoryFor,
+    ],
+  );
+  return {
+    ...drafts,
+    moveDraft,
+    directory: activeDraftId
+      ? getDirectory(activeDraftId)
+      : ({ kind: "project_default" } as NewTaskDirectory),
+    setDirectory: (directory: NewTaskDirectory) => {
+      if (activeDraftId) setDirectoryFor(activeDraftId, directory);
+    },
+    getDirectory,
+  };
 }

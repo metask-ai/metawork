@@ -238,6 +238,7 @@ try {
   for (let index = 0; index < configuredConcurrency; index++) {
     const modelSnapshot = await read();
     const created = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId: workspace.id,

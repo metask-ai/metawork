@@ -43,6 +43,7 @@ import {
   runSkillAutoRefreshVertical,
 } from "./skill-auto-refresh-vertical.mjs";
 import { runMemoryGrowthVertical } from "./memory-growth-vertical.mjs";
+import { runTaskProjectMembershipVertical } from "./task-project-membership-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
@@ -489,6 +490,8 @@ let exited;
 const attachmentCapacityOnly =
   process.env.METAWORK_ATTACHMENT_CAPACITY_ONLY === "1" ||
   process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1";
+const projectMembershipOnly =
+  process.env.METAWORK_PROJECT_MEMBERSHIP_ONLY === "1";
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
 const memoryGrowthOnly = process.env.METAWORK_MEMORY_GROWTH_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
@@ -686,6 +689,7 @@ desktopVertical: try {
     !builtinOfficeOnly &&
     !approvalOnly &&
     !taskArchiveOnly &&
+    !projectMembershipOnly &&
     !attachmentCapacityOnly
   ) {
     await captureVisual("new-task", 1320, 812);
@@ -732,6 +736,28 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (projectMembershipOnly) {
+    const verifyRestart = await runTaskProjectMembershipVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      toolSse,
+      workspaceId,
+      workspaceRoot: canonicalWorkspace,
+    });
+    await stopApplication("project membership cold restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    await verifyRestart();
+    await stopApplication("project membership verification complete");
+    process.stdout.write(
+      "Project membership desktop Host vertical passed: independent creation, movement, real Core relative writes and reads, explicit null and project membership after cold restart.\n",
+    );
+    break desktopVertical;
+  }
   if (memoryGrowthOnly) {
     const catalog = await poll(
       async () => {
@@ -974,6 +1000,7 @@ desktopVertical: try {
     );
     if (process.platform === "darwin") {
       const created = await invokeBridge("metawork.tasks.create", {
+        projectId: null,
         workspace: { kind: "manual", workspaceId, expectedWorkspaceEpoch },
         modelSelection: fixtureModelSelection(await snapshot()),
         expectedSkillCatalogRevision: catalog.revision,
@@ -1338,6 +1365,7 @@ desktopVertical: try {
     const verifyNewTask = async (catalog) => {
       const modelSnapshot = await snapshot();
       const created = await invokeBridge("metawork.tasks.create", {
+        projectId: null,
         workspace: { kind: "manual", workspaceId, expectedWorkspaceEpoch },
 
         modelSelection: fixtureModelSelection(modelSnapshot),
@@ -1563,6 +1591,7 @@ desktopVertical: try {
   }
   const modelSnapshot = await snapshot();
   const createResult = await invokeBridge("metawork.tasks.create", {
+    projectId: null,
     workspace: {
       kind: "manual",
       workspaceId,

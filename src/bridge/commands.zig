@@ -16,6 +16,7 @@ pub const register_notification_text = "metawork.host.notifications.registerText
 pub const updates_check = "metawork.updates.check";
 pub const updates_open_download = "metawork.updates.openDownload";
 pub const updates_open_website = "metawork.updates.openWebsite";
+pub const add_project = "metawork.workspaces.addProject";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const open_workspace = "metawork.workspaces.open";
 pub const remove_workspace = "metawork.workspaces.remove";
@@ -110,6 +111,7 @@ pub const cancel_compact = "metawork.tasks.cancelCompact";
 pub const refresh_task_skill_catalog = "metawork.tasks.refreshSkillCatalog";
 pub const cancel = "metawork.tasks.cancel";
 pub const respond_ui = "metawork.tasks.respondUi";
+pub const set_task_project = "metawork.tasks.setProject";
 pub const rename_task = "metawork.tasks.rename";
 pub const archive_task = "metawork.tasks.archive";
 pub const mark_task_completion_seen = "metawork.tasks.markCompletionSeen";
@@ -137,6 +139,7 @@ pub const product = [_][]const u8{
     updates_open_download,
     updates_open_website,
     choose_workspace,
+    add_project,
     open_workspace,
     remove_workspace,
     remove_project,
@@ -231,6 +234,7 @@ pub const product = [_][]const u8{
     cancel,
     respond_ui,
     rename_task,
+    set_task_project,
     archive_task,
     mark_task_completion_seen,
     delete_task,

@@ -131,6 +131,8 @@ import {
   MediaLightbox,
   type MediaViewerTarget,
 } from "../features/media/MediaLightbox.tsx";
+import { WorkingDirectoriesSettings } from "../features/settings/WorkingDirectoriesSettings.tsx";
+import { ProjectSelector } from "../features/tasks/ProjectSelector.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { TaskWorkspace } from "../features/tasks/NewTaskView.tsx";
 import {
@@ -219,7 +221,6 @@ import {
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { WorkspaceRemovalMenu } from "../features/workspaces/WorkspaceRemovalMenu.tsx";
-import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import {
   navigableTasks,
@@ -571,7 +572,17 @@ export default function App() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const composerModelTrigger = useRef<HTMLButtonElement>(null);
   const submissionSessions = useRef(new Map<string, TaskSubmissionSession>());
-  const newTaskSubmissionInstance = useRef(0);
+  const newTaskSubmissionInstances = useRef(new Map<string, number>());
+  function releaseNewTaskSubmission(key: string) {
+    const [, kind, projectKey] = key.split(":");
+    if (kind !== "new-task" || !projectKey) return;
+    submissionSessions.current.delete(key);
+    newTaskSubmissionInstances.current.set(
+      projectKey,
+      (newTaskSubmissionInstances.current.get(projectKey) ?? 0) + 1,
+    );
+  }
+
   const localSubmissionSequence = useRef(0);
   const [localSubmissions, setLocalSubmissions] = useState<
     LocalTaskSubmission[]
@@ -1491,13 +1502,10 @@ export default function App() {
     () => orderedProjects(snapshot.workspaces),
     [snapshot.workspaces],
   );
-  const initialNewTaskWorkspaceId =
+  const initialNewTaskProjectId =
     route === "workbench"
       ? (projects.find(
-          (workspace) =>
-            workspace.id === selectedTaskSummary?.workspaceId &&
-            workspace.authorization === "available" &&
-            !workspace.redacted,
+          (workspace) => workspace.id === selectedTaskSummary?.projectId,
         )?.id ?? null)
       : null;
   const navigableTaskItems = useMemo(
@@ -1559,7 +1567,7 @@ export default function App() {
     workbench.draftOpen || workbench.activeTaskId === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
-    workbench.draftWorkspaceId,
+    workbench.draftProjectId,
   );
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const composerDraft = newTaskDraftActive
@@ -1571,7 +1579,7 @@ export default function App() {
   const composerDraftRef = useRef(composerDraft);
   composerDraftRef.current = composerDraft;
   const composerDraftScope = newTaskDraftActive
-    ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}:${newTaskSubmissionInstance.current}`
+    ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}:${newTaskSubmissionInstances.current.get(newTaskDraftId ?? unscopedNewTaskDraftId) ?? 0}`
     : `task:${workbench.activeTaskId ?? "missing"}`;
   const composerDraftScopeRef = useRef(composerDraftScope);
   composerDraftScopeRef.current = composerDraftScope;
@@ -1764,20 +1772,23 @@ export default function App() {
   };
   const taskDraftActionContext = useRef(taskDraftAction);
   taskDraftActionContext.current = taskDraftAction;
-  const composerWorkspaceId =
-    activeTask?.workspaceId ??
-    selectedTaskSummary?.workspaceId ??
-    workbench.draftWorkspaceId;
+  const draftDirectoryId =
+    newTaskDrafts.directory.kind === "explicit"
+      ? newTaskDrafts.directory.workspaceId
+      : workbench.draftProjectId;
+  const composerWorkspaceId = newTaskDraftActive
+    ? draftDirectoryId
+    : (activeTask?.workspaceId ?? selectedTaskSummary?.workspaceId);
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
   const composerWorkspaceLabel =
     composerWorkspace?.canonicalRoot || t("workspace.select");
-  const newTaskWorkspaceReady = workbench.draftWorkspaceId
+  const newTaskWorkspaceReady = draftDirectoryId
     ? composerWorkspace?.authorization === "available"
     : snapshot.capabilities.automaticWorkspaces;
   const personalComposerCatalog =
-    newTaskDraftActive && workbench.draftWorkspaceId === null;
+    newTaskDraftActive && draftDirectoryId === null;
   const skillCatalog = (personalComposerCatalog
     ? snapshot.skillCatalog
     : composerWorkspace?.skillCatalog) ?? {
@@ -1828,14 +1839,47 @@ export default function App() {
         entry.state === "accepted" ||
         entry.state === "unknown"),
   ).length;
+  const draftSubmissionSession = submissionSessions.current.get(
+    `${bridgeGenerationRef.current}:${composerDraftScope}`,
+  );
   const taskIdentityPending =
     newTaskDraftActive &&
-    submissionSessions.current.has(
-      `${bridgeGenerationRef.current}:${composerDraftScope}`,
-    );
+    Boolean(draftSubmissionSession && !draftSubmissionSession.creationUnknown);
+  useEffect(() => {
+    const id = draftSubmissionSession?.targetTaskId;
+    if (
+      !newTaskDraftActive ||
+      !newTaskDraftId ||
+      !id ||
+      settingsOpen ||
+      searchOpen ||
+      route !== "workbench" ||
+      pendingTaskSelection.current === id
+    )
+      return;
+    pendingTaskSelection.current = id;
+    pendingTaskDraftSource.current = {
+      taskId: id,
+      draftId: newTaskDraftId,
+      generation: bridgeGenerationRef.current,
+    };
+    void refreshSnapshot();
+  }, [
+    draftSubmissionSession?.targetTaskId,
+    newTaskDraftActive,
+    newTaskDraftId,
+    settingsOpen,
+    searchOpen,
+    route,
+    refreshSnapshot,
+  ]);
+  const newTaskProjectReady =
+    workbench.draftProjectId === null ||
+    projects.some((project) => project.id === workbench.draftProjectId);
   const canCreateTask =
     snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
+    newTaskProjectReady &&
     newTaskModelState.valid;
   const canSubmit =
     taskCanCompose &&
@@ -2211,6 +2255,15 @@ export default function App() {
               .catch(() => undefined);
           for (const taskId of projectedTaskIds)
             pendingTaskDraftRetention.current.delete(taskId);
+          for (const [key, session] of submissionSessions.current) {
+            const taskId = session.targetTaskId;
+            if (
+              taskId &&
+              !selectableTask(next, taskId) &&
+              !pendingTaskDraftRetention.current.has(taskId)
+            )
+              releaseNewTaskSubmission(key);
+          }
           dispatchWorkbench({
             type: "snapshot.accepted",
             snapshot: next,
@@ -2366,27 +2419,58 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localSubmissions, bridgeGeneration]);
   const moveNewTaskDraft = newTaskDrafts.moveDraft;
+  useEffect(() => {
+    if (!workbench.activeTaskId || workbench.draftOpen) return;
+    for (const [key, session] of submissionSessions.current) {
+      if (
+        !key.includes(":new-task:") ||
+        session.targetTaskId !== workbench.activeTaskId
+      )
+        continue;
+      releaseNewTaskSubmission(key);
+    }
+  }, [workbench.activeTaskId, workbench.draftOpen]);
   const openNewTaskDraft = useCallback(
-    (workspaceId: string | null) => {
+    (projectId: string | null) => {
       pendingTaskSelection.current = null;
-      newTaskSubmissionInstance.current += 1;
-      // Retire lookup ownership; in-flight sessions still finish their own sends.
-      const prefix = `${bridgeGenerationRef.current}:new-task:`;
-      for (const key of submissionSessions.current.keys())
-        if (key.startsWith(prefix)) submissionSessions.current.delete(key);
       setNewTaskApprovalOverride(null);
       setNewTaskRequestedModel(null);
-      if (workspaceId !== null && newTaskDraftId === unscopedNewTaskDraftId)
-        moveNewTaskDraft(newTaskDraftId, workspaceId);
+      const projectKey = projectId ?? unscopedNewTaskDraftId;
+      const instance = newTaskSubmissionInstances.current.get(projectKey) ?? 0;
+      const key = `${bridgeGenerationRef.current}:new-task:${projectKey}:${instance}`;
+      const session = submissionSessions.current.get(key);
+      if (session?.creationUnknown) {
+        releaseNewTaskSubmission(key);
+      }
+      if (
+        (!session || session.creationUnknown) &&
+        projectId !== null &&
+        newTaskDraftId === unscopedNewTaskDraftId &&
+        !submissionSessions.current.has(
+          `${bridgeGenerationRef.current}:${composerDraftScopeRef.current}`,
+        )
+      ) {
+        if (moveNewTaskDraft(newTaskDraftId, projectKey) === "preserve_both")
+          reportDraftPreserved(projectKey);
+      }
       setRoute("workbench");
-      dispatchWorkbench({ type: "task.draft.opened", workspaceId });
+      dispatchWorkbench({ type: "task.draft.opened", projectId });
+      if (session?.targetTaskId) {
+        pendingTaskSelection.current = session.targetTaskId;
+        pendingTaskDraftSource.current = {
+          taskId: session.targetTaskId,
+          draftId: projectKey,
+          generation: bridgeGenerationRef.current,
+        };
+        void refreshSnapshot();
+      }
       window.requestAnimationFrame(() => composer.current?.focus());
     },
-    [moveNewTaskDraft, newTaskDraftId],
+    [moveNewTaskDraft, newTaskDraftId, refreshSnapshot],
   );
   const beginNewTask = useCallback(
-    () => openNewTaskDraft(initialNewTaskWorkspaceId),
-    [initialNewTaskWorkspaceId, openNewTaskDraft],
+    () => openNewTaskDraft(initialNewTaskProjectId),
+    [initialNewTaskProjectId, openNewTaskDraft],
   );
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
@@ -2430,7 +2514,7 @@ export default function App() {
       return;
     dispatchWorkbench({
       type: "task.draft.opened",
-      workspaceId: null,
+      projectId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }, [
@@ -2944,8 +3028,37 @@ export default function App() {
       return;
     await runAccountCommand(() => client.cancelAccountOperation(), true);
   }
+  function beginDraftContextChange() {
+    const session = submissionSessions.current.get(
+      `${bridgeGenerationRef.current}:${composerDraftScopeRef.current}`,
+    );
+    return (
+      !workbenchMutationDisabled &&
+      !(session && !session.creationUnknown) &&
+      !workspaceBusyRef.current
+    );
+  }
+  function reportDraftPreserved(targetId: string) {
+    const targetScope = `new-task:${targetId}:${newTaskSubmissionInstances.current.get(targetId) ?? 0}`;
+    const audience = { scope: "workspace" as const, workspaceId: null };
+    const token = beginOperationFeedback(
+      `workspace:selection:${targetScope}`,
+      audience,
+    );
+    settleOperationFeedback(
+      token,
+      attentionStatus("task.draft_preserved", audience),
+    );
+  }
+  function retireUnknownDraftSubmission() {
+    const key = `${bridgeGenerationRef.current}:${composerDraftScope}`;
+    const session = submissionSessions.current.get(key);
+    if (session?.creationUnknown && newTaskDraftId) {
+      releaseNewTaskSubmission(key);
+    }
+  }
   async function chooseWorkspaceForDraft() {
-    if (workbenchMutationDisabled || workspaceBusyRef.current) return null;
+    if (!beginDraftContextChange()) return null;
     const requestedAudience = attachmentAudience.current;
     const scope = composerDraftScope;
     const token = beginOperationFeedback(`workspace:selection:${scope}`, {
@@ -2956,54 +3069,33 @@ export default function App() {
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
-      const outcome = await chooseWorkspaceAndMigrateDraft({
-        choose: () => client.chooseWorkspace(),
-        refresh: refreshSnapshot,
-        migratableDraftId:
-          newTaskDraftId === unscopedNewTaskDraftId ? newTaskDraftId : null,
-        moveDraft: (sourceId, targetId) =>
-          newTaskDrafts.moveDraft(sourceId, targetId),
-        current,
-      });
-      if (!current()) {
-        settleOperationFeedback(token, null);
-        return null;
-      }
-      if (outcome.kind === "superseded" || outcome.kind === "sync_failed") {
-        settleOperationFeedback(token, null);
-        return null;
-      }
-      if (outcome.kind === "selected") {
-        const { result } = outcome;
-        dispatchWorkbench({
-          type: "task.draft.opened",
+      const result = await client.chooseWorkspace();
+      await refreshSnapshot();
+      if (current() && result.selected) {
+        retireUnknownDraftSubmission();
+        newTaskDrafts.setDirectory({
+          kind: "explicit",
           workspaceId: result.workspaceId,
         });
-        settleOperationFeedback(token, null);
-        window.requestAnimationFrame(() => composer.current?.focus());
-        return result;
       }
       settleOperationFeedback(token, null);
-      window.requestAnimationFrame(() => composer.current?.focus());
-      return null;
+      return current() && result.selected ? result : null;
     } catch (error) {
-      if (!current()) {
-        settleOperationFeedback(token, null);
-        return null;
+      if (current()) {
+        const diagnostic = errorText(error);
+        settleOperationFeedback(
+          token,
+          attentionStatus(
+            diagnostic === "WorkspaceDirectoryCapacity" ||
+              diagnostic === "WorkspaceCapacity"
+              ? "workspace.directory_capacity"
+              : "workspace.selection_failed",
+            { scope: "workspace", workspaceId: null },
+            { diagnostic },
+          ),
+          snapshot.securityEpoch,
+        );
       }
-      const diagnostic = errorText(error);
-      settleOperationFeedback(
-        token,
-        attentionStatus(
-          diagnostic === "WorkspaceCapacity"
-            ? "workspace.selection_capacity"
-            : "workspace.selection_failed",
-          { scope: "workspace", workspaceId: null },
-          { diagnostic },
-        ),
-        snapshot.securityEpoch,
-      );
-      window.requestAnimationFrame(() => composer.current?.focus());
       return null;
     } finally {
       workspaceBusyRef.current = false;
@@ -3011,43 +3103,142 @@ export default function App() {
     }
   }
   function setDraftWorkspaceById(workspaceId: string) {
-    if (workbenchMutationDisabled) return;
-    if (workspaceId === automaticWorkspaceOptionId) {
-      if (newTaskDraftId && newTaskDraftId !== unscopedNewTaskDraftId)
-        newTaskDrafts.moveDraft(newTaskDraftId, unscopedNewTaskDraftId);
-      dispatchWorkbench({ type: "task.draft.opened", workspaceId: null });
-      window.requestAnimationFrame(() => composer.current?.focus());
-      return;
-    }
-    const workspace = snapshot.workspaces.find(
-      (candidate) => candidate.id === workspaceId,
-    );
+    if (!beginDraftContextChange()) return;
     if (
-      !workspace ||
-      workspace.kind !== "manual" ||
-      workspace.projectRemoved ||
-      workspace.authorization !== "available"
-    ) {
-      const token = beginOperationFeedback(
-        `workspace:selection:${composerDraftScope}`,
-        { scope: "workspace", workspaceId: composerWorkspaceId ?? null },
-      );
-      settleOperationFeedback(
-        token,
-        attentionStatus("workspace.selection_unavailable", {
-          scope: "workspace",
-          workspaceId: null,
-        }),
-      );
+      workspaceId !== automaticWorkspaceOptionId &&
+      !snapshot.workspaces.some(
+        (workspace) =>
+          workspace.id === workspaceId &&
+          workspace.kind === "manual" &&
+          workspace.authorization === "available",
+      )
+    )
       return;
-    }
-    if (newTaskDraftId === unscopedNewTaskDraftId)
-      newTaskDrafts.moveDraft(newTaskDraftId, workspace.id);
-    dispatchWorkbench({
-      type: "task.draft.opened",
-      workspaceId: workspace.id,
+    retireUnknownDraftSubmission();
+    newTaskDrafts.setDirectory({
+      kind: "explicit",
+      workspaceId:
+        workspaceId === automaticWorkspaceOptionId ? null : workspaceId,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
+  }
+  function setDraftProject(projectId: string | null) {
+    if (
+      !beginDraftContextChange() ||
+      (projectId !== null &&
+        !projects.some((project) => project.id === projectId))
+    )
+      return;
+    retireUnknownDraftSubmission();
+    const targetId = projectId ?? unscopedNewTaskDraftId;
+    const targetSession = submissionSessions.current.get(
+      `${bridgeGenerationRef.current}:new-task:${targetId}:${newTaskSubmissionInstances.current.get(targetId) ?? 0}`,
+    );
+    if (
+      targetId !== newTaskDraftId &&
+      targetSession &&
+      !targetSession.creationUnknown
+    ) {
+      if (
+        newTaskDraftId &&
+        (composerDraftHasContent(newTaskDrafts.getDraft(newTaskDraftId)) ||
+          newTaskDrafts.getDirectory(newTaskDraftId).kind === "explicit")
+      )
+        reportDraftPreserved(targetId);
+      openNewTaskDraft(projectId);
+      return;
+    }
+    if (targetSession?.creationUnknown)
+      releaseNewTaskSubmission(
+        `${bridgeGenerationRef.current}:new-task:${targetId}:${newTaskSubmissionInstances.current.get(targetId) ?? 0}`,
+      );
+    if (newTaskDraftId) {
+      const decision = newTaskDrafts.moveDraft(newTaskDraftId, targetId);
+      if (decision === "preserve_both") reportDraftPreserved(targetId);
+    }
+    dispatchWorkbench({ type: "task.draft.opened", projectId });
+    window.requestAnimationFrame(() => composer.current?.focus());
+  }
+  async function registerWorkingDirectory(addProject: boolean) {
+    if (workbenchMutationDisabled || workspaceBusyRef.current) return;
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
+    try {
+      await (addProject ? client.addProject() : client.chooseWorkspace());
+    } finally {
+      await refreshSnapshot().catch(() => undefined);
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
+    }
+  }
+  async function addProject() {
+    if (workbenchMutationDisabled || workspaceBusyRef.current) return;
+    const token = beginOperationFeedback("workspace:add-project", {
+      scope: "workspace",
+      workspaceId: null,
+    });
+    try {
+      await registerWorkingDirectory(true);
+      settleOperationFeedback(token, null);
+    } catch (error) {
+      settleOperationFeedback(
+        token,
+        attentionStatus(
+          errorText(error) === "WorkspaceCapacity"
+            ? "workspace.selection_capacity"
+            : errorText(error) === "WorkspaceDirectoryCapacity"
+              ? "workspace.directory_capacity"
+              : "task.add_project_failed",
+          { scope: "workspace", workspaceId: null },
+        ),
+      );
+    }
+  }
+  async function changeTaskProject(
+    task: TaskSummary,
+    projectId: string | null,
+  ) {
+    if (
+      workbenchMutationDisabled ||
+      task.historyReadOnly ||
+      task.lifecycle !== "open" ||
+      task.deletionStatus === "deleting"
+    )
+      return;
+    const audience = { scope: "task" as const, taskId: task.id };
+    const token = beginOperationFeedback(`task:project:${task.id}`, audience);
+    try {
+      const result = await client.setTaskProject(task.id, projectId);
+      settleOperationFeedback(
+        token,
+        result.applied
+          ? null
+          : attentionStatus("task.project_change_failed", audience, {
+              diagnostic: result.reason,
+            }),
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      const confirmed =
+        error instanceof BridgeCommandTimeoutError &&
+        latestSnapshotRef.current?.taskIndex.find(
+          (current) => current.id === task.id,
+        )?.projectId === projectId;
+      settleOperationFeedback(
+        token,
+        confirmed
+          ? null
+          : attentionStatus(
+              error instanceof BridgeCommandTimeoutError
+                ? "task.project_change_not_confirmed"
+                : "task.project_change_failed",
+              audience,
+              { diagnostic: errorText(error) },
+            ),
+      );
+      return;
+    }
+    await refreshSnapshot().catch(() => undefined);
   }
   function openTask(taskId: string) {
     pendingTaskSelection.current = null;
@@ -3117,12 +3308,15 @@ export default function App() {
             input.kind === "skill" ? input.catalogRevision : null,
             input.kind === "skill" ? input.selectionRevision : null,
             newTaskApprovalMode,
+            workbench.draftProjectId,
           ),
         onCreated: (id) => {
           pendingTaskDraftRetention.current.add(id);
           if (
             composerDraftScopeRef.current !== scope ||
-            attachmentAudience.current !== audience ||
+            attachmentAudience.current.route !== audience.route ||
+            attachmentAudience.current.settingsOpen !== audience.settingsOpen ||
+            attachmentAudience.current.searchOpen !== audience.searchOpen ||
             submissionSessions.current.get(key) !== session
           )
             return;
@@ -4562,15 +4756,25 @@ export default function App() {
   );
   const workspaceSelectionFeedback =
     statuses.entries[`workspace:selection:${composerDraftScope}`];
+  const addProjectFeedback = statuses.entries["workspace:add-project"];
   const taskOperationFeedback = Object.values(statuses.entries).filter(
     (entry) =>
       entry?.local &&
+      !entry.key.startsWith("task:project:") &&
       entry.audience.scope === "task" &&
       entry.audience.taskId === activeTask?.id,
   );
   const composerCatalogFeedback =
     statuses.entries[`composer-catalog:${composerDraftScope}`];
   const modelsCatalogFeedback = statuses.entries["models:catalog"];
+  function renderProjectFeedback(task: TaskSummary) {
+    const entry = statuses.entries[`task:project:${task.id}`];
+    return entry?.tone === "attention" && !entry.dismissed ? (
+      <p role="status" className="task-list-empty">
+        {t(entry.id, entry.values)}
+      </p>
+    ) : null;
+  }
   const historyTaskId = newTaskDraftActive ? null : activeTask?.id;
   function composerHistoryIsCurrent() {
     const latest = latestSnapshotRef.current;
@@ -4775,8 +4979,20 @@ export default function App() {
                   workspaceSelectionFeedback.values,
                 )}
               </p>
+              {workspaceSelectionFeedback.id ===
+                "workspace.directory_capacity" && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => openSettings("directories")}
+                >
+                  {t("settings.working_directories")}
+                </Button>
+              )}
               {workspaceSelectionFeedback.id !==
                 "workspace.selection_capacity" &&
+                workspaceSelectionFeedback.id !==
+                  "workspace.directory_capacity" &&
                 workspaceSelectionFeedback.diagnostic && (
                   <details>
                     <summary>{t("feedback.details")}</summary>
@@ -4784,6 +5000,20 @@ export default function App() {
                   </details>
                 )}
             </div>
+          ) : undefined
+        }
+        projectContext={
+          newTaskDraftActive ? (
+            <ProjectSelector
+              projectId={workbench.draftProjectId}
+              workspaces={snapshot.workspaces}
+              disabled={
+                workbenchMutationDisabled ||
+                taskIdentityPending ||
+                workspaceBusy
+              }
+              onSelect={setDraftProject}
+            />
           ) : undefined
         }
         workspaceOptions={[
@@ -4794,15 +5024,17 @@ export default function App() {
             authorization: "available" as const,
             disabled: !snapshot.capabilities.automaticWorkspaces,
           },
-          ...projects.map((workspace) => ({
-            id: workspace.id,
-            label: workspace.displayName || workspace.canonicalRoot,
-            authorization: workspace.authorization,
-          })),
+          ...snapshot.workspaces
+            .filter((workspace) => workspace.kind === "manual")
+            .map((workspace) => ({
+              id: workspace.id,
+              label: workspace.displayName || workspace.canonicalRoot,
+              authorization: workspace.authorization,
+            })),
         ]}
         selectedWorkspaceOptionId={
           newTaskDraftActive
-            ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
+            ? (draftDirectoryId ?? automaticWorkspaceOptionId)
             : ""
         }
         workspaceEditable={newTaskDraftActive}
@@ -4946,7 +5178,10 @@ export default function App() {
             const option = newTaskModelState.options.find(
               (candidate) => candidate.selectionId === id,
             );
-            if (option) setNewTaskRequestedModel(option.modelRef);
+            if (option && beginDraftContextChange()) {
+              retireUnknownDraftSubmission();
+              setNewTaskRequestedModel(option.modelRef);
+            }
             return;
           }
           void selectModelForTask(id);
@@ -5030,6 +5265,13 @@ export default function App() {
             {pendingLocator}
             {activeTask && (
               <TaskInformation
+                projectName={
+                  activeTask?.projectId === null
+                    ? t("task.no_project")
+                    : (projects.find(
+                        (project) => project.id === activeTask?.projectId,
+                      )?.displayName ?? t("task.project_removed"))
+                }
                 key={activeTask.id}
                 task={activeTask}
                 models={snapshot.models}
@@ -5287,6 +5529,28 @@ export default function App() {
                 suppressedCompletionTaskId={suppressedCompletionTaskId}
                 onSelectTask={openTask}
                 onTaskAction={handleTaskAction}
+                onSetProject={changeTaskProject}
+                renderProjectFeedback={renderProjectFeedback}
+                onAddProject={() => void addProject()}
+                addProjectNotice={
+                  addProjectFeedback?.tone === "attention" ? (
+                    <div className="task-list-empty">
+                      <p role="status">
+                        {t(addProjectFeedback.id, addProjectFeedback.values)}
+                      </p>
+                      {addProjectFeedback.id ===
+                        "workspace.directory_capacity" && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => openSettings("directories")}
+                        >
+                          {t("settings.working_directories")}
+                        </Button>
+                      )}
+                    </div>
+                  ) : undefined
+                }
                 renderWorkspaceHeading={(workspace, heading) => (
                   <WorkspaceRemovalMenu
                     workspace={workspace}
@@ -5503,10 +5767,43 @@ export default function App() {
       overlay={
         settingsOpen ? (
           <SettingsPage
+            directoryManagement={
+              <WorkingDirectoriesSettings
+                workspaces={snapshot.workspaces}
+                tasks={snapshot.taskIndex}
+                disabled={workbenchMutationDisabled}
+                onChoose={() => registerWorkingDirectory(false)}
+                onRevoke={async (workspace) => {
+                  try {
+                    return (
+                      await client.removeWorkspace(
+                        workspace.id,
+                        workspace.epoch,
+                      )
+                    ).accepted;
+                  } finally {
+                    await refreshSnapshot();
+                  }
+                }}
+              />
+            }
             modelContext={`${bridgeGeneration}:${snapshot.securityEpoch}`}
             archiveManagement={{
               tasks: snapshot.taskIndex,
               workspaces: snapshot.workspaces,
+              renderProject: (task, disabled) => (
+                <>
+                  <ProjectSelector
+                    projectId={task.projectId}
+                    workspaces={snapshot.workspaces}
+                    disabled={disabled}
+                    onSelect={(projectId) =>
+                      void changeTaskProject(task, projectId)
+                    }
+                  />
+                  {renderProjectFeedback(task)}
+                </>
+              ),
               query: archivedQuery,
               pending: taskPending,
               errors: taskArchiveErrors,

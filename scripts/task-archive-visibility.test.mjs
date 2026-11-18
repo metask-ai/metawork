@@ -136,7 +136,7 @@ async function renderApp(
 ) {
   const snapshot = structuredClone(initialSnapshot);
   Object.assign(snapshot.workspaces[0], workspace);
-  snapshot.workspaces[0].projectRemoved = projectHidden;
+  snapshot.workspaces[0].projectEntry = !projectHidden;
   const task = snapshot.tasks[0];
   Object.assign(task, {
     title: "Archive target",
@@ -178,7 +178,7 @@ async function renderApp(
       projectRemovals.push({ workspaceId, expectedWorkspaceEpoch });
       snapshot.workspaces.find(
         (entry) => entry.id === workspaceId,
-      ).projectRemoved = true;
+      ).projectEntry = false;
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       return {
         workspaceId,
@@ -187,11 +187,15 @@ async function renderApp(
         reason: null,
       };
     },
-    chooseWorkspace: async () => {
-      snapshot.workspaces[0].projectRemoved = false;
+    addProject: async () => {
+      snapshot.workspaces[0].projectEntry = true;
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       return { selected: true, workspaceId: snapshot.workspaces[0].id };
     },
+    chooseWorkspace: async () => ({
+      selected: true,
+      workspaceId: snapshot.workspaces[0].id,
+    }),
     onHostSignal: () => () => {},
     onTaskOpen: () => () => {},
     onWorkbenchRevision: (callback) => {
@@ -1226,7 +1230,12 @@ test("task ellipsis entries reuse the context menu without selecting a Task or c
   fireEvent.change(editor, { target: { value: "Keep the new Task draft" } });
   const rows = [...taskRows("3")];
   assert.equal(rows.length, 2);
-  const expected = ["Rename", "Archive", "Permanently delete"];
+  const expected = [
+    "Rename",
+    "Archive",
+    "Change project",
+    "Permanently delete",
+  ];
   for (const row of rows) {
     assert.equal(
       row.querySelector("button"),
@@ -1507,6 +1516,12 @@ for (const emptyProject of [false, true])
       ),
     );
     assert.equal(screen.queryByRole("menu"), null);
+    assert.equal(
+      screen
+        .getByRole("combobox", { name: "Project" })
+        .textContent.includes("metawork-test"),
+      true,
+    );
     await user.click(newTask);
     assert.equal(
       (await screen.findByPlaceholderText("Enter your instructions…")).value,
@@ -1524,7 +1539,7 @@ for (const emptyProject of [false, true])
   });
 
 for (const authorization of ["reauthorization_required", "removing"])
-  test(`project new conversation is disabled for ${authorization} directories`, async (ctx) => {
+  test(`project new conversation opens its draft for ${authorization} directories`, async (ctx) => {
     const { user } = await renderApp(ctx, { workspace: { authorization } });
     const editor = document.querySelector(".ai-composer textarea");
     fireEvent.change(editor, {
@@ -1533,7 +1548,7 @@ for (const authorization of ["reauthorization_required", "removing"])
     const trigger = screen.getByRole("button", {
       name: "New conversation in “metawork-test”",
     });
-    assert.equal(trigger.disabled, true);
+    assert.equal(trigger.disabled, false);
     await user.click(trigger);
     assert.ok(document.querySelector(".ai-composer textarea") === editor);
     assert.equal(editor.value, "Preserve the current draft");
@@ -1720,7 +1735,7 @@ for (const emptyProject of [false, true])
     );
     await confirmProjectRemoval(user);
     assert.deepEqual(calls, []);
-    before.workspaces[0].projectRemoved = true;
+    before.workspaces[0].projectEntry = false;
     before.revision = snapshot.revision;
     assert.deepEqual(snapshot, before);
     assert.deepEqual(projectRemovals, [
@@ -1758,7 +1773,7 @@ for (const phase of ["queued", "running", "waiting_ui", "stopping"])
     );
     await confirmProjectRemoval(user);
     assert.deepEqual(calls, []);
-    before.workspaces[0].projectRemoved = true;
+    before.workspaces[0].projectEntry = false;
     before.revision = snapshot.revision;
     assert.deepEqual(snapshot, before);
     assert.equal(taskRows("3").length, 1);
@@ -1800,7 +1815,7 @@ test("project removal waits for Host acceptance and allows retry after rejection
   await within(dialog).findByRole("alert");
   assert.ok(document.querySelector(".task-project-context"));
   await user.click(remove);
-  snapshot.workspaces[0].projectRemoved = true;
+  snapshot.workspaces[0].projectEntry = false;
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () =>
     resolveRemoval({ accepted: true, workspaceId: "1", reason: null }),
@@ -1816,7 +1831,7 @@ test("timed out project removal reconciles the Host state without resending", as
   let calls = 0;
   ctx.mock.method(BridgeClient.prototype, "removeProject", async () => {
     calls++;
-    snapshot.workspaces[0].projectRemoved = true;
+    snapshot.workspaces[0].projectEntry = false;
     snapshot.revision = String(BigInt(snapshot.revision) + 1n);
     throw new Error("timeout");
   });
@@ -1834,7 +1849,7 @@ async function openLocalWorkspaceFolder(user) {
   );
 }
 
-test("Host project removal survives remount and native folder selection restores its group", async (ctx) => {
+test("Host project removal survives remount and Add project restores its group", async (ctx) => {
   const { user } = await renderApp(ctx);
   await confirmProjectRemoval(user);
   cleanup();
@@ -1842,28 +1857,10 @@ test("Host project removal survives remount and native folder selection restores
   assert.equal(document.querySelector(".task-project-context"), null);
   assert.equal(taskRows("3").length, 1);
   await remounted.user.click(
-    screen.getByRole("button", { name: "New task", exact: true }),
-  );
-  const picker = screen.getByRole("combobox", {
-    name: "Choose working directory",
-  });
-  await remounted.user.click(picker);
-  assert.equal((await screen.findAllByRole("option")).length, 2);
-  assert.ok(
-    screen.getByRole("option", {
-      name: "No working directory",
-      selected: true,
-    }),
-  );
-  await remounted.user.click(
-    screen.getByRole("option", { name: "Open local folder" }),
+    screen.getByRole("button", { name: "Add project", exact: true }),
   );
   await waitFor(projectHeading);
   assert.equal(taskRows("3").length, 2);
-
-  await remounted.user.click(picker);
-  await screen.findByRole("option", { name: "metawork-test", exact: true });
-  assert.equal(screen.queryByText("/tmp/metawork-test"), null);
 });
 
 for (const outcome of ["selected", "cancelled", "superseded"])
@@ -1885,7 +1882,6 @@ for (const outcome of ["selected", "cancelled", "superseded"])
     await openLocalWorkspaceFolder(user);
     assert.equal(typeof resolveChoice, "function");
     if (outcome === "superseded") await user.click(taskRows("3")[0]);
-    if (outcome !== "cancelled") snapshot.workspaces[0].projectRemoved = false;
     await act(async () =>
       resolveChoice(
         outcome === "cancelled"
@@ -1894,12 +1890,10 @@ for (const outcome of ["selected", "cancelled", "superseded"])
       ),
     );
     if (outcome === "superseded") await publishTask("3", {});
-    await waitFor(() =>
-      assert.equal(taskRows("3").length, outcome !== "cancelled" ? 2 : 1),
-    );
+    await waitFor(() => assert.equal(taskRows("3").length, 1));
     assert.equal(
       document.querySelector(".task-project-context") !== null,
-      outcome !== "cancelled",
+      false,
     );
     if (outcome === "superseded")
       assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page");
@@ -2343,3 +2337,401 @@ test("generation replacement isolates old archive replies from a newer operation
   await app.settle({ archived: true });
   await waitFor(() => assert.ok(document.querySelector(".archive-notice")));
 });
+
+test("project menu honors the latest move while retaining the actual directory", async (ctx) => {
+  const fixture = await renderApp(ctx);
+  const { snapshot, user } = fixture;
+  const original = snapshot.workspaces[0];
+  snapshot.workspaces.push(
+    ...["2", "3"].map((id) => ({
+      ...structuredClone(original),
+      id,
+      displayName: `Project ${id}`,
+      canonicalRoot: `/project-${id}`,
+    })),
+  );
+  await fixture.publishTask("3", {});
+  await screen.findByRole("button", {
+    name: "New conversation in “Project 2”",
+  });
+  const moves = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "setTaskProject",
+    (taskId, projectId) => {
+      snapshot.tasks.find((task) => task.id === taskId).projectId = projectId;
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return new Promise((resolve) =>
+        moves.push({ taskId, projectId, resolve }),
+      );
+    },
+  );
+  async function move(project) {
+    fireEvent.contextMenu(taskRows("3")[0]);
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Change project",
+        exact: true,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Change project",
+      exact: true,
+    });
+    await user.click(within(dialog).getByRole("combobox", { name: "Project" }));
+    await user.click(
+      await screen.findByRole("option", { name: project, exact: true }),
+    );
+    await waitFor(() =>
+      assert.equal(
+        screen.queryByRole("dialog", { name: "Change project", exact: true }),
+        null,
+      ),
+    );
+  }
+
+  await move("Project 2");
+  await move("Project 3");
+  assert.equal(moves.length, 2);
+  await act(async () =>
+    moves[1].resolve({
+      applied: true,
+      taskId: "3",
+      projectId: "3",
+      reason: null,
+    }),
+  );
+  await waitFor(() =>
+    assert.ok(
+      document.querySelector('[data-workspace-id="3"] [data-task-id="3"]'),
+    ),
+  );
+  await act(async () =>
+    moves[0].resolve({
+      applied: true,
+      taskId: "3",
+      projectId: "2",
+      reason: null,
+    }),
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector('[data-workspace-id="2"] [data-task-id="3"]'),
+      null,
+    ),
+  );
+  assert.equal(snapshot.tasks[0].workspaceId, original.id);
+  assert.equal(snapshot.tasks[0].projectId, "3");
+});
+
+test("internal Task drag moves membership and ignores external files or forged drops", async (ctx) => {
+  const fixture = await renderApp(ctx);
+  const project = {
+    ...structuredClone(fixture.snapshot.workspaces[0]),
+    id: "2",
+    displayName: "Drop project",
+    canonicalRoot: "/drop-project",
+  };
+  fixture.snapshot.workspaces.push(project);
+  await fixture.publishTask("3", {});
+  await screen.findByRole("button", {
+    name: "New conversation in “Drop project”",
+  });
+  const calls = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "setTaskProject",
+    async (taskId, projectId) => {
+      calls.push([taskId, projectId]);
+      fixture.snapshot.tasks.find((task) => task.id === taskId).projectId =
+        projectId;
+      fixture.snapshot.revision = String(
+        BigInt(fixture.snapshot.revision) + 1n,
+      );
+      return { applied: true, taskId, projectId, reason: null };
+    },
+  );
+  const target = document.querySelector('[data-workspace-id="2"]');
+  const dataTransfer = {
+    types: ["application/x-metawork-task"],
+    files: [],
+    setData() {},
+    effectAllowed: "none",
+    dropEffect: "none",
+  };
+  fireEvent.drop(target, { dataTransfer });
+  assert.equal(calls.length, 0);
+  fireEvent.dragStart(taskRows("3")[0], { dataTransfer });
+  fireEvent.dragOver(target, { dataTransfer });
+  fireEvent.drop(target, { dataTransfer });
+  await waitFor(() => assert.deepEqual(calls, [["3", "2"]]));
+  await waitFor(() =>
+    assert.ok(
+      document.querySelector('[data-workspace-id="2"] [data-task-id="3"]'),
+    ),
+  );
+  fireEvent.drop(target, {
+    dataTransfer: {
+      ...dataTransfer,
+      types: ["Files"],
+      files: [new window.File(["a"], "a.txt")],
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(fixture.snapshot.tasks[0].workspaceId, "1");
+});
+
+test("revoking a project directory explains the retained chats and leaves them in Recent", async (ctx) => {
+  const fixture = await renderApp(ctx);
+  const { user, snapshot } = fixture;
+  const directory = {
+    ...structuredClone(snapshot.workspaces[0]),
+    id: "2",
+    projectEntry: false,
+    displayName: "Other directory",
+    canonicalRoot: "/other-directory",
+  };
+  snapshot.workspaces.push(directory);
+  snapshot.tasks.push({
+    ...structuredClone(snapshot.tasks[0]),
+    id: "8",
+    title: "Chat in another directory",
+    workspaceId: "2",
+    projectId: "1",
+  });
+  await fixture.publishTask("3", {});
+  const revoked = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "removeWorkspace",
+    async (workspaceId, expectedWorkspaceEpoch) => {
+      revoked.push([workspaceId, expectedWorkspaceEpoch]);
+      snapshot.workspaces = snapshot.workspaces.filter(
+        (workspace) => workspace.id !== workspaceId,
+      );
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return { accepted: true, workspaceId, reason: null };
+    },
+  );
+  await fixture.openArchives();
+  await user.click(screen.getByRole("link", { name: "Working directories" }));
+  const section = (
+    await screen.findByRole("heading", { name: "Working directories" })
+  ).closest("section");
+  const row = within(section)
+    .getByText("metawork-test", { exact: true })
+    .closest("li");
+  await user.click(
+    within(row).getByRole("button", { name: "Revoke directory access" }),
+  );
+  const dialog = await screen.findByRole("alertdialog", {
+    name: "Revoke directory access",
+  });
+  assert.match(dialog.textContent, /project entry will also be removed/);
+  assert.match(dialog.textContent, /Chats working in other directories: 1/);
+  await user.click(
+    within(dialog).getByRole("button", { name: "Revoke directory access" }),
+  );
+  await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
+  assert.deepEqual(revoked, [["1", snapshot.workspaces[0].epoch]]);
+  await user.click(screen.getByRole("button", { name: "Back to main view" }));
+  await waitFor(() => assert.equal(taskRows("8").length, 1));
+  assert.equal(document.querySelector('[data-workspace-id="1"]'), null);
+  assert.equal(snapshot.tasks.find((task) => task.id === "8").projectId, "1");
+  assert.equal(snapshot.tasks.find((task) => task.id === "8").workspaceId, "2");
+});
+
+test("project selection is keyboard accessible and returns focus to the same chat", async (ctx) => {
+  const { user, snapshot } = await renderApp(ctx);
+  const calls = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "setTaskProject",
+    async (taskId, projectId) => {
+      calls.push([taskId, projectId]);
+      snapshot.tasks.find((task) => task.id === taskId).projectId = projectId;
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return { applied: true, taskId, projectId, reason: null };
+    },
+  );
+  await act(
+    async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
+  );
+  await act(async () => taskRows("3")[0].focus());
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await waitFor(() =>
+    assertFocused(
+      screen.getByRole("menuitem", { name: "Rename", exact: true }),
+    ),
+  );
+  await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+  const dialog = await screen.findByRole("dialog", {
+    name: "Change project",
+    exact: true,
+  });
+  const selector = within(dialog).getByRole("combobox", { name: "Project" });
+  await waitFor(() => assertFocused(selector));
+  await user.keyboard(" ");
+  await screen.findByRole("option", { name: "No project", exact: true });
+  await user.keyboard("{Home}{Enter}");
+  await waitFor(() => assert.deepEqual(calls, [["3", null]]));
+  await waitFor(() =>
+    assert.ok(document.activeElement?.getAttribute("data-task-id") === "3"),
+  );
+  assert.equal(snapshot.tasks[0].workspaceId, "1");
+});
+
+test("opening archived history with revoked directory never requests its files", async (ctx) => {
+  const fixture = await renderApp(ctx);
+  fixture.snapshot.workspaces = [];
+  await fixture.publishTask("4", {});
+  const requests = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "listWorkspaceDirectory",
+    async (...args) => {
+      requests.push(args);
+      return { state: "error", entries: [], truncated: false, redacted: false };
+    },
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "previewWorkspaceFile",
+    async (...args) => {
+      requests.push(args);
+      return { state: "missing" };
+    },
+  );
+  await fixture.openArchives();
+  await fixture.user.click(
+    screen.getByRole("button", { name: "Earlier archive", exact: true }),
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".workbench-view").dataset.view,
+      "task",
+    ),
+  );
+  await fixture.user.click(
+    screen.getByRole("button", { name: "Open side panel", exact: true }),
+  );
+  const show = screen.queryByRole("button", {
+    name: "Show file tree",
+    exact: true,
+  });
+  if (show) await fixture.user.click(show);
+  await screen.findByText(
+    "Select a task with an available workspace to browse files.",
+  );
+  assert.deepEqual(requests, []);
+});
+
+for (const applied of [true, false]) {
+  test(`project move timeout reconciles canonical membership without replay: applied=${applied}`, async (ctx) => {
+    const fixture = await renderApp(ctx);
+    let calls = 0;
+    ctx.mock.method(
+      BridgeClient.prototype,
+      "setTaskProject",
+      async (taskId, projectId) => {
+        calls++;
+        if (applied) {
+          fixture.snapshot.tasks.find((task) => task.id === taskId).projectId =
+            projectId;
+          fixture.snapshot.revision = String(
+            BigInt(fixture.snapshot.revision) + 1n,
+          );
+        }
+        throw new BridgeCommandTimeoutError("metawork.tasks.setProject", 10000);
+      },
+    );
+    fireEvent.contextMenu(taskRows("3")[0]);
+    await fixture.user.click(
+      await screen.findByRole("menuitem", {
+        name: "Change project",
+        exact: true,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Change project",
+      exact: true,
+    });
+    await fixture.user.click(
+      within(dialog).getByRole("combobox", { name: "Project" }),
+    );
+    await fixture.user.click(
+      await screen.findByRole("option", { name: "No project", exact: true }),
+    );
+    await waitFor(() => assert.equal(calls, 1));
+    if (applied) {
+      await waitFor(() =>
+        assert.ok(
+          document.querySelector(
+            '[data-workspace-id="1"] [data-task-id="3"]',
+          ) === null,
+        ),
+      );
+      assert.ok(
+        screen.queryByText(
+          "The project change is not confirmed. Refresh to check its current assignment.",
+        ) === null,
+      );
+    } else {
+      await screen.findByText(
+        "The project change is not confirmed. Refresh to check its current assignment.",
+      );
+    }
+    assert.equal(calls, 1);
+    assert.equal(fixture.snapshot.tasks[0].workspaceId, "1");
+  });
+}
+
+test("working directory settings reports its independent quota", async (ctx) => {
+  const fixture = await renderApp(ctx);
+  const { user } = fixture;
+  ctx.mock.method(BridgeClient.prototype, "chooseWorkspace", async () => {
+    throw new Error("WorkspaceDirectoryCapacity");
+  });
+  await fixture.openArchives();
+  await user.click(screen.getByRole("link", { name: "Working directories" }));
+  await user.click(
+    screen.getByRole("button", {
+      name: "Choose working directory",
+      exact: true,
+    }),
+  );
+  await screen.findByText(
+    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
+  );
+});
+
+for (const [reason, message, opensSettings] of [
+  [
+    "WorkspaceCapacity",
+    "The project limit has been reached. Remove a project entry to add another.",
+    false,
+  ],
+  [
+    "WorkspaceDirectoryCapacity",
+    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
+    true,
+  ],
+]) {
+  test(`Add project explains ${reason} in the sidebar`, async (ctx) => {
+    const { user } = await renderApp(ctx);
+    ctx.mock.method(BridgeClient.prototype, "addProject", async () => {
+      throw new Error(reason);
+    });
+    const projects = within(screen.getByRole("region", { name: "Projects" }));
+    await user.click(projects.getByRole("button", { name: "Add project" }));
+    await projects.findByText(message);
+    const settings = projects.queryByRole("button", {
+      name: "Working directories",
+    });
+    assert.equal(Boolean(settings), opensSettings);
+    if (settings) {
+      await user.click(settings);
+      await screen.findByRole("heading", { name: "Working directories" });
+    }
+  });
+}

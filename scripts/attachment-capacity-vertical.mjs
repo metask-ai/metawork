@@ -157,6 +157,7 @@ export async function runAttachmentCapacityVertical({
         });
         const modelSnapshot = await snapshot();
         const task = await invoke("metawork.tasks.create", {
+          projectId: null,
           workspace: {
             kind: "manual",
             workspaceId,

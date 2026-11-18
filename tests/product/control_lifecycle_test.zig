@@ -266,7 +266,7 @@ test "history capacity creates one hundred Tasks with one live Session" {
         for (0..100) |_| {
             for (0..5000) |_| {
                 const created = if (automatic)
-                    control.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&control), null, null, .{ .interactive = .manual })
+                    control.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&control), null, null, .{ .interactive = .manual })
                 else
                     control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
                 if (created) |id| {
@@ -1746,7 +1746,7 @@ test "Automatic catalog uses personal discovery after creation and waits for Ses
         if (!restore_workspace) probe.hold_queries.store(true, .release);
         try installControlExecution(&workbench);
         if (!restore_workspace) {
-            task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+            task_id = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
             for (0..5000) |_| {
                 if (probe.queries.load(.acquire) > 0) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -1815,7 +1815,7 @@ test "Automatic deletion retains Workspace authority until the catalog worker dr
     probe.hold_queries.store(true, .release);
     defer probe.hold_queries.store(false, .release);
     try installControlExecution(&workbench);
-    const id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = .full_access });
+    const id = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = .full_access });
     for (0..5000) |_| {
         if (probe.queries.load(.acquire) > 0) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -4326,7 +4326,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecutionGeneration(&first, 1);
-    const task_id = try first.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&first), null, null, .{ .interactive = null });
+    const task_id = try first.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&first), null, null, .{ .interactive = null });
     try waitInitialTaskCatalog(&first, task_id);
     _ = try runPreparedTask(&first, task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
@@ -5576,7 +5576,7 @@ test "scheduled durable admission failure does not block an interactive Product 
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, rejected, "\"tasks\":[]") != null);
 
-    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const task_id = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "Continue interactively" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeAggregateFixture(&snapshot_storage);
@@ -5790,7 +5790,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const task_id = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "Remain accepted" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
@@ -5863,7 +5863,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         }
     };
     var acceptance = Acceptance{};
-    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const task_id = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
         .text = "Compare these",
         .attachment_ids = &ids,
@@ -6294,7 +6294,7 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
     const task_id = try workbench.createTaskForWorkspace(.{ .manual = .{
         .workspace_id = workspace_id,
         .expected_epoch = epoch,
-    } }, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    } }, workspace_id, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     const after = try workbench.copyWorkspaceProjections(&projection_storage);
     try std.testing.expect(after[0].recent_order > recent_order);
     var snapshot_storage: [128 * 1024]u8 = undefined;
@@ -6540,7 +6540,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     const before = try workbench.copyWorkspaceProjections(&user_projection_storage);
     const manual_recent_order = before[0].recent_order;
 
-    const first_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const first_task = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     const first_workspace = try workbench.taskWorkspaceId(first_task);
     try std.testing.expectEqual(
         product_control.WorkspaceKind.automatic,
@@ -6589,7 +6589,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
         } }),
     );
 
-    const second_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const second_task = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     const second_workspace = try workbench.taskWorkspaceId(second_task);
     try std.testing.expect(first_workspace != second_workspace);
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
@@ -6703,7 +6703,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
 
     try std.testing.expectError(
         error.SessionCapacity,
-        workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null }),
+        workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null }),
     );
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
@@ -7055,8 +7055,8 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     });
     fake_core.setNextPlan(.controlled);
     defer fake_core.releaseControlled();
-    const running_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
-    const queued_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const running_task = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const queued_task = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, running_task, .{ .text = "hold worker" });
     try waitControlSnapshot(
         &workbench,
@@ -9017,7 +9017,7 @@ test "expanded text and file limits reach AgentCore intact and reject overflow b
         try std.testing.expectEqual(limits.max_attachment_file_bytes, descriptor.size_bytes);
         id.* = descriptor.id;
     }
-    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const task_id = try workbench.createTaskForWorkspace(.automatic, null, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     try std.testing.expectError(error.ProjectionCapacity, workbench.runTask(task_id, .{ .text = text }));
     try std.testing.expectError(error.ProjectionCapacity, workbench.runTask(task_id, .{
         .multimodal = .{ .text = text, .attachment_ids = &ids },

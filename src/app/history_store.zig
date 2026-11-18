@@ -1172,6 +1172,68 @@ test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive re
     }
 }
 
+test "SQLite history projects all legacy directories above the registration quota" {
+    const a = std.testing.allocator;
+    const limits: product.Limits = .{};
+    const directory_count = limits.max_manual_directories + 1;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    var store = try Store.init(std.testing.io, a, root);
+    defer store.deinit();
+    {
+        const database = try sqlite.Database.create(std.testing.io, a, .{ .file = store.path }, product.history_migrations[0..11]);
+        defer database.destroy() catch unreachable;
+        var next_id: [8]u8 = undefined;
+        std.mem.writeInt(u64, &next_id, directory_count + 1, .big);
+        const first_id = "\x00\x00\x00\x00\x00\x00\x00\x01";
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{
+            .sql = "INSERT INTO history_state(singleton,default_permission_profile,next_workspace_id,next_workspace_recent_order,next_task_id,next_task_recent_order,failures_json) VALUES(1,'approval_required',?1,?1,?2,?2,'[]')",
+            .params = &.{ .{ .blob = &next_id }, .{ .blob = first_id } },
+        } }}));
+        for (1..directory_count + 1) |id| {
+            const name = try std.fmt.allocPrint(a, "legacy-{d}", .{id});
+            defer a.free(name);
+            try temporary.dir.createDir(std.testing.io, name, .default_dir);
+            const path = try temporary.dir.realPathFileAlloc(std.testing.io, name, a);
+            defer a.free(path);
+            var identity: [8]u8 = undefined;
+            std.mem.writeInt(u64, &identity, id, .big);
+            try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{
+                .sql = "INSERT INTO workspaces(id,epoch,kind,visible,recent_order,canonical_root,display_name,project_removed) VALUES(?1,?2,'manual',1,?1,?3,?4,?5)",
+                .params = &.{ .{ .blob = &identity }, .{ .blob = first_id }, .{ .blob = path }, .{ .blob = name }, .{ .integer = @intFromBool(id != 1) } },
+            } }}));
+        }
+    }
+    const Restore = struct {
+        fn load(context: ?*anyopaque) !?wire.RecoveredState {
+            const history: *Store = @ptrCast(@alignCast(context.?));
+            return history.load(std.testing.allocator);
+        }
+    };
+    const control = try a.create(product.Runtime);
+    defer a.destroy(control);
+    try product.TestSupport.initHistoryFixture(a, control, limits, .{
+        .task_persistence = .{ .enabled = true, .context = &store, .restore_fn = Restore.load },
+    });
+    defer control.deinit();
+    try std.testing.expect(!store.restore_failed);
+    const output = try a.alloc(u8, 1024 * 1024);
+    defer a.free(output);
+    const bytes = try control.writeViewFixture(output, .{ .management = .skills });
+    const decoded = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+    defer decoded.deinit();
+    const directories = decoded.value.object.get("workspaces").?.array.items;
+    try std.testing.expectEqual(directory_count, directories.len);
+    for (directories) |entry| {
+        const id = try std.fmt.parseInt(u64, entry.object.get("id").?.string, 10);
+        try std.testing.expectEqual(id == 1, entry.object.get("projectEntry").?.bool);
+        try std.testing.expectEqualStrings("available", entry.object.get("authorization").?.string);
+    }
+    try std.testing.expectError(error.WorkspaceDirectoryCapacity, control.openWorkspace(.{ .workspace_root = root, .intent = .directory, .trust = .explicitly_trusted }));
+}
+
 test "SQLite history newer schema cannot be replaced through recovery" {
     for ([_]bool{ false, true }) |json_marker| {
         const a = std.testing.allocator;

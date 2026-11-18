@@ -63,6 +63,7 @@ const added_columns = [_]struct { column: []const u8, version: usize }{
     .{ .column = "superseded_by_run_id", .version = 10 },
     .{ .column = "compact_boundary", .version = 10 },
     .{ .column = "updated_output_ids_json", .version = 11 },
+    .{ .column = "project_id", .version = 12 },
 };
 
 /// Writes today's rows into a store migrated only through `version`, which is
@@ -80,9 +81,8 @@ fn insertAtVersion(
         var markers: std.ArrayList(u8) = .empty;
         var params: std.ArrayList(sql.Value) = .empty;
         for (row.columns, row.values) |column, value| {
-            // Version 1 had this one and migration 3 dropped it, so no
-            // store this writes to has it.
-            if (std.mem.eql(u8, column, "project_removed")) continue;
+            const legacy_project_entry = version < 12 and std.mem.eql(u8, column, "project_entry");
+            if (legacy_project_entry and version < 3) continue;
             var later = false;
             for (added_columns) |added| {
                 if (std.mem.eql(u8, column, added.column) and added.version > version) later = true;
@@ -92,8 +92,8 @@ fn insertAtVersion(
                 try columns.append(a, ',');
                 try markers.append(a, ',');
             }
-            try columns.appendSlice(a, column);
-            try params.append(a, value);
+            try columns.appendSlice(a, if (legacy_project_entry) "project_removed" else column);
+            try params.append(a, if (legacy_project_entry) .{ .integer = 1 - value.integer } else value);
             try markers.appendSlice(a, try std.fmt.allocPrint(a, "?{d}", .{params.items.len}));
         }
         try mutations.append(a, .{ .statement = .{
@@ -203,7 +203,7 @@ test "Project removal survives SQL restart without changing Workspace or Task au
     const a = arena.allocator();
     const path = try temporaryPath(a, temporary.dir);
     const state = try history.fixture(a);
-    state.workspaces[0].project_removed = true;
+    state.workspaces[0].project_entry = false;
     {
         const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
@@ -213,9 +213,9 @@ test "Project removal survives SQL restart without changing Workspace or Task au
     defer database.destroy() catch unreachable;
     try expectSame(a, database.capability(), state);
     for ([_][]const u8{
-        "UPDATE workspaces SET project_removed=2",
-        "UPDATE workspaces SET project_removed='invalid'",
-        "UPDATE workspaces SET project_removed=NULL",
+        "UPDATE workspaces SET project_entry=2",
+        "UPDATE workspaces SET project_entry='invalid'",
+        "UPDATE workspaces SET project_entry=NULL",
     }) |statement| {
         try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
     }
@@ -1997,4 +1997,59 @@ test "repository preserves multiple opaque frame occurrences with the same ident
     var same = try repository.prepare(loaded.value, loaded.preserved, @splat(2));
     defer same.deinit();
     try std.testing.expectEqual(@as(usize, 0), same.changed_rows);
+}
+
+test "project membership migration retains hidden identity and explicit null across SQL restart" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    var state = try history.fixture(a);
+    var hidden = state.workspaces[0];
+    hidden.id = state.next_workspace_id;
+    hidden.canonical_root = "/hidden-project";
+    hidden.visible = false;
+    hidden.project_entry = false;
+    hidden.recent_order = state.next_workspace_recent_order;
+    state.next_workspace_id += 1;
+    state.next_workspace_recent_order += 1;
+    state.workspaces = try a.dupe(history.wire.WorkspaceWire, &.{ state.workspaces[0], hidden });
+    {
+        const previous = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..11]);
+        defer previous.destroy() catch unreachable;
+        try insertAtVersion(a, previous.capability(), state, 11);
+        // Old hidden records could still carry the old default negative flag.
+        try std.testing.expectEqual(sql.MutationOutcome.committed, previous.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE workspaces SET project_removed=0" } }}));
+    }
+    {
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        const upgraded = try history.load(a, database.capability());
+        try std.testing.expectEqual(state.tasks[0].workspace_id, upgraded.tasks[0].project_id.?);
+        try std.testing.expect(!upgraded.workspaces[1].project_entry);
+        var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+        defer repository.deinit();
+        try repository.seed(upgraded, .{});
+        state.tasks[0].project_id = hidden.id;
+        var moved = try repository.prepare(state, .{}, @splat(1));
+        defer moved.deinit();
+        try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&moved));
+        try expectSame(a, database.capability(), state);
+        state.tasks[0].project_id = null;
+        var cleared = try repository.prepare(state, .{}, @splat(2));
+        defer cleared.deinit();
+        try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&cleared));
+    }
+    const reopened = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer reopened.destroy() catch unreachable;
+    try expectSame(a, reopened.capability(), state);
+    for ([_][]const u8{
+        "UPDATE tasks SET project_id=X'0000000000000000'",
+        "UPDATE tasks SET project_id=X'01'",
+        "UPDATE tasks SET project_id=3",
+        "UPDATE tasks SET project_id=X'00000000000000ff'",
+        "UPDATE workspaces SET project_entry=1 WHERE visible=0",
+    }) |invalid| try std.testing.expectEqual(sql.MutationOutcome.constraint, reopened.capability().mutate(&.{.{ .statement = .{ .sql = invalid } }}));
 }

@@ -294,11 +294,11 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
   });
   const draft = workbenchReducer(accepted, {
     type: "task.draft.opened",
-    workspaceId: "1",
+    projectId: "1",
   });
   assert.equal(draft.activeTaskId, null);
   assert.equal(draft.draftOpen, true);
-  assert.equal(draft.draftWorkspaceId, "1");
+  assert.equal(draft.draftProjectId, "1");
 
   const refreshed = workbenchReducer(draft, {
     type: "snapshot.accepted",
@@ -307,7 +307,7 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
   });
   assert.equal(refreshed.activeTaskId, null);
   assert.equal(refreshed.draftOpen, true);
-  assert.equal(refreshed.draftWorkspaceId, "1");
+  assert.equal(refreshed.draftProjectId, "1");
 
   const selected = workbenchReducer(refreshed, {
     type: "task.selected",
@@ -315,17 +315,17 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
   });
   assert.equal(selected.activeTaskId, "2");
   assert.equal(selected.draftOpen, false);
-  assert.equal(selected.draftWorkspaceId, null);
+  assert.equal(selected.draftProjectId, null);
 });
 
 test("an unscoped New task survives snapshots without inventing a Workspace", () => {
   const draft = workbenchReducer(initialWorkbenchState, {
     type: "task.draft.opened",
-    workspaceId: null,
+    projectId: null,
   });
   assert.equal(draft.activeTaskId, null);
   assert.equal(draft.draftOpen, true);
-  assert.equal(draft.draftWorkspaceId, null);
+  assert.equal(draft.draftProjectId, null);
 
   const refreshed = workbenchReducer(draft, {
     type: "snapshot.accepted",
@@ -334,7 +334,7 @@ test("an unscoped New task survives snapshots without inventing a Workspace", ()
   });
   assert.equal(refreshed.activeTaskId, null);
   assert.equal(refreshed.draftOpen, true);
-  assert.equal(refreshed.draftWorkspaceId, null);
+  assert.equal(refreshed.draftProjectId, null);
 });
 
 test("a removed Workspace leaves orphan history unselected until reauthorization", () => {
@@ -363,14 +363,14 @@ test("removing a Workspace keeps its New task draft identity", () => {
   });
   const draft = workbenchReducer(accepted, {
     type: "task.draft.opened",
-    workspaceId: "1",
+    projectId: "1",
   });
   const removed = workbenchReducer(draft, {
     type: "snapshot.accepted",
     receivedAt: 0,
     snapshot: snapshot("2", [], []),
   });
-  assert.equal(removed.draftWorkspaceId, "1");
+  assert.equal(removed.draftProjectId, "1");
   assert.equal(removed.draftOpen, true);
 });
 

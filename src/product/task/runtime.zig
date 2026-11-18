@@ -5114,6 +5114,19 @@ pub const Runtime = struct {
         task.skills_unavailable = true;
     }
 
+    pub fn taskProjectId(self: *const Runtime, task_id: u64) MutationError!?u64 {
+        return (self.findConst(task_id) orelse return error.UnknownTask).durable.project_id;
+    }
+
+    pub fn setProject(self: *Runtime, task_id: u64, project_id: ?u64) MutationError!bool {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null) return error.TaskReadOnly;
+        if (task.deletion == .deleting or task.runtime.close_requested) return error.TaskBusy;
+        if (task.durable.project_id == project_id) return false;
+        task.durable.project_id = project_id;
+        return true;
+    }
+
     pub fn renameTask(
         self: *Runtime,
         task_id: u64,
@@ -5427,6 +5440,12 @@ pub const Runtime = struct {
             }
         }
         return result;
+    }
+
+    pub fn projectHasTasks(self: *const Runtime, project_id: u64) bool {
+        for (self.tasks) |entry| if (entry) |task|
+            if (task.durable.project_id == project_id) return true;
+        return false;
     }
 
     pub fn workspaceHasTasks(self: *const Runtime, workspace_id: u64) bool {

@@ -45,6 +45,7 @@ export async function runAutomaticFirstSkillVertical({
   );
   assert.equal(skill.enabled, true);
   const request = {
+    projectId: null,
     workspace: { kind: "automatic" },
     modelSelection: fixtureModelSelection(before),
     expectedSkillCatalogRevision: catalog.revision,
@@ -201,6 +202,7 @@ export async function runSkillAutoRefreshVertical({
   try {
     const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId,

@@ -218,6 +218,7 @@ export async function runMcpLifecycleVertical({
     const modelSnapshot = await snapshot();
     const create = async (approvalMode = "manual") => {
       const result = await invoke("metawork.tasks.create", {
+        projectId: null,
         workspace: {
           kind: "manual",
           workspaceId: workspace.id,

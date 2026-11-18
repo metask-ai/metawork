@@ -12,7 +12,8 @@
       "canonical_root": "/history",
       "display_name": "Workspace\u0000\u4e16",
       "visible": true,
-      "recent_order": 9
+      "recent_order": 9,
+      "project_entry": true
     }
   ],
   "tasks": [
@@ -251,7 +252,8 @@
           },
           "state": "waiting"
         }
-      ]
+      ],
+      "project_id": 3
     }
   ],
   "failures": [

@@ -199,7 +199,7 @@ test("Account states never replace or reinterpret the Workbench", async () => {
   // Once identity acquisition began, continuous delivery uses that same Task.
   assert.match(
     app,
-    /const canCreateTask =\s*snapshot\.newTaskAdmission\.available &&\s*newTaskWorkspaceReady &&\s*newTaskModelState\.valid/,
+    /const canCreateTask =\s*snapshot\.newTaskAdmission\.available &&\s*newTaskWorkspaceReady &&\s*newTaskProjectReady &&\s*newTaskModelState\.valid/,
   );
   assert.match(
     app,
@@ -264,7 +264,7 @@ test("draft Workspace selection stays local until Task creation", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   assert.match(
     app,
-    /function setDraftWorkspaceById\(workspaceId: string\) \{[\s\S]*?type: "task\.draft\.opened",[\s\S]*?workspaceId: workspace\.id/,
+    /function setDraftWorkspaceById\(workspaceId: string\) \{[\s\S]*?newTaskDrafts\.setDirectory\(\{[\s\S]*?kind: "explicit"/,
   );
   assert.doesNotMatch(app, /client\.selectWorkspace|WorkspaceSelectionIntents/);
   assert.match(app, /onSelectTask=\{openTask\}/);
@@ -283,7 +283,7 @@ test("Task and draft contexts do not recreate a global active Workspace", async 
   assert.doesNotMatch(app, /snapshot\.selectedWorkspaceId/);
   assert.match(
     app,
-    /const composerWorkspaceId =\s*activeTask\?\.workspaceId \?\?\s*selectedTaskSummary\?\.workspaceId \?\?\s*workbench\.draftWorkspaceId/,
+    /const composerWorkspaceId = newTaskDraftActive\s*\? draftDirectoryId\s*: (activeTask\?\.workspaceId \?\? selectedTaskSummary\?\.workspaceId|\(activeTask\?\.workspaceId \?\? selectedTaskSummary\?\.workspaceId\))/,
   );
   assert.match(
     app,

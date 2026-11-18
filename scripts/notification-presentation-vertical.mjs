@@ -163,6 +163,7 @@ export async function runNotificationPresentationVertical({
   const create = async (title) => {
     const current = await snapshot();
     const created = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId,
