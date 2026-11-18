@@ -3,7 +3,7 @@
 const std = @import("std");
 const memory = @import("metawork_http_memory");
 const contract = @import("metawork_http_contract");
-const idle_probe = @import("http_idle_probe.zig");
+const idle_probe = @import("idle_probe.zig");
 const Io = std.Io;
 const Client = std.http.Client;
 
@@ -1232,8 +1232,8 @@ test "HTTP Keep-Alive timeout parsing keeps a one second margin under the defaul
 }
 
 test {
-    _ = @import("http_transport_test.zig");
-    _ = @import("http_idle_probe.zig");
+    _ = @import("transport_test.zig");
+    _ = @import("idle_probe.zig");
     _ = @import("metawork_http_contract");
 }
 

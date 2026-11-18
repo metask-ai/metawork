@@ -1,5 +1,6 @@
-//! Application-only registration of blocking Select arms. Every arm needs a
-//! concurrency guarantee; async may run inline before its peers are registered.
+//! Registration of blocking Select arms: an engine, composed by Application.
+//! Every arm needs a concurrency guarantee; async may run inline before its
+//! peers are registered.
 const std = @import("std");
 
 pub fn start(selection: anytype, arms: anytype) std.Io.ConcurrentError!void {

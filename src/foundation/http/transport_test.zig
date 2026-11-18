@@ -1,5 +1,5 @@
 const std = @import("std");
-const http = @import("http_transport.zig");
+const http = @import("transport.zig");
 const contract = @import("metawork_http_contract");
 const Io = std.Io;
 
