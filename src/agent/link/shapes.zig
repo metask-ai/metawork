@@ -497,8 +497,11 @@ pub const McpInstallationTarget = struct {
 /// back. The Runtime it names does not travel -- across the link the Runtime
 /// *is* the link -- and the two capabilities become ids.
 pub const SessionRestoreInputs = struct {
-    skill: ?handle_table.Id,
-    mcp: ?handle_table.Id,
+    /// Absent as `Id.none`, not as an optional: a zero id is already invalid
+    /// by construction, so an `?Id` would be a second way to say the same
+    /// thing and a decoder would have to be told which one it is reading.
+    skill: handle_table.Id,
+    mcp: handle_table.Id,
     permission_mode: control.PermissionMode,
     shell_policy: control.ShellPolicy,
     permission_interaction: surface.PermissionInteraction,
@@ -524,9 +527,10 @@ pub const SessionOpenOptions = struct {
     workspace: surface.WorkspaceInput,
     canonical_user_home: []const u8,
     workspace_epoch: []const u8,
-    skill_catalog: ?handle_table.Id,
+    /// Absent as `Id.none`; see `SessionRestoreInputs`.
+    skill_catalog: handle_table.Id,
     skill_policy: ?surface.SkillPolicyInput,
-    mcp_selection: ?handle_table.Id,
+    mcp_selection: handle_table.Id,
     operation_id_floor: surface.OperationIdFloor,
 };
 

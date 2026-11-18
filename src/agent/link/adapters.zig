@@ -28,7 +28,10 @@ const method = @import("method.zig");
 const wire_types = @import("wire_types.zig");
 
 const port = contract.port;
+const surface = contract.surface;
+const shapes = @import("shapes.zig");
 const catalog = @import("agent_catalog");
+const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 
 /// The execution half's own state, which is what makes an argument whole
@@ -46,6 +49,16 @@ pub const Bindings = struct {
     runs: *handle_table.Table(port.RunPort),
     /// Skill catalog leases.
     leases: *handle_table.Table(catalog.Lease),
+    /// Captured skill capabilities. A separate table from the leases because
+    /// they are separate objects with separate lifetimes: one is borrowed
+    /// from the other by its own registered method.
+    skill_restore: *handle_table.Table(port.SkillRestoreInputs),
+    /// Captured Session restore inputs.
+    session_restore: *handle_table.Table(port.SessionRestoreInputs),
+    /// MCP selections. The methods that *create* one belong to the MCP step;
+    /// this table exists because an options struct can name one, and a
+    /// Session cannot be opened without reading that field.
+    selections: *handle_table.Table(mcp_catalog.Selection),
 };
 
 pub const ResolveError = error{
@@ -55,53 +68,170 @@ pub const ResolveError = error{
     UnknownHandle,
 };
 
-/// How one parameter type is rebuilt, or `null` when nothing rebuilds it yet.
+/// One parameter type's rebuild, with its signature nailed to the type.
 ///
-/// The returned type carries `apply`, so a dispatcher never sees the shape of
-/// an adapter -- only that one exists.
-pub fn parameterAdapter(comptime T: type) ?type {
+/// `apply` is declared here rather than in each entry, so every entry is
+/// checked against `Wire(T)` as it is written. That is not decoration: the
+/// first version of this file had an adapter taking `?handle_table.Id` for a
+/// type whose wire form is a bare id, which would have decoded one field
+/// short and blamed the payload.
+pub fn Adapter(comptime T: type) type {
+    return struct {
+        apply: *const fn (Bindings, wire_types.Wire(T)) ResolveError!T,
+    };
+}
+
+/// How one parameter type is rebuilt, or `null` when nothing rebuilds it yet.
+pub fn parameterAdapter(comptime T: type) ?Adapter(T) {
     // Plain data is itself. No adapter, nothing to own, nothing to decide:
     // `Wire(T) == T` is the statement that the value crossed unchanged.
-    if (wire_types.Wire(T) == T) return struct {
-        pub fn apply(_: Bindings, value: T) ResolveError!T {
+    if (wire_types.Wire(T) == T) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResolveError!T {
             return value;
         }
-    };
+    }.apply };
 
     // The caller's allocator does not cross; the execution half calls with
     // its own. `Wire` maps it to `void`, so there is no wire value at all.
-    if (T == std.mem.Allocator) return struct {
-        pub fn apply(bindings: Bindings, _: void) ResolveError!T {
+    if (T == std.mem.Allocator) return .{ .apply = struct {
+        fn apply(bindings: Bindings, _: void) ResolveError!T {
             return bindings.allocator;
         }
-    };
+    }.apply };
 
     // A Session named by id. The table is generation-bearing, so a stale id
     // resolves to nothing rather than to the slot's next occupant.
-    if (T == port.SessionPort) return struct {
-        pub fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+    if (T == port.SessionPort) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
             const held = bindings.sessions.resolve(id) orelse return error.UnknownHandle;
             return held.*;
         }
-    };
+    }.apply };
 
     // A skill catalog lease, borrowed for the call and released by its own
     // registered method, never by the dispatcher.
-    if (T == *catalog.Lease) return struct {
-        pub fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+    if (T == *catalog.Lease) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
             return bindings.leases.resolve(id) orelse error.UnknownHandle;
         }
-    };
-    if (T == ?*catalog.Lease) return struct {
-        pub fn apply(bindings: Bindings, id: ?handle_table.Id) ResolveError!T {
-            const value = id orelse return null;
-            return bindings.leases.resolve(value) orelse error.UnknownHandle;
+    }.apply };
+    // An optional handle crosses as a bare id, because a zero id is already
+    // invalid by construction. An `?Id` would be a second way to say absent,
+    // and the one thing worse than no rule is two.
+    if (T == ?*catalog.Lease) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+            if (!id.valid()) return null;
+            return bindings.leases.resolve(id) orelse error.UnknownHandle;
         }
-    };
+    }.apply };
+    if (T == ?*const mcp_catalog.Selection) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+            if (!id.valid()) return null;
+            return bindings.selections.resolve(id) orelse error.UnknownHandle;
+        }
+    }.apply };
+
+    // Captured capabilities, named by id for exactly as long as the other
+    // half holds one.
+    //
+    // Resolving borrows and never takes, including for the release methods.
+    // A release that fails must leave its handle resolvable -- the object is
+    // still there and the caller may ask again -- so retiring the entry
+    // belongs to the dispatcher, after the call returns without error. An
+    // adapter that took the entry up front would turn a refused release into
+    // a leak with no name left to refer to it by.
+    if (T == *port.SkillRestoreInputs) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+            return bindings.skill_restore.resolve(id) orelse error.UnknownHandle;
+        }
+    }.apply };
+    if (T == *const port.SkillRestoreInputs) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+            return bindings.skill_restore.resolve(id) orelse error.UnknownHandle;
+        }
+    }.apply };
+    if (T == *port.SessionRestoreInputs) return .{ .apply = struct {
+        fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
+            return bindings.session_restore.resolve(id) orelse error.UnknownHandle;
+        }
+    }.apply };
+
+    // Mirrors, read back field by field rather than by hand. A field whose
+    // mirror type differs goes through this same chain, so a handle inside an
+    // options struct is resolved by the entry above rather than by a second
+    // copy of it.
+    if (T == surface.SessionOpenOptions) return mirrorAdapter(T, shapes.SessionOpenOptions);
+    if (T == catalog.Query) return mirrorAdapter(T, shapes.CatalogQuery);
 
     // Everything else is owed. The list of what that is comes from
     // `owedMethods` rather than from a sentence here.
     return null;
+}
+
+/// A mirror read back into the port type it mirrors.
+///
+/// Field by field rather than by hand, because a hand-written copy of twelve
+/// fields is a second place for the shape to drift -- and `shapes.mirrors`
+/// only checks that a mirror field still names something, not that anyone
+/// copied it.
+///
+/// Three cases, and each is a rule rather than a convenience:
+///
+/// - The types match: the value crossed unchanged, so it is copied.
+/// - They differ: the port field's own adapter is applied, which is how a
+///   handle inside an options struct is resolved by the handle entry above
+///   instead of by a second copy of it. The mirror's field type must then be
+///   that port type's wire form, or the build says both, because two
+///   encodings of one field is how a decoder reads the wrong bytes.
+/// - The mirror has no such field: the wire dropped it, so the port field
+///   must have a default and that default is what the execution half passes.
+///   `catalog.Query.source_lifetime` is the one that matters -- its contract
+///   requires nonblocking reference accounting, which a cross-process call
+///   cannot provide, so it does not cross at all. Its default is `null`, and
+///   the caller retaining before the call is what replaces it.
+fn mirrorAdapter(comptime T: type, comptime Mirror: type) Adapter(T) {
+    if (wire_types.Wire(T) != Mirror) @compileError(
+        "the mirror for " ++ @typeName(T) ++ " is not its wire form",
+    );
+    return .{
+        .apply = struct {
+            fn apply(bindings: Bindings, value: Mirror) ResolveError!T {
+                var out: T = undefined;
+                inline for (@typeInfo(T).@"struct".fields) |field| {
+                    if (!@hasField(Mirror, field.name)) {
+                        const default = field.defaultValue() orelse @compileError(
+                            @typeName(T) ++ "." ++ field.name ++ " does not cross and has " ++
+                                "no default, so nothing says what the execution half " ++
+                                "should pass for it",
+                        );
+                        @field(out, field.name) = default;
+                        continue;
+                    }
+                    const Mirrored = @FieldType(Mirror, field.name);
+                    if (Mirrored == field.type) {
+                        @field(out, field.name) = @field(value, field.name);
+                        continue;
+                    }
+                    // Forced comptime: the `orelse` arm is a compile error, and
+                    // an arm like that is analysed unless the condition is
+                    // already known.
+                    const nested = comptime parameterAdapter(field.type) orelse @compileError(
+                        @typeName(T) ++ "." ++ field.name ++ " is reshaped as " ++
+                            @typeName(Mirrored) ++ " and nothing rebuilds " ++
+                            @typeName(field.type) ++ " from it",
+                    );
+                    if (Mirrored != wire_types.Wire(field.type)) @compileError(
+                        @typeName(Mirror) ++ "." ++ field.name ++ " is " ++ @typeName(Mirrored) ++
+                            " but " ++ @typeName(field.type) ++ " crosses as " ++
+                            @typeName(wire_types.Wire(field.type)) ++
+                            "; one field cannot have two encodings",
+                    );
+                    @field(out, field.name) = try nested.apply(bindings, @field(value, field.name));
+                }
+                return out;
+            }
+        }.apply,
+    };
 }
 
 /// Whether every argument of one method can be rebuilt.
@@ -201,17 +331,17 @@ test "plain data needs no adapter, and that is what Wire being the identity mean
     try testing.expect(parameterAdapter([]const u8) != null);
     try testing.expect(parameterAdapter(u64) != null);
 
-    const Adapter = parameterAdapter([]const u8).?;
+    const resolver = parameterAdapter([]const u8).?;
     const bindings = testBindings();
-    try testing.expectEqualStrings("model", try Adapter.apply(bindings, "model"));
+    try testing.expectEqualStrings("model", try resolver.apply(bindings, "model"));
 }
 
 test "an allocator is supplied locally rather than carried" {
-    const Adapter = parameterAdapter(std.mem.Allocator).?;
+    const resolver = parameterAdapter(std.mem.Allocator).?;
     const bindings = testBindings();
     // The wire value is `void`: there is nothing to send, and the execution
     // half answers with its own allocator.
-    const resolved = try Adapter.apply(bindings, {});
+    const resolved = try resolver.apply(bindings, {});
     try testing.expectEqual(bindings.allocator.ptr, resolved.ptr);
     try testing.expectEqual(void, wire_types.Wire(std.mem.Allocator));
 }
@@ -223,6 +353,12 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     defer runs.deinit();
     var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 1);
     defer leases.deinit();
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 1);
+    defer skill_restore.deinit();
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 1);
+    defer session_restore.deinit();
+    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 1);
+    defer selections.deinit();
 
     var first: port.SessionPort = .{ .context = null, .vtable = undefined };
     var second: port.SessionPort = .{ .context = null, .vtable = undefined };
@@ -231,18 +367,21 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
+        .skill_restore = &skill_restore,
+        .session_restore = &session_restore,
+        .selections = &selections,
     };
 
-    const Adapter = parameterAdapter(port.SessionPort).?;
+    const resolver = parameterAdapter(port.SessionPort).?;
     const stale = try sessions.insert(&first);
-    _ = try Adapter.apply(bindings, stale);
+    _ = try resolver.apply(bindings, stale);
     _ = sessions.take(stale);
 
     const fresh = try sessions.insert(&second);
     try testing.expect(fresh.bits() != stale.bits());
-    _ = try Adapter.apply(bindings, fresh);
-    try testing.expectError(error.UnknownHandle, Adapter.apply(bindings, stale));
-    try testing.expectError(error.UnknownHandle, Adapter.apply(bindings, .none));
+    _ = try resolver.apply(bindings, fresh);
+    try testing.expectError(error.UnknownHandle, resolver.apply(bindings, stale));
+    try testing.expectError(error.UnknownHandle, resolver.apply(bindings, .none));
     _ = sessions.take(fresh);
 }
 
@@ -259,24 +398,18 @@ test "the worklist is what the step still owes, counted by the compiler" {
     // rather than only in a build that happened to succeed. They are a
     // worklist, not an invariant: the end state is `owed.len == 0`.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 38), rebuildable);
-    try testing.expectEqual(@as(usize, 12), owed.len);
+    try testing.expectEqual(@as(usize, 45), rebuildable);
+    try testing.expectEqual(@as(usize, 5), owed.len);
 
     // Named one by one, because this is the work and a count is not a
-    // worklist. Five want a handle table they do not have yet, two belong
-    // to the MCP step, three read a mirror back, and two rebuild a
-    // capability from its descriptor.
+    // worklist. Two belong to the MCP step and three rebuild a capability
+    // from its descriptor -- `restore_session_route` among them, because its
+    // options carry a checkpoint source, which makes it a capability case
+    // rather than the mirror case it looked like from the method list.
     const expected = [_][]const u8{
-        "create_session_route",
         "restore_session_route",
         "create_mcp_admission_selection",
         "prepare_mcp_restore_selection",
-        "query_skill_catalog",
-        "narrow_skill_restore_inputs",
-        "clone_skill_restore_inputs",
-        "borrow_skill_restore_inputs",
-        "release_skill_restore_inputs",
-        "release_restore_inputs",
         "prepare_run_with_tools",
         "export_checkpoint",
     };
@@ -296,13 +429,17 @@ test "a type absent from the chain is owed, not assumed trivial" {
     // identity would hand a method a borrowed pointer rebuilt from nothing,
     // which is the one outcome worse than not compiling.
     try testing.expect(parameterAdapter(checkpoint.Sink) == null);
-    try testing.expect(parameterAdapter(contract.surface.SessionOpenOptions) == null);
+    try testing.expect(parameterAdapter(surface.SessionRestoreOptions) == null);
     // And the sentinel this file would otherwise never prove: the count moved
     // when an adapter was written. `port.SessionPort` has one, so the Session
     // release that takes one is rebuildable; the restore-inputs releases, which
     // take a handle with no table yet, are not.
     try testing.expect(comptime argumentsRebuildable(.runtime, "release_closed_session"));
-    try testing.expect(comptime !argumentsRebuildable(.runtime, "release_restore_inputs"));
+    try testing.expect(comptime argumentsRebuildable(.runtime, "release_restore_inputs"));
+    try testing.expect(comptime argumentsRebuildable(.runtime, "create_session_route"));
+    // Still owed, and not for want of a table: a checkpoint source is a
+    // capability the execution half has to perform, not a value it can hold.
+    try testing.expect(comptime !argumentsRebuildable(.runtime, "restore_session_route"));
 }
 
 fn testBindings() Bindings {
@@ -311,5 +448,99 @@ fn testBindings() Bindings {
         .sessions = undefined,
         .runs = undefined,
         .leases = undefined,
+        .skill_restore = undefined,
+        .session_restore = undefined,
+        .selections = undefined,
     };
+}
+
+test "an options mirror is read back with its handle resolved and its absence kept" {
+    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    defer sessions.deinit();
+    var runs = try handle_table.Table(port.RunPort).init(testing.allocator, 1);
+    defer runs.deinit();
+    var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 2);
+    defer leases.deinit();
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 1);
+    defer skill_restore.deinit();
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 1);
+    defer session_restore.deinit();
+    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 1);
+    defer selections.deinit();
+    const bindings: Bindings = .{
+        .allocator = testing.allocator,
+        .sessions = &sessions,
+        .runs = &runs,
+        .leases = &leases,
+        .skill_restore = &skill_restore,
+        .session_restore = &session_restore,
+        .selections = &selections,
+    };
+
+    var lease_storage: [8]u8 align(8) = @splat(0);
+    const lease: *catalog.Lease = @ptrCast(&lease_storage);
+    const lease_id = try leases.insert(lease);
+
+    const mirror: shapes.SessionOpenOptions = .{
+        .model_binding = .{
+            .image_capabilities = &.{},
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .permission_interaction = .interactive,
+        .workspace = .{ .canonical_root = "root", .trust = .explicitly_trusted },
+        .canonical_user_home = "home",
+        .workspace_epoch = "epoch",
+        .skill_catalog = lease_id,
+        .skill_policy = null,
+        // The absence this encoding has exactly one spelling for.
+        .mcp_selection = .none,
+        .operation_id_floor = .{},
+    };
+
+    const resolver = parameterAdapter(surface.SessionOpenOptions).?;
+    const options = try resolver.apply(bindings, mirror);
+
+    // The handle found its object, through the same entry a bare lease
+    // parameter uses rather than a second copy of it.
+    try testing.expectEqual(lease, options.skill_catalog.?);
+    try testing.expect(options.mcp_selection == null);
+    // And the plain fields came across as themselves, borrowed from the
+    // request for the length of the call, which is all the Session needs:
+    // the implementation dupes everything it keeps.
+    try testing.expectEqualStrings("epoch", options.workspace_epoch);
+    try testing.expectEqualStrings("home", options.canonical_user_home);
+    try testing.expectEqualStrings("model", options.model_binding.target.model);
+    try testing.expectEqual(surface.PermissionInteraction.interactive, options.permission_interaction);
+
+    // A retired id is refused, so a Session cannot be opened against a
+    // catalog lease the other half no longer holds.
+    _ = leases.take(lease_id);
+    try testing.expectError(error.UnknownHandle, resolver.apply(bindings, mirror));
+}
+
+test "a field the wire drops arrives as its default, and the default is the decision" {
+    const bindings = testBindings();
+    const resolver = parameterAdapter(catalog.Query).?;
+    const query = try resolver.apply(bindings, .{
+        .canonical_user_home = "home",
+        .target = .management,
+        .additional_sources = &.{},
+        .default_source_priority = 3,
+    });
+
+    try testing.expectEqualStrings("home", query.canonical_user_home);
+    try testing.expectEqual(@as(i32, 3), query.default_source_priority);
+    // `source_lifetime` is not on the mirror at all: its contract requires
+    // nonblocking reference accounting and a cross-process call blocks, so it
+    // cannot cross. `null` is its default, and the caller retaining before
+    // the call is what replaces it.
+    try testing.expect(query.source_lifetime == null);
 }
