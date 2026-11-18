@@ -330,6 +330,100 @@ pub fn overFrame(
     return body(context, frame);
 }
 
+/// Performs a call whose success cannot be undone, over a slot reserved
+/// before it runs.
+///
+/// The reservation is a parameter of `body`, so "begin it, then find it a
+/// name" is not an order to remember avoiding: it cannot be written. That
+/// matters because some of these calls have no undo at all. A begun Run is a
+/// linear value whose own contract says it must execute and deinitialize
+/// exactly once, and `RunPort.deinit` asserts it executed -- so a Run begun
+/// and then not namable is neither deliverable nor droppable, and the
+/// assertion would fire later, somewhere unrelated.
+///
+/// The promise is given back on every path out that did not fill it, on a
+/// `defer`, for the same reason the frame is retired on one: the failing
+/// paths are the common ones, and an early return that skipped it would hold
+/// a slot for a caller that can never fill it -- a leak that shows up only as
+/// capacity refusals much later.
+///
+/// Whether it was filled is asked of the table rather than tracked here, so
+/// there is one answer to that question.
+pub fn overReservation(
+    comptime T: type,
+    comptime Result: type,
+    table: *handle_table.Table(T),
+    context: anytype,
+    comptime body: fn (@TypeOf(context), handle_table.Table(T).Reservation) Result,
+) handle_table.InsertError!Result {
+    const promised = try table.reserve();
+    defer if (table.stillReserved(promised)) {
+        std.debug.assert(table.releaseReservation(promised));
+    };
+    return body(context, promised);
+}
+
+const Promised = struct {
+    const Table = handle_table.Table(u32);
+
+    fn fills(table: *Table, promise: Table.Reservation) anyerror!handle_table.Id {
+        // Stands in for the irreversible call succeeding: the thing now
+        // exists, and the name it was promised is the name it gets.
+        return table.fill(promise, &held) orelse error.Unexpected;
+    }
+
+    fn refuses(_: *Table, _: Table.Reservation) anyerror!handle_table.Id {
+        // The irreversible call refused, so nothing exists to name and the
+        // early return must not keep the slot.
+        return error.Unexpected;
+    }
+
+    var held: u32 = 42;
+};
+
+test "a promise is given back when the call it was made for does not happen" {
+    var table = try Promised.Table.init(testing.allocator, 1);
+    defer table.deinit();
+
+    // One slot, so a promise that was not given back would make the next
+    // attempt fail -- which is exactly how this leak presents in production.
+    // Two unwraps, and they are two different failures: the outer one is the
+    // table refusing to promise, the inner one is the call refusing to
+    // happen. Collapsing them would name the wrong cause.
+    try testing.expectError(
+        error.Unexpected,
+        try overReservation(u32, anyerror!handle_table.Id, &table, &table, Promised.refuses),
+    );
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+
+    const id = try (try overReservation(
+        u32,
+        anyerror!handle_table.Id,
+        &table,
+        &table,
+        Promised.fills,
+    ));
+    try testing.expectEqual(@as(u32, 42), table.resolve(id).?.*);
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
+    _ = table.take(id);
+}
+
+test "capacity is refused before the call that cannot be undone, not after" {
+    var table = try Promised.Table.init(testing.allocator, 1);
+    defer table.deinit();
+    const held = try table.reserve();
+
+    // The table is full, so `overReservation` refuses without ever reaching
+    // `body`. That is the whole reordering: the Run is not begun, so there is
+    // nothing undeliverable to hold.
+    try testing.expectError(
+        error.HandleCapacity,
+        overReservation(u32, anyerror!handle_table.Id, &table, &table, Promised.fills),
+    );
+    try testing.expect(table.stillReserved(held));
+    try testing.expect(table.releaseReservation(held));
+}
+
 test "a frame is retired on the failing path too, which is the path that matters" {
     const Work = struct {
         fn succeed(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {

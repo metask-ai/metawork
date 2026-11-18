@@ -1385,3 +1385,206 @@ test "a request naming another Run is not executed as this one" {
     try testing.expect(!run.names(11, 5));
     try testing.expect(!run.names(12, 4));
 }
+
+/// Whether a wire type names a handle anywhere inside it, which is how a
+/// result ends up putting something in a table.
+pub fn namesHandle(comptime T: type) bool {
+    if (T == handle_table.Id) return true;
+    return switch (@typeInfo(T)) {
+        .optional => |info| namesHandle(info.child),
+        .array => |info| namesHandle(info.child),
+        .pointer => |info| info.size == .slice and namesHandle(info.child),
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (namesHandle(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (namesHandle(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// How the thing a result names came to exist, which decides whether its slot
+/// has to be promised before the call or can be filled after it.
+///
+/// Derived from the question nobody can answer from a signature: if naming
+/// the result fails, can what the call created be undone? For a begun Run the
+/// answer is no at all -- its own contract says it must execute and
+/// deinitialize exactly once -- and for the rest the undo is a call that can
+/// itself fail. Only where nothing new was created is "insert afterwards"
+/// safe.
+pub const Creation = enum {
+    /// Success cannot be taken back, or can only be taken back by a call that
+    /// may fail. The slot is promised before this runs, so a refusal happens
+    /// while there is still nothing to deliver.
+    irreversible,
+    /// The result names something that already exists, so there is nothing to
+    /// insert and nothing to promise.
+    names_existing,
+    /// Deferred to the MCP step with the rest of that surface.
+    mcp_step,
+};
+
+pub const Named = struct {
+    name: []const u8,
+    creation: Creation,
+    reason: []const u8,
+};
+
+/// Every method whose wire result names a handle, with how that handle came
+/// to exist. Closed against the derivation below, so a method that starts
+/// naming one cannot slip in unclassified -- and a classification cannot
+/// outlive the result it describes.
+pub const named_handles = [_]Named{
+    .{
+        .name = "create_session_route",
+        .creation = .irreversible,
+        .reason = "undoing it means closing the Session and then releasing it, and the close " ++
+            "can fail, so a naming failure afterwards could leave a Session open with no " ++
+            "name to reach it by",
+    },
+    .{
+        .name = "restore_session_route",
+        .creation = .irreversible,
+        .reason = "as create_session_route, and it has read a checkpoint besides",
+    },
+    .{
+        .name = "activate_mcp",
+        .creation = .mcp_step,
+        .reason = "deferred with the rest of the MCP handle surface, which brings its own " ++
+            "tables and its own release methods, so classifying this one alone would " ++
+            "decide half of a question",
+    },
+    .{
+        .name = "create_mcp_admission_selection",
+        .creation = .mcp_step,
+        .reason = "deferred with the rest of the MCP handle surface, which brings its own " ++
+            "tables and its own release methods, so classifying this one alone would " ++
+            "decide half of a question",
+    },
+    .{
+        .name = "prepare_mcp_restore_selection",
+        .creation = .mcp_step,
+        .reason = "deferred with the rest of the MCP handle surface, which brings its own " ++
+            "tables and its own release methods, so classifying this one alone would " ++
+            "decide half of a question",
+    },
+    .{
+        .name = "query_skill_catalog",
+        .creation = .irreversible,
+        .reason = "the acquisition holds a catalog lease, and release_skill_catalog returns " ++
+            "an error union, so the undo is a call that can fail",
+    },
+    .{
+        .name = "narrow_skill_restore_inputs",
+        .creation = .irreversible,
+        .reason = "allocates new inputs whose release returns an error union",
+    },
+    .{
+        .name = "clone_skill_restore_inputs",
+        .creation = .irreversible,
+        .reason = "allocates new inputs whose release returns an error union",
+    },
+    .{
+        .name = "borrow_skill_restore_inputs",
+        .creation = .names_existing,
+        .reason = "reads a lease the caller already holds rather than creating one, so there " ++
+            "is nothing to promise. It needs the id that lease was already issued, which " ++
+            "the table cannot answer yet: it maps an id to an object and not the other way " ++
+            "round. Inserting again would give one lease two names and two releases",
+    },
+    .{
+        .name = "capture_restore_inputs",
+        .creation = .irreversible,
+        .reason = "captures new inputs whose release returns an error union",
+    },
+    .{
+        .name = "begin_run_outcome",
+        .creation = .irreversible,
+        .reason = "the strongest case and the one that found this rule: a begun Run is a " ++
+            "linear value that must execute and deinitialize exactly once, and RunPort.deinit " ++
+            "asserts it executed. A Run begun and then not namable is neither deliverable " ++
+            "nor droppable",
+    },
+};
+
+fn namedHandle(comptime name: []const u8) ?Named {
+    comptime {
+        for (named_handles) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry;
+        }
+        return null;
+    }
+}
+
+fn WireResult(comptime owner: method.Owner, comptime name: []const u8) type {
+    comptime {
+        const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+        const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
+        return wire_types.Wire(Returned);
+    }
+}
+
+comptime {
+    @setEvalBranchQuota(1_000_000);
+    // Every result that names a handle says how that handle came to exist,
+    // and nothing else claims to.
+    for (method.entries) |entry| {
+        if (entry.transport == .stream) continue;
+        const Wired = switch (entry.owner) {
+            inline else => |owner| WireResult(owner, entry.name),
+        };
+        const names = Wired != void and namesHandle(Wired);
+        const listed = namedHandle(entry.name) != null;
+        if (names and !listed) @compileError(
+            "the result of " ++ entry.name ++ " names a handle and nothing says how that " ++
+                "handle came to exist. Add it to `named_handles` in " ++
+                "src/agent/link/adapters.zig: if the call cannot be undone, its slot has to " ++
+                "be promised before the call rather than filled after it",
+        );
+        if (!names and listed) @compileError(
+            "`named_handles` classifies " ++ entry.name ++ ", whose result no longer names a " ++
+                "handle; remove it so the table cannot outlive its reason",
+        );
+    }
+}
+
+test "every result that names a handle says how the handle came to exist" {
+    // The comptime block fails the build otherwise; this records the division,
+    // because which of these must promise a slot first is the whole content of
+    // the rule.
+    var irreversible: usize = 0;
+    var existing: usize = 0;
+    var mcp: usize = 0;
+    for (named_handles) |entry| {
+        try testing.expect(entry.reason.len > 40);
+        switch (entry.creation) {
+            .irreversible => irreversible += 1,
+            .names_existing => existing += 1,
+            .mcp_step => mcp += 1,
+        }
+    }
+    try testing.expectEqual(@as(usize, 11), named_handles.len);
+    try testing.expectEqual(@as(usize, 7), irreversible);
+    try testing.expectEqual(@as(usize, 1), existing);
+    try testing.expectEqual(@as(usize, 3), mcp);
+}
+
+test "naming a handle is detected through the shapes that carry one" {
+    // The derivation, not the list: a handle inside a union inside a struct
+    // still counts, which is how `begin_run_outcome` was found.
+    try testing.expect(namesHandle(handle_table.Id));
+    try testing.expect(namesHandle(shapes.SessionRoute));
+    try testing.expect(namesHandle(shapes.BeginRunOutcome));
+    try testing.expect(namesHandle(?shapes.RunRoute));
+    try testing.expect(namesHandle([]const shapes.SkillRestoreBorrow));
+    try testing.expect(!namesHandle(u64));
+    try testing.expect(!namesHandle(void));
+    try testing.expect(!namesHandle(shapes.CloseOutcome));
+}
