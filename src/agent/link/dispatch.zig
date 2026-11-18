@@ -32,98 +32,11 @@ const error_code = @import("error_code.zig");
 const handle_table = @import("handle_table.zig");
 const method = @import("method.zig");
 const payload = @import("payload.zig");
+const run_tools = @import("run_tools.zig");
 const wire_types = @import("wire_types.zig");
 
 const checkpoint = @import("agent_checkpoint");
 const port = contract.port;
-
-/// A capability's backing object, valid for exactly one call.
-///
-/// `borrow` is the only way in, so a pointer kept past `retire` is a refusal
-/// rather than a read. The marker is checked rather than the memory being
-/// merely overwritten: a zeroed struct can still look like a valid one, and
-/// "looks valid" is the thing being prevented.
-pub fn Frame(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        /// Deliberately not a bool. A freed-and-reused frame is far more
-        /// likely to hold a plausible bool than this exact word.
-        const live_marker: u64 = 0x4c49_5645_4652_414d;
-        const retired_marker: u64 = 0xdead_f00d_dead_f00d;
-
-        marker: u64 = live_marker,
-        value: T,
-
-        pub fn init(value: T) Self {
-            return .{ .value = value };
-        }
-
-        /// The context pointer a capability carries. Opaque on purpose: the
-        /// only thing the far side can do with it is hand it back.
-        pub fn context(self: *Self) ?*anyopaque {
-            return @ptrCast(self);
-        }
-
-        /// The backing object, or `null` once the call it belonged to has
-        /// returned.
-        pub fn borrow(self: *Self) ?*T {
-            if (self.marker != live_marker) return null;
-            return &self.value;
-        }
-
-        /// Recovers the frame from a capability's context, without yet
-        /// claiming it is live.
-        pub fn fromContext(value: ?*anyopaque) ?*Self {
-            const pointer = value orelse return null;
-            return @ptrCast(@alignCast(pointer));
-        }
-
-        /// Called by the dispatcher when the call returns, whatever the
-        /// outcome. After this the frame answers nothing.
-        pub fn retire(self: *Self) void {
-            self.marker = retired_marker;
-            self.value = undefined;
-        }
-
-        pub fn live(self: *const Self) bool {
-            return self.marker == live_marker;
-        }
-    };
-}
-
-/// A checkpoint destination the execution half writes to, as a capability
-/// built over one call's frame.
-///
-/// The sink is the first of the four and it is the shape the rest follow:
-/// nothing about the destination crosses except the descriptor, the bytes
-/// never leave this half, and the writer lives in a frame the dispatcher
-/// retires.
-pub const CheckpointWriter = struct {
-    destination: envelope_destination,
-    written: u64 = 0,
-
-    const envelope_destination = @import("shapes.zig").CheckpointDestination;
-    pub const Backing = Frame(CheckpointWriter);
-
-    /// `ok` while the write is admitted, and the contract's own refusal
-    /// otherwise. A retained frame lands on `contract_failed`, because a
-    /// write after the call is exactly a contract failure and the vocabulary
-    /// already says so.
-    pub fn sink(backing: *Backing) checkpoint.Sink {
-        return .{ .context = backing.context(), .write_fn = write };
-    }
-
-    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
-        const backing = Backing.fromContext(context) orelse return .contract_failed;
-        const writer = backing.borrow() orelse return .contract_failed;
-        if (bytes.len == 0) return .contract_failed;
-        const hard = writer.destination.hard_bytes;
-        if (writer.written > hard - @min(hard, bytes.len)) return .contract_failed;
-        writer.written += bytes.len;
-        return .ok;
-    }
-};
 
 pub const DecodeError = envelope.DecodeError || payload.DecodeError;
 
@@ -155,8 +68,8 @@ pub fn resolveReceiver(
     const kind = envelope.receiverOf(request.entry.owner) orelse return null;
     return switch (kind) {
         .session => .{
-            .session = (bindings.sessions.resolve(request.receiver) orelse
-                return error.UnknownHandle).*,
+            .session = bindings.sessions.resolve(request.receiver) orelse
+                return error.UnknownHandle,
         },
         .run => .{
             .run = bindings.runs.resolve(request.receiver) orelse
@@ -166,7 +79,10 @@ pub fn resolveReceiver(
 }
 
 pub const Receiver = union(enum) {
-    session: port.SessionPort,
+    /// The entry, not the port: a Session method is called through
+    /// `held.port`, and the entry also carries the tool capabilities of its
+    /// current prepared Run.
+    session: *run_tools.HeldSession,
     run: *adapters.BegunRun,
 };
 
@@ -283,7 +199,7 @@ fn contextOf(
 ) ?*anyopaque {
     return switch (owner) {
         .runtime => bindings.runtime.context,
-        .session => receiver.?.session.context,
+        .session => receiver.?.session.port.context,
         .run => receiver.?.run.context,
         // The control block, which is what a Run's control handle names.
         .run_control => receiver.?.run.control_handle.context,
@@ -297,7 +213,7 @@ fn vtableOf(
 ) *const owner.VTable() {
     return switch (owner) {
         .runtime => bindings.runtime.vtable,
-        .session => receiver.?.session.vtable,
+        .session => receiver.?.session.port.vtable,
         .run => receiver.?.run.run_vtable,
         .run_control => receiver.?.run.control_handle.vtable.?,
     };
@@ -349,67 +265,6 @@ pub fn dispatchableCount() usize {
 
 const testing = std.testing;
 
-test "a frame answers while its call is running and refuses afterwards" {
-    var backing = CheckpointWriter.Backing.init(.{
-        .destination = .{ .task_id = 7, .generation = 3, .hard_bytes = 64 },
-    });
-    const sink = CheckpointWriter.sink(&backing);
-
-    try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "hello"));
-    try testing.expectEqual(@as(u64, 5), backing.borrow().?.written);
-
-    // The call returns. Everything the far side may still be holding is the
-    // same pointer it had a moment ago.
-    backing.retire();
-    try testing.expect(!backing.live());
-    try testing.expect(backing.borrow() == null);
-
-    // And this is the property: a write through the retained capability is
-    // refused, not performed against whatever now occupies that memory.
-    try testing.expectEqual(
-        checkpoint.SinkWriteResult.contract_failed,
-        sink.write_fn(sink.context, "after"),
-    );
-}
-
-test "a retired frame is not merely zeroed, because zero can look valid" {
-    var backing = CheckpointWriter.Backing.init(.{
-        .destination = .{ .task_id = 1, .generation = 1, .hard_bytes = 8 },
-    });
-    try testing.expect(backing.live());
-    backing.retire();
-
-    // A frame whose marker was cleared to zero rather than set to the retired
-    // word would still have to be refused, and is.
-    backing.marker = 0;
-    try testing.expect(backing.borrow() == null);
-
-    // Only the exact live word admits a borrow, so a reused allocation has to
-    // reproduce it to be mistaken for a live frame.
-    backing.marker = CheckpointWriter.Backing.live_marker;
-    try testing.expect(backing.borrow() != null);
-}
-
-test "the sink keeps the bound the descriptor carried" {
-    var backing = CheckpointWriter.Backing.init(.{
-        .destination = .{ .task_id = 2, .generation = 9, .hard_bytes = 4 },
-    });
-    const sink = CheckpointWriter.sink(&backing);
-    try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "abcd"));
-    // One byte past `hard_bytes` is a contract failure, not a truncation: the
-    // bound crossed as a number and is enforced where the bytes are.
-    try testing.expectEqual(
-        checkpoint.SinkWriteResult.contract_failed,
-        sink.write_fn(sink.context, "e"),
-    );
-    // An empty write is a contract failure too, as it is in process.
-    try testing.expectEqual(
-        checkpoint.SinkWriteResult.contract_failed,
-        sink.write_fn(sink.context, ""),
-    );
-    backing.retire();
-}
-
 test "a request is classified by the registry, and an unregistered one is refused" {
     const entry = try method.find(method.codeOf(.runtime, "has_pending_events"));
     var bytes: [envelope.header_bytes]u8 = undefined;
@@ -426,7 +281,7 @@ test "a request is classified by the registry, and an unregistered one is refuse
 }
 
 test "a receiver is resolved through its table, and a stale id is refused" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(adapters.BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
@@ -449,7 +304,7 @@ test "a receiver is resolved through its table, and a stale id is refused" {
         .selections = &selections,
     };
 
-    var held: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var held = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     const id = try sessions.insert(&held);
     const entry = try method.find(method.codeOf(.session, "set_model"));
 
@@ -485,165 +340,6 @@ test "every registered method's receiver resolves through a table this half has"
     _ = wire_types;
 }
 
-/// Runs one call over a per-call capability and retires the frame on the way
-/// out, whatever happened.
-///
-/// A `defer`, not a line at the end of the successful path. That distinction
-/// is the whole mechanism: an early return that skipped the retire would
-/// leave the frame live, a pointer the far side kept would keep working, and
-/// every test would still pass -- the mechanism gone with no symptom. Failure
-/// paths are the common case here, because a dispatcher refuses malformed
-/// arguments, unknown handles and capacity before it ever reaches the call.
-///
-/// `body` receives the frame rather than the capability, because which
-/// capability to build from it is the caller's business; what this function
-/// owns is the lifetime.
-pub fn overFrame(
-    comptime T: type,
-    comptime Result: type,
-    frame: *Frame(T),
-    context: anytype,
-    comptime body: fn (@TypeOf(context), *Frame(T)) Result,
-) Result {
-    defer frame.retire();
-    return body(context, frame);
-}
-
-/// Performs a call whose success cannot be undone, over a slot reserved
-/// before it runs.
-///
-/// The reservation is a parameter of `body`, so "begin it, then find it a
-/// name" is not an order to remember avoiding: it cannot be written. That
-/// matters because some of these calls have no undo at all. A begun Run is a
-/// linear value whose own contract says it must execute and deinitialize
-/// exactly once, and `RunPort.deinit` asserts it executed -- so a Run begun
-/// and then not namable is neither deliverable nor droppable, and the
-/// assertion would fire later, somewhere unrelated.
-///
-/// The promise is given back on every path out that did not fill it, on a
-/// `defer`, for the same reason the frame is retired on one: the failing
-/// paths are the common ones, and an early return that skipped it would hold
-/// a slot for a caller that can never fill it -- a leak that shows up only as
-/// capacity refusals much later.
-///
-/// Whether it was filled is asked of the table rather than tracked here, so
-/// there is one answer to that question.
-pub fn overReservation(
-    comptime T: type,
-    comptime Result: type,
-    table: *handle_table.Table(T),
-    context: anytype,
-    comptime body: fn (@TypeOf(context), handle_table.Table(T).Reservation) Result,
-) handle_table.InsertError!Result {
-    const promised = try table.reserve();
-    defer if (table.stillReserved(promised)) {
-        std.debug.assert(table.releaseReservation(promised));
-    };
-    return body(context, promised);
-}
-
-const Promised = struct {
-    const Table = handle_table.Table(u32);
-
-    fn fills(table: *Table, promise: Table.Reservation) anyerror!handle_table.Id {
-        // Stands in for the irreversible call succeeding: the thing now
-        // exists, and the name it was promised is the name it gets.
-        return table.fill(promise, &held) orelse error.Unexpected;
-    }
-
-    fn refuses(_: *Table, _: Table.Reservation) anyerror!handle_table.Id {
-        // The irreversible call refused, so nothing exists to name and the
-        // early return must not keep the slot.
-        return error.Unexpected;
-    }
-
-    var held: u32 = 42;
-};
-
-test "a promise is given back when the call it was made for does not happen" {
-    var table = try Promised.Table.init(testing.allocator, 1);
-    defer table.deinit();
-
-    // One slot, so a promise that was not given back would make the next
-    // attempt fail -- which is exactly how this leak presents in production.
-    // Two unwraps, and they are two different failures: the outer one is the
-    // table refusing to promise, the inner one is the call refusing to
-    // happen. Collapsing them would name the wrong cause.
-    try testing.expectError(
-        error.Unexpected,
-        try overReservation(u32, anyerror!handle_table.Id, &table, &table, Promised.refuses),
-    );
-    try testing.expectEqual(@as(usize, 0), table.liveCount());
-
-    const id = try (try overReservation(
-        u32,
-        anyerror!handle_table.Id,
-        &table,
-        &table,
-        Promised.fills,
-    ));
-    try testing.expectEqual(@as(u32, 42), table.resolve(id).?.*);
-    try testing.expectEqual(@as(usize, 1), table.liveCount());
-    _ = table.take(id);
-}
-
-test "capacity is refused before the call that cannot be undone, not after" {
-    var table = try Promised.Table.init(testing.allocator, 1);
-    defer table.deinit();
-    const held = try table.reserve();
-
-    // The table is full, so `overReservation` refuses without ever reaching
-    // `body`. That is the whole reordering: the Run is not begun, so there is
-    // nothing undeliverable to hold.
-    try testing.expectError(
-        error.HandleCapacity,
-        overReservation(u32, anyerror!handle_table.Id, &table, &table, Promised.fills),
-    );
-    try testing.expect(table.stillReserved(held));
-    try testing.expect(table.releaseReservation(held));
-}
-
-test "a frame is retired on the failing path too, which is the path that matters" {
-    const Work = struct {
-        fn succeed(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {
-            const sink = CheckpointWriter.sink(frame);
-            if (sink.write_fn(sink.context, "ok") != .ok) return error.Unexpected;
-            return frame.borrow().?.written;
-        }
-
-        fn fail(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {
-            const sink = CheckpointWriter.sink(frame);
-            _ = sink.write_fn(sink.context, "partial");
-            // An early return, which is what a dispatcher does on a bad
-            // argument or an unknown handle.
-            return error.Unexpected;
-        }
-    };
-
-    const destination: @import("shapes.zig").CheckpointDestination =
-        .{ .task_id = 4, .generation = 2, .hard_bytes = 64 };
-
-    var good = CheckpointWriter.Backing.init(.{ .destination = destination });
-    const written = try overFrame(CheckpointWriter, anyerror!u64, &good, {}, Work.succeed);
-    try testing.expectEqual(@as(u64, 2), written);
-    try testing.expect(!good.live());
-
-    var bad = CheckpointWriter.Backing.init(.{ .destination = destination });
-    const sink = CheckpointWriter.sink(&bad);
-    try testing.expectError(
-        error.Unexpected,
-        overFrame(CheckpointWriter, anyerror!u64, &bad, {}, Work.fail),
-    );
-    // The point: the call left through an error and the frame is still
-    // retired, so the capability the far side may have kept is dead either
-    // way.
-    try testing.expect(!bad.live());
-    try testing.expectEqual(
-        checkpoint.SinkWriteResult.contract_failed,
-        sink.write_fn(sink.context, "after"),
-    );
-}
-
 /// A Session whose one driven method records what it was given. The rest of
 /// the vtable is left undefined on purpose: a test that called one of those
 /// would crash rather than quietly pass, which is the behaviour wanted from a
@@ -667,7 +363,7 @@ const FakeSession = struct {
 const port_namespace = port;
 
 const Harness = struct {
-    sessions: handle_table.Table(port.SessionPort),
+    sessions: handle_table.Table(run_tools.HeldSession),
     runs: handle_table.Table(adapters.BegunRun),
     leases: handle_table.Table(@import("agent_catalog").Lease),
     skill_restore: handle_table.Table(port.SkillRestoreInputs),
@@ -676,7 +372,7 @@ const Harness = struct {
 
     fn init() !Harness {
         return .{
-            .sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 2),
+            .sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2),
             .runs = try handle_table.Table(adapters.BegunRun).init(testing.allocator, 2),
             .leases = try handle_table.Table(@import("agent_catalog").Lease)
                 .init(testing.allocator, 2),
@@ -747,7 +443,7 @@ test "a request is answered by the object it named" {
     defer harness.deinit();
     var fake: FakeSession = .{};
     var vtable: port.SessionPort.VTable = undefined;
-    var held = fake.port(&vtable);
+    var held = run_tools.HeldSession.init(fake.port(&vtable));
     const id = try harness.sessions.insert(&held);
 
     const bytes = try setModelRequest(arena, id, "a-model", false);
@@ -772,7 +468,7 @@ test "the method's own failure is an answer, not the dispatcher's failure" {
     defer harness.deinit();
     var fake: FakeSession = .{ .fail = true };
     var vtable: port.SessionPort.VTable = undefined;
-    var held = fake.port(&vtable);
+    var held = run_tools.HeldSession.init(fake.port(&vtable));
     const id = try harness.sessions.insert(&held);
 
     const bytes = try setModelRequest(arena, id, "a-model", false);
@@ -798,7 +494,7 @@ test "each refusal leaves nothing behind" {
     defer harness.deinit();
     var fake: FakeSession = .{};
     var vtable: port.SessionPort.VTable = undefined;
-    var held = fake.port(&vtable);
+    var held = run_tools.HeldSession.init(fake.port(&vtable));
     const id = try harness.sessions.insert(&held);
     const baseline = harness.live();
 

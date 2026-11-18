@@ -30,6 +30,7 @@ const wire_types = @import("wire_types.zig");
 const port = contract.port;
 const surface = contract.surface;
 const control = contract.control;
+const run_tools = @import("run_tools.zig");
 const shapes = @import("shapes.zig");
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
@@ -144,8 +145,10 @@ pub const Bindings = struct {
     /// The one Runtime. A `runtime` method names no receiver because there is
     /// nothing to choose between, so this is where its calls land.
     runtime: port.RuntimePort,
-    /// Sessions this half holds for the other half to name.
-    sessions: *handle_table.Table(port.SessionPort),
+    /// Sessions this half holds for the other half to name, each with the
+    /// tool capabilities of its current prepared Run. Those are not
+    /// call-scoped, and `run_tools.zig` says why they live here.
+    sessions: *handle_table.Table(run_tools.HeldSession),
     /// Runs, which also answer their control handle: in process both are the
     /// Session's control block, so `envelope.Receiver.run` names one entry.
     runs: *handle_table.Table(BegunRun),
@@ -206,7 +209,7 @@ pub fn parameterAdapter(comptime T: type) ?Adapter(T) {
     if (T == port.SessionPort) return .{ .apply = struct {
         fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
             const held = bindings.sessions.resolve(id) orelse return error.UnknownHandle;
-            return held.*;
+            return held.port;
         }
     }.apply };
 
@@ -552,7 +555,7 @@ test "an allocator is supplied locally rather than carried" {
 }
 
 test "a stale handle resolves to a refusal, never to the slot's next occupant" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
@@ -565,8 +568,8 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 1);
     defer selections.deinit();
 
-    var first: port.SessionPort = .{ .context = null, .vtable = undefined };
-    var second: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var first = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
+    var second = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
@@ -694,7 +697,7 @@ fn testBindings() Bindings {
 }
 
 test "an options mirror is read back with its handle resolved and its absence kept" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
@@ -1056,7 +1059,7 @@ test "every handle table says what reclaims its entries, and only in two ways" {
 }
 
 test "a capacity refusal can name the table it came from" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(BegunRun).init(testing.allocator, 2);
     defer runs.deinit();
@@ -1079,7 +1082,7 @@ test "a capacity refusal can name the table it came from" {
         .selections = &selections,
     };
 
-    var held: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var held = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     const id = try sessions.insert(&held);
 
     const counts = liveCounts(bindings);
@@ -1094,7 +1097,7 @@ test "a capacity refusal can name the table it came from" {
     }
 
     // Full, and the refusal is a typed failure rather than a growth.
-    var second: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var second = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     try testing.expectError(error.HandleCapacity, sessions.insert(&second));
     _ = sessions.take(id);
 }
@@ -1166,7 +1169,7 @@ const ReleaseLog = struct {
 
     fn release(self: *ReleaseLog, comptime T: type, value: *T) void {
         _ = value;
-        if (T == port.SessionPort) self.sessions += 1;
+        if (T == run_tools.HeldSession) self.sessions += 1;
         if (T == BegunRun) self.runs += 1;
         if (T == catalog.Lease) self.leases += 1;
         if (T == port.SkillRestoreInputs) self.skill_restore += 1;
@@ -1181,7 +1184,7 @@ const ReleaseLog = struct {
 };
 
 const Tables = struct {
-    sessions: handle_table.Table(port.SessionPort),
+    sessions: handle_table.Table(run_tools.HeldSession),
     runs: handle_table.Table(BegunRun),
     leases: handle_table.Table(catalog.Lease),
     skill_restore: handle_table.Table(port.SkillRestoreInputs),
@@ -1190,7 +1193,7 @@ const Tables = struct {
 
     fn init() !Tables {
         return .{
-            .sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 4),
+            .sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 4),
             .runs = try handle_table.Table(BegunRun).init(testing.allocator, 4),
             .leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 4),
             .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
@@ -1240,7 +1243,7 @@ const Tables = struct {
 };
 
 const Storage = struct {
-    session: port.SessionPort = .{ .context = null, .vtable = undefined },
+    session: run_tools.HeldSession = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined }),
     run: BegunRun = undefined,
     lease: [8]u8 align(8) = @splat(0),
     skill: [8]u8 align(8) = @splat(0),
