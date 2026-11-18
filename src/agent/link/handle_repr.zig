@@ -1,9 +1,24 @@
 //! How the caller's half names a handle the execution half holds.
 //!
 //! The execution half keeps the object and sends an id. The caller has to
-//! hand Product back something of the port's own type, and Product only ever
-//! passes it along -- `handles.zig` asserts the opaque handle types declare
-//! nothing, so nothing is ever called on them over here.
+//! hand Product back something of the port's own type.
+//!
+//! An earlier version of this comment said that `handles.zig` asserts the
+//! opaque handle types declare nothing, so nothing is ever called on them
+//! over here. That is wrong, and it was the premise under "a box is enough":
+//! `handles.zig` exists *because* an opaque type can carry methods, and it
+//! classifies eleven of them on `mcp_catalog.Activation` alone. What it
+//! actually says is narrower, and it says it in as many words -- `catalog.Lease`
+//! and `port.SkillRestoreInputs` carry no methods at all, which is why they
+//! need nothing there beyond an assertion.
+//!
+//! Those two are also the only `boxed` handles outside MCP, so the box is
+//! sufficient for exactly the types it is used for, and `boxed_carry_nothing`
+//! below is the check rather than the claim. A handle that *does* carry
+//! methods needs a third representation -- an object on this side that
+//! answers the `projected` reads from what rode across and forwards the
+//! `call` and `release` ones -- and all four such types are MCP's, which is
+//! why `activate_mcp` is the one result the inbound chain still owes.
 //!
 //! The obvious shortcut is to put the id in the pointer: `@ptrFromInt` on the
 //! way out, `@intFromPtr` on the way back, no allocation. It is rejected, and
@@ -36,9 +51,11 @@
 const std = @import("std");
 const contract = @import("agent_contract");
 const handle_table = @import("handle_table.zig");
+const handles = @import("handles.zig");
 const method = @import("method.zig");
 const wire_types = @import("wire_types.zig");
 
+const mcp_catalog = @import("agent_mcp_catalog");
 const port = contract.port;
 const surface = contract.surface;
 
@@ -48,6 +65,73 @@ pub const Representation = enum {
     /// The id lives in a slot of ours, named by a real pointer to it.
     boxed,
 };
+
+/// A handle whose type carries methods, which a box cannot serve.
+///
+/// A box names the far object and nothing more. Product calling
+/// `activation.state()` on a box does not reach the far side at all -- it
+/// reads a slot as if it were an `ActivationStorage`, which is the silent
+/// wrong answer this file exists to refuse, arrived at from the other
+/// direction. What such a handle needs is an object of ours that answers the
+/// `projected` reads from the facts that rode across and forwards the rest,
+/// and building one means the module that owns the opaque type has to be able
+/// to make one -- the same gap `catalog.Projection.own` closed for the skill
+/// catalog.
+///
+/// All four are MCP's, so this whole shape belongs to the MCP step.
+pub const needs_stand_in = [_][]const u8{
+    @typeName(mcp_catalog.Activation),
+    @typeName(mcp_catalog.Selection),
+    @typeName(mcp_catalog.RestoreSelection),
+    @typeName(mcp_catalog.Projection),
+};
+
+/// Whether `handles.zig` records this type as carrying methods.
+fn carriesMethods(comptime T: type) bool {
+    inline for (handles.handles) |handle| {
+        if (comptime std.mem.eql(u8, handle.name, @typeName(T))) return handle.methods.len > 0;
+    }
+    return false;
+}
+
+fn listedNeedsStandIn(comptime T: type) bool {
+    inline for (needs_stand_in) |name| {
+        if (comptime std.mem.eql(u8, name, @typeName(T))) return true;
+    }
+    return false;
+}
+
+/// A `boxed` handle must carry no methods, or be one of the four already
+/// recorded as needing more than a box.
+///
+/// This is the check that replaces the claim the header used to make. Closed
+/// both ways: a type that gains a method and is not recorded fails the build
+/// rather than getting a box that answers its reads out of a slot, and a type
+/// recorded here that no longer carries methods is named so the entry goes.
+fn boxedCarriesNothing(comptime T: type, comptime named: []const u8) void {
+    comptime {
+        if (representationOf(T) != .boxed) return;
+        const Target = switch (@typeInfo(T)) {
+            .optional => |info| switch (@typeInfo(info.child)) {
+                .pointer => |inner| inner.child,
+                else => info.child,
+            },
+            .pointer => |info| info.child,
+            else => T,
+        };
+        if (carriesMethods(Target) and !listedNeedsStandIn(Target)) @compileError(
+            @typeName(Target) ++ " is named by " ++ named ++ ", crosses as a boxed handle, " ++
+                "and carries methods that src/agent/link/handles.zig classifies. A box " ++
+                "cannot answer them: Product would read a slot of ours as if it were that " ++
+                "type's own storage. Give it the stand-in representation, or record it in " ++
+                "`needs_stand_in` with the step that will",
+        );
+        if (!carriesMethods(Target) and listedNeedsStandIn(Target)) @compileError(
+            @typeName(Target) ++ " is in `needs_stand_in` but carries no methods any more; " ++
+                "a box is enough for it, so remove the entry",
+        );
+    }
+}
 
 /// Which representation a type gets, read off the type and nothing else.
 ///
@@ -129,6 +213,7 @@ fn classify(comptime T: type, comptime named: []const u8) void {
     comptime {
         const Wired = wire_types.Wire(T);
         if (Wired == handle_table.Id) {
+            boxedCarriesNothing(T, named);
             if (representationOf(T) == null) @compileError(
                 "the wire carries " ++ @typeName(T) ++ " as a handle id (it reaches " ++ named ++
                     ") and nothing says how the caller's half names it. It is neither a port " ++
@@ -142,6 +227,7 @@ fn classify(comptime T: type, comptime named: []const u8) void {
         for (@typeInfo(Wired).@"struct".fields) |field| {
             if (field.type != handle_table.Id) continue;
             const Origin = @FieldType(T, field.name);
+            boxedCarriesNothing(Origin, named);
             if (representationOf(Origin) == null) @compileError(
                 "the wire carries " ++ @typeName(T) ++ "." ++ field.name ++ " as a handle id " ++
                     "and nothing says how the caller's half names " ++ @typeName(Origin) ++
@@ -565,4 +651,42 @@ test "a box is taken before the call that names it, not after" {
     const again = try boxes.reserve();
     boxes.releaseReservation(again);
     try testing.expectEqual(@as(usize, 0), boxes.liveCount());
+}
+
+test "a box is enough for a handle that carries no methods, and for no other" {
+    // The header used to justify the box by saying nothing is ever called on
+    // an opaque handle over here. `handles.zig` exists because that is not
+    // true, so this is the shape of what is actually the case.
+
+    // The two the box is used for carry nothing, which is what makes a slot
+    // holding an id a complete answer for them.
+    try testing.expect(!carriesMethods(@import("agent_catalog").Lease));
+    try testing.expect(!carriesMethods(port.SkillRestoreInputs));
+    try testing.expectEqual(
+        Representation.boxed,
+        representationOf(*@import("agent_catalog").Lease).?,
+    );
+
+    // The four that carry methods are all MCP's, and all recorded. A box
+    // would let `activation.state()` read one of our slots as if it were
+    // that type's own storage -- the same silent wrong answer as an id in a
+    // pointer, reached from the other side.
+    try testing.expectEqual(@as(usize, 4), needs_stand_in.len);
+    var carrying: usize = 0;
+    for (handles.handles) |handle| {
+        if (handle.methods.len == 0) continue;
+        carrying += 1;
+        var listed = false;
+        for (needs_stand_in) |name| {
+            if (std.mem.eql(u8, name, handle.name)) listed = true;
+        }
+        try testing.expect(listed);
+    }
+    try testing.expectEqual(needs_stand_in.len, carrying);
+
+    // And `boxedCarriesNothing` is what keeps that true: it runs over the
+    // whole method surface in the closure above, so a non-MCP opaque handle
+    // gaining a method fails the build rather than quietly getting a box.
+    try testing.expect(carriesMethods(mcp_catalog.Activation));
+    try testing.expect(listedNeedsStandIn(mcp_catalog.Activation));
 }
