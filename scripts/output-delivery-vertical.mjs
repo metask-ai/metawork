@@ -3,8 +3,56 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { crc32, deflateRawSync } from "node:zlib";
 import { enUS } from "../frontend/src/i18n/messages/en-US.ts";
 import { zhCN } from "../frontend/src/i18n/messages/zh-CN.ts";
+
+function officeWordFixture() {
+  const documentType =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+  const wordNamespace =
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const entries = {
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${documentType}"/></Types>`,
+    "_rels/.rels":
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    "word/document.xml": `<w:document xmlns:w="${wordNamespace}"><w:body><w:p><w:r><w:t>MetaWork original fixture</w:t></w:r></w:p></w:body></w:document>`,
+  };
+  const local = [];
+  const central = [];
+  let offset = 0;
+  for (const [entry, value] of Object.entries(entries)) {
+    const name = Buffer.from(entry);
+    const data = Buffer.from(value);
+    const compressed = deflateRawSync(data);
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(8, 8);
+    header.writeUInt32LE(crc32(data), 14);
+    header.writeUInt32LE(compressed.length, 18);
+    header.writeUInt32LE(data.length, 22);
+    header.writeUInt16LE(name.length, 26);
+    const record = Buffer.alloc(46);
+    record.writeUInt32LE(0x02014b50);
+    record.writeUInt16LE(20, 4);
+    header.copy(record, 6, 4, 30);
+    record.writeUInt32LE(offset, 42);
+    local.push(header, name, compressed);
+    central.push(record, name);
+    offset += header.length + name.length + compressed.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50);
+  end.writeUInt16LE(central.length / 2, 8);
+  end.writeUInt16LE(central.length / 2, 10);
+  end.writeUInt32LE(
+    central.reduce((length, part) => length + part.length, 0),
+    12,
+  );
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...local, ...central, end]);
+}
 
 // Real App/Core/Renderer; only Provider replies are scripted. Drive the normal
 // Composer so a second snapshot reader cannot starve the window's one current
@@ -21,6 +69,7 @@ export async function runOutputDeliveryVertical({
   toolSse,
   textSse,
   nativeOutputProbe,
+  nativeExistingActions = true,
   connectWebView,
   restart,
   evidenceDirectory,
@@ -262,7 +311,7 @@ export async function runOutputDeliveryVertical({
       return request;
     }
     await click("check", "ready");
-    if (nativeOutputProbe) {
+    if (nativeOutputProbe && nativeExistingActions) {
       const beforeNative = await readdir(workspaceRoot);
       const destination = path.join(workspaceRoot, "另存 output 中文.txt");
       const saved = await nativeOutputProbe({
@@ -317,15 +366,17 @@ export async function runOutputDeliveryVertical({
     await click("check", "changed");
     await unlink(source);
     await click("check", "missing");
-    await writeFile(source, bytes);
-    await click("check", "ready");
+    await writeFile(source, `${content}edited externally`);
     const unsent = "Keep my unsent request. ";
     await webview.evaluate(
       `document.querySelector('.composer-shell textarea').focus()`,
     );
     await webview.send("Input.insertText", { text: unsent });
     const requestsBeforeEdit = provider.requests.length;
-    await click("edit", "edit_prepared");
+    assert.equal(
+      (await click("edit", "edit_prepared")).action,
+      "check_current",
+    );
     const draft = await webview.evaluate(
       `document.querySelector('.composer-shell textarea')?.value`,
     );
@@ -336,6 +387,7 @@ export async function runOutputDeliveryVertical({
     assert.equal(draft.split(unsent).length, 2);
     assert.equal(provider.requests.length, requestsBeforeEdit);
     evidence.editDraftOnlyAndExistingTextPreserved = true;
+    await writeFile(source, bytes);
     webview.close();
     webview = undefined;
     await restart();
@@ -346,6 +398,153 @@ export async function runOutputDeliveryVertical({
     assert.deepEqual(restored.outputs, [output]);
     const checked = await click("check", "ready");
     evidence.coldHistoryAndRecheck = true;
+    assert.equal(provider.requests.length, callsBeforeChecks);
+    evidence.fileActionsDidNotCallProvider = true;
+    assert.equal(
+      (await task()).conversationOutputs.find(
+        (record) => record.id === output.id,
+      )?.runId,
+      delivered.id,
+    );
+
+    await writeFile(source, `${content}between turns`);
+    const unchanged = await run(
+      "Read without updating the output",
+      "OUTPUT_INTERVAL_UNCHANGED",
+      [textSse("interval-unchanged", "OUTPUT_INTERVAL_UNCHANGED")],
+    );
+    assert.equal(unchanged.outputs.length, 0);
+    const updated = await run(
+      "Observe the work in progress",
+      "OUTPUT_INTERVAL_CHANGED",
+      [
+        async () => {
+          await writeFile(source, `${content}during the turn`);
+          return textSse("interval-changed", "OUTPUT_INTERVAL_CHANGED");
+        },
+      ],
+    );
+    assert.deepEqual(updated.outputs, [{ ...output, updated: true }]);
+    assert.equal(
+      (await task()).conversationOutputs.filter(
+        (record) => record.id === output.id,
+      ).length,
+      1,
+    );
+    evidence.updatedExistingOutputId = output.id;
+    await writeFile(source, bytes);
+
+    const html = "results/static.html";
+    const page = await run("Create a static report", "OUTPUT_HTML_CREATED", [
+      toolSse("html-write", "html-write", "Write", {
+        file_path: path.join(workspaceRoot, html),
+        content:
+          "<!doctype html><h1>Static report from outputs</h1><table><tr><td>42</td></tr></table>",
+      }),
+      textSse("html-created", "OUTPUT_HTML_CREATED"),
+    ]);
+    assert.equal(page.outputs.length, 0);
+    const change = page.fileChanges.changes.find(
+      (item) => item.displayPath === html,
+    );
+    assert.equal(change?.outputRegistrationAdmitted, true);
+    const review = labels("file_changes.review");
+    const register = labels("outputs.register");
+    async function clickLabel(labels, selector = "button") {
+      await poll(
+        () =>
+          webview.evaluate(`(() => {
+        const button = [...document.querySelectorAll(${JSON.stringify(selector)})].findLast(item => !item.disabled && ${JSON.stringify(labels)}.some(label => item.textContent.trim().includes(label)));
+        if (!button) return false;
+        button.click(); return true;
+      })()`),
+        15_000,
+        `Output button ${labels[0]}`,
+      );
+    }
+    await clickLabel(review);
+    await clickLabel(register, "#task-panel-tabpanel button");
+    const htmlOutput = await poll(
+      async () =>
+        (await task()).conversationOutputs?.find(
+          (record) => record.displayPath === html,
+        ),
+      15_000,
+      "Manually registered HTML output",
+    );
+    assert.equal(htmlOutput.runId, page.id);
+    await clickLabel(labels("outputs.view"));
+    await clickLabel(
+      labels("outputs.open_preview"),
+      `#task-panel-tabpanel [data-output-id="${htmlOutput.id}"] button`,
+    );
+    await poll(
+      () =>
+        webview.evaluate(
+          `document.querySelector('iframe[sandbox=""]')?.getAttribute('srcdoc')?.includes('Static report from outputs')`,
+        ),
+      15_000,
+      "HTML appears in the isolated preview frame",
+    );
+    const preview = await webview.send("DOMSnapshot.captureSnapshot", {
+      computedStyles: [],
+    });
+    assert.ok(preview.strings.includes("about:srcdoc"));
+    assert.ok(preview.strings.includes("Static report from outputs"));
+    evidence.registeredHtmlOutput = htmlOutput.id;
+    if (nativeOutputProbe) {
+      evidence.officeStage = "registering";
+      const wordPath = `results/MetaWork Office original ${taskId}-${process.pid}.docx`;
+      const wrongPath = `results/MetaWork Office mismatch ${taskId}-${process.pid}.xlsx`;
+      const original = path.join(workspaceRoot, wordPath);
+      const wordPackage = officeWordFixture();
+      await writeFile(original, wordPackage);
+      await writeFile(path.join(workspaceRoot, wrongPath), wordPackage);
+      const officeRun = await run(
+        "Deliver the Office document",
+        "OUTPUT_OFFICE_READY",
+        [
+          toolSse("office-deliver", "office-deliver", "DeliverFile", {
+            path: wordPath,
+          }),
+          toolSse("office-mismatch", "office-mismatch", "DeliverFile", {
+            path: wrongPath,
+          }),
+          textSse("office-ready", "OUTPUT_OFFICE_READY"),
+        ],
+      );
+      const word = officeRun.outputs.find(
+        (record) => record.displayPath === wordPath,
+      );
+      const mismatch = officeRun.outputs.find(
+        (record) => record.displayPath === wrongPath,
+      );
+      evidence.officeStage = "rejecting_mismatch";
+      const officeRow = (record) => `[data-output-id="${record.id}"]`;
+      const expectOpen = async (record, state) => {
+        await clickLabel(labels("outputs.open"), `${officeRow(record)} button`);
+        await poll(
+          () =>
+            webview.evaluate(`(() => {
+          const rows = [...document.querySelectorAll(${JSON.stringify(officeRow(record))})];
+          return rows.some(row => ${JSON.stringify(labels(`outputs.state.${state}`))}.includes(row.querySelector('.run-output-status')?.textContent.trim()));
+        })()`),
+          20_000,
+          `Office action returned ${state}`,
+        );
+      };
+      await expectOpen(mismatch, "restricted");
+      evidence.officeStage = "opening_original";
+      evidence.office = await nativeOutputProbe({
+        mode: "office",
+        source: original,
+        trigger: () => expectOpen(word, "opened"),
+      });
+      assert.equal(evidence.office.openedOriginal, true);
+      delete evidence.officeStage;
+      if (evidence.office.savedOriginal)
+        assert.notDeepEqual(await readFile(original), wordPackage);
+    }
     const screenshot = await webview.send("Page.captureScreenshot", {
       format: "png",
     });
@@ -364,15 +563,16 @@ export async function runOutputDeliveryVertical({
       15_000,
       "Output Task deleted from UI",
     );
+    const lastAction = await webview.evaluate(
+      "window.__outputActions.at(-1).operationId",
+    );
     const denied = await invoke("metawork.outputs.action", {
       ...checked,
-      operationId: String(BigInt(checked.operationId) + 1n),
+      operationId: String(BigInt(lastAction) + 1n),
     });
     assert.equal(denied.state, "missing");
     assert.deepEqual(await readFile(source), bytes);
     evidence.deletedTaskRejectedAndSourcePreserved = true;
-    assert.equal(provider.requests.length, callsBeforeChecks);
-    evidence.fileActionsDidNotCallProvider = true;
     assert.equal(provider.error, null);
     await writeFile(
       path.join(evidenceDirectory, "output.json"),
@@ -381,22 +581,28 @@ export async function runOutputDeliveryVertical({
     return evidence;
   } catch (error) {
     await mkdir(evidenceDirectory, { recursive: true });
+    let ui = null;
     if (webview) {
-      const ui = await webview.evaluate(
-        `({ body: document.body.innerText.slice(0, 16000), tasks: [...document.querySelectorAll('.task-list-item')].map(item => ({ id: item.dataset.taskId, current: item.getAttribute('aria-current') })), inputs: window.__outputInputs, actions: window.__outputActions })`,
-      );
-      await writeFile(
-        path.join(evidenceDirectory, "output-failure.json"),
-        JSON.stringify({ message: error.message, ...ui }, null, 2),
-      );
-      const screenshot = await webview.send("Page.captureScreenshot", {
-        format: "png",
-      });
-      await writeFile(
-        path.join(evidenceDirectory, "output-failure.png"),
-        Buffer.from(screenshot.data, "base64"),
-      );
+      ui = await webview
+        .evaluate(
+          `({ body: document.body.innerText.slice(0, 16000), tasks: [...document.querySelectorAll('.task-list-item')].map(item => ({ id: item.dataset.taskId, current: item.getAttribute('aria-current') })), inputs: window.__outputInputs, actions: window.__outputActions })`,
+        )
+        .catch(() => null);
+      const screenshot = await webview
+        .send("Page.captureScreenshot", {
+          format: "png",
+        })
+        .catch(() => null);
+      if (screenshot)
+        await writeFile(
+          path.join(evidenceDirectory, "output-failure.png"),
+          Buffer.from(screenshot.data, "base64"),
+        );
     }
+    await writeFile(
+      path.join(evidenceDirectory, "output-failure.json"),
+      JSON.stringify({ message: error.message, ...evidence, ...ui }, null, 2),
+    );
     throw error;
   } finally {
     webview?.close();

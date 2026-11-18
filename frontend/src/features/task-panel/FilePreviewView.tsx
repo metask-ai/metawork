@@ -1,5 +1,5 @@
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
 import {
   Markdown,
@@ -11,6 +11,7 @@ import { Tabs } from "../../components/ui/tabs.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { HighlightedSource } from "./HighlightedSource.tsx";
 import type { FilePreviewMode } from "./useTaskPanelViewStates.ts";
+import { staticHtmlPreview } from "./static-html-preview.ts";
 export type FilePreviewViewState = {
   selected: FileReferenceView;
   phase: "loading" | "settled";
@@ -36,7 +37,21 @@ export function FilePreviewView({
   const { t } = useI18n();
   const root = useRef<HTMLDivElement | null>(null);
   const markdown = /\.(?:md|markdown)$/i.test(state.selected.displayPath);
+  const html = /\.html?$/i.test(state.selected.displayPath);
   const ready = state.phase === "settled" && state.preview?.state === "ready";
+  const htmlSource =
+    ready &&
+    html &&
+    !state.preview?.truncated &&
+    !state.preview?.redacted &&
+    !state.preview?.image
+      ? state.preview?.content
+      : undefined;
+  const staticPage = useMemo(
+    () =>
+      htmlSource === undefined ? undefined : staticHtmlPreview(htmlSource),
+    [htmlSource],
+  );
   const status = state.phase === "loading" ? "loading" : state.preview?.state;
   const failureMessage = state.preview?.reason
     ? (`file_preview.state.${state.preview.reason}` as const)
@@ -60,15 +75,17 @@ export function FilePreviewView({
       aria-live="polite"
       aria-busy={state.phase === "loading"}
     >
-      {markdown && ready && !state.preview?.image && (
-        <Tabs.List
-          className="task-panel-preview-modes"
-          aria-label={t("file_preview.mode")}
-        >
-          <Tabs.Tab value="preview">{t("file_preview.rendered")}</Tabs.Tab>
-          <Tabs.Tab value="source">{t("file_preview.source")}</Tabs.Tab>
-        </Tabs.List>
-      )}
+      {(markdown || staticPage !== undefined) &&
+        ready &&
+        !state.preview?.image && (
+          <Tabs.List
+            className="task-panel-preview-modes"
+            aria-label={t("file_preview.mode")}
+          >
+            <Tabs.Tab value="preview">{t("file_preview.rendered")}</Tabs.Tab>
+            <Tabs.Tab value="source">{t("file_preview.source")}</Tabs.Tab>
+          </Tabs.List>
+        )}
 
       <div className="task-panel-resource-body">
         {status === "loading" ? (
@@ -98,6 +115,28 @@ export function FilePreviewView({
                   onFailure={() => state.preview?.release?.()}
                 />
               </div>
+            ) : staticPage !== undefined ? (
+              <>
+                <Tabs.Panel value="preview" className="task-panel-preview-html">
+                  <iframe
+                    sandbox=""
+                    srcDoc={staticPage}
+                    title={state.selected.displayPath}
+                    referrerPolicy="no-referrer"
+                  />
+                </Tabs.Panel>
+                <Tabs.Panel
+                  value="source"
+                  className="task-panel-preview-source"
+                >
+                  <HighlightedSource
+                    displayPath={state.selected.displayPath}
+                    content={state.preview.content}
+                    scrollTop={scrollTop}
+                    onScrollTopChange={onScrollTopChange}
+                  />
+                </Tabs.Panel>
+              </>
             ) : markdown ? (
               <>
                 <Tabs.Panel

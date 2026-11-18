@@ -5514,7 +5514,7 @@ test("Markdown preview renders documents, switches to source, and preserves mode
   assert.ok(screen.getByRole("heading", { name: "Updated" }));
 });
 
-test("text and HTML stay inert source without extra preview chrome", async () => {
+test("HTML renders in a sandbox and retains its inert highlighted source", async () => {
   for (const path of ["notes.txt", "script.js", "page.html", "page.HTM"]) {
     const content =
       '<h1>Page</h1><script>window.zero.invoke("attack")</script><img src="https://example.com/track.png">';
@@ -5529,6 +5529,16 @@ test("text and HTML stay inert source without extra preview chrome", async () =>
       },
     };
     render(filePreviewElement(state));
+    if (/\.html?$/i.test(path)) {
+      const frame = document.querySelector("iframe");
+      assert.equal(frame?.getAttribute("sandbox"), "");
+      assert.match(frame?.getAttribute("srcdoc"), /<h1>Page<\/h1>/);
+      assert.doesNotMatch(frame?.getAttribute("srcdoc"), /<script|https:/);
+      assert.equal(document.querySelector("h1, script, img"), null);
+      fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+    } else {
+      assert.equal(screen.queryByRole("tablist"), null);
+    }
     if (path === "notes.txt") {
       await act(async () => Promise.resolve());
       assert.equal(document.querySelector(".token"), null);
@@ -5540,7 +5550,6 @@ test("text and HTML stay inert source without extra preview chrome", async () =>
       content,
     );
     assert.equal(document.querySelector("h1, script, img, iframe"), null);
-    assert.equal(screen.queryByRole("tablist"), null);
     assert.equal(
       screen.queryByRole("button", { name: "Preview details" }),
       null,

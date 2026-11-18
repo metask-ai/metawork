@@ -13,6 +13,7 @@ pub const migrations: []const sql.Migration = &.{
     .{ .version = 8, .name = "run_cause_approval_mode_change", .sql = @embedFile("migrations/0008_run_cause_approval_mode_change.sql") },
     .{ .version = 9, .name = "attachment_media_identity", .sql = @embedFile("migrations/0009_attachment_media_identity.sql") },
     .{ .version = 10, .name = "conversation_position", .sql = @embedFile("migrations/0010_conversation_position.sql") },
+    .{ .version = 11, .name = "run_output_updates", .sql = @embedFile("migrations/0011_run_output_updates.sql") },
 };
 
 pub const codec = @import("codec.zig");

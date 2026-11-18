@@ -959,6 +959,7 @@ desktopVertical: try {
   }
   if (outputOnly) {
     assert.equal(process.platform, "win32");
+    const outputNativeMode = process.env.METAWORK_OUTPUT_NATIVE;
     const catalog = await poll(
       async () => {
         const selected = (await snapshot()).workspaces.find(
@@ -982,8 +983,9 @@ desktopVertical: try {
       provider,
       toolSse,
       textSse,
+      nativeExistingActions: outputNativeMode !== "office",
       nativeOutputProbe:
-        process.env.METAWORK_OUTPUT_NATIVE === "1"
+        outputNativeMode === "1" || outputNativeMode === "office"
           ? async ({ mode, source, destination, trigger }) => {
               const args = [
                 "-NoProfile",
@@ -1074,14 +1076,14 @@ desktopVertical: try {
       },
       evidenceDirectory: join(
         root,
-        process.env.METAWORK_OUTPUT_NATIVE === "1"
+        outputNativeMode === "1" || outputNativeMode === "office"
           ? ".zig-cache/output-native-desktop"
           : ".zig-cache/output-delivery-desktop",
       ),
     });
     await stopApplication("Output desktop verification complete");
     process.stdout.write(
-      `Output Windows desktop vertical passed: real Core delivery, Renderer checks/edit draft, cold history and source preservation${process.env.METAWORK_OUTPUT_NATIVE === "1" ? ", native Save As/cancel/overwrite protection and exact Explorer selection" : ""}.\n`,
+      `Output Windows desktop vertical passed: real Core delivery, registration, updates, HTML preview, edit draft and cold history${outputNativeMode === "1" ? ", native Save As and Explorer selection" : ""}.\n`,
     );
     break desktopVertical;
   }

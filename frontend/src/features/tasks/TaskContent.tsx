@@ -393,6 +393,7 @@ export function TaskContent({
   fileChangesEnabled,
   outputsEnabled,
   onOutputAction,
+  onShowOutputs,
   onPrepareOutputEdit,
   webLink,
   onPrepareRetry,
@@ -437,6 +438,7 @@ export function TaskContent({
   fileChangesEnabled: boolean;
   outputsEnabled: boolean;
   onOutputAction?: OutputActionHandler;
+  onShowOutputs?: (opener: HTMLButtonElement) => void;
   onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView, taskId: string, runId: string) => void;
@@ -1173,6 +1175,8 @@ export function TaskContent({
                   disabled={responseDisabled || !synchronized}
                   onAction={onOutputAction}
                   onPrepareEdit={onPrepareOutputEdit}
+                  onPreview={onPreviewWorkspaceFile}
+                  officeOpen={task.officeOutputsOpen}
                 />
               )}
               {fileChangesEnabled && run.fileChanges && (
@@ -1183,6 +1187,22 @@ export function TaskContent({
                   }
                 />
               )}
+              {outputsEnabled &&
+                !presentation.active &&
+                onShowOutputs &&
+                task.conversationOutputs?.some(
+                  (output) => BigInt(output.runId) <= BigInt(run.id),
+                ) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="self-start"
+                    onClick={(event) => onShowOutputs(event.currentTarget)}
+                  >
+                    {t("outputs.view")}
+                  </Button>
+                )}
               {!presentation.active && (
                 <RunProcess
                   presentation={presentation}

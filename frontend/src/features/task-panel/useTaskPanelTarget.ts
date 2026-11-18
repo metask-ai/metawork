@@ -82,6 +82,7 @@ export function useTaskPanelTarget(
     waitingForRun: Boolean(
       activeTab &&
       activeTab.kind !== "workspace" &&
+      activeTab.kind !== "outputs" &&
       !task?.runs.some((run) => run.id === activeTab.runId),
     ),
     target: activeTab ?? emptyTaskPanelTarget,

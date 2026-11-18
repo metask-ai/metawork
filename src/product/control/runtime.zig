@@ -1377,6 +1377,7 @@ pub const Runtime = struct {
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
     output_file_reveal: ?control_ports.OutputFileReveal = null,
+    output_file_open: ?control_ports.OutputFileOpen = null,
     output_file_save: ?control_ports.OutputFileSave = null,
     pending_output_saves: [output_check.max_in_flight]?struct { id: u64, target: OutputFileTarget } = @splat(null),
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
@@ -1867,6 +1868,12 @@ pub const Runtime = struct {
 
     fn queueOutputInspection(self: *Runtime, completion_id: u64, kind: OutputCheckKind, target: OutputFileTarget) OutputCheckAdmission {
         var work: output_check.Work = inspect: {
+            if (kind == .open) {
+                const open = self.output_file_open orelse return .{ .immediate = .unavailable };
+                const owned = open.prepare_fn(open.context, target.workspace_root, target.relative_path) catch |err|
+                    return .{ .immediate = output_check.openFailure(err) };
+                break :inspect .{ .open = owned };
+            }
             const preparation = self.file_delivery_preparation orelse return .{ .immediate = .unavailable };
             const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
             break :inspect .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
@@ -1981,6 +1988,10 @@ pub const Runtime = struct {
         while (self.output_checks.take(self.io)) |taken| {
             var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputInspection(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
             if (state == .ready and taken.kind == .register) state = self.registerInspectedOutput(taken.target);
+            if (state == .ready and taken.kind == .open) {
+                const open = taken.job.work.open;
+                state = if (open.open_fn(open.context)) |_| .opened else |err| output_check.openFailure(err);
+            }
             if (state == .ready and taken.kind == .reveal) {
                 state = if (self.output_file_reveal) |reveal| result: {
                     reveal.reveal_fn(reveal.context, taken.target.workspace_root, taken.target.relative_path) catch |err| break :result switch (err) {
@@ -2006,6 +2017,10 @@ pub const Runtime = struct {
 
     pub fn setOutputFileReveal(self: *Runtime, reveal: control_ports.OutputFileReveal) void {
         self.output_file_reveal = reveal;
+    }
+
+    pub fn setOutputFileOpen(self: *Runtime, open: control_ports.OutputFileOpen) void {
+        self.output_file_open = open;
     }
 
     pub fn shutdownOutputChecks(self: *Runtime) void {
@@ -7720,6 +7735,7 @@ pub const Runtime = struct {
             .authority_fn = taskProjectionAuthority,
             .text = text.task(),
             .output_path_validator = if (self.file_delivery_preparation) |preparation| preparation.validate_path_fn else null,
+            .office_outputs_open = self.output_file_open != null,
             .catalog = .{
                 .context = text,
                 .write_fn = writeTaskCatalogProjection,
@@ -23054,6 +23070,10 @@ test "Output check worker distinguishes current bytes from changed or unavailabl
         try std.testing.expectEqual(i + 1, harness.releases);
     }
     try std.testing.expectEqual(cases.len, harness.inspections.load(.acquire));
+    harness.outcome = .{ .verified = .{ .size_bytes = 43, .sha256 = @splat(4) } };
+    try std.testing.expect(control.beginOutputCheck(cases.len + 1, 3, 7, @splat(3), .check_current) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.ready, harness.results[cases.len].?.state);
 }
 
 test "Output registration waits for terminal receipt drain, deduplicates, and persists the inspected bytes" {
@@ -23185,14 +23205,14 @@ test "Output reveal requires both verified bytes and an active requester immedia
     harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } };
     try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .reveal) == .queued);
     try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.changed, harness.results[1].?.state);
-    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    try std.testing.expectEqual(OutputCheckState.revealed, harness.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), harness.reveals);
     harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } };
     harness.requester_active = false;
     try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .reveal) == .queued);
     try harness.drainAll(&control);
     try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
-    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    try std.testing.expectEqual(@as(usize, 2), harness.reveals);
 }
 
 const OutputSaveHarness = struct {

@@ -220,6 +220,7 @@ pub const Input = struct {
     compact_blocker: ?ActionBlocker,
     text: TextProjection,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
+    office_outputs_open: bool = false,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
     /// A consumer page is an explicit slice of this Task's stable Run order.
@@ -543,6 +544,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"context\":") catch return error.SnapshotTooLarge;
     try writeConversationContext(writer, task.conversation_observation);
+    try writeConversationOutputs(writer, input.text, task);
+    if (input.office_outputs_open) writer.writeAll(",\"officeOutputsOpen\":true") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
     var run_count: usize = 0;
     for (task.durable.runs, 0..) |*entry, run_index| {
@@ -964,17 +967,55 @@ fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const ta
             if (std.mem.eql(u8, &id, &output.id)) break;
         } else {
             if (output_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            try writeDeliveredOutput(writer, text, output);
+            const hex = std.fmt.bytesToHex(output.id, .lower);
+            const updated = for (run.updated_output_ids) |id| {
+                if (std.mem.eql(u8, &id, &hex)) break true;
+            } else false;
+            try writeDeliveredOutput(writer, text, output, null, updated);
             visible_ids[output_count] = output.id;
             output_count += 1;
+        }
+    }
+    var first_observation = output_count == 0;
+    for (run.updated_output_ids, 0..) |hex, index| {
+        var id: [16]u8 = undefined;
+        _ = std.fmt.hexToBytes(&id, &hex) catch continue;
+        for (visible_ids[0..output_count]) |visible_id| {
+            if (std.mem.eql(u8, &id, &visible_id)) break;
+        } else {
+            for (run.updated_output_ids[0..index]) |previous| {
+                if (std.mem.eql(u8, &previous, &hex)) break;
+            } else {
+                const output = task_policy.outputByIdentity(task, id) orelse continue;
+                if (!first_observation) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                try writeDeliveredOutput(writer, text, output, null, true);
+                first_observation = false;
+            }
         }
     }
     writer.writeByte(']') catch return error.SnapshotTooLarge;
 }
 
-fn writeDeliveredOutput(writer: *std.Io.Writer, text: TextProjection, output: *const task_state.OutputRecord) Error!void {
+fn writeConversationOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {
+    var started = false;
+    for (task.durable.runs) |*entry| if (entry.*) |*run| {
+        if (!task_policy.runProjected(task, run)) continue;
+        for (&run.outputs) |*slot| if (slot.*) |*output| {
+            if (task_policy.conversationOutput(task, output) != output) continue;
+            writer.writeAll(if (started) "," else ",\"conversationOutputs\":[") catch return error.SnapshotTooLarge;
+            started = true;
+            try writeDeliveredOutput(writer, text, output, run.id, false);
+        };
+    };
+    if (started) writer.writeByte(']') catch return error.SnapshotTooLarge;
+}
+
+fn writeDeliveredOutput(writer: *std.Io.Writer, text: TextProjection, output: *const task_state.OutputRecord, run_id: ?u64, updated: bool) Error!void {
     const hidden = output.redacted or text.containsSensitive(output.locator);
-    writer.print("{{\"id\":\"{s}\",\"displayPath\":", .{std.fmt.bytesToHex(output.id, .lower)}) catch return error.SnapshotTooLarge;
+    writer.print("{{\"id\":\"{s}\"", .{std.fmt.bytesToHex(output.id, .lower)}) catch return error.SnapshotTooLarge;
+    if (run_id) |id| writer.print(",\"runId\":\"{d}\"", .{id}) catch return error.SnapshotTooLarge;
+    if (updated) writer.writeAll(",\"updated\":true") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, if (hidden) "" else output.locator);
     writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{ output.size_bytes, hidden }) catch return error.SnapshotTooLarge;
 }

@@ -62,6 +62,7 @@ const added_columns = [_]struct { column: []const u8, version: usize }{
     .{ .column = "conversation_position", .version = 10 },
     .{ .column = "superseded_by_run_id", .version = 10 },
     .{ .column = "compact_boundary", .version = 10 },
+    .{ .column = "updated_output_ids_json", .version = 11 },
 };
 
 /// Writes today's rows into a store migrated only through `version`, which is
@@ -1481,6 +1482,7 @@ test "production SQL history preserves Outputs metadata without file contents" {
     const state = try history.fixture(arena.allocator());
     var outputs = [_]history.wire.OutputWire{.{ .id = "01" ** 16, .locator = "report.docx", .size_bytes = 42, .sha256 = "ab" ** 32, .redacted = false }};
     state.tasks[0].runs[0].outputs = &outputs;
+    state.tasks[0].runs[0].updated_output_ids = &.{("01" ** 16).*};
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(arena.allocator(), database.capability(), state);

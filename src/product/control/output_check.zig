@@ -29,8 +29,8 @@ pub const Target = struct {
     }
 };
 
-pub const Kind = enum { check, reveal, save, register };
-pub const State = enum { ready, revealed, saved, registered, save_failed, target_changed, cleanup_failed, busy, missing, restricted, changed, too_large, cancelled, timed_out, stale_security, unavailable, failed };
+pub const Kind = enum { check, check_current, reveal, save, register, open };
+pub const State = enum { ready, revealed, saved, registered, opened, save_failed, target_changed, cleanup_failed, busy, missing, restricted, changed, too_large, cancelled, timed_out, stale_security, unavailable, failed };
 pub const max_in_flight = 2;
 const timeout_ns = 30 * std.time.ns_per_s;
 pub const Notifier = struct { context: ?*anyopaque, wake_fn: *const fn (?*anyopaque) bool };
@@ -38,10 +38,12 @@ pub const Notifier = struct { context: ?*anyopaque, wake_fn: *const fn (?*anyopa
 pub const Work = union(enum) {
     inspect: task.OwnedFileDelivery,
     save: ports.OwnedOutputSave,
+    open: ports.OwnedOutputOpen,
     pub fn deinit(self: *Work) void {
         switch (self.*) {
             .inspect => |*value| value.deinit(),
             .save => |*value| value.deinit(),
+            .open => |*value| value.deinit(),
         }
     }
 };
@@ -71,6 +73,12 @@ const Job = struct {
             self.publish();
             return;
         }
+        if (self.work == .open) {
+            const owned = self.work.open;
+            self.state = if (owned.inspect_fn(owned.context, &self.cancelled)) |_| .ready else |err| openFailure(err);
+            self.publish();
+            return;
+        }
         const delivery = self.work.inspect;
         self.state = if (self.cancelled.load(.acquire)) .cancelled else switch (delivery.input.inspect_fn(delivery.input.context, self.target.relative_path, &self.cancelled)) {
             .verified => |value| verified: {
@@ -79,6 +87,7 @@ const Job = struct {
                     self.target.sha256 = value.sha256;
                     break :verified .ready;
                 }
+                if (self.kind == .check_current or self.kind == .reveal) break :verified .ready;
                 break :verified if (value.size_bytes == self.target.size_bytes and std.mem.eql(u8, &value.sha256, &self.target.sha256)) .ready else .changed;
             },
             .failed => |reason| switch (reason) {
@@ -145,6 +154,18 @@ const Job = struct {
         allocator.destroy(self);
     }
 };
+
+pub fn openFailure(err: anyerror) State {
+    return switch (err) {
+        error.UnsupportedService, error.RuntimeUnavailable => .unavailable,
+        error.Cancelled, error.Canceled => .cancelled,
+        error.FileNotFound => .missing,
+        error.OutputTooLarge => .too_large,
+        error.OutputChanged => .changed,
+        error.InvalidOutputPath, error.InvalidWorkspaceRoot, error.NotRegularOutput, error.RestrictedOutput, error.AccessDenied, error.SymLinkLoop => .restricted,
+        else => .failed,
+    };
+}
 
 pub const Taken = struct { job: *Job, target: *const Target, completion_id: u64, kind: Kind, state: State, committed: bool };
 

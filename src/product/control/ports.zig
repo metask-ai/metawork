@@ -425,6 +425,23 @@ pub const OutputFileReveal = struct {
     reveal_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
 };
 
+pub const OutputFileOpen = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!OwnedOutputOpen,
+};
+
+pub const OwnedOutputOpen = struct {
+    context: *anyopaque,
+    inspect_fn: *const fn (*anyopaque, *const std.atomic.Value(bool)) anyerror!void,
+    open_fn: *const fn (*anyopaque) anyerror!void,
+    release_fn: *const fn (*anyopaque) void,
+
+    pub fn deinit(self: *OwnedOutputOpen) void {
+        self.release_fn(self.context);
+        self.* = undefined;
+    }
+};
+
 /// Callback-scoped source identity. The Application copies this and the picker
 /// selection into an owned effect before returning; no Product pointer escapes.
 pub const OutputFileSaveInput = struct {

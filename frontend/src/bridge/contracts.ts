@@ -894,6 +894,7 @@ export const outputActionStates = [
   "revealed",
   "saved",
   "registered",
+  "opened",
   "save_failed",
   "target_changed",
   "cleanup_failed",
@@ -909,7 +910,7 @@ export const outputActionStates = [
   "failed",
 ] as const;
 export type OutputActionState = (typeof outputActionStates)[number];
-export type OutputAction = "check" | "reveal" | "save";
+export type OutputAction = "check" | "check_current" | "reveal" | "save" | "open";
 export type OutputActionHandler = (
   taskId: string,
   runId: string,
@@ -918,6 +919,7 @@ export type OutputActionHandler = (
   signal: AbortSignal,
 ) => Promise<OutputActionState>;
 export type DeliveredOutputView = {
+  updated?: true;
   id: string;
   displayPath: string;
   sizeBytes: string;
@@ -1261,6 +1263,8 @@ export const modelInputBlockers = [
 ] as const;
 
 export type TaskView = {
+  conversationOutputs?: (DeliveredOutputView & { runId: string })[];
+  officeOutputsOpen?: true;
   modelInputBlocker?: (typeof modelInputBlockers)[number];
   sessionCloseRetryAvailable?: true;
   signal: (typeof taskNavigationSignals)[number] | null;

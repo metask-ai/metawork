@@ -368,10 +368,14 @@ export class BridgeClient {
       )
         throw new DOMException("Output action cancelled", "AbortError");
       if (
+        (action === "open" &&
+          (result.state === "ready" || result.state === "revealed")) ||
+        (action !== "open" && result.state === "opened") ||
         (action === "register" &&
           (result.state === "ready" || result.state === "revealed")) ||
         (action !== "register" && result.state === "registered") ||
-        (action === "check" && result.state === "revealed") ||
+        ((action === "check" || action === "check_current") &&
+          result.state === "revealed") ||
         (action === "reveal" && result.state === "ready") ||
         (action === "save" &&
           (result.state === "ready" || result.state === "revealed")) ||

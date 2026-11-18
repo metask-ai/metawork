@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedExecutable,
     [Parameter(Mandatory = $true)][string]$WorkspaceRoot,
     [Parameter(Mandatory = $true)][string]$SourcePath,
-    [Parameter(Mandatory = $true)][ValidateSet('save', 'cancel', 'reveal')][string]$Mode,
+    [Parameter(Mandatory = $true)][ValidateSet('save', 'cancel', 'reveal', 'office')][string]$Mode,
     [string]$Destination
 )
 
@@ -127,6 +127,13 @@ function Assert-Target {
     if ($process.HasExited) { throw 'Test application exited before the native action' }
 }
 
+function Get-FixtureHash([string]$path) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try { return [Convert]::ToBase64String($hash.ComputeHash($stream)) }
+    finally { $stream.Dispose(); $hash.Dispose() }
+}
+
 $dialogCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $ProcessId)),
@@ -176,6 +183,37 @@ $success = $false
 $overwriteConfirmed = $false
 $deadline = [DateTime]::UtcNow.AddSeconds(25)
 try {
+    if ($Mode -eq 'office') {
+        $expectedTitle = [IO.Path]::GetFileNameWithoutExtension($source)
+        $originalHash = Get-FixtureHash $source
+        @{ phase='ready'; mode=$Mode } | ConvertTo-Json -Compress
+        $visible = $false
+        while ([DateTime]::UtcNow -lt $deadline) {
+            Assert-Target
+            $visible = @((Get-Process -Name 'wps','winword' -ErrorAction SilentlyContinue) | Where-Object {
+                $_.MainWindowTitle.IndexOf($expectedTitle, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            }).Count -gt 0
+            if ($visible) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not $visible) { throw 'The default Office application did not display the private fixture' }
+        $savedOriginal = $false
+        foreach ($progId in @('KWPS.Application', 'WPS.Application', 'Word.Application')) {
+            try { $office = [Runtime.InteropServices.Marshal]::GetActiveObject($progId) } catch { continue }
+            foreach ($document in $office.Documents) {
+                if (-not [string]::Equals($document.FullName, $source, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                $document.Content.InsertAfter(' Saved by MetaWork Office acceptance.')
+                $document.Save()
+                $savedOriginal = (Get-FixtureHash $source) -ne $originalHash
+                $document.Close()
+                break
+            }
+            if ($savedOriginal) { break }
+        }
+        $success = $true
+        @{ mode=$Mode; openedOriginal=$visible; savedOriginal=$savedOriginal } | ConvertTo-Json -Compress
+        return
+    }
     if ($Mode -eq 'reveal') {
         # Observe only the exact generated directory and selected fixture.
         # Never close a pre-existing Explorer window or terminate Explorer.

@@ -893,6 +893,18 @@ pub fn outputAtLocator(task: *const task_state.Task, locator: []const u8) ?*cons
     return null;
 }
 
+pub fn outputByIdentity(task: *const task_state.Task, id: [16]u8) ?*const task_state.OutputRecord {
+    for (task.durable.runs) |*entry| if (entry.*) |*run| {
+        if (!runProjected(task, run)) continue;
+        for (&run.outputs) |*slot| if (slot.*) |*output| {
+            if (!std.mem.eql(u8, &output.id, &id)) continue;
+            const canonical = conversationOutput(task, output);
+            return if (canonical == output) output else null;
+        };
+    };
+    return null;
+}
+
 pub fn outputRegistrationCandidate(task: *const task_state.Task, run: *const task_state.RunRecord, change: *const task_state.FileChangeView) bool {
     return task.deletion == .idle and task.read_only_history == null and runProjected(task, run) and
         task_state.productTerminalPayload(run) != null and !change.redacted and

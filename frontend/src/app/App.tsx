@@ -103,6 +103,7 @@ import { TaskInformation } from "../features/tasks/TaskInformation.tsx";
 import { ConversationContext } from "../features/composer/ConversationContext.tsx";
 import { findRunFileReference } from "../workbench/run-file-references.ts";
 import { TaskPanel } from "../features/task-panel/TaskPanel.tsx";
+import { RunOutputs } from "../features/tasks/RunOutputs.tsx";
 import {
   FilePreviewRefreshAction,
   FilePreviewView,
@@ -120,6 +121,7 @@ import {
   createTaskPanelPreviewTab,
   createTaskPanelWorkspaceTab,
   createTaskPanelReviewTab,
+  createTaskPanelOutputsTab,
 } from "../features/task-panel/task-panel-state.ts";
 import {
   WorkspaceFileTree,
@@ -1329,11 +1331,19 @@ export default function App() {
     snapshot.taskPage?.runManifest,
     panelWorkspace,
   );
+  function showConversationOutputs(opener: HTMLButtonElement) {
+    if (!panelTask?.conversationOutputs?.length) return;
+    const tab = createTaskPanelOutputsTab(panelTask.id);
+    taskPanelOpeners.current.set(tab.tabId, opener);
+    taskPanel.selectTarget({ kind: "outputs", taskId: panelTask.id });
+    setRightPanelOpen(true);
+    focusTaskPanelTab(tab.tabId);
+  }
   const previewTabIds = useMemo(
     () =>
       new Set(
         taskPanel.session.tabs.flatMap((tab) =>
-          tab.kind !== "review" ? [tab.tabId] : [],
+          tab.kind === "preview" || tab.kind === "workspace" ? [tab.tabId] : [],
         ),
       ),
     [taskPanel.session.tabs],
@@ -4246,9 +4256,13 @@ export default function App() {
       composerDraftScopeRef.current !== `task:${taskId}`
     )
       return "edit_unavailable";
-    const output = current.task.runs
-      .find((run) => run.id === runId)
-      ?.outputs.find((record) => record.id === outputId);
+    const output =
+      current.task.runs
+        .find((run) => run.id === runId)
+        ?.outputs.find((record) => record.id === outputId) ??
+      current.task.conversationOutputs?.find(
+        (record) => record.id === outputId && record.runId === runId,
+      );
     if (!output || output.redacted) return "edit_unavailable";
     const draft = taskDrafts.currentDraft(taskId);
     if (!draft) return "edit_unavailable";
@@ -4989,9 +5003,11 @@ export default function App() {
       ? t("task_panel.title")
       : panelTarget.kind === "review"
         ? t("file_changes.review")
-        : previewMatchesTarget && filePreviewViewState
-          ? filePreviewViewState.selected.displayPath
-          : t("file_preview.title");
+        : panelTarget.kind === "outputs"
+          ? t("outputs.title")
+          : previewMatchesTarget && filePreviewViewState
+            ? filePreviewViewState.selected.displayPath
+            : t("file_preview.title");
   return (
     <AppShell
       taskTitle={
@@ -5352,7 +5368,7 @@ export default function App() {
                 tree={workspaceTree}
                 available={workspaceFilesAvailable}
                 selectedPath={
-                  taskPanel.activeTab && taskPanel.activeTab.kind !== "review"
+                  taskPanel.activeTab && "displayPath" in taskPanel.activeTab
                     ? taskPanel.activeTab.displayPath
                     : null
                 }
@@ -5409,6 +5425,30 @@ export default function App() {
                 }}
                 onRetry={refreshFilePreview}
               />
+            ) : panelTarget.kind === "outputs" &&
+              panelTask?.conversationOutputs ? (
+              <div className="task-panel-review">
+                <RunOutputs
+                  layout="conversation"
+                  outputs={panelTask.conversationOutputs}
+                  officeOpen={panelTask.officeOutputsOpen}
+                  taskId={panelTask.id}
+                  disabled={bridgeUnavailable}
+                  onPreview={
+                    workspaceFilesAvailable
+                      ? openConversationWorkspaceFile
+                      : undefined
+                  }
+                  onAction={(taskId, runId, outputId, action, signal) =>
+                    client.outputAction(taskId, runId, outputId, action, signal)
+                  }
+                  onPrepareEdit={
+                    taskCanCompose && !newTaskDraftActive
+                      ? prepareOutputEdit
+                      : undefined
+                  }
+                />
+              </div>
             ) : panelTarget.kind === "review" && reviewMatchesTarget ? (
               <FileChangesView
                 key={`${fileChanges.taskId}:${fileChanges.runId}`}
@@ -5953,6 +5993,7 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
+                onShowOutputs={showConversationOutputs}
                 onOutputAction={(taskId, runId, outputId, action, signal) =>
                   client.outputAction(taskId, runId, outputId, action, signal)
                 }

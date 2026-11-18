@@ -1007,6 +1007,14 @@ pub const RunExecution = struct {
     /// Worker writes before terminal publication; the main loop consumes the
     /// bounded trusted tail before finalization, without borrowing Agent state.
     terminal_receipts: agent.TerminalReceipts = .{},
+    tracked_outputs: []TrackedOutput = &.{},
+};
+
+pub const TrackedOutput = struct {
+    id: [32]u8,
+    locator: []u8,
+    before: ?[32]u8 = null,
+    changed: bool = false,
 };
 
 pub const RunRecord = struct {
@@ -1017,6 +1025,7 @@ pub const RunRecord = struct {
     image_execution: ?OwnedImageExecution = null,
     video_execution: ?OwnedVideoExecution = null,
     file_delivery: ?OwnedFileDelivery = null,
+    updated_output_ids: []const [32]u8 = &.{},
 
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,
