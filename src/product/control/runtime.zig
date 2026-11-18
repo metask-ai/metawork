@@ -93,6 +93,8 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     TaskIdentityExhausted,
     UiRequestIdentityCollision,
     WorkspaceCapacity,
+    WorkspaceDirectoryCapacity,
+    ProjectUnavailable,
     WorkspaceIdentityExhausted,
     WorkspaceIdentityUntrusted,
     WorkspaceOrderExhausted,
@@ -209,6 +211,7 @@ pub const Limits = struct {
     max_event_drain_ns: u64 = 8 * std.time.ns_per_ms,
     max_tasks: usize = 50,
     max_workspaces: usize = 16,
+    max_manual_directories: usize = 32,
     max_scheduled_tasks: usize = 16,
     max_skill_assets: usize = 256,
     max_runs_per_task: usize = 16,
@@ -247,7 +250,9 @@ pub const Limits = struct {
     max_pending_ui_requests: usize = 4,
     max_ui_history_per_task: usize = 8,
     max_terminal_diagnostic_bytes: usize = 512,
-    max_snapshot_bytes: usize = 64 * 1024 * 1024,
+    // Full internal projection includes catalogs for all registered directories.
+    // Scoped Bridge views retain their independently enforced transport bounds.
+    max_snapshot_bytes: usize = 72 * 1024 * 1024,
 };
 
 // Single Runtime-owned production source. Agent validates these product
@@ -278,6 +283,7 @@ pub const TaskWorkspaceTrust = union(enum) {
 
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
+    intent: product_workspace.OpenIntent = .project,
     trust: TaskWorkspaceTrust,
     approval_mode: ?ApprovalMode = null,
 };
@@ -775,6 +781,7 @@ fn automaticWorkspaceContains(context: *const anyopaque, path: []const u8) bool 
 fn hiddenWorkspaceReusable(context: *const anyopaque, workspace_id: u64) bool {
     const self: *const Runtime = @ptrCast(@alignCast(context));
     return !self.task_runtime.workspaceHasTasks(workspace_id) and
+        !self.task_runtime.projectHasTasks(workspace_id) and
         !self.skill.hasWorkspaceJob(workspace_id) and
         self.skill.workspaceRetirementAllowed(workspace_id);
 }
@@ -1397,7 +1404,7 @@ pub const Runtime = struct {
         agent_runtime.* = agent_port;
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_events_per_drain == 0 or limits.max_event_drain_ns == 0 or
-            limits.max_tasks == 0 or limits.max_workspaces == 0 or
+            limits.max_tasks == 0 or limits.max_workspaces == 0 or limits.max_manual_directories == 0 or
             limits.max_scheduled_tasks == 0 or
             limits.max_skill_assets == 0 or
             limits.max_pending_inputs_per_task == 0 or limits.max_pending_inputs_per_task > 64 or
@@ -1428,7 +1435,7 @@ pub const Runtime = struct {
             limits.max_ui_history_per_task == 0 or
             limits.max_terminal_diagnostic_bytes == 0 or
             limits.max_snapshot_bytes == 0 or
-            (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
+            (admittedSnapshotBudgetBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
         var account_projection_state = try account_projection.Projection.init(allocator);
         errdefer account_projection_state.deinit();
@@ -1458,6 +1465,7 @@ pub const Runtime = struct {
             allocator,
             io,
             limits.max_workspaces,
+            limits.max_manual_directories,
             limits.max_tasks,
             limits.max_workspace_bytes,
             .{
@@ -1597,7 +1605,7 @@ pub const Runtime = struct {
             },
             .{
                 .max_assets = limits.max_skill_assets,
-                .max_workspaces = limits.max_workspaces,
+                .max_workspaces = limits.max_manual_directories,
                 .max_policy_keys = limits.max_catalog_skills,
                 .max_policy_key_bytes = limits.max_tool_field_bytes,
             },
@@ -3367,6 +3375,7 @@ pub const Runtime = struct {
                 .automatic_contains_fn = automaticWorkspaceContains,
                 .reusable_fn = hiddenWorkspaceReusable,
                 .allocation_allowed = self.skill.identitySourceTrusted(),
+                .intent = input.intent,
             },
         );
         errdefer if (preparation.isActive())
@@ -3756,8 +3765,8 @@ pub const Runtime = struct {
     /// Removes only the project entry, retaining Task authority and identity.
     pub fn removeProjectAtEpoch(self: *Runtime, workspace_id: u64, expected_workspace_epoch: u64) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        const previous = try self.workspace.setProjectRemoved(workspace_id, expected_workspace_epoch, true);
-        errdefer _ = self.workspace.setProjectRemoved(workspace_id, expected_workspace_epoch, previous) catch unreachable;
+        const previous = try self.workspace.setProjectEntry(workspace_id, expected_workspace_epoch, false);
+        errdefer _ = self.workspace.setProjectEntry(workspace_id, expected_workspace_epoch, previous) catch unreachable;
         try self.commitTaskStateBestEffort();
         self.bumpRevision();
     }
@@ -3828,7 +3837,7 @@ pub const Runtime = struct {
         try self.validateNewTaskModelAdmission(model_selection);
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         const workspace = try self.openWorkspaceInternal(input);
-        return self.createTaskInWorkspaceInternal(workspace, (self.workspace.facts(workspace) orelse return error.UnknownWorkspace).epoch, model_selection, null, null, .{ .interactive = input.approval_mode }, false);
+        return self.createTaskInWorkspaceInternal(workspace, (self.workspace.facts(workspace) orelse return error.UnknownWorkspace).epoch, model_selection, null, null, .{ .interactive = input.approval_mode }, false, workspace);
     }
 
     pub fn createTaskInWorkspace(
@@ -3842,12 +3851,13 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        return self.createTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false);
+        return self.createTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false, workspace_id);
     }
 
     pub fn createTaskForWorkspace(
         self: *Runtime,
         request: TaskWorkspaceRequest,
+        project_id: ?u64,
         model_selection: NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
@@ -3855,9 +3865,10 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        try self.validateProject(project_id);
         return switch (request) {
-            .manual => |manual| self.createTaskInWorkspaceInternal(manual.workspace_id, manual.expected_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false),
-            .automatic => self.createAutomaticTask(model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission),
+            .manual => |manual| self.createTaskInWorkspaceInternal(manual.workspace_id, manual.expected_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false, project_id),
+            .automatic => self.createAutomaticTask(model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, project_id),
         };
     }
 
@@ -3870,6 +3881,7 @@ pub const Runtime = struct {
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
+        project_id: ?u64,
     ) Error!u64 {
         const remembered_mode: ?ApprovalMode = switch (permission) {
             .interactive => |mode| mode orelse self.default_approval_mode,
@@ -3877,6 +3889,7 @@ pub const Runtime = struct {
         };
         const previous_default_mode = self.default_approval_mode;
         var prepared = try self.prepareTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, allow_unowned_automatic);
+        _ = self.task_runtime.setProject(prepared.id(), project_id) catch unreachable;
         if (remembered_mode) |mode| self.default_approval_mode = mode;
         self.commitTaskStateBestEffort() catch |err| {
             self.default_approval_mode = previous_default_mode;
@@ -4059,6 +4072,7 @@ pub const Runtime = struct {
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
+        project_id: ?u64,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         try self.validateNewTaskModelAdmission(model_selection);
@@ -4082,7 +4096,7 @@ pub const Runtime = struct {
         var automatic = try self.prepareAutomaticWorkspace();
         errdefer if (automatic.workspace.isActive()) automatic.rollback(self);
         const workspace = automatic.facts(self);
-        const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true);
+        const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true, project_id);
         if (personal_revision) |revision|
             self.task_runtime.installInitialPersonalCatalog(task_id, revision, expected_skill_selection_revision.?);
         self.workspace.setAutomaticOwner(workspace.id, task_id);
@@ -5274,6 +5288,27 @@ pub const Runtime = struct {
             task_id,
             self.taskRuntimeOperationEffects(),
         )) {
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+        }
+    }
+
+    fn validateProject(self: *const Runtime, project_id: ?u64) Error!void {
+        const id = project_id orelse return;
+        const project = self.workspace.facts(id) orelse return error.ProjectUnavailable;
+        if (project.kind != .manual or !project.visible or !project.project_entry) return error.ProjectUnavailable;
+    }
+
+    pub fn taskProjectId(self: *const Runtime, task_id: u64) Error!?u64 {
+        return self.task_runtime.taskProjectId(task_id);
+    }
+
+    pub fn setTaskProject(self: *Runtime, task_id: u64, project_id: ?u64) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if ((try self.task_runtime.taskProjectId(task_id)) != project_id) try self.validateProject(project_id);
+        if (try self.task_runtime.setProject(task_id, project_id)) {
+            self.approval_history_dirty = true;
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
@@ -8124,7 +8159,7 @@ pub const Runtime = struct {
                 .canonical_root = workspace.canonical_root,
                 .display_name = workspace.display_name,
                 .visible = workspace.visible,
-                .project_removed = workspace.project_removed,
+                .project_entry = workspace.project_entry,
                 .recent_order = workspace.recent_order,
             }, self.workspaceStorage()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -8263,7 +8298,7 @@ pub const Runtime = struct {
                 .canonical_root = workspace.canonical_root,
                 .display_name = workspace.display_name,
                 .visible = workspace.visible,
-                .project_removed = workspace.project_removed,
+                .project_entry = workspace.project_entry,
                 .recent_order = workspace.recent_order,
             };
             workspace_index += 1;
@@ -10997,8 +11032,7 @@ fn takeActivityOrder(run: *TestRunRecord) u64 {
 }
 
 fn workspaceRecordCapacity(limits: Limits) ?usize {
-    return std.math.add(usize, limits.max_workspaces, limits.max_tasks) catch
-        null;
+    return std.math.add(usize, limits.max_manual_directories, std.math.mul(usize, limits.max_tasks, 2) catch return null) catch null;
 }
 
 fn accountFileChangeSnapshotTier(
@@ -11105,7 +11139,7 @@ fn fileChangeSnapshotAdditionalBytes(limits: Limits) ?usize {
 // winner. Catalog fields are serialized again in these rows; source settings
 // and root checks are additional bounded structure, never Task catalog data.
 fn skillManagementAdditionalSnapshotBytes(limits: Limits) ?usize {
-    const scopes = std.math.add(usize, limits.max_workspaces, 1) catch return null;
+    const scopes = std.math.add(usize, limits.max_manual_directories, 1) catch return null;
     const catalog_text = std.math.mul(usize, scopes, limits.max_catalog_projection_bytes) catch return null;
     const text = std.math.mul(usize, @min(catalog_text, limits.max_projection_bytes), json_string_expansion) catch return null;
     const arguments = std.math.mul(usize, limits.max_skill_arguments, catalog_argument_snapshot_overhead) catch return null;
@@ -11133,7 +11167,10 @@ fn pendingUiSnapshotBytes(limits: Limits) ?usize {
     return std.math.add(usize, limits.max_pending_ui_json_bytes, pending_ui_snapshot_overhead) catch null;
 }
 
-fn worstCaseSnapshotBytes(limits: Limits) ?usize {
+// Size the internal reserve for newly admitted collections. Restore preserves
+// eligible historical records beyond these admission quotas. The scoped view
+// writer checks the actual encoded size of every restored view.
+fn admittedSnapshotBudgetBytes(limits: Limits) ?usize {
     // The 6x bound also covers raw + readable Bash text: readable fields are
     // emitted only from valid JSON. Its raw re-encoding and selected decoded
     // strings each fit 3x source bytes (including the "***" redaction marker).
@@ -11247,7 +11284,7 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     ) catch return null;
     const workspace_and_task_catalogs = std.math.add(
         usize,
-        limits.max_workspaces,
+        limits.max_manual_directories,
         limits.max_tasks,
     ) catch return null;
     const catalog_copies = std.math.add(
@@ -11625,6 +11662,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
             .execution_model = execution_model,
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
+            .project_id = 1,
             .workspace_id = 1,
             .workspace_root = workspace,
             .title = try control.copyBounded("", control.limits.max_task_title_bytes),
@@ -11993,7 +12031,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try installTestExecution(&unavailable);
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        unavailable.createTaskForWorkspace(.automatic, try TestSupport.fixtureModelSelection(&unavailable), null, null, .{ .interactive = null }),
+        unavailable.createTaskForWorkspace(.automatic, null, try TestSupport.fixtureModelSelection(&unavailable), null, null, .{ .interactive = null }),
     );
     unavailable.deinit();
 
@@ -12409,21 +12447,21 @@ test "Project removal frees a slot and re-addition preserves Workspace identity 
     const id = try control.openWorkspace(.{ .workspace_root = root, .trust = .{ .temporary = root } });
     try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = another, .trust = .explicitly_trusted }));
     try std.testing.expectError(error.WorkspaceEpochMismatch, control.removeProjectAtEpoch(id, 2));
-    try std.testing.expect(!control.workspace.facts(id).?.project_removed);
+    try std.testing.expect(control.workspace.facts(id).?.project_entry);
     try control.removeProjectAtEpoch(id, 1);
     const removed = control.workspace.facts(id).?;
-    try std.testing.expect(removed.project_removed);
+    try std.testing.expect(!removed.project_entry);
     try std.testing.expect(removed.visible);
     try std.testing.expectEqual(WorkspaceAuthorization.available, removed.authorization);
     try std.testing.expectEqual(@as(u64, 1), removed.epoch);
     try std.testing.expectEqualStrings(root, removed.trust.temporary);
     const another_id = try control.openWorkspace(.{ .workspace_root = another, .trust = .explicitly_trusted });
     try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
-    try std.testing.expect(control.workspace.facts(id).?.project_removed);
+    try std.testing.expect(!control.workspace.facts(id).?.project_entry);
     try control.removeProjectAtEpoch(another_id, 1);
     try std.testing.expectEqual(id, try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
     const restored = control.workspace.facts(id).?;
-    try std.testing.expect(!restored.project_removed);
+    try std.testing.expect(restored.project_entry);
     try std.testing.expectEqual(@as(u64, 1), restored.epoch);
     try std.testing.expectEqualStrings(root, restored.trust.temporary);
     try std.testing.expectEqual(@as(usize, 2), control.workspace.count(.manual));
@@ -12447,11 +12485,11 @@ test "Project removal survives Host restart while Workspace authority remains av
     var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, limits, .{ .task_persistence = persistence.capability(persistence.storage[0..persistence.len]) });
     defer restored.deinit();
     const workspace = restored.workspace.facts(1).?;
-    try std.testing.expect(workspace.project_removed);
+    try std.testing.expect(!workspace.project_entry);
     try std.testing.expectEqual(@as(u64, 1), workspace.epoch);
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspace.authorization);
     try std.testing.expectEqual(@as(u64, 1), try restored.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
-    try std.testing.expect(!restored.workspace.facts(1).?.project_removed);
+    try std.testing.expect(restored.workspace.facts(1).?.project_entry);
 }
 
 test "Project removal retains running Task state, Workspace epoch and durable Task authority" {
@@ -12468,7 +12506,7 @@ test "Project removal retains running Task state, Workspace epoch and durable Ta
     const epoch = try control.workspaceEpoch(1);
     try control.removeProjectAtEpoch(1, epoch);
     const workspace = control.workspace.facts(1).?;
-    try std.testing.expect(workspace.project_removed);
+    try std.testing.expect(!workspace.project_entry);
     try std.testing.expect(workspace.visible);
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspace.authorization);
     try std.testing.expectEqual(epoch, workspace.epoch);
@@ -12477,7 +12515,7 @@ test "Project removal retains running Task state, Workspace epoch and durable Ta
     try std.testing.expectEqualStrings(workspace.canonical_root, try control.workspaceDirectoryForOpen(1, epoch));
     var wire = try control.buildTaskStateWire();
     defer wire.deinit();
-    try std.testing.expect(wire.state.workspaces[0].project_removed);
+    try std.testing.expect(!wire.state.workspaces[0].project_entry);
     try std.testing.expectEqual(@as(usize, 1), wire.state.tasks.len);
     const after = try std.json.Stringify.valueAlloc(std.testing.allocator, wire.state.tasks, .{});
     defer std.testing.allocator.free(after);
@@ -12505,14 +12543,11 @@ test "hidden Workspace record with Task history cannot be reused" {
         std.testing.allocator,
     );
     defer std.testing.allocator.free(replacement_root);
-    try std.testing.expectError(
-        error.WorkspaceCapacity,
-        control.openWorkspace(.{
-            .workspace_root = replacement_root,
-            .trust = .explicitly_trusted,
-        }),
-    );
-    try std.testing.expect(control.workspace.findByRoot(replacement_root) == null);
+    const replacement = try control.openWorkspace(.{
+        .workspace_root = replacement_root,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expect(replacement != 1);
     try std.testing.expect(control.workspace.facts(1) != null);
 }
 
@@ -12594,12 +12629,15 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     var control = try testRuntimeWith(.{ .attachment_store = &store, .attachment_images = .{ .prepare_fn = testAttachmentPreview } });
     defer control.deinit();
     product_workspace.testing.makeAutomatic(&control.workspace, 1, 3);
+    control.testTaskSlots()[0].?.durable.project_id = null;
     try control.skill.setWorkspaceCatalogAuthorized(1, 1, false, control.skillProjectionBudget());
 
     var fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.snapshot, .{});
     defer fixture.deinit();
     const workspace = &fixture.value.object.getPtr("workspaces").?.array.items[0];
     workspace.object.getPtr("kind").?.* = .{ .string = "automatic" };
+    workspace.object.getPtr("projectEntry").?.* = .{ .bool = false };
+    fixture.value.object.getPtr("tasks").?.array.items[0].object.getPtr("projectId").?.* = .null;
     workspace.object.getPtr("recentOrder").?.* = .{ .string = "0" };
     workspace.object.getPtr("skillCatalog").?.object.getPtr("availability").?.* = .{ .string = "unavailable" };
     const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value, .{});
@@ -13321,6 +13359,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
         var source = try testRuntime();
         defer source.deinit();
         product_workspace.testing.makeAutomatic(&source.workspace, 1, 3);
+        source.testTaskSlots()[0].?.durable.project_id = null;
         source.task_runtime.next_recent_order = 2;
         source.task_persistence = persistence.capability(null);
         source.task_persistence_health = .ready;
@@ -17867,14 +17906,14 @@ test "Runtime projection preserves text bytes with bounded geometric growth" {
 
 test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     const limits = Limits{};
-    const worst_case = worstCaseSnapshotBytes(limits).?;
+    const worst_case = admittedSnapshotBudgetBytes(limits).?;
     try std.testing.expect(worst_case <= limits.max_snapshot_bytes);
     try std.testing.expect(worst_case > 1024 * 1024);
     const additional_skill_bytes = skillManagementAdditionalSnapshotBytes(limits).?;
-    try std.testing.expect(additional_skill_bytes >= (limits.max_workspaces + 1) * limits.max_catalog_skills * skill_asset_snapshot_overhead);
-    try std.testing.expect(additional_skill_bytes >= @min((limits.max_workspaces + 1) * limits.max_catalog_projection_bytes, limits.max_projection_bytes) * json_string_expansion);
+    try std.testing.expect(additional_skill_bytes >= (limits.max_manual_directories + 1) * limits.max_catalog_skills * skill_asset_snapshot_overhead);
+    try std.testing.expect(additional_skill_bytes >= @min((limits.max_manual_directories + 1) * limits.max_catalog_projection_bytes, limits.max_projection_bytes) * json_string_expansion);
     var exhausted_skill_limits = limits;
-    exhausted_skill_limits.max_workspaces = std.math.maxInt(usize);
+    exhausted_skill_limits.max_manual_directories = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(?usize, null), skillManagementAdditionalSnapshotBytes(exhausted_skill_limits));
     try std.testing.expectEqual(@as(usize, 1536 * 1024), limits.max_projection_bytes);
     try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_task);
@@ -17910,7 +17949,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
 test "production pending UI concurrency fits the snapshot store with file changes" {
     var limits = Limits{};
     limits.max_pending_ui_requests = 16;
-    try std.testing.expect(worstCaseSnapshotBytes(limits).? <= limits.max_snapshot_bytes);
+    try std.testing.expect(admittedSnapshotBudgetBytes(limits).? <= limits.max_snapshot_bytes);
 }
 
 fn installMaximumAccountProjection(control: *Runtime) !void {
@@ -18190,7 +18229,7 @@ test "default snapshot budget contains the maximum structural projection" {
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
     const snapshot = try control.writeAggregateFixture(storage);
-    try std.testing.expect(snapshot.len <= worstCaseSnapshotBytes(limits).?);
+    try std.testing.expect(snapshot.len <= admittedSnapshotBudgetBytes(limits).?);
     try std.testing.expect(snapshot.len <= limits.max_snapshot_bytes);
 
     var task_state = try control.buildTaskStateWire();
@@ -21821,6 +21860,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         storage: []u8,
         main_thread: std.Thread.Id,
         len: usize = 0,
+        saved_project_id: ?u64 = 1,
         pending: ?[]u8 = null,
         main_commits: usize = 0,
         worker_commits: usize = 0,
@@ -21850,6 +21890,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
             }
             const bytes = task_persistence.encodePreserving(self.storage, candidate.value, candidate.preserved, persistenceLimits(.{}, 16)) catch return .failed;
             self.len = bytes.len;
+            self.saved_project_id = candidate.value.tasks[0].project_id;
             return .committed;
         }
         fn resolve(context: ?*anyopaque, token: task_persistence.CommitToken) TaskPersistenceCommit {
@@ -21923,6 +21964,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         }
         try std.testing.expect(history.entered.load(.acquire));
         try control.renameTask(3, "renamed while mode writer is held");
+        try control.setTaskProject(3, null);
         try std.testing.expect(control.approval_history_dirty);
         try std.testing.expectEqual(main_commits, history.main_commits);
         history.released.store(true, .release);
@@ -21956,6 +21998,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
             var canonical = try task_persistence.decode(std.testing.allocator, history.storage[0..history.len], control.taskPersistenceLimits());
             defer canonical.deinit();
             try std.testing.expectEqualStrings("renamed while mode writer is held", canonical.value.tasks[0].title);
+            try std.testing.expectEqual(@as(?u64, null), history.saved_project_id);
             try std.testing.expectEqual(@as(u64, 2), canonical.value.tasks[0].approval_revision);
             try std.testing.expect(canonical.value.tasks[0].permission_review_delegated);
             continue;
@@ -21970,6 +22013,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         defer candidate.deinit();
         try std.testing.expectEqualStrings("renamed while mode writer is held", candidate.value.tasks[0].title);
         try control.renameTask(3, "latest title while projection is unknown");
+        try control.setTaskProject(3, 1);
         for (0..10) |_| control.syncLifecycle();
         try std.testing.expectEqual(@as(usize, 2), history.worker_commits);
         try std.testing.expectEqual(main_commits, history.main_commits);
@@ -22013,6 +22057,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         var canonical = try task_persistence.decode(std.testing.allocator, history.storage[0..history.len], control.taskPersistenceLimits());
         defer canonical.deinit();
         try std.testing.expectEqualStrings("latest title while projection is unknown", canonical.value.tasks[0].title);
+        try std.testing.expectEqual(@as(?u64, 1), history.saved_project_id);
         try std.testing.expectEqual(@as(u64, 2), canonical.value.tasks[0].approval_revision);
         try std.testing.expect(canonical.value.tasks[0].permission_review_delegated);
         try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
@@ -23529,4 +23574,82 @@ test "history allowance admits more than sixteen Runs beyond the old shared proj
     defer owned.deinit();
     try std.testing.expectEqual(@as(usize, 25), owned.candidate.value.tasks[0].runs.len);
     try std.testing.expect(task_persistence.validateCandidate(&owned.candidate.value, control.taskPersistenceLimits()) == null);
+}
+
+test "directory selection preserves entry intent and has independent capacity" {
+    var control = try testRuntime();
+    defer control.deinit();
+    product_workspace.testing.setManualLimit(&control.workspace, 1);
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const directory = try control.openWorkspace(.{ .workspace_root = root, .intent = .directory, .trust = .explicitly_trusted });
+    try std.testing.expect(!control.workspace.facts(directory).?.project_entry);
+    try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    try control.removeProjectAtEpoch(1, 1);
+    try std.testing.expectEqual(directory, try control.openWorkspace(.{ .workspace_root = root, .intent = .directory, .trust = .explicitly_trusted }));
+    try std.testing.expect(!control.workspace.facts(directory).?.project_entry);
+    try std.testing.expectEqual(directory, try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    try std.testing.expect(control.workspace.facts(directory).?.project_entry);
+}
+
+test "Task project membership is last-writer-wins and keeps execution and hidden identity" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const project = try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted });
+    const task = control.testTaskSlots()[0].?;
+    const workspace = task.durable.workspace_id;
+    const binding = task.durable.binding_epoch;
+    const recent_order = task.durable.recent_order;
+    try control.setTaskProject(3, project);
+    try control.setTaskProject(3, 1);
+    try std.testing.expectEqual(@as(?u64, 1), try control.taskProjectId(3));
+    try std.testing.expectEqual(workspace, task.durable.workspace_id);
+    try std.testing.expectEqual(binding, task.durable.binding_epoch);
+    try std.testing.expectEqual(recent_order, task.durable.recent_order);
+    try control.setTaskProject(3, project);
+    try control.removeWorkspaceAtEpoch(project, control.workspace.facts(project).?.epoch);
+    try std.testing.expect(!control.workspace.facts(project).?.visible);
+    try std.testing.expect(!control.workspace.facts(project).?.project_entry);
+    try std.testing.expect(!hiddenWorkspaceReusable(&control, project));
+    try control.setTaskProject(3, project); // Existing hidden membership is an idempotent target.
+    try std.testing.expectEqual(workspace, task.durable.workspace_id);
+    try control.setTaskProject(3, null);
+    try std.testing.expectError(error.ProjectUnavailable, control.setTaskProject(3, project));
+    try std.testing.expectEqual(@as(?u64, null), try control.taskProjectId(3));
+    try std.testing.expectEqual(recent_order, task.durable.recent_order);
+}
+
+test "revoking a project directory releases directory quota without projecting its retained identity" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.workspace.max_directories = 2;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDir(std.testing.io, "p", .default_dir);
+    try temporary.dir.createDir(std.testing.io, "c", .default_dir);
+    const project_root = try temporary.dir.realPathFileAlloc(std.testing.io, "p", std.testing.allocator);
+    defer std.testing.allocator.free(project_root);
+    const other_root = try temporary.dir.realPathFileAlloc(std.testing.io, "c", std.testing.allocator);
+    defer std.testing.allocator.free(other_root);
+    const project = try control.openWorkspace(.{ .workspace_root = project_root, .trust = .explicitly_trusted });
+    try control.setTaskProject(3, project);
+    const other_input: TaskCreateInput = .{ .workspace_root = other_root, .intent = .directory, .trust = .explicitly_trusted };
+    try std.testing.expectError(error.WorkspaceDirectoryCapacity, control.openWorkspace(other_input));
+    try control.removeWorkspaceAtEpoch(project, control.workspace.facts(project).?.epoch);
+    const other = try control.openWorkspace(other_input);
+    try std.testing.expectEqual(@as(?u64, project), try control.taskProjectId(3));
+    try std.testing.expectEqual(@as(u64, 1), control.testTaskSlots()[0].?.durable.workspace_id);
+    try std.testing.expect(!control.workspace.facts(project).?.project_entry);
+    var projections: [2]WorkspaceProjection = undefined;
+    const visible = try control.copyWorkspaceProjections(&projections);
+    try std.testing.expectEqual(@as(usize, 2), visible.len);
+    for (visible) |entry| try std.testing.expect(entry.id != project);
+    try std.testing.expect(!control.workspace.facts(other).?.project_entry);
+    try std.testing.expectError(error.WorkspaceDirectoryCapacity, control.openWorkspace(.{ .workspace_root = project_root, .intent = .directory, .trust = .explicitly_trusted }));
 }

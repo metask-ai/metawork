@@ -177,6 +177,7 @@ export async function runOutputDeliveryVertical({
   try {
     const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId,

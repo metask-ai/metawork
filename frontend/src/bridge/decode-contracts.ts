@@ -1,4 +1,4 @@
-import type { SearchCursor } from "./contracts.ts";
+import type { SearchCursor, TaskProjectResult } from "./contracts.ts";
 import {
   skillMutationReasons,
   skillImportEffects,
@@ -411,6 +411,7 @@ const scheduledTaskFailureReasons = [
   "permission_required",
 ] as const;
 const taskCreateReasons = [
+  "project_unavailable",
   "execution_unavailable",
   "schedule_persistence_unavailable",
   "schedule_persistence_failed",
@@ -3744,6 +3745,7 @@ function decodeTask(
     "recentOrder",
     "title",
     "workspaceId",
+    "projectId",
     "permissionProfile",
     "approvalMode",
     "approvalRevision",
@@ -4354,6 +4356,10 @@ function decodeTask(
     id: positiveWireId(item.id, `${path}.id`),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
+    projectId:
+      item.projectId === null
+        ? null
+        : positiveWireId(item.projectId, `${path}.projectId`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     signal: nullableEnum(item.signal, `${path}.signal`, taskNavigationSignals),
     compactBlocker: nullableEnum(
@@ -4412,7 +4418,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "id",
     "epoch",
     "kind",
-    "projectRemoved",
+    "projectEntry",
     "displayName",
     "canonicalRoot",
     "redacted",
@@ -4429,10 +4435,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "failedOrInterrupted",
   ]);
   const kind = enumValue(item.kind, `${path}.kind`, workspaceKinds);
-  const projectRemoved = booleanValue(
-    item.projectRemoved,
-    `${path}.projectRemoved`,
-  );
+  const projectEntry = booleanValue(item.projectEntry, `${path}.projectEntry`);
   const authorization = enumValue(
     item.authorization,
     `${path}.authorization`,
@@ -4465,7 +4468,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     fail(`${path}.recentOrder`, "manual Workspace requires recent order");
   if (
     kind === "automatic" &&
-    (projectRemoved ||
+    (projectEntry ||
       recentOrder !== "0" ||
       authorization !== "available" ||
       lastRemovalFailure !== null)
@@ -4478,7 +4481,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
     kind,
-    projectRemoved,
+    projectEntry,
     displayName: stringValue(item.displayName, `${path}.displayName`),
     canonicalRoot: stringValue(item.canonicalRoot, `${path}.canonicalRoot`),
     redacted: booleanValue(item.redacted, `${path}.redacted`),
@@ -5507,6 +5510,7 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
     "recentOrder",
     "title",
     "workspaceId",
+    "projectId",
     "archived",
     "lifecycle",
     "deletionStatus",
@@ -5544,6 +5548,10 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
     ),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
+    projectId:
+      item.projectId === null
+        ? null
+        : positiveWireId(item.projectId, `${path}.projectId`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     archived: booleanValue(item.archived, `${path}.archived`),
     lifecycle: enumValue(item.lifecycle, `${path}.lifecycle`, taskLifecycles),
@@ -6331,6 +6339,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       "recentOrder",
       "title",
       "workspaceId",
+      "projectId",
       "archived",
       "lifecycle",
       "deletionStatus",
@@ -6391,6 +6400,14 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   )
     fail("$.workspaces", "Workspace identities must be unique");
   const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+  for (const task of taskIndex) {
+    if (task.projectId === null) continue;
+    const project = workspaces.find(
+      (workspace) => workspace.id === task.projectId,
+    );
+    if (project && project.kind !== "manual")
+      fail("$.taskIndex", "Task project must reference a Manual Workspace");
+  }
   if (new Set(taskIndex.map((task) => task.id)).size !== taskIndex.length)
     fail("$.tasks", "Task identities must be unique");
   if (
@@ -7211,6 +7228,7 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
   const item = object(value, "$", [
     "accepted",
     "taskId",
+    "projectId",
     "bindingEpoch",
     "mcpAuthority",
     "reason",
@@ -7224,6 +7242,10 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     decodeSessionBlocker(item, null);
     return {
       accepted: true,
+      projectId:
+        item.projectId === null
+          ? null
+          : positiveWireId(item.projectId, "$.projectId"),
       taskId: positiveWireId(item.taskId, "$.taskId"),
       bindingEpoch: positiveWireId(item.bindingEpoch, "$.bindingEpoch"),
       mcpAuthority: decodeTaskMcpAuthority(item.mcpAuthority, "$.mcpAuthority"),
@@ -7231,6 +7253,7 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     };
   }
   if (
+    item.projectId !== null ||
     item.taskId !== null ||
     item.bindingEpoch !== null ||
     item.mcpAuthority !== null
@@ -7239,6 +7262,7 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
   const reason = enumValue(item.reason, "$.reason", taskCreateReasons);
   return {
     accepted: false,
+    projectId: null,
     taskId: null,
     bindingEpoch: null,
     mcpAuthority: null,
@@ -7989,4 +8013,38 @@ export function decodeSendInputResult(
   if (item.reason !== null)
     fail(path, "accepted input cannot have a refusal reason");
   return { taskId, operationId, outcome, reason: null };
+}
+
+export function decodeTaskProjectResult(
+  value: unknown,
+  expectedTaskId: string,
+): TaskProjectResult {
+  const item = object(value, "$", ["applied", "taskId", "projectId", "reason"]);
+  const applied = booleanValue(item.applied, "$.applied");
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
+  if (applied) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      applied,
+      taskId,
+      projectId:
+        item.projectId === null
+          ? null
+          : positiveWireId(item.projectId, "$.projectId"),
+      reason: null,
+    };
+  }
+  if (item.projectId !== null) fail("$.projectId", "expected null");
+  return {
+    applied,
+    taskId,
+    projectId: null,
+    reason: enumValue(item.reason, "$.reason", [
+      "task_missing",
+      "task_unavailable",
+      "project_unavailable",
+      "shutting_down",
+    ] as const),
+  };
 }

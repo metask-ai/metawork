@@ -82,6 +82,13 @@ const Faults = struct {
     var failing_writes: std.atomic.Value(usize) = .init(0);
     /// Start time of each connection attempt, in attempt order.
     var starts: [8]Io.Clock.Timestamp = undefined;
+    /// When the call's own deadline or connect budget arrives. `.clock` leaves
+    /// it to real time. The others hold the engine's control waiter until a
+    /// lookup or a connection attempt is in flight, so a case that needs its
+    /// control to land in that phase does not race thread start-up against a
+    /// short wall clock; such a case passes a backstop the clock never reaches.
+    var arrival: enum { clock, dns, connect } = .clock;
+    var arrived: Io.Event = .unset;
 
     fn reset(io: Io, selected: Mode) void {
         original = io;
@@ -91,6 +98,15 @@ const Faults = struct {
         late.store(0, .monotonic);
         dns_active.store(0, .monotonic);
         failing_writes.store(0, .monotonic);
+        arrival = .clock;
+        arrived = .unset;
+    }
+
+    /// The engine's only `.deadline` waits are the call's deadline and connect
+    /// budget waiters; pacing and caps sleep for durations and pass through.
+    fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
+        if (arrival != .clock and timeout == .deadline) return arrived.wait(original);
+        return original.vtable.sleep(userdata, timeout);
     }
 
     fn write(userdata: ?*anyopaque, handle: Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) Io.net.Stream.Writer.Error!usize {
@@ -102,8 +118,8 @@ const Faults = struct {
         return original.vtable.netWrite(userdata, handle, header, data, splat);
     }
 
-    fn startedAfter(first: usize, second: usize) i64 {
-        return starts[first].durationTo(starts[second]).raw.toMilliseconds();
+    fn startedSince(origin: Io.Clock.Timestamp, index: usize) i64 {
+        return origin.durationTo(starts[index]).raw.toMilliseconds();
     }
 
     fn lookup(userdata: ?*anyopaque, host: Io.net.HostName, queue: *Io.Queue(Io.net.HostName.LookupResult), options: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
@@ -111,6 +127,7 @@ const Faults = struct {
         defer queue.close(original);
         _ = dns_active.fetchAdd(1, .monotonic);
         defer _ = dns_active.fetchSub(1, .monotonic);
+        if (arrival == .dns) arrived.set(original);
         if (mode == .slow_dns) {
             Io.sleep(original, .fromSeconds(30), .awake) catch {
                 _ = late.fetchAdd(1, .monotonic);
@@ -146,6 +163,21 @@ const Faults = struct {
         defer _ = active.fetchSub(1, .monotonic);
         const index = attempts.fetchAdd(1, .monotonic);
         if (index < starts.len) starts[index] = .now(original, .awake);
+        if (mode == .late_connect) {
+            // Connect first, then hold the connection back: a cancel arrives
+            // only once no connect() is in flight. On POSIX, std retries a
+            // connect() interrupted by a cancel signal sent to an earlier wait
+            // and treats the resulting EISCONN as a programmer bug.
+            const socket = try original.vtable.netConnectIp(userdata, address, options);
+            if (arrival == .connect) arrived.set(original);
+            Io.sleep(original, .fromSeconds(30), .awake) catch {
+                // Models a nested async task acknowledging cancellation and then
+                // returning a connection anyway: it must not authorize an HTTP write.
+                _ = late.fetchAdd(1, .monotonic);
+            };
+            return socket;
+        }
+        if (arrival == .connect) arrived.set(original);
         if (mode == .refused) return error.ConnectionRefused;
         if (address.* == .ip4 and address.ip4.bytes[3] == 4) return error.ConnectionRefused;
         // A slow but healthy only address: TCP alone exceeds three seconds.
@@ -154,11 +186,6 @@ const Faults = struct {
             try Io.sleep(original, .fromSeconds(30), .awake);
             return error.NetworkUnreachable;
         }
-        if (mode == .late_connect) Io.sleep(original, .fromSeconds(30), .awake) catch {
-            // Models a nested async task acknowledging cancellation and then
-            // returning a connection anyway: it must not authorize an HTTP write.
-            _ = late.fetchAdd(1, .monotonic);
-        };
         return original.vtable.netConnectIp(userdata, address, options);
     }
 };
@@ -230,10 +257,11 @@ test "HTTP races both same-family and dual-stack addresses with async quota zero
 test "HTTP cancellation closes send admission before a late connection returns" {
     var threaded: Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
-    Faults.reset(threaded.io(), .late_connect);
-    var vtable = threaded.io().vtable.*;
-    vtable.netConnectIp = Faults.connect;
-    const io: Io = .{ .userdata = threaded.io().userdata, .vtable = &vtable };
+    var vtable: Io.VTable = undefined;
+    const io = faultIo(&threaded, &vtable, .late_connect);
+    // The deadline falls while the connection is being established; a
+    // deadline before any attempt would leave the server waiting forever.
+    Faults.arrival = .connect;
     var engine: http.Engine = undefined;
     engine.init(std.testing.allocator, io);
     defer engine.deinit();
@@ -245,10 +273,10 @@ test "HTTP cancellation closes send admission before a late connection returns" 
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/post", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(50), .clock = .boot }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = backstop(io) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
-    try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
+    try std.testing.expectEqual(@as(@TypeOf(result.outcome), .{ .failed = error.DeadlineExceeded }), result.outcome);
     try std.testing.expectEqual(contract.Send.not_sent, result.send);
     try expectDiagnosedOutcome(result);
     // The deadline fell while a connection was being established.
@@ -291,7 +319,14 @@ fn faultIo(threaded: *Io.Threaded, vtable: *Io.VTable, mode: Faults.Mode) Io {
     vtable.netLookup = Faults.lookup;
     vtable.netConnectIp = Faults.connect;
     vtable.netWrite = Faults.write;
+    vtable.sleep = Faults.sleep;
     return .{ .userdata = threaded.io().userdata, .vtable = vtable };
+}
+
+/// A deadline for a case whose control arrives through `Faults.arrival`: the
+/// clock never decides it.
+fn backstop(io: Io) Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
 }
 
 test "HTTP only address keeps the whole remaining budget beyond three seconds" {
@@ -395,17 +430,42 @@ test "HTTP starts later addresses 250 ms apart and caps only attempts with addre
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://fixture.test:{d}/post", .{listener.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var output: [8]u8 = undefined;
+    // Starts are measured from before the call, not from the first attempt:
+    // the engine paces reservations, and the fixture sees an attempt only once
+    // its connect thread runs, which can be late for the first attempt as much
+    // as for any other.
+    const called: Io.Clock.Timestamp = .now(io, .awake);
     // 6 s over three addresses: the first attempt is capped at max(2 s, 6 s / 3).
-    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = called.addDuration(.{ .raw = .fromSeconds(6), .clock = .awake }) } }, fetch, .{ url, "body", &output });
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
     try std.testing.expectEqual(@as(usize, 3), Faults.attempts.load(.acquire));
-    const second = Faults.startedAfter(0, 1);
-    try std.testing.expect(second >= 240 and second < 600);
-    const third = Faults.startedAfter(0, 2);
-    try std.testing.expect(third >= 1900 and third < 2700);
+    // `ConnectRace.reserve` starts the next address no earlier than 250 ms
+    // after the previous reservation, the first no earlier than the call, and a
+    // lane sleeps until its reservation. The second address is released by
+    // that pacing, not by the first attempt's 2 s cap ending.
+    try expectStartedWithin(called, 1, 250 - timer_tick_ms, 2000);
+    // The last address waits for a free lane. The first attempt's 2 s cap
+    // frees one no earlier than 2 s after the call; the second attempt, started
+    // at t >= 250 ms with two addresses left, is capped at (6 s - t) / 2 and so
+    // frees the other no earlier than (6 s + t) / 2 >= 3125 ms.
+    try expectStartedWithin(called, 2, 2000 - timer_tick_ms, 3125);
     try std.testing.expectEqual(@as(usize, 0), Faults.active.load(.acquire));
+}
+
+/// A timed wait is due on the kernel's timer ticks, not on the awake clock the
+/// starts are read from, so a lower bound allows one tick at the default
+/// resolution (15.625 ms). Under load a start paced 250 ms after the call was
+/// read at 249 ms.
+const timer_tick_ms = 16;
+
+/// Reports the measured start when it falls outside [at_least, below) ms.
+fn expectStartedWithin(called: Io.Clock.Timestamp, index: usize, at_least: i64, below: i64) !void {
+    const started = Faults.startedSince(called, index);
+    if (started >= at_least and started < below) return;
+    std.debug.print("attempt {d} started {d} ms after the call, expected at least {d} and below {d}\n", .{ index, started, at_least, below });
+    return error.TestUnexpectedResult;
 }
 
 test "HTTP connect budget ends DNS and TCP with their typed failures before any send" {
@@ -414,12 +474,14 @@ test "HTTP connect budget ends DNS and TCP with their typed failures before any 
         defer threaded.deinit();
         var vtable: Io.VTable = undefined;
         const io = faultIo(&threaded, &vtable, mode);
+        // The budget ends inside the phase each mode stalls in.
+        Faults.arrival = if (mode == .slow_dns) .dns else .connect;
         var engine: http.Engine = undefined;
         engine.init(std.testing.allocator, io);
         defer engine.deinit();
         var output: [8]u8 = undefined;
-        const result = engine.run(.{ .consumer = .completion, .isolation = .public, .budget = .{ .connect = .fromMilliseconds(200) } }, fetch, .{ "http://fixture.test/post", "body", &output });
-        try std.testing.expectEqual(@as(http.Error, if (mode == .slow_dns) error.DnsFailed else error.ConnectFailed), result.outcome.failed);
+        const result = engine.run(.{ .consumer = .completion, .isolation = .public, .budget = .{ .connect = .fromSeconds(30) } }, fetch, .{ "http://fixture.test/post", "body", &output });
+        try std.testing.expectEqual(@as(@TypeOf(result.outcome), .{ .failed = if (mode == .slow_dns) error.DnsFailed else error.ConnectFailed }), result.outcome);
         try std.testing.expectEqual(contract.Send.not_sent, result.send);
         try expectDiagnosedOutcome(result);
         try std.testing.expectEqual(@as(contract.Phase, if (mode == .slow_dns) .resolve else .connect), result.diagnostic.?.phase);
@@ -433,17 +495,16 @@ test "HTTP connect budget ends DNS and TCP with their typed failures before any 
 test "HTTP retains resolver capacity and borrowed inputs until canceled DNS joins" {
     var threaded: Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
-    Faults.reset(threaded.io(), .slow_dns);
-    var vtable = threaded.io().vtable.*;
-    vtable.netLookup = Faults.lookup;
-    vtable.netConnectIp = Faults.connect;
-    const io: Io = .{ .userdata = threaded.io().userdata, .vtable = &vtable };
+    var vtable: Io.VTable = undefined;
+    const io = faultIo(&threaded, &vtable, .slow_dns);
+    // The deadline falls while the lookup is in flight.
+    Faults.arrival = .dns;
     var engine: http.Engine = undefined;
     engine.init(std.testing.allocator, io);
     defer engine.deinit();
     var output: [8]u8 = undefined;
-    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(io, .{ .raw = .fromMilliseconds(20), .clock = .awake }) } }, fetch, .{ "http://fixture.test/post", "body", &output });
-    try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
+    const result = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = backstop(io) } }, fetch, .{ "http://fixture.test/post", "body", &output });
+    try std.testing.expectEqual(@as(@TypeOf(result.outcome), .{ .failed = error.DeadlineExceeded }), result.outcome);
     try std.testing.expectEqual(contract.Send.not_sent, result.send);
     try expectDiagnosedOutcome(result);
     try std.testing.expectEqual(contract.Phase.resolve, result.diagnostic.?.phase);

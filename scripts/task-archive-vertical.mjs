@@ -29,6 +29,7 @@ export async function runTaskArchiveVertical({
   async function create(title) {
     const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId,

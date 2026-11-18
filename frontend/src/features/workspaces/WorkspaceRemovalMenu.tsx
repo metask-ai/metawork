@@ -102,7 +102,7 @@ export function WorkspaceRemovalMenu({
             title: workspace.displayName,
           })}
           title={t("workspace.new_conversation")}
-          disabled={openDisabled || workspace.authorization !== "available"}
+          disabled={openDisabled}
           onClick={onNewTask}
         >
           <Icon name="new-task" />

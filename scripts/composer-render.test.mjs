@@ -455,6 +455,19 @@ function renderTaskList(tasks, props = {}) {
         activeTaskId: null,
         onSelectTask() {},
         ...props,
+        workspaces: (props.workspaces ?? []).map((workspace) => ({
+          projectEntry: workspace.kind === "manual",
+          ...workspace,
+        })),
+        tasks: tasks.map((task) => ({
+          projectId: props.workspaces?.some(
+            (workspace) =>
+              workspace.id === task.workspaceId && workspace.kind === "manual",
+          )
+            ? task.workspaceId
+            : null,
+          ...task,
+        })),
       }),
     ),
   );
@@ -1381,7 +1394,7 @@ test("Manual projects repeat their tasks while automatic tasks stay global", () 
     activeTaskId: "2",
   });
   const projectsStart = markup.indexOf('class="task-projects"');
-  const tasksStart = markup.indexOf('class="task-list-heading"');
+  const tasksStart = markup.lastIndexOf('class="task-list-heading"');
   assert.ok(projectsStart < tasksStart, "Projects appear above global tasks");
   const projects = markup.slice(projectsStart, tasksStart);
   const alpha = projects.slice(

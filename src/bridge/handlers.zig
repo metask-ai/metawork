@@ -406,6 +406,7 @@ pub const NewTaskModelSelection = struct {
     expectedCatalogGeneration: []const u8,
 };
 pub const TaskCreate = struct {
+    projectId: ?[]const u8,
     workspace: TaskWorkspaceIntent,
     modelSelection: NewTaskModelSelection,
     expectedSkillCatalogRevision: ?[]const u8,
@@ -617,6 +618,7 @@ pub const AttachmentReceiveAppend = struct {
     offset: []const u8,
     dataBase64: []const u8,
 };
+pub const TaskSetProject = struct { taskId: []const u8, projectId: ?[]const u8 };
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
@@ -1019,7 +1021,7 @@ test "dropped attachment paths use one exact bounded payload" {
 
 test "Task creation requires explicit nullable model and skill selections" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-1"},"expectedSourceGeneration":"3","expectedCatalogGeneration":"4"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}
+        \\{"projectId":null,"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-1"},"expectedSourceGeneration":"3","expectedCatalogGeneration":"4"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
@@ -1033,7 +1035,7 @@ test "Task creation requires explicit nullable model and skill selections" {
     try std.testing.expect(permissionProfile("full_access") != null);
     try std.testing.expect(permissionProfile("accept_edits") == null);
     var selected = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"automatic"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"full_access"}
+        \\{"projectId":null,"workspace":{"kind":"automatic"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"full_access"}
     );
     defer selected.deinit();
     try std.testing.expectEqualStrings(

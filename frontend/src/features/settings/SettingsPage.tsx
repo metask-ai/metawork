@@ -25,13 +25,16 @@ import {
   type CustomModelActions,
 } from "./CustomModelsSettings.tsx";
 import { supportsCustomProviders } from "../../workbench/model-setup.ts";
-export type SettingsFocusTarget = "title" | "account" | "models" | "archived";
+export type SettingsFocusTarget =
+  "title" | "account" | "models" | "archived" | "directories";
 
-type SettingsSection = "general" | "account" | "models" | "archived";
+type SettingsSection =
+  "general" | "account" | "models" | "archived" | "directories";
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 export function SettingsPage({
   archiveManagement,
+  directoryManagement,
   account,
   accountFeedback,
   accountDiagnostics,
@@ -63,6 +66,7 @@ export function SettingsPage({
   onLogout,
 }: {
   archiveManagement?: ArchivedTasksProps;
+  directoryManagement?: ReactNode;
   account: AccountView;
   accountFeedback?: ReactNode;
   accountDiagnostics?: ReactNode;
@@ -145,7 +149,9 @@ export function SettingsPage({
     [t],
   );
   useEffect(() => {
-    if (focusTarget === "archived") {
+    if (focusTarget === "directories") {
+      setActiveSection("directories");
+    } else if (focusTarget === "archived") {
       setActiveSection("archived");
     } else if (focusTarget === "models") {
       setActiveSection("models");
@@ -306,6 +312,22 @@ export function SettingsPage({
           </a>
           <a
             className="focus-ring"
+            href="#settings-directories"
+            aria-current={
+              activeSection === "directories" ? "location" : undefined
+            }
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("directories");
+            }}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="workspace" />
+            </span>
+            <span>{t("settings.working_directories")}</span>
+          </a>
+          <a
+            className="focus-ring"
             href="#settings-archived"
             aria-current={activeSection === "archived" ? "location" : undefined}
             onClick={(event) => {
@@ -336,6 +358,7 @@ export function SettingsPage({
           >
             {t("settings.title")}
           </h1>
+          {activeSection === "directories" && directoryManagement}
           {activeSection === "archived" && archiveManagement && (
             <ArchivedTasks {...archiveManagement} />
           )}

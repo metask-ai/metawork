@@ -6,6 +6,7 @@ import {
   decodeOutputActionResult,
   decodeOutputActionCancel,
   decodeSendInputResult,
+  decodeTaskProjectResult,
 } from "./decode-contracts.ts";
 import {
   commands,
@@ -479,6 +480,17 @@ export class BridgeClient {
     // Host work. Their lifetime must not be confused with a wedged command.
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
+    );
+  }
+  async addProject(): Promise<WorkspaceChoice> {
+    return decodeWorkspaceChoice(
+      await this.bridge().invoke(commands.addProject, {}),
+    );
+  }
+  async setTaskProject(taskId: string, projectId: string | null) {
+    return decodeTaskProjectResult(
+      await this.invoke(commands.setTaskProject, { taskId, projectId }),
+      taskId,
     );
   }
   async openWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
@@ -1010,10 +1022,12 @@ export class BridgeClient {
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     approvalMode: ApprovalMode,
+    projectId: string | null,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
         workspace,
+        projectId,
         modelSelection,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,

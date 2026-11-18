@@ -9,6 +9,7 @@ export function TaskInformation({
   task,
   models,
   workspaceDirectory,
+  projectName,
   workspaceDiagnostic,
   permissionProfilesEnabled,
   triggerRef,
@@ -17,6 +18,7 @@ export function TaskInformation({
   task: TaskView;
   models: ModelsView;
   workspaceDirectory?: ReactNode;
+  projectName?: string;
   workspaceDiagnostic?: string;
   permissionProfilesEnabled: boolean;
   triggerRef?: Ref<HTMLButtonElement>;
@@ -58,6 +60,12 @@ export function TaskInformation({
               </DiagnosticDisclosure>
             )}
             <dl className="task-facts">
+              {projectName !== undefined && (
+                <div>
+                  <dt>{t("task.project")}</dt>
+                  <dd>{projectName}</dd>
+                </div>
+              )}
               {workspaceDirectory}
               <div>
                 <dt>{t("task.selected_provider")}</dt>

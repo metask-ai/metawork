@@ -6,6 +6,7 @@ const configuration_impl = @import("product_workspace_configuration");
 
 pub const Runtime = runtime_impl.Runtime;
 pub const Kind = runtime_impl.Kind;
+pub const OpenIntent = runtime_impl.OpenIntent;
 pub const Authorization = runtime_impl.Authorization;
 pub const RemovalFailure = runtime_impl.RemovalFailure;
 pub const RemovalState = runtime_impl.RemovalState;

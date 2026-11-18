@@ -8,7 +8,7 @@ export type WorkbenchState = {
   snapshotGeneration: string | null;
   activeTaskId: string | null;
   draftOpen: boolean;
-  draftWorkspaceId: string | null;
+  draftProjectId: string | null;
 };
 export type WorkbenchAction =
   | {
@@ -32,7 +32,7 @@ export type WorkbenchAction =
     }
   | {
       type: "task.draft.opened";
-      workspaceId: string | null;
+      projectId: string | null;
     }
   | {
       type: "task.draft.closed";
@@ -186,7 +186,7 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotGeneration: null,
   activeTaskId: null,
   draftOpen: false,
-  draftWorkspaceId: null,
+  draftProjectId: null,
 };
 export function workbenchReducer(
   state: WorkbenchState,
@@ -198,7 +198,7 @@ export function workbenchReducer(
       ...state,
       activeTaskId: action.taskId,
       draftOpen: false,
-      draftWorkspaceId: null,
+      draftProjectId: null,
     };
   }
   if (action.type === "task.draft.opened")
@@ -206,14 +206,14 @@ export function workbenchReducer(
       ...state,
       activeTaskId: null,
       draftOpen: true,
-      draftWorkspaceId: action.workspaceId,
+      draftProjectId: action.projectId,
     };
   if (action.type === "task.draft.closed")
     return {
       ...state,
       activeTaskId: null,
       draftOpen: false,
-      draftWorkspaceId: null,
+      draftProjectId: null,
     };
   if (action.type === "security.invalidated") {
     if (action.generation !== state.connectionGeneration) return state;
@@ -236,7 +236,7 @@ export function workbenchReducer(
       snapshotReceivedAt: null,
       activeTaskId: null,
       draftOpen: false,
-      draftWorkspaceId: null,
+      draftProjectId: null,
     };
   }
   const generation = action.generation ?? state.connectionGeneration;
@@ -288,9 +288,9 @@ export function workbenchReducer(
       snapshotReceivedAt: action.receivedAt,
       snapshotGeneration: generation,
       activeTaskId: null,
-      // A removed Workspace loses authorization, but its local draft identity
-      // must survive so reauthorization can restore the same text.
-      draftWorkspaceId: state.draftWorkspaceId,
+      // A removed project keeps its local draft identity, which
+      // survives so adding the project again restores the same draft.
+      draftProjectId: state.draftProjectId,
     };
   // Snapshot hydration restores the history list, not the current
   // conversation route. A Task becomes active only after an explicit user
@@ -307,6 +307,6 @@ export function workbenchReducer(
     snapshotGeneration: generation,
     activeTaskId,
     draftOpen: false,
-    draftWorkspaceId: null,
+    draftProjectId: null,
   };
 }

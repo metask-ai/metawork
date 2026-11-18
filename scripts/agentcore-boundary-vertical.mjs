@@ -26,6 +26,7 @@ export async function runAgentBoundaryVertical({
   const evidence = [];
   async function create(title) {
     const result = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId,

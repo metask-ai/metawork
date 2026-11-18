@@ -3,12 +3,16 @@ import {
   useRef,
   useState,
   type MouseEvent,
+  type DragEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
 
 import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { ProjectSelector } from "./ProjectSelector.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import {
   createContextMenuAnchor,
@@ -52,6 +56,10 @@ export function TaskList({
   suppressedCompletionTaskId = null,
   onSelectTask,
   onTaskAction,
+  onSetProject,
+  renderProjectFeedback,
+  onAddProject,
+  addProjectNotice,
   renderWorkspaceHeading,
   taskMutationDisabled,
   synchronized = true,
@@ -63,6 +71,10 @@ export function TaskList({
   suppressedCompletionTaskId?: string | null;
   onSelectTask: (id: string) => void;
   onTaskAction: (task: TaskSummary, action: TaskMenuAction) => void;
+  onSetProject?: (task: TaskSummary, projectId: string | null) => void;
+  renderProjectFeedback?: (task: TaskSummary) => ReactNode;
+  onAddProject?: () => void;
+  addProjectNotice?: ReactNode;
   renderWorkspaceHeading?: (
     workspace: WorkspaceView,
     heading: ReactNode,
@@ -73,9 +85,19 @@ export function TaskList({
 }) {
   const { locale, t } = useI18n();
   const projectListId = useId();
+  const draggedTask = useRef<string | null>(null);
+  const menuSourceTask = useRef<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null | undefined>(
+    undefined,
+  );
   const [collapsedProjects, setCollapsedProjects] = useState(
     readCollapsedProjects,
   );
+  const [projectTarget, setProjectTarget] = useState<{
+    taskId: string;
+    open: boolean;
+  } | null>(null);
+  const projectDialog = useRef<HTMLDivElement>(null);
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
@@ -90,6 +112,7 @@ export function TaskList({
     menuTaskId === null
       ? null
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
+  const projectTask = tasks.find((task) => task.id === projectTarget?.taskId);
   const menuTaskReadOnly = menuTask?.historyReadOnly === true;
 
   function toggleProject(workspaceId: string) {
@@ -126,14 +149,64 @@ export function TaskList({
           )
         : event.currentTarget,
     );
+    menuSourceTask.current = taskId;
     setMenuTaskId(taskId);
   }
 
-  function renderTask(task: TaskSummary) {
+  function dragAllowed(task: TaskSummary) {
+    return (
+      synchronized &&
+      !taskMutationDisabled &&
+      !task.historyReadOnly &&
+      task.lifecycle === "open" &&
+      task.deletionStatus !== "deleting"
+    );
+  }
+  function dropProject(event: DragEvent, projectId: string | null) {
+    if (
+      !event.dataTransfer.types.includes("application/x-metawork-task") ||
+      event.dataTransfer.files.length > 0
+    )
+      return;
+    const task = tasks.find((task) => task.id === draggedTask.current);
+    if (!task || !dragAllowed(task) || !onSetProject) return;
+    event.preventDefault();
+    draggedTask.current = null;
+    setDropTarget(undefined);
+    onSetProject(task, projectId);
+  }
+  function dragOver(event: DragEvent, projectId: string | null) {
+    if (
+      !event.dataTransfer.types.includes("application/x-metawork-task") ||
+      event.dataTransfer.files.length > 0
+    )
+      return;
+    const task = tasks.find((task) => task.id === draggedTask.current);
+    if (!task || !dragAllowed(task) || !onSetProject) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget(projectId);
+  }
+  function renderTask(task: TaskSummary, recent = false) {
     return (
       <div key={task.id} className="task-list-entry">
         <button
           data-task-id={task.id}
+          data-task-recent={recent ? "true" : undefined}
+          draggable={dragAllowed(task) && Boolean(onSetProject)}
+          onDragStart={(event) => {
+            if (!dragAllowed(task)) {
+              event.preventDefault();
+              return;
+            }
+            draggedTask.current = task.id;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("application/x-metawork-task", task.id);
+          }}
+          onDragEnd={() => {
+            draggedTask.current = null;
+            setDropTarget(undefined);
+          }}
           className="task-list-item focus-ring"
           aria-current={activeTaskId === task.id ? "page" : undefined}
           onClick={() => onSelectTask(task.id)}
@@ -190,20 +263,36 @@ export function TaskList({
         >
           <Icon name="more" />
         </button>
+        {recent && renderProjectFeedback?.(task)}
       </div>
     );
   }
 
   return (
     <nav className="task-list" aria-label={t("task.list")}>
-      {projects.length > 0 && (
+      {(projects.length > 0 || onAddProject) && (
         <section className="task-projects" aria-label={t("task.projects")}>
-          <p className="section-label">{t("task.projects")}</p>
+          <div className="task-list-heading">
+            <p className="section-label">{t("task.projects")}</p>
+            {onAddProject && (
+              <button
+                type="button"
+                className="icon-button focus-ring"
+                aria-label={t("task.add_project")}
+                title={t("task.add_project")}
+                disabled={taskMutationDisabled}
+                onClick={onAddProject}
+              >
+                <Icon name="plus" />
+              </button>
+            )}
+          </div>
+          {addProjectNotice}
           {projects.map((workspace) => {
             const expanded = !collapsedProjects.has(workspace.id);
             const itemsId = `${projectListId}-project-${workspace.id}`;
             const projectTasks = visibleTasks.filter(
-              (task) => task.workspaceId === workspace.id,
+              (task) => task.projectId === workspace.id,
             );
             const heading = (
               <h3>
@@ -229,6 +318,16 @@ export function TaskList({
                 key={workspace.id}
                 className="task-project"
                 data-workspace-id={workspace.id}
+                data-drop-target={dropTarget === workspace.id}
+                onDragOver={(event) => dragOver(event, workspace.id)}
+                onDragLeave={(event) => {
+                  if (
+                    !(event.relatedTarget instanceof Node) ||
+                    !event.currentTarget.contains(event.relatedTarget)
+                  )
+                    setDropTarget(undefined);
+                }}
+                onDrop={(event) => dropProject(event, workspace.id)}
                 aria-label={workspace.displayName}
               >
                 {renderWorkspaceHeading?.(workspace, heading) ?? heading}
@@ -249,10 +348,10 @@ export function TaskList({
                   inert={!expanded}
                 >
                   <div className="task-project-items-content">
-                    {projectTasks.map(renderTask)}
+                    {projectTasks.map((task) => renderTask(task))}
                     {projectTasks.length === 0 && (
                       <p className="task-list-empty">
-                        {tasks.some((task) => task.workspaceId === workspace.id)
+                        {tasks.some((task) => task.projectId === workspace.id)
                           ? t("task.archived_hidden")
                           : t("task.project_empty")}
                       </p>
@@ -264,7 +363,12 @@ export function TaskList({
           })}
         </section>
       )}
-      <div className="task-list-heading">
+      <div
+        className="task-list-heading"
+        data-drop-target={dropTarget === null}
+        onDragOver={(event) => dragOver(event, null)}
+        onDrop={(event) => dropProject(event, null)}
+      >
         <p className="section-label">{t("task.recent")}</p>
         <span>
           {t(taskCountMessageId(locale, visibleTaskCount), {
@@ -272,7 +376,7 @@ export function TaskList({
           })}
         </span>
       </div>
-      {visibleTasks.map(renderTask)}
+      {visibleTasks.map((task) => renderTask(task, true))}
       {visibleTaskCount === 0 && (
         <p className="task-list-empty">
           {tasks.length > 0 ? t("task.archived_hidden") : t("task.no_tasks")}
@@ -282,6 +386,89 @@ export function TaskList({
         <p className="task-list-empty">
           {t("task.history_retained", { count: retainedTaskCount })}
         </p>
+      )}
+      {onSetProject && (
+        <Dialog.Root
+          open={Boolean(projectTask && projectTarget?.open)}
+          onOpenChangeComplete={(open) => {
+            if (open) return;
+            const taskId = projectTarget?.taskId;
+            setProjectTarget(null);
+            // The nested selector must release its focus trap before the
+            // dialog returns focus to the chat's stable Recent row.
+            window.requestAnimationFrame(() => {
+              const target = document.querySelector<HTMLButtonElement>(
+                `[data-task-recent="true"][data-task-id="${CSS.escape(taskId ?? "")}"]`,
+              );
+              (
+                target ??
+                document.querySelector<HTMLButtonElement>(
+                  ".task-list-item, .sidebar-capability",
+                )
+              )?.focus();
+            });
+          }}
+          onOpenChange={(open) => {
+            if (!open)
+              setProjectTarget((current) =>
+                current ? { ...current, open: false } : null,
+              );
+          }}
+        >
+          <Dialog.Portal>
+            <Dialog.Backdrop />
+            <Dialog.Popup
+              ref={projectDialog}
+              initialFocus={() =>
+                projectDialog.current?.querySelector<HTMLElement>(
+                  '[role="combobox"]',
+                ) ?? false
+              }
+              finalFocus={false}
+            >
+              <Dialog.Title>
+                {t(
+                  projectTask?.projectId === null
+                    ? "task.move_to_project"
+                    : "task.change_project",
+                )}
+              </Dialog.Title>
+              <Dialog.Description>
+                {t("task.project_change_body")}
+              </Dialog.Description>
+              {projectTask && (
+                <ProjectSelector
+                  projectId={projectTask.projectId}
+                  workspaces={workspaces}
+                  disabled={
+                    taskMutationDisabled ||
+                    Boolean(projectTask.historyReadOnly) ||
+                    projectTask.lifecycle !== "open" ||
+                    projectTask.deletionStatus === "deleting"
+                  }
+                  onSelect={(projectId) => {
+                    onSetProject(projectTask, projectId);
+                    setProjectTarget((current) =>
+                      current ? { ...current, open: false } : null,
+                    );
+                  }}
+                />
+              )}
+              <div className="delete-confirmation-actions">
+                <Button
+                  variant="secondary"
+                  onClick={() =>
+                    setProjectTarget((current) =>
+                      current ? { ...current, open: false } : null,
+                    )
+                  }
+                >
+                  {t("common.cancel")}
+                </Button>
+              </div>
+            </Dialog.Popup>
+          </Dialog.Portal>
+        </Dialog.Root>
       )}
       <Menu.Root
         onOpenChangeComplete={(open) => {
@@ -321,7 +508,13 @@ export function TaskList({
                   ? false
                   : menuTrigger.current?.isConnected
                     ? menuTrigger.current
-                    : false
+                    : menuSourceTask.current
+                      ? document.querySelector<HTMLButtonElement>(
+                          `[data-task-id="${CSS.escape(menuSourceTask.current)}"]`,
+                        )
+                      : document.querySelector<HTMLButtonElement>(
+                          ".task-list-item",
+                        )
               }
               className="task-menu-popover"
               aria-label={t("task.actions")}
@@ -354,6 +547,30 @@ export function TaskList({
                     <Icon name="archive" />
                     {menuTask.archived ? t("task.restore") : t("task.archive")}
                   </Menu.Item>
+                  {onSetProject && (
+                    <Menu.Item
+                      disabled={
+                        taskMutationDisabled ||
+                        menuTaskReadOnly ||
+                        menuTask.lifecycle !== "open" ||
+                        menuTask.deletionStatus === "deleting"
+                      }
+                      onClick={() => {
+                        openingDialog.current = true;
+                        setProjectTarget({
+                          taskId: menuTask.id,
+                          open: true,
+                        });
+                      }}
+                    >
+                      <Icon name="workspace" />
+                      {t(
+                        menuTask.projectId === null
+                          ? "task.move_to_project"
+                          : "task.change_project",
+                      )}
+                    </Menu.Item>
+                  )}
                   <Menu.Item
                     variant="danger"
                     disabled={

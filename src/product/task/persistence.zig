@@ -696,7 +696,22 @@ pub const WorkspaceWire = struct {
     display_name: []const u8,
     visible: bool,
     recent_order: u64,
+    project_entry: bool = false,
+};
+
+const LegacyWorkspaceWire = struct {
+    id: u64,
+    epoch: u64,
+    kind: []const u8 = "manual",
+    canonical_root: []const u8,
+    display_name: []const u8,
+    visible: bool,
+    recent_order: u64,
     project_removed: bool = false,
+
+    fn current(self: @This()) WorkspaceWire {
+        return .{ .id = self.id, .epoch = self.epoch, .kind = self.kind, .canonical_root = self.canonical_root, .display_name = self.display_name, .visible = self.visible, .recent_order = self.recent_order, .project_entry = std.mem.eql(u8, self.kind, "manual") and self.visible and !self.project_removed };
+    }
 };
 
 pub const TaskWire = struct {
@@ -705,6 +720,7 @@ pub const TaskWire = struct {
     id: u64,
     recent_order: u64,
     completion_seen_run_id: ?u64 = null,
+    project_id: ?u64 = null,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
@@ -1425,6 +1441,7 @@ pub fn projectTask(
         .next_presentation_order = task.durable.next_presentation_order,
         .recent_order = task.durable.recent_order,
         .completion_seen_run_id = task.durable.completion_seen_run_id,
+        .project_id = task.durable.project_id,
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
@@ -2073,6 +2090,7 @@ pub fn restoreTask(
             .approval_revision = wire.approval_revision,
             .model_intent = model_intent,
             .binding_epoch = wire.binding.epoch,
+            .project_id = wire.project_id,
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
             .workspace_root = workspace_root,
@@ -3042,7 +3060,16 @@ fn encodeUncheckedImpl(output: []u8, state: StateWire, preserved: PreservedFrame
         .next_task_recent_order = state.next_task_recent_order,
     }) catch |err| return err;
     for (state.workspaces) |workspace|
-        appendRecord(output, &offset, record_workspace, workspace.id, workspace.recent_order, workspace) catch |err|
+        appendRecord(output, &offset, record_workspace, workspace.id, workspace.recent_order, LegacyWorkspaceWire{
+            .id = workspace.id,
+            .epoch = workspace.epoch,
+            .kind = workspace.kind,
+            .canonical_root = workspace.canonical_root,
+            .display_name = workspace.display_name,
+            .visible = workspace.visible,
+            .recent_order = workspace.recent_order,
+            .project_removed = !workspace.project_entry,
+        }) catch |err|
             return err;
     for (preserved.retained) |record| if (record.kind == .workspace)
         try appendRawRecord(output, &offset, record_workspace, record.id, record.order, record.payload);
@@ -3307,7 +3334,7 @@ pub fn decodeRecovering(
                     .payload = try arena_allocator.dupe(u8, payload),
                 };
                 const workspace = std.json.parseFromSliceLeaky(
-                    WorkspaceWire,
+                    LegacyWorkspaceWire,
                     arena_allocator,
                     payload,
                     .{ .ignore_unknown_fields = false },
@@ -3318,7 +3345,7 @@ pub fn decodeRecovering(
                     offset = payload_end;
                     continue;
                 };
-                try workspace_values.append(arena_allocator, workspace);
+                try workspace_values.append(arena_allocator, workspace.current());
                 try workspace_frames.append(arena_allocator, frame);
             },
             record_task => {
@@ -3458,7 +3485,11 @@ pub fn decodeRecovering(
                 continue;
             },
         };
-        task_storage[task_len] = task;
+        var imported = task;
+        if (findRecoveredWorkspace(workspace_storage[0..workspace_len], task.workspace_id)) |workspace| {
+            imported.project_id = if (std.mem.eql(u8, workspace.kind, "manual")) workspace.id else null;
+        }
+        task_storage[task_len] = imported;
         task_frame_storage[task_len] = frame;
         task_read_only_storage[task_len] = read_only;
         task_len += 1;
@@ -3713,6 +3744,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
             !std.fs.path.isAbsolute(workspace.canonical_root) or
             !validText(workspace.display_name, limits.max_workspace_bytes, false))
             return error.Invalid;
+        if (workspace.project_entry and (!workspace.visible or !std.mem.eql(u8, workspace.kind, "manual"))) return error.Invalid;
         for (state.workspaces[0..index]) |previous|
             if (previous.id == workspace.id or
                 std.mem.eql(u8, previous.canonical_root, workspace.canonical_root))
@@ -3740,6 +3772,10 @@ fn validate(state: *const StateWire, limits: Limits) !void {
             return error.Invalid;
         const workspace = findWorkspace(state.workspaces, task.workspace_id) orelse
             return error.Invalid;
+        if (task.project_id) |project_id| {
+            const project = findWorkspace(state.workspaces, project_id) orelse return error.Invalid;
+            if (!std.mem.eql(u8, project.kind, "manual")) return error.Invalid;
+        }
         if (task.workspace_epoch > workspace.epoch or
             !std.mem.eql(u8, workspace.canonical_root, task.workspace_root))
             return error.Invalid;
@@ -3753,7 +3789,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
         return error.Invalid;
     for (state.workspaces) |workspace| {
         if (!std.mem.eql(u8, workspace.kind, "automatic")) continue;
-        if (workspace.visible or workspace.recent_order != 0 or workspace.project_removed)
+        if (workspace.visible or workspace.recent_order != 0 or workspace.project_entry)
             return error.Invalid;
         var task_count: usize = 0;
         for (state.tasks) |task|
@@ -4708,7 +4744,7 @@ fn unreadableTestMeta() MetaWire {
 }
 
 test "a Task with unknown fields is restored read-only and written back unchanged" {
-    const workspace = WorkspaceWire{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 };
+    const workspace = LegacyWorkspaceWire{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 };
     var json_buffer: [4096]u8 = undefined;
     var json_writer = std.Io.Writer.fixed(&json_buffer);
     try std.json.Stringify.value(unreadableTestTask(1, 1, "/tmp/repo"), .{}, &json_writer);
@@ -4740,8 +4776,8 @@ test "a Task with unknown fields is restored read-only and written back unchange
 }
 
 test "an unrestorable Task and its automatic Workspace are written back unchanged" {
-    const manual = WorkspaceWire{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 };
-    const automatic = WorkspaceWire{ .id = 2, .epoch = 1, .kind = "automatic", .canonical_root = "/tmp/auto", .display_name = "auto", .visible = false, .recent_order = 0 };
+    const manual = LegacyWorkspaceWire{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 };
+    const automatic = LegacyWorkspaceWire{ .id = 2, .epoch = 1, .kind = "automatic", .canonical_root = "/tmp/auto", .display_name = "auto", .visible = false, .recent_order = 0 };
     var json_buffer: [4096]u8 = undefined;
     var json_writer = std.Io.Writer.fixed(&json_buffer);
     try std.json.Stringify.value(unreadableTestTask(1, 2, "/tmp/auto"), .{}, &json_writer);

@@ -239,6 +239,8 @@ pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: 
     try writeNavigationSignal(writer, task);
     try writeActionBlocker(writer, "archiveBlocker", archive_blocker);
     try writeActionBlocker(writer, "deleteBlocker", delete_blocker);
+    writer.writeAll(",\"projectId\":") catch return error.SnapshotTooLarge;
+    if (task.durable.project_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"workspaceId\":\"{d}\",\"archived\":{},\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"historyReadOnly\":{},\"permissionReviewState\":\"{s}\",\"currentRunPhase\":", .{
         task.durable.workspace_id, task.durable.archived, @tagName(task_policy.taskLifecycle(task)), @tagName(task.deletion), task.read_only_history != null, @tagName(task.permissionReviewPhase()),
     }) catch return error.SnapshotTooLarge;
@@ -448,6 +450,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
     writer.writeByte(']') catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"projectId\":") catch return error.SnapshotTooLarge;
+    if (task.durable.project_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),

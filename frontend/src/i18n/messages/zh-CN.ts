@@ -1,5 +1,30 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "task.project_change_body": "更改所属项目会保留这条会话的工作目录。",
+  "task.project_change_not_confirmed":
+    "项目归属变更尚未确认，请刷新查看当前归属。",
+  "task.project": "所属项目",
+  "task.no_project": "无项目",
+  "task.project_removed": "项目已移除",
+  "task.add_project": "添加项目",
+  "task.add_project_failed": "未能添加项目，请重新选择项目目录。",
+  "task.move_to_project": "移入项目",
+  "task.change_project": "更改项目",
+  "task.project_change_failed": "未能更改所属项目，请刷新后重试。",
+  "task.draft_preserved": "原项目的草稿已保留，当前显示目标项目的草稿。",
+  "settings.working_directories": "工作目录",
+  "workspace.directory_capacity":
+    "已达到工作目录数量上限。请在设置的“工作目录”中撤销不再需要的目录授权。",
+  "workspace.directory_management_body":
+    "管理已授权的本地工作目录。选择目录只登记授权；侧栏项目由“添加项目”创建。",
+  "workspace.choose_directory": "选择工作目录",
+  "workspace.revoke_directory": "撤销目录授权",
+  "workspace.no_directories": "尚未登记工作目录。",
+  "workspace.directory_action_failed": "未能完成目录操作，请刷新后重试。",
+  "workspace.revoke_directory_body":
+    "撤销“{title}”的目录授权，将收口实际在此目录工作的任务。该目录关联 {count} 条会话，历史和本地文件会保留。",
+  "workspace.revoke_project_body":
+    "“{title}”的项目入口将一并移除。在其他目录中的 {count} 条会话仍可从“最近”访问，归档会话保留在归档列表；重新添加此项目后恢复分组。",
   "run.input_history_loading": "正在读取输入历史…",
   "run.input_history_failed": "未能读取输入历史，按 ↑ 重试。",
   "model_setup.preference_not_saved":
@@ -290,7 +315,7 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.selection_cancelled": "已取消选择工作区。",
   "workspace.selection_failed": "未能打开工作区，请重新选择。",
   "workspace.selection_capacity":
-    "工作区名额已满。从侧栏移除一个项目后，即可添加新目录。",
+    "项目名额已满。移除一个项目入口后，即可添加新项目。",
   "workspace.grant_confirmed": "已选择工作目录。",
   "workspace.access_required": "此工作目录当前不可用，请重新选择目录。",
   "workspace.access_required_short": "目录不可用",
@@ -604,7 +629,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.choose_folder_body":
     "选择根目录或唯一一层子目录含 SKILL.md 的文件夹。",
   "skills.choose_again": "重新选择",
-  "skills.import_error.invalid_scope": "请选择可用的个人或项目范围。",
+  "skills.import_error.invalid_scope": "请选择可用的个人或工作目录范围。",
   "skills.import_error.invalid_preview": "这次确认已失效，请重新选择来源。",
   "skills.import_error.source_unavailable":
     "无法读取所选来源，请检查文件是否存在和访问权限，再重新选择。",
@@ -636,9 +661,9 @@ export const zhCN: Record<MessageId, string> = {
   "skills.import_error.catalog_loading":
     "技能仍在查询或验证，请等待完成后再次确认。",
   "skills.import_error.workspace_changed":
-    "项目授权已改变，请重新选择项目并确认。",
+    "工作目录授权已改变，请重新选择目录并确认。",
   "skills.import_error.workspace_unavailable":
-    "项目当前不可用，请恢复目录授权后重试。",
+    "工作目录当前不可用，请恢复目录授权后重试。",
   "skills.import_error.capacity_reached":
     "当前没有足够的处理容量，请稍后重试。",
   "skills.import_error.shutting_down": "应用正在关闭，本次操作未接纳。",
@@ -1520,6 +1545,7 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.execution_unavailable": "当前选择的执行配置暂时不可用。",
   "mutation.reason.workspace_changed":
     "工作区状态已变化，请确认最新状态后重试。",
+  "mutation.reason.project_unavailable": "该项目已不可用，请重新选择归属。",
   "mutation.reason.workspace_unavailable": "该工作区已不可用。",
   "mutation.reason.workspace_removing": "该工作区正在移除，请等待操作完成。",
   "mutation.reason.binding_changed": "任务的执行配置已变化，请确认后继续。",

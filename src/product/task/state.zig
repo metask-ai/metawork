@@ -1327,6 +1327,7 @@ pub const DurableTaskRecord = struct {
     approval_revision: u64 = 1,
     /// Persisted current Task delegation; Run authority is captured separately.
     permission_review_delegated: bool = false,
+    project_id: ?u64 = null,
     workspace_id: u64,
     workspace_epoch: u64 = 1,
     workspace_root: []u8,

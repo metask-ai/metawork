@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
 import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
@@ -20,6 +20,7 @@ export type ArchivedTasksProps = {
   onOpen: (task: TaskSummary) => void;
   onRestore: (task: TaskSummary) => void;
   onDelete: (task: TaskSummary) => void;
+  renderProject?: (task: TaskSummary, disabled: boolean) => ReactNode;
 };
 
 export function ArchivedTasks({
@@ -35,6 +36,7 @@ export function ArchivedTasks({
   onOpen,
   onRestore,
   onDelete,
+  renderProject,
 }: ArchivedTasksProps) {
   const { t } = useI18n();
   const heading = useRef<HTMLHeadingElement>(null);
@@ -127,6 +129,13 @@ export function ArchivedTasks({
                     {task.title || t("task.item", { id: task.id })}
                   </button>
                   {workspace && <p>{workspace.displayName}</p>}
+                  {renderProject?.(
+                    task,
+                    !synchronized ||
+                      task.historyReadOnly ||
+                      task.lifecycle !== "open" ||
+                      task.deletionStatus === "deleting",
+                  )}
                   {errors[task.id] && <p role="alert">{errors[task.id]}</p>}
                   {diagnostics[task.id] && (
                     <DiagnosticDisclosure

@@ -142,6 +142,7 @@ export function ComposerFooter({
   workspaceTitle,
   workspaceDiagnostic,
   workspaceNotice,
+  projectContext,
   workspaceOptions,
   selectedWorkspaceOptionId,
   workspaceEditable,
@@ -200,6 +201,7 @@ export function ComposerFooter({
   workspaceTitle: string;
   workspaceDiagnostic?: string;
   workspaceNotice?: ReactNode;
+  projectContext?: ReactNode;
   workspaceOptions: {
     id: string;
     label: string;
@@ -954,6 +956,7 @@ export function ComposerFooter({
                   />
                 ))}
               {approvalModeControl}
+              {projectContext}
               {workspaceEditable && workspaceContext}
             </div>
             <div className="composer-model-actions">

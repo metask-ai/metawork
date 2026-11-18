@@ -27,6 +27,7 @@ export async function runActiveInputVertical({
   async function create(title, approvalMode = "manual", rename = true) {
     const modelSnapshot = await snapshot();
     const result = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId,

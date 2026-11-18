@@ -23,7 +23,6 @@ export function useWorkspaceDirectoryOpen(
     opening ||
     !onOpen ||
     workspace?.kind !== "manual" ||
-    workspace.projectRemoved ||
     workspace.redacted ||
     workspace.authorization !== "available";
 

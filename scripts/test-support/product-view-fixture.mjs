@@ -38,6 +38,7 @@ export function taskSummary(task) {
     "recentOrder",
     "title",
     "workspaceId",
+    "projectId",
     "archived",
     "lifecycle",
     "deletionStatus",

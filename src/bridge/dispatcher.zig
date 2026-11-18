@@ -21,7 +21,7 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 20;
+const async_product_handler_count = 21;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -212,7 +212,7 @@ pub const McpManagementHost = struct {
 
 const Dialog = product_control.NativeDialog;
 const DialogContinuation = union(enum) {
-    workspace,
+    workspace: bool,
     root: u64,
     skill_import: struct { kind: product_control.SkillImportSourceKind, target: product_control.SkillImportTarget },
     skill_export: skill_management.InstallId,
@@ -509,6 +509,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.cancel, .function = cancelTask },
             .{ .name = commands.respond_ui, .function = respondUi },
             .{ .name = commands.rename_task, .function = renameTask },
+            .{ .name = commands.set_task_project, .function = setTaskProject },
             .{ .name = commands.archive_task, .function = archiveTask },
             .{ .name = commands.mark_task_completion_seen, .function = markTaskCompletionSeen },
             .{ .name = commands.delete_task, .function = deleteTask },
@@ -562,6 +563,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[17] = .{ .name = commands.mcp_probe_http_draft, .context = self, .invoke_fn = probeMcpHttpDraft };
         self.registered_async_handlers[18] = .{ .name = commands.mcp_verify_add_http_draft, .context = self, .invoke_fn = verifyAndAddMcpHttpDraft };
         self.registered_async_handlers[19] = .{ .name = commands.media_preview, .context = self, .invoke_fn = mediaPreview };
+        self.registered_async_handlers[20] = .{ .name = commands.add_project, .context = self, .invoke_fn = chooseWorkspace };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -3428,13 +3430,13 @@ pub const Dispatcher = struct {
         if (!cancelled and (selected.count == 0 or selected.paths.len == 0)) return error.InvalidDialogResult;
         var output: [native_sdk.bridge.max_response_bytes]u8 = undefined;
         const encoded: []const u8 = switch (owned.continuation) {
-            .workspace => workspace: {
+            .workspace => |add_project| workspace: {
                 if (cancelled) break :workspace "{\"selected\":false}";
                 if (selected.count != 1 or selected.paths.len > workspace_path_capacity) return error.InvalidWorkspace;
                 const token = try self.grants.issue(owned.generation, owned.window, selected.paths);
                 var storage: [workspace_path_capacity]u8 = undefined;
                 const path = try self.grants.consume(token, owned.window, owned.generation, &storage);
-                const workspace = try (try self.requireProductControl()).openWorkspace(.{ .workspace_root = path, .trust = if (self.automation.active()) .{ .temporary = path } else .explicitly_trusted });
+                const workspace = try (try self.requireProductControl()).openWorkspace(.{ .workspace_root = path, .intent = if (add_project) .project else .directory, .trust = if (self.automation.active()) .{ .temporary = path } else .explicitly_trusted });
                 self.notifyCommitted();
                 break :workspace try std.fmt.bufPrint(&output, "{{\"selected\":true,\"workspaceId\":\"{d}\"}}", .{workspace});
             },
@@ -3499,7 +3501,10 @@ pub const Dispatcher = struct {
     fn chooseWorkspaceChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         try self.requireWindow(invocation.source.window_id);
         self.grants.invalidate();
-        try self.beginDialog(invocation, responder, .workspace, .{ .open = .{ .title = "Choose a workspace", .allow_directories = true } });
+        var parsed = try handlers.parsePayload(struct {}, invocation.request.payload);
+        defer parsed.deinit();
+        const add_project = std.mem.eql(u8, invocation.request.command, commands.add_project);
+        try self.beginDialog(invocation, responder, .{ .workspace = add_project }, .{ .open = .{ .title = if (add_project) "Add a project" else "Choose a working directory", .allow_directories = true } });
     }
 
     fn openWorkspaceDirectory(context: *anyopaque, invocation: native_sdk.bridge.Invocation, _: []u8) anyerror![]const u8 {
@@ -3688,23 +3693,17 @@ pub const Dispatcher = struct {
         const approval_mode = handlers.approvalMode(
             parsed.value.approvalMode,
         ) orelse return error.InvalidBridgePayload;
-        const task_id = workbench.createTaskForWorkspace(workspace_request, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, .{ .interactive = approval_mode }) catch |err| {
+        const project_id = if (parsed.value.projectId) |id| try handlers.parseWireId(id) else null;
+        if (project_id == 0) return error.InvalidBridgeId;
+        const task_id = workbench.createTaskForWorkspace(workspace_request, project_id, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, .{ .interactive = approval_mode }) catch |err| {
             if (taskCreateRejection(err)) |reason|
-                return encodeTaskCreateResult(output, false, null, null, null, reason, if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null);
+                return encodeTaskCreateResult(output, false, null, null, null, reason, if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null, null);
             return err;
         };
         const binding_epoch = try workbench.taskBindingEpoch(task_id);
         const mcp_authority = try workbench.taskMcpAuthority(task_id);
         self.notifyCommitted();
-        return encodeTaskCreateResult(
-            output,
-            true,
-            task_id,
-            binding_epoch,
-            mcp_authority,
-            null,
-            null,
-        );
+        return encodeTaskCreateResult(output, true, task_id, binding_epoch, mcp_authority, null, null, project_id);
     }
 
     fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -5486,6 +5485,33 @@ pub const Dispatcher = struct {
         );
     }
 
+    fn setTaskProject(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskSetProject, invocation.request.payload);
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const project_id = if (parsed.value.projectId) |id| try handlers.parseWireId(id) else null;
+        if (task_id == 0 or project_id == 0) return error.InvalidBridgeId;
+        const control = try self.requireProductControl();
+        control.setTaskProject(task_id, project_id) catch |err| {
+            const reason: []const u8 = switch (err) {
+                error.UnknownTask => "task_missing",
+                error.ProjectUnavailable => "project_unavailable",
+                error.ExecutorShuttingDown => "shutting_down",
+                error.TaskReadOnly, error.TaskBusy, error.TaskClosing => "task_unavailable",
+                else => return err,
+            };
+            return std.fmt.bufPrint(output, "{{\"applied\":false,\"taskId\":\"{d}\",\"projectId\":null,\"reason\":\"{s}\"}}", .{ task_id, reason });
+        };
+        self.notifyCommitted();
+        var project_buffer: [32]u8 = undefined;
+        const project = if (try control.taskProjectId(task_id)) |id| try std.fmt.bufPrint(&project_buffer, "\"{d}\"", .{id}) else "null";
+        return std.fmt.bufPrint(output, "{{\"applied\":true,\"taskId\":\"{d}\",\"projectId\":{s},\"reason\":null}}", .{ task_id, project });
+    }
+
     fn renameTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -5924,6 +5950,7 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.ScheduledTaskPersistenceUnavailable => "schedule_persistence_unavailable",
         error.ScheduledTaskPersistenceFailed => "schedule_persistence_failed",
         error.ScheduledTaskPersistenceOutcomeUnknown => "schedule_persistence_outcome_unknown",
+        error.ProjectUnavailable => "project_unavailable",
         error.WorkspaceEpochMismatch => "workspace_changed",
         error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => "workspace_unavailable",
         error.WorkspaceRemovalInProgress => "workspace_removing",
@@ -6200,13 +6227,14 @@ fn encodeTaskCreateResult(
     mcp_authority: ?product_control.TaskMcpAuthorityAtCreation,
     reason: ?[]const u8,
     blocking_task_id: ?u64,
+    project_id: ?u64,
 ) ![]const u8 {
     const valid = if (accepted)
         task_id != null and task_id.? != 0 and
             binding_epoch != null and binding_epoch.? != 0 and
             mcp_authority != null and reason == null
     else
-        task_id == null and binding_epoch == null and
+        project_id == null and task_id == null and binding_epoch == null and
             mcp_authority == null and reason != null;
     if (!valid)
         return error.InvalidTaskCreateResult;
@@ -6218,6 +6246,8 @@ fn encodeTaskCreateResult(
         writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"projectId\":") catch return error.NoSpaceLeft;
+    if (project_id) |value| writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft else writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeAll(",\"bindingEpoch\":") catch return error.NoSpaceLeft;
     if (binding_epoch) |value|
         writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
@@ -7304,39 +7334,31 @@ test "mutation response encoders reject every inconsistent success and rejection
     var output: [256]u8 = undefined;
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, false, 1, null, null, "task_unavailable", null),
+        encodeTaskCreateResult(&output, false, 1, null, null, "task_unavailable", null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, false, null, null, null, null, null),
+        encodeTaskCreateResult(&output, false, null, null, null, null, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 1, .ready_without_selection, "unexpected", null),
+        encodeTaskCreateResult(&output, true, 1, 1, .ready_without_selection, "unexpected", null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 0, 1, .ready_without_selection, null, null),
+        encodeTaskCreateResult(&output, true, 0, 1, .ready_without_selection, null, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 0, .ready_without_selection, null, null),
+        encodeTaskCreateResult(&output, true, 1, 0, .ready_without_selection, null, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 1, null, null, null),
+        encodeTaskCreateResult(&output, true, 1, 1, null, null, null, null),
     );
-    const task_create = try encodeTaskCreateResult(
-        &output,
-        true,
-        1,
-        1,
-        .unavailable,
-        null,
-        null,
-    );
+    const task_create = try encodeTaskCreateResult(&output, true, 1, 1, .unavailable, null, null, null);
     try std.testing.expectEqualStrings(
-        "{\"accepted\":true,\"taskId\":\"1\",\"bindingEpoch\":\"1\",\"mcpAuthority\":{\"kind\":\"unavailable\",\"selection\":null},\"reason\":null}",
+        "{\"accepted\":true,\"taskId\":\"1\",\"projectId\":null,\"bindingEpoch\":\"1\",\"mcpAuthority\":{\"kind\":\"unavailable\",\"selection\":null},\"reason\":null}",
         task_create,
     );
     try std.testing.expectError(
@@ -8515,7 +8537,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"99\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"projectId\":null,\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"99\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -8530,7 +8552,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"modelSelection\":{\"targetModelRef\":{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"projectId\":null,\"workspace\":{\"kind\":\"automatic\"},\"modelSelection\":{\"targetModelRef\":{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}",
         source,
         &response,
     );
@@ -8543,7 +8565,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var request_storage: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"projectId\":null,\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;
@@ -9691,11 +9713,11 @@ test "Product view Session pressure rejection fixture preserves exact reason and
     var output: [1024]u8 = undefined;
     const create = try std.json.Stringify.valueAlloc(allocator, fixture.value.object.get("create").?, .{});
     defer allocator.free(create);
-    try std.testing.expectEqualStrings(create, try encodeTaskCreateResult(&output, false, null, null, null, "session_close_failed", 7));
+    try std.testing.expectEqualStrings(create, try encodeTaskCreateResult(&output, false, null, null, null, "session_close_failed", 7, null));
     const restore = try std.json.Stringify.valueAlloc(allocator, fixture.value.object.get("restore").?, .{});
     defer allocator.free(restore);
     try std.testing.expectEqualStrings(restore, try encodeTaskRestoreResult(&output, false, 3, null, "session_close_failed", 7));
-    try std.testing.expectError(error.InvalidSessionPressureResult, encodeTaskCreateResult(&output, false, null, null, null, "session_close_failed", null));
+    try std.testing.expectError(error.InvalidSessionPressureResult, encodeTaskCreateResult(&output, false, null, null, null, "session_close_failed", null, null));
     try std.testing.expectError(error.InvalidSessionPressureResult, encodeTaskRestoreResult(&output, false, 3, null, "session_releasing", 7));
     try std.testing.expectEqualStrings("session_releasing", taskCreateRejection(error.SessionReleasing).?);
     try std.testing.expectEqualStrings("session_close_failed", taskRestoreRejection(error.SessionReleaseFailed).?);
@@ -10071,11 +10093,11 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(project_request, source, &output), accepted) != null);
     var project_projections: [1]product_control.WorkspaceProjection = undefined;
     const project = (try workbench.copyWorkspaceProjections(&project_projections))[0];
-    try std.testing.expect(project.project_removed);
+    try std.testing.expect(!project.project_entry);
     try std.testing.expectEqual(@as(u64, 1), project.epoch);
     try std.testing.expect(project.authorization == .available);
     try std.testing.expectEqual(@as(u64, 1), try workbench.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
-    try std.testing.expect(!(try workbench.copyWorkspaceProjections(&project_projections))[0].project_removed);
+    try std.testing.expect((try workbench.copyWorkspaceProjections(&project_projections))[0].project_entry);
     const stale = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}";
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale, source, &output), changed) != null);
     try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), accepted) != null);

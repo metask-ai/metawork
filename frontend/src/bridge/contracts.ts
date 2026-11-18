@@ -1290,6 +1290,7 @@ export type TaskView = {
   id: string;
   recentOrder: string;
   title: string;
+  projectId: string | null;
   workspaceId: string;
   permissionProfile: PermissionProfile;
   binding: {
@@ -1427,6 +1428,7 @@ export type TaskSummary = Pick<
   | "recentOrder"
   | "title"
   | "workspaceId"
+  | "projectId"
   | "archived"
   | "lifecycle"
   | "deletionStatus"
@@ -1604,7 +1606,7 @@ export type WorkspaceView = {
   id: string;
   epoch: string;
   kind: "manual" | "automatic";
-  projectRemoved: boolean;
+  projectEntry: boolean;
   displayName: string;
   canonicalRoot: string;
   redacted: boolean;
@@ -1998,7 +2000,21 @@ export type McpConnectionTestResult = {
     | "rejected"
     | "unavailable";
 };
+export type TaskProjectResult =
+  | { applied: true; taskId: string; projectId: string | null; reason: null }
+  | {
+      applied: false;
+      taskId: string;
+      projectId: null;
+      reason:
+        | "task_missing"
+        | "task_unavailable"
+        | "project_unavailable"
+        | "shutting_down";
+    };
+
 export type TaskCreateReason =
+  | "project_unavailable"
   | "execution_unavailable"
   | "schedule_persistence_unavailable"
   | "schedule_persistence_failed"
@@ -2018,6 +2034,7 @@ export type TaskCreateReason =
 export type TaskCreateResult =
   | {
       accepted: true;
+      projectId: string | null;
       taskId: string;
       bindingEpoch: string;
       mcpAuthority: TaskMcpAuthority;
@@ -2025,6 +2042,7 @@ export type TaskCreateResult =
     }
   | {
       accepted: false;
+      projectId: null;
       taskId: null;
       bindingEpoch: null;
       mcpAuthority: null;

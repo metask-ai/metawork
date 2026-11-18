@@ -35,6 +35,7 @@ pub fn automaticPathStrictlyWithin(parent: []const u8, child: []const u8) bool {
 }
 
 pub const Kind = enum { manual, automatic };
+pub const OpenIntent = enum { directory, project };
 pub const Authorization = enum { available, removing, reauthorization_required };
 pub const RemovalFailure = enum { none, task_close_failed };
 pub const RemovalState = enum { close_failed, pending, ready };
@@ -69,7 +70,7 @@ pub const Facts = struct {
     last_removal_failure: RemovalFailure,
     visible: bool,
     recent_order: u64,
-    project_removed: bool = false,
+    project_entry: bool = false,
 };
 
 pub const Binding = struct {
@@ -102,7 +103,7 @@ pub const HistoryFact = struct {
     display_name: []const u8,
     visible: bool,
     recent_order: u64,
-    project_removed: bool = false,
+    project_entry: bool = false,
 };
 
 pub const RestoreFact = HistoryFact;
@@ -145,6 +146,7 @@ pub const Error = StorageError || error{
     InvalidWorkspace,
     WorkspaceNotTrusted,
     WorkspaceCapacity,
+    WorkspaceDirectoryCapacity,
     WorkspaceIdentityExhausted,
     WorkspaceIdentityUntrusted,
     WorkspaceOrderExhausted,
@@ -197,7 +199,7 @@ const Record = struct {
     last_removal_failure: RemovalFailure = .none,
     visible: bool = true,
     recent_order: u64,
-    project_removed: bool = false,
+    project_entry: bool = false,
 };
 
 const ExistingState = struct {
@@ -207,7 +209,7 @@ const ExistingState = struct {
     visible: bool,
     epoch: u64,
     recent_order: u64,
-    project_removed: bool,
+    project_entry: bool,
 };
 
 pub const OpenPreparation = struct {
@@ -235,6 +237,7 @@ pub const OpenAuthority = struct {
     /// could not be read: a fresh id might then collide with one of them.
     /// Reauthorizing an existing record never allocates and stays allowed.
     allocation_allowed: bool = true,
+    intent: OpenIntent = .project,
 
     fn automaticContains(self: OpenAuthority, path: []const u8) bool {
         return self.automatic_contains_fn(self.context, path);
@@ -294,6 +297,7 @@ pub const Runtime = struct {
     records: []?Record,
     pending_automatic: []?automatic_root.Allocation,
     max_manual: usize,
+    max_directories: usize,
     max_automatic: usize,
     max_workspace_bytes: usize,
     automatic_allocator: ?automatic_root.Allocator,
@@ -307,6 +311,7 @@ pub const Runtime = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         max_manual: usize,
+        max_directories: usize,
         max_automatic: usize,
         max_workspace_bytes: usize,
         automatic_root_inputs: AutomaticRootInputs,
@@ -333,7 +338,7 @@ pub const Runtime = struct {
         else
             try root_configuration.Runtime.bootstrap(allocator, automatic_root_inputs.store);
         errdefer configuration.deinit();
-        const capacity = std.math.add(usize, max_manual, max_automatic) catch
+        const capacity = std.math.add(usize, max_directories, std.math.mul(usize, max_automatic, 2) catch return error.ProjectionCapacity) catch
             return error.ProjectionCapacity;
         const records = try allocator.alloc(?Record, capacity);
         errdefer allocator.free(records);
@@ -346,6 +351,7 @@ pub const Runtime = struct {
             .records = records,
             .pending_automatic = pending_automatic,
             .max_manual = max_manual,
+            .max_directories = max_directories,
             .max_automatic = max_automatic,
             .max_workspace_bytes = max_workspace_bytes,
             .automatic_allocator = null,
@@ -603,9 +609,18 @@ pub const Runtime = struct {
         var used: usize = 0;
         for (self.records) |entry| {
             const record = entry orelse continue;
-            if (record.kind == .manual and !record.project_removed) used += 1;
+            if (record.kind == .manual and record.project_entry) used += 1;
         }
         return used < self.max_manual;
+    }
+
+    fn directoryCapacityAvailable(self: *const Runtime) bool {
+        var used: usize = 0;
+        for (self.records) |entry| {
+            const record = entry orelse continue;
+            if (record.kind == .manual and record.visible) used += 1;
+        }
+        return used < self.max_directories;
     }
 
     pub fn automaticCapacityAvailable(self: *const Runtime) bool {
@@ -647,7 +662,7 @@ pub const Runtime = struct {
             .display_name = record.display_name_storage[0..record.display_name_len],
             .visible = record.visible,
             .recent_order = record.recent_order,
-            .project_removed = record.project_removed,
+            .project_entry = record.project_entry,
         };
     }
 
@@ -825,7 +840,8 @@ pub const Runtime = struct {
             if (record.kind == .automatic) return error.InvalidWorkspace;
             if (record.authorization == .removing)
                 return error.WorkspaceRemovalInProgress;
-            if (record.project_removed and !self.manualCapacityAvailable())
+            if (!record.visible and !self.directoryCapacityAvailable()) return error.WorkspaceDirectoryCapacity;
+            if (authority.intent == .project and !record.project_entry and !self.manualCapacityAvailable())
                 return error.WorkspaceCapacity;
             const reopening_removed = !record.visible;
             if (reopening_removed and record.epoch == std.math.maxInt(u64))
@@ -842,7 +858,7 @@ pub const Runtime = struct {
                 .visible = record.visible,
                 .epoch = record.epoch,
                 .recent_order = record.recent_order,
-                .project_removed = record.project_removed,
+                .project_entry = record.project_entry,
             };
             if (!retain_authorization) {
                 record.trust = if (next_temporary) |root|
@@ -852,7 +868,7 @@ pub const Runtime = struct {
             }
             record.authorization = .available;
             record.visible = true;
-            record.project_removed = false;
+            if (authority.intent == .project) record.project_entry = true;
             record.recent_order = recent_order;
             if (reopening_removed) record.epoch += 1;
             return .{
@@ -866,7 +882,7 @@ pub const Runtime = struct {
         var replaced: ?Record = null;
         for (self.records, 0..) |*entry, index| {
             const record = &(entry.* orelse continue);
-            if (record.kind != .manual or record.visible or !authority.reusable(record.id))
+            if (record.kind != .manual or record.visible or record.project_entry or !authority.reusable(record.id))
                 continue;
             replaced = record.*;
             entry.* = null;
@@ -879,7 +895,8 @@ pub const Runtime = struct {
                 if (slot) |index| self.records[index] = replaced;
             }
         }
-        if (!self.manualCapacityAvailable())
+        if (!self.directoryCapacityAvailable()) return error.WorkspaceDirectoryCapacity;
+        if (authority.intent == .project and !self.manualCapacityAvailable())
             return error.WorkspaceCapacity;
         if (slot == null) slot = findEmpty(self.records);
         const target = slot orelse try self.reserveSlot();
@@ -916,6 +933,7 @@ pub const Runtime = struct {
             .projection_redacted = projected_root.redacted or display_name.redacted,
             .trust = if (owned_temporary) |root| .{ .temporary = root } else .explicitly_trusted,
             .recent_order = recent_order,
+            .project_entry = authority.intent == .project,
         };
         restore_replaced = false;
         return .{
@@ -943,7 +961,7 @@ pub const Runtime = struct {
                 record.trust = previous.trust;
                 record.authorization = previous.authorization;
                 record.visible = previous.visible;
-                record.project_removed = previous.project_removed;
+                record.project_entry = previous.project_entry;
                 record.epoch = previous.epoch;
                 record.recent_order = previous.recent_order;
             },
@@ -982,14 +1000,14 @@ pub const Runtime = struct {
         return displaced;
     }
 
-    pub fn setProjectRemoved(self: *Runtime, id: u64, expected_epoch: u64, removed: bool) Error!bool {
+    pub fn setProjectEntry(self: *Runtime, id: u64, expected_epoch: u64, entry: bool) Error!bool {
         const index = self.findIndex(id) orelse return error.UnknownWorkspace;
         const record = &self.records[index].?;
         if (record.kind != .manual or !record.visible) return error.UnknownWorkspace;
         if (expected_epoch == 0 or record.epoch != expected_epoch) return error.WorkspaceEpochMismatch;
         if (record.authorization == .removing) return error.WorkspaceRemovalInProgress;
-        const previous = record.project_removed;
-        record.project_removed = removed;
+        const previous = record.project_entry;
+        record.project_entry = entry;
         return previous;
     }
 
@@ -1061,6 +1079,7 @@ pub const Runtime = struct {
             .ready => {
                 record.authorization = .reauthorization_required;
                 record.visible = false;
+                record.project_entry = false;
             },
         }
         return true;
@@ -1302,7 +1321,7 @@ pub const Runtime = struct {
             .authorization = authorization,
             .visible = fact.visible,
             .recent_order = fact.recent_order,
-            .project_removed = fact.project_removed,
+            .project_entry = fact.project_entry,
         };
     }
 
@@ -1420,7 +1439,7 @@ fn factsFromRecord(record: *const Record) Facts {
         .last_removal_failure = record.last_removal_failure,
         .visible = record.visible,
         .recent_order = record.recent_order,
-        .project_removed = record.project_removed,
+        .project_entry = record.project_entry,
     };
 }
 
@@ -1499,6 +1518,7 @@ pub const testing = if (builtin.is_test) struct {
             .authorization = input.authorization,
             .last_removal_failure = input.last_removal_failure,
             .visible = input.visible,
+            .project_entry = input.kind == .manual and input.visible,
             .recent_order = input.recent_order,
         };
     }
@@ -1523,6 +1543,7 @@ pub const testing = if (builtin.is_test) struct {
         record.kind = .automatic;
         record.automatic_task_id = task_id;
         record.visible = false;
+        record.project_entry = false;
         record.recent_order = 0;
     }
 
@@ -1597,6 +1618,7 @@ test "automatic root candidate conflicts preserve old records and allow ancestor
         std.testing.io,
         1,
         1,
+        1,
         1024,
         .{},
     );
@@ -1665,6 +1687,7 @@ test "automatic root replacement affects only new allocations and old automatic 
     var runtime = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
+        1,
         1,
         2,
         std.Io.Dir.max_path_bytes,
@@ -1740,6 +1763,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
         std.testing.allocator,
         std.testing.io,
         0,
+        0,
         1,
         std.Io.Dir.max_path_bytes,
         .{ .testing_root = &root },
@@ -1803,6 +1827,7 @@ test "typed authorities invalidate stale Workspace consumers" {
     var runtime = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
+        1,
         1,
         1,
         1024,
