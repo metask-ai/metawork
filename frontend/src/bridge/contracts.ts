@@ -910,7 +910,8 @@ export const outputActionStates = [
   "failed",
 ] as const;
 export type OutputActionState = (typeof outputActionStates)[number];
-export type OutputAction = "check" | "check_current" | "reveal" | "save" | "open";
+export type OutputAction =
+  "check" | "check_current" | "reveal" | "save" | "open";
 export type OutputActionHandler = (
   taskId: string,
   runId: string,
