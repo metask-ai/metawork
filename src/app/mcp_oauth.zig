@@ -1,6 +1,8 @@
-//! Application-owned MCP OAuth mechanics. This module owns bounded HTTP
-//! discovery/registration/token codecs and authorization-request construction;
-//! Workbench remains the owner of durable product state and operation markers.
+//! Application-owned MCP OAuth policy and effects. This module owns bounded
+//! HTTP discovery and dynamic-registration codecs, MCP's acceptance rules and
+//! token endpoint client authentication, and drives the Foundation OAuth codec
+//! for the authorization request and token endpoint; Workbench remains the
+//! owner of durable product state and operation markers.
 
 const std = @import("std");
 const http_execution = @import("metawork_http_transport");
@@ -461,41 +463,20 @@ pub const AuthorizationServer = struct {
     }
 };
 
-pub const Secret = struct {
-    allocator: std.mem.Allocator = undefined,
-    bytes: []u8 = &.{},
-    owned: bool = false,
+pub const Secret = oauth_mechanics.Secret(.{ .max_bytes = Limits.secret_bytes });
 
-    pub fn init(allocator: std.mem.Allocator, value: []const u8) !Secret {
-        if (value.len == 0 or value.len > Limits.secret_bytes or
-            !validSecretValue(value))
-            return error.InvalidTokenResponse;
-        return .{
-            .allocator = allocator,
-            .bytes = try allocator.dupe(u8, value),
-            .owned = true,
-        };
-    }
-
-    pub fn view(self: *const Secret) []const u8 {
-        std.debug.assert(self.owned);
-        return self.bytes;
-    }
-
-    pub fn take(self: *Secret) Secret {
-        std.debug.assert(self.owned);
-        const moved = self.*;
-        self.* = .{};
-        return moved;
-    }
-
-    pub fn deinit(self: *Secret) void {
-        if (!self.owned) return;
-        std.crypto.secureZero(u8, self.bytes);
-        self.allocator.free(self.bytes);
-        self.* = .{};
-    }
-};
+/// Token and client secrets travel in HTTP headers, so MCP admits no control
+/// byte other than tab on top of the length limit.
+fn admitSecret(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) (error{InvalidTokenResponse} || std.mem.Allocator.Error)!Secret {
+    if (!validSecretValue(value)) return error.InvalidTokenResponse;
+    return Secret.init(allocator, value) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.FieldTooLarge => error.InvalidTokenResponse,
+    };
+}
 
 fn validSecretValue(value: []const u8) bool {
     for (value) |byte|
@@ -822,16 +803,9 @@ const RegistrationResponse = struct {
     token_endpoint_auth_method: ?[]const u8 = null,
 };
 
-const TokenResponse = struct {
-    access_token: []const u8,
-    refresh_token: ?[]const u8 = null,
-    token_type: []const u8,
-    expires_in: ?u64 = null,
-};
-
-const OAuthErrorResponse = struct {
-    @"error": []const u8,
-};
+const TokenResponse = oauth_mechanics.TokenResponse(.{
+    .body_bytes = Limits.token_body_bytes,
+});
 
 const Challenge = struct {
     resource_metadata: ?[]const u8 = null,
@@ -1103,29 +1077,17 @@ pub fn buildAuthorizationUrl(
     const scope = joinScopes(&scope_storage, scopes) catch
         return error.InvalidAuthorizationRequest;
     var writer = std.Io.Writer.fixed(output);
-    writer.writeAll(server.authorization_endpoint) catch
-        return error.InvalidAuthorizationRequest;
-    writer.writeByte(if (std.mem.indexOfScalar(
-        u8,
+    oauth_mechanics.writeAuthorizationUrl(
+        &writer,
         server.authorization_endpoint,
-        '?',
-    ) == null) '?' else '&') catch return error.InvalidAuthorizationRequest;
-    writeFormPairs(&writer, &.{
-        .{ "response_type", "code" },
-        .{ "client_id", client_id },
-        .{ "redirect_uri", redirect_uri },
-    }) catch return error.InvalidAuthorizationRequest;
-    if (scope.len != 0) {
-        writer.writeByte('&') catch return error.InvalidAuthorizationRequest;
-        writePair(&writer, "scope", scope) catch return error.InvalidAuthorizationRequest;
-    }
-    writer.writeByte('&') catch return error.InvalidAuthorizationRequest;
-    writeFormPairs(&writer, &.{
-        .{ "state", &material.state },
-        .{ "code_challenge", &material.challenge },
-        .{ "code_challenge_method", "S256" },
-        .{ "resource", resource },
-    }) catch return error.InvalidAuthorizationRequest;
+        material,
+        .{
+            .client_id = client_id,
+            .redirect_uri = redirect_uri,
+            .scope = scope,
+            .resource = resource,
+        },
+    ) catch return error.InvalidAuthorizationRequest;
     if (writer.buffered().len > Limits.url_bytes)
         return error.InvalidAuthorizationRequest;
     return writer.buffered();
@@ -1463,7 +1425,16 @@ pub fn registerDynamicClientEffect(
         else => return error.RegistrationOutcomeUnknown,
     };
     if (response.status == 400 and jsonContentType(response.content_type) and
-        registrationErrorProvesNoClient(response.body))
+        oauth_mechanics.errorCode(
+            .{ .body_bytes = Limits.registration_body_bytes },
+            response.body,
+            &.{
+                "invalid_redirect_uri",
+                "invalid_client_metadata",
+                "invalid_software_statement",
+                "unapproved_software_statement",
+            },
+        ) != null)
         return error.RegistrationRejected;
     if (response.status != 200 and response.status != 201)
         return error.RegistrationOutcomeUnknown;
@@ -1531,7 +1502,7 @@ fn parseRegistrationResponse(
         allocator.free(result.client_id);
     }
     if (value.client_secret) |secret|
-        result.client_secret = Secret.init(allocator, secret) catch |err| switch (err) {
+        result.client_secret = admitSecret(allocator, secret) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidRegistrationResponse,
         };
@@ -1559,17 +1530,16 @@ pub fn exchangeAuthorizationCodeEffect(
     var request_storage: [Limits.request_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request_storage);
     var writer = std.Io.Writer.fixed(&request_storage);
-    writeFormPairs(&writer, &.{
-        .{ "grant_type", "authorization_code" },
-        .{ "client_id", client_id },
-        .{ "code", code.view() },
-        .{ "code_verifier", verifier },
-        .{ "redirect_uri", redirect_uri },
-        .{ "resource", resource },
+    oauth_mechanics.writeAuthorizationCodeGrant(&writer, .{
+        .client_id = client_id,
+        .code = code.view(),
+        .code_verifier = verifier,
+        .redirect_uri = redirect_uri,
+        .resource = resource,
     }) catch return error.InvalidAuthorizationRequest;
     if (auth_method == .client_secret_post) {
         writer.writeByte('&') catch return error.InvalidAuthorizationRequest;
-        writePair(&writer, "client_secret", client_secret.?) catch
+        oauth_mechanics.writeFormPair(&writer, "client_secret", client_secret.?) catch
             return error.InvalidAuthorizationRequest;
     }
     // form-encoding can triple both components before base64 expands the
@@ -1603,7 +1573,11 @@ pub fn exchangeAuthorizationCodeEffect(
         error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.TokenOutcomeUnknown,
     };
-    if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
+    if (response.status == 400 and oauth_mechanics.errorCode(
+        .{ .body_bytes = Limits.token_body_bytes },
+        response.body,
+        &.{"invalid_grant"},
+    ) != null)
         return error.InvalidGrant;
     if (response.status != 200 or !jsonContentType(response.content_type) or
         response.body.len == 0 or response.body.len > Limits.token_body_bytes)
@@ -1647,15 +1621,14 @@ pub fn refreshAccessTokenEffect(
     var request_storage: [Limits.request_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request_storage);
     var writer = std.Io.Writer.fixed(&request_storage);
-    writeFormPairs(&writer, &.{
-        .{ "grant_type", "refresh_token" },
-        .{ "client_id", request.client_id },
-        .{ "refresh_token", refresh_token },
-        .{ "resource", request.resource },
+    oauth_mechanics.writeRefreshTokenGrant(&writer, .{
+        .client_id = request.client_id,
+        .refresh_token = refresh_token,
+        .resource = request.resource,
     }) catch return error.InvalidAuthorizationRequest;
     if (request.token_endpoint_auth_method == .client_secret_post) {
         writer.writeByte('&') catch return error.InvalidAuthorizationRequest;
-        writePair(&writer, "client_secret", client_secret.?) catch
+        oauth_mechanics.writeFormPair(&writer, "client_secret", client_secret.?) catch
             return error.InvalidAuthorizationRequest;
     }
     var basic_storage: [4 * (Limits.client_id_bytes + Limits.secret_bytes) + 16]u8 =
@@ -1687,7 +1660,11 @@ pub fn refreshAccessTokenEffect(
         error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.TokenOutcomeUnknown,
     };
-    if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
+    if (response.status == 400 and oauth_mechanics.errorCode(
+        .{ .body_bytes = Limits.token_body_bytes },
+        response.body,
+        &.{"invalid_grant"},
+    ) != null)
         return error.InvalidGrant;
     if (response.status != 200 or !jsonContentType(response.content_type) or
         response.body.len == 0 or response.body.len > Limits.token_body_bytes)
@@ -1701,79 +1678,25 @@ fn parseTokenResponse(
     body: []const u8,
     now_unix_ms: u64,
 ) (Error || std.mem.Allocator.Error)!TokenSet {
-    if (body.len == 0 or body.len > Limits.token_body_bytes)
-        return error.InvalidTokenResponse;
-    var scratch: [Limits.token_body_bytes * 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &scratch);
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
-    var parsed = std.json.parseFromSlice(
-        TokenResponse,
-        fixed.allocator(),
-        body,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch return error.InvalidTokenResponse;
-    defer parsed.deinit();
-    const value = parsed.value;
-    if (!std.ascii.eqlIgnoreCase(value.token_type, "Bearer"))
-        return error.InvalidTokenResponse;
+    var response: TokenResponse = .{};
+    defer response.deinit();
+    try response.decode(body);
     var result: TokenSet = .{
-        .access_token = Secret.init(allocator, value.access_token) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidTokenResponse,
-        },
+        .access_token = try admitSecret(allocator, response.access_token),
         .refresh_token = null,
         .expires_at_unix_ms = null,
     };
     errdefer result.access_token.deinit();
-    if (value.refresh_token) |secret|
-        result.refresh_token = Secret.init(allocator, secret) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidTokenResponse,
-        };
+    if (response.refresh_token) |secret|
+        result.refresh_token = try admitSecret(allocator, secret);
     errdefer if (result.refresh_token) |*secret| secret.deinit();
-    if (value.expires_in) |seconds| {
-        if (seconds == 0) return error.InvalidTokenResponse;
+    if (response.expires_in) |seconds| {
         const duration = std.math.mul(u64, seconds, 1000) catch
             return error.ExpiryOverflow;
         result.expires_at_unix_ms = std.math.add(u64, now_unix_ms, duration) catch
             return error.ExpiryOverflow;
     }
     return result;
-}
-
-fn oauthErrorIs(body: []const u8, expected: []const u8) bool {
-    if (body.len == 0 or body.len > Limits.token_body_bytes) return false;
-    var scratch: [Limits.token_body_bytes * 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &scratch);
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
-    var parsed = std.json.parseFromSlice(
-        OAuthErrorResponse,
-        fixed.allocator(),
-        body,
-        .{ .ignore_unknown_fields = true },
-    ) catch return false;
-    defer parsed.deinit();
-    return std.mem.eql(u8, parsed.value.@"error", expected);
-}
-
-fn registrationErrorProvesNoClient(body: []const u8) bool {
-    if (body.len == 0 or body.len > Limits.registration_body_bytes) return false;
-    var scratch: [Limits.registration_body_bytes * 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &scratch);
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
-    var parsed = std.json.parseFromSlice(
-        OAuthErrorResponse,
-        fixed.allocator(),
-        body,
-        .{ .ignore_unknown_fields = true },
-    ) catch return false;
-    defer parsed.deinit();
-    return containsText(&.{
-        "invalid_redirect_uri",
-        "invalid_client_metadata",
-        "invalid_software_statement",
-        "unapproved_software_statement",
-    }, parsed.value.@"error");
 }
 
 fn parseBearerChallenge(input: []const u8, storage: []u8) error{InvalidChallenge}!Challenge {
@@ -2147,33 +2070,6 @@ fn joinScopes(output: []u8, scopes: []const []const u8) ![]const u8 {
     return writer.buffered();
 }
 
-fn writeFormPairs(
-    writer: *std.Io.Writer,
-    pairs: []const struct { []const u8, []const u8 },
-) !void {
-    for (pairs, 0..) |pair, index| {
-        if (index != 0) try writer.writeByte('&');
-        try writePair(writer, pair[0], pair[1]);
-    }
-}
-
-fn writePair(writer: *std.Io.Writer, key: []const u8, value: []const u8) !void {
-    try percentEncode(writer, key);
-    try writer.writeByte('=');
-    try percentEncode(writer, value);
-}
-
-fn percentEncode(writer: *std.Io.Writer, input: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (input) |byte| {
-        if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '.' or
-            byte == '_' or byte == '~')
-            try writer.writeByte(byte)
-        else
-            try writer.writeAll(&.{ '%', hex[byte >> 4], hex[byte & 0x0f] });
-    }
-}
-
 fn buildBasicAuthorization(
     output: []u8,
     client_id: []const u8,
@@ -2183,9 +2079,9 @@ fn buildBasicAuthorization(
         undefined;
     defer std.crypto.secureZero(u8, &credential_storage);
     var credential_writer = std.Io.Writer.fixed(&credential_storage);
-    try percentEncode(&credential_writer, client_id);
+    try oauth_mechanics.percentEncode(&credential_writer, client_id);
     try credential_writer.writeByte(':');
-    try percentEncode(&credential_writer, client_secret);
+    try oauth_mechanics.percentEncode(&credential_writer, client_secret);
     var writer = std.Io.Writer.fixed(output);
     try writer.writeAll("Basic ");
     const encoded_len = std.base64.standard.Encoder.calcSize(credential_writer.buffered().len);
@@ -2211,11 +2107,11 @@ test "MCP OAuth declaration graph compiles" {
 test "MCP OAuth token secrets reject HTTP control bytes" {
     try std.testing.expectError(
         error.InvalidTokenResponse,
-        Secret.init(std.testing.allocator, "access\r\ninjected"),
+        admitSecret(std.testing.allocator, "access\r\ninjected"),
     );
     try std.testing.expectError(
         error.InvalidTokenResponse,
-        Secret.init(std.testing.allocator, "access\x7f"),
+        admitSecret(std.testing.allocator, "access\x7f"),
     );
 }
 

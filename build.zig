@@ -1794,6 +1794,7 @@ fn wireAgentCore(
     metask_client.addImport("metawork_account_contract", account_contract);
     metask_client.addImport("account_state", account_state);
     metask_client.addImport("account_oauth", account_oauth);
+    metask_client.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     metask_client.addImport("account_summary", account_summary);
     const account_login_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/login_attempt.zig"),
