@@ -305,3 +305,68 @@ test "every registered method's receiver resolves through a table this half has"
     }
     _ = wire_types;
 }
+
+/// Runs one call over a per-call capability and retires the frame on the way
+/// out, whatever happened.
+///
+/// A `defer`, not a line at the end of the successful path. That distinction
+/// is the whole mechanism: an early return that skipped the retire would
+/// leave the frame live, a pointer the far side kept would keep working, and
+/// every test would still pass -- the mechanism gone with no symptom. Failure
+/// paths are the common case here, because a dispatcher refuses malformed
+/// arguments, unknown handles and capacity before it ever reaches the call.
+///
+/// `body` receives the frame rather than the capability, because which
+/// capability to build from it is the caller's business; what this function
+/// owns is the lifetime.
+pub fn overFrame(
+    comptime T: type,
+    comptime Result: type,
+    frame: *Frame(T),
+    context: anytype,
+    comptime body: fn (@TypeOf(context), *Frame(T)) Result,
+) Result {
+    defer frame.retire();
+    return body(context, frame);
+}
+
+test "a frame is retired on the failing path too, which is the path that matters" {
+    const Work = struct {
+        fn succeed(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {
+            const sink = CheckpointWriter.sink(frame);
+            if (sink.write_fn(sink.context, "ok") != .ok) return error.Unexpected;
+            return frame.borrow().?.written;
+        }
+
+        fn fail(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {
+            const sink = CheckpointWriter.sink(frame);
+            _ = sink.write_fn(sink.context, "partial");
+            // An early return, which is what a dispatcher does on a bad
+            // argument or an unknown handle.
+            return error.Unexpected;
+        }
+    };
+
+    const destination: @import("shapes.zig").CheckpointDestination =
+        .{ .task_id = 4, .generation = 2, .hard_bytes = 64 };
+
+    var good = CheckpointWriter.Backing.init(.{ .destination = destination });
+    const written = try overFrame(CheckpointWriter, anyerror!u64, &good, {}, Work.succeed);
+    try testing.expectEqual(@as(u64, 2), written);
+    try testing.expect(!good.live());
+
+    var bad = CheckpointWriter.Backing.init(.{ .destination = destination });
+    const sink = CheckpointWriter.sink(&bad);
+    try testing.expectError(
+        error.Unexpected,
+        overFrame(CheckpointWriter, anyerror!u64, &bad, {}, Work.fail),
+    );
+    // The point: the call left through an error and the frame is still
+    // retired, so the capability the far side may have kept is dead either
+    // way.
+    try testing.expect(!bad.live());
+    try testing.expectEqual(
+        checkpoint.SinkWriteResult.contract_failed,
+        sink.write_fn(sink.context, "after"),
+    );
+}

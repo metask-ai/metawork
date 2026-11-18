@@ -757,3 +757,196 @@ test "a return that puts something in a table is owed, not assumed trivial" {
     try testing.expect(resultAdapter(port.BeginRunOutcome) == null);
     try testing.expect(resultAdapter(port.SkillRestoreBorrow) == null);
 }
+
+// ---------------------------------------------------------------------------
+// Who reclaims an entry whose owner never comes back
+// ---------------------------------------------------------------------------
+//
+// "Putting a handle in a table decides who owns the entry and when it leaves"
+// has a third question, and it is the one with no symptom: when that owner
+// never returns, who clears it. `insert` fails once a table is full, so a leak
+// shows up as calls suddenly being refused, with the link looking healthy
+// until that moment. Nothing here is harder to find.
+//
+// The answer is the same shape as the rest of this change: an entry's life is
+// bound to something that already ends, and exactly two things end one.
+//
+// - Its own registered release, asked for by the owner while the link is up.
+// - The link ending. Closure drains every table, because an entry whose owner
+//   is unreachable is not waiting for anything.
+//
+// There is deliberately no third. No scavenging, no timeout, no releasing the
+// oldest: each of those retires an entry a live owner still names, which is
+// the stale-handle failure a generation in an id exists to catch, brought
+// back as a policy.
+//
+// The inventory below is checked against `Bindings` both ways, so a table
+// added later cannot be left out of closure, and an entry here cannot outlive
+// the table it describes.
+
+pub const Reclaim = struct {
+    /// The `Bindings` field holding the table.
+    field: []const u8,
+    /// The registered method an owner releases one entry through. Empty where
+    /// the entry belongs to this half rather than to the caller.
+    release_method: []const u8,
+    /// What the entry's life is bound to, which is what closure drains with.
+    bound_to: enum {
+        /// Ends when the Session closes, or when the link does.
+        session,
+        /// Ends when the Run reaches its terminal, or when the link does.
+        run,
+        /// Held by the caller between two of its own calls. Nothing but its
+        /// release or the link bounds it, which is why these are the entries
+        /// a capacity failure will name first.
+        caller_hold,
+    },
+};
+
+pub const reclamation = [_]Reclaim{
+    .{ .field = "sessions", .release_method = "release_closed_session", .bound_to = .session },
+    .{ .field = "runs", .release_method = "", .bound_to = .run },
+    .{ .field = "leases", .release_method = "release_skill_catalog", .bound_to = .caller_hold },
+    .{
+        .field = "skill_restore",
+        .release_method = "release_skill_restore_inputs",
+        .bound_to = .caller_hold,
+    },
+    .{
+        .field = "session_restore",
+        .release_method = "release_restore_inputs",
+        .bound_to = .caller_hold,
+    },
+    .{ .field = "selections", .release_method = "", .bound_to = .session },
+};
+
+fn isHandleTable(comptime T: type) bool {
+    const info = @typeInfo(T);
+    if (info != .pointer) return false;
+    const Child = info.pointer.child;
+    return switch (@typeInfo(Child)) {
+        .@"struct" => @hasDecl(Child, "is_handle_table"),
+        else => false,
+    };
+}
+
+fn reclaimFor(comptime field: []const u8) ?Reclaim {
+    comptime {
+        for (reclamation) |entry| {
+            if (std.mem.eql(u8, entry.field, field)) return entry;
+        }
+        return null;
+    }
+}
+
+comptime {
+    @setEvalBranchQuota(200_000);
+    // Every table this half holds says how its entries are reclaimed.
+    for (@typeInfo(Bindings).@"struct".fields) |field| {
+        if (!isHandleTable(field.type)) continue;
+        if (reclaimFor(field.name) == null) @compileError(
+            "Bindings." ++ field.name ++ " is a handle table and nothing says what reclaims " ++
+                "its entries. Add it to `reclamation` in src/agent/link/adapters.zig: a " ++
+                "table nobody drains leaks until it is full, and then every call needing one " ++
+                "is refused with no earlier symptom",
+        );
+    }
+    // And every entry still describes a table that exists.
+    for (reclamation) |entry| {
+        if (!@hasField(Bindings, entry.field)) @compileError(
+            "`reclamation` names Bindings." ++ entry.field ++ ", which is not a field",
+        );
+    }
+}
+
+pub const TableCount = struct {
+    field: []const u8,
+    live: usize,
+    capacity: usize,
+};
+
+/// How many entries each table holds, for the diagnostic a capacity failure
+/// has to carry. A refusal that does not name the table it came from leaves
+/// out the one fact worth having.
+pub fn liveCounts(bindings: Bindings) [reclamation.len]TableCount {
+    var out: [reclamation.len]TableCount = undefined;
+    inline for (reclamation, 0..) |entry, index| {
+        const table = @field(bindings, entry.field);
+        out[index] = .{
+            .field = entry.field,
+            .live = table.liveCount(),
+            .capacity = table.capacity(),
+        };
+    }
+    return out;
+}
+
+test "every handle table says what reclaims its entries, and only in two ways" {
+    // The comptime block above fails the build otherwise; this records the
+    // division, because which entries a capacity failure names first is worth
+    // seeing in the suite.
+    comptime var tables: usize = 0;
+    inline for (@typeInfo(Bindings).@"struct".fields) |field| {
+        if (comptime isHandleTable(field.type)) tables += 1;
+    }
+    try testing.expectEqual(reclamation.len, tables);
+    try testing.expectEqual(@as(usize, 6), tables);
+
+    var caller_held: usize = 0;
+    for (reclamation) |entry| {
+        if (entry.bound_to == .caller_hold) caller_held += 1;
+        // A release method named here must be a registered method; an entry
+        // belonging to this half names none.
+        if (entry.release_method.len != 0) {
+            var found = false;
+            for (method.entries) |registered| {
+                if (std.mem.eql(u8, registered.name, entry.release_method)) found = true;
+            }
+            try testing.expect(found);
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), caller_held);
+}
+
+test "a capacity refusal can name the table it came from" {
+    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    defer sessions.deinit();
+    var runs = try handle_table.Table(port.RunPort).init(testing.allocator, 2);
+    defer runs.deinit();
+    var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 3);
+    defer leases.deinit();
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 4);
+    defer skill_restore.deinit();
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 5);
+    defer session_restore.deinit();
+    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 6);
+    defer selections.deinit();
+    const bindings: Bindings = .{
+        .allocator = testing.allocator,
+        .sessions = &sessions,
+        .runs = &runs,
+        .leases = &leases,
+        .skill_restore = &skill_restore,
+        .session_restore = &session_restore,
+        .selections = &selections,
+    };
+
+    var held: port.SessionPort = .{ .context = null, .vtable = undefined };
+    const id = try sessions.insert(&held);
+
+    const counts = liveCounts(bindings);
+    try testing.expectEqual(reclamation.len, counts.len);
+    for (counts) |entry| {
+        if (std.mem.eql(u8, entry.field, "sessions")) {
+            try testing.expectEqual(@as(usize, 1), entry.live);
+            try testing.expectEqual(@as(usize, 1), entry.capacity);
+        } else {
+            try testing.expectEqual(@as(usize, 0), entry.live);
+        }
+    }
+
+    // Full, and the refusal is a typed failure rather than a growth.
+    var second: port.SessionPort = .{ .context = null, .vtable = undefined };
+    try testing.expectError(error.HandleCapacity, sessions.insert(&second));
+    _ = sessions.take(id);
+}

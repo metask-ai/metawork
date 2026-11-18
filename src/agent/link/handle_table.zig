@@ -63,6 +63,13 @@ pub fn Table(comptime T: type) type {
     return struct {
         const Self = @This();
 
+        /// The type states its own kind, so "which of these fields is a
+        /// handle table" is a question about the type rather than about a
+        /// name someone chose. The reclamation inventory in `adapters.zig`
+        /// closes over this.
+        pub const is_handle_table = true;
+        pub const Held = T;
+
         const Slot = struct {
             /// The generation this slot is currently at. Odd means live, even
             /// means free, so a slot's history cannot be confused with its
