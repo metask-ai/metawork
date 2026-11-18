@@ -3676,18 +3676,7 @@ pub const Runtime = struct {
             task.durable.recent_order = self.takeRecentOrder();
             return true;
         }
-        // A request that did not take cannot put the Task into stopping:
-        // every value that means "not taken" is already on this side, and an
-        // undelivered request is one of them.
-        const stopping = switch (dispatch) {
-            .pending, .requested, .already_requested => true,
-            .already_finishing,
-            .already_terminal,
-            .stale_run,
-            .session_closing,
-            .dependency_contract,
-            => false,
-        };
+        const stopping = dispatchStops(dispatch, .pending_stops);
         if (!stopping) return continuation_cancelled;
         task.runtime.permission_review.invalidate();
         if (record) |value| switch (pushUiRecord(task, value)) {
@@ -4178,11 +4167,7 @@ pub const Runtime = struct {
             const dispatch = requestRunTermination(run_record, .session_close);
             if (effects.executor.cancel(run_record)) {
                 run_record.terminal_observed = true;
-            } else if (dispatch == .stale_run) {
-                // A comparison rather than a switch, so `dependency_contract`
-                // deliberately lands nowhere: an undelivered request is not a
-                // stale RunControl, and crashing because the other half died
-                // is the behaviour this whole change exists to remove.
+            } else if (task_policy.dispatchedControlStale(dispatch)) {
                 std.debug.panic(
                     "active Task Run {d} published a stale RunControl",
                     .{run_record.id},
@@ -7476,16 +7461,7 @@ pub const Runtime = struct {
             defer access.deinit();
             if (access.permissionStopRequest() != active_run_id) continue;
             const dispatch = requestPermissionTermination(run);
-            const stopping = switch (dispatch) {
-                .requested, .already_requested => true,
-                .pending,
-                .already_finishing,
-                .already_terminal,
-                .stale_run,
-                .session_closing,
-                .dependency_contract,
-                => false,
-            };
+            const stopping = dispatchStops(dispatch, .pending_waits);
             if (!stopping) continue;
             task.runtime.cancel_requested = true;
             changed = true;
@@ -10185,6 +10161,36 @@ fn acknowledgeLatestCompletion(task: *task_state.Task) void {
     const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
     if (terminal.outcome == .completed)
         task.durable.completion_seen_run_id = latest.id;
+}
+
+/// How a caller reads a request that has not reached the Session yet.
+///
+/// The two callers differ on this one value and agree on every other: a user
+/// cancel of a Run still being handed over is a stop in progress, while the
+/// permission path acts only on a Run already running.
+const PendingReading = enum { pending_stops, pending_waits };
+
+/// Whether a termination dispatch means the Run is now winding down.
+///
+/// Named once rather than switched twice, so that the group meaning "the
+/// request did not take" has a single definition. `dependency_contract`
+/// belongs in it: a request that never arrived cannot have started a stop,
+/// and claiming otherwise would show the Task as stopping over a Run nobody
+/// asked anything of.
+fn dispatchStops(
+    dispatch: task_state.RunTerminationDispatch,
+    pending: PendingReading,
+) bool {
+    return switch (dispatch) {
+        .pending => pending == .pending_stops,
+        .requested, .already_requested => true,
+        .already_finishing,
+        .already_terminal,
+        .stale_run,
+        .session_closing,
+        .dependency_contract,
+        => false,
+    };
 }
 
 fn requestRunTermination(
@@ -13104,4 +13110,104 @@ test "a composition with no window system announces nothing and costs nothing" {
     publishTerminalTestRun(&runs[0].?, .completed);
     runtime.notifyRunAttention(.{}, &context, noScheduledOwner);
     try std.testing.expectEqual(@as(u64, 1), task.notification_marks.?.terminal_run_id);
+}
+
+// ---------------------------------------------------------------------------
+// The branches an unreachable half exists for
+// ---------------------------------------------------------------------------
+//
+// Every one of these answers was written for a half that is not there, so
+// every one of them is unreachable in process unless a test supplies a control
+// handle that cannot answer. Without that the whole group is dead code and a
+// green suite says nothing about it, which is the same shape as a comptime
+// guard whose tests are never collected.
+
+fn unreachableHalfRun(execution: *task_state.RunExecution) task_state.RunRecord {
+    execution.run_control = agent.RunControl.testUnreachable(9, 1);
+    return .{
+        .id = 9,
+        .generation = 1,
+        .execution = execution,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = @constCast("model"),
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("input") } },
+        .commentary_ends = @constCast(&[_]u64{}),
+        .tools = @constCast(&[_]?task_state.ToolView{}),
+        .terminal_diagnostic = @constCast(""),
+        .agent_handoff = .init(.running),
+    };
+}
+
+test "an observation that could not be made blocks automatic approval" {
+    var execution: task_state.RunExecution = .{};
+    var run = unreachableHalfRun(&execution);
+
+    // The reason the return type changed. This function already answers true
+    // for a Run that is not running and true for a lease it cannot acquire;
+    // an unreachable half is the third of the same kind, and the only one
+    // that could not arise while both halves shared an address space.
+    try std.testing.expect(inputBlocksAutomaticAllow(&run));
+}
+
+test "a termination request that never arrived starts no stop and panics nowhere" {
+    var execution: task_state.RunExecution = .{};
+    var run = unreachableHalfRun(&execution);
+
+    try std.testing.expectEqual(
+        task_state.RunTerminationDispatch.dependency_contract,
+        requestRunTermination(&run, .user_cancel),
+    );
+    try std.testing.expectEqual(
+        task_state.RunTerminationDispatch.dependency_contract,
+        requestPermissionTermination(&run),
+    );
+
+    // Both callers put it with the answers that mean the request did not
+    // take, which is the whole content of the classification.
+    try std.testing.expect(!dispatchStops(.dependency_contract, .pending_stops));
+    try std.testing.expect(!dispatchStops(.dependency_contract, .pending_waits));
+    try std.testing.expect(dispatchStops(.pending, .pending_stops));
+    try std.testing.expect(!dispatchStops(.pending, .pending_waits));
+
+    // And neither panic path fires on it. That is the only thing those two
+    // sites have to guarantee, and a comparison cannot be made to guarantee
+    // it by the compiler.
+    try std.testing.expect(!task_policy.publishedControlStale(.dependency_contract));
+    try std.testing.expect(!task_policy.dispatchedControlStale(.dependency_contract));
+    try std.testing.expect(task_policy.publishedControlStale(.stale_run));
+    try std.testing.expect(task_policy.dispatchedControlStale(.stale_run));
+}
+
+test "restore filters that could not be borrowed are not unchanged filters" {
+    // `modelRestoreCapabilitiesExact` ends in `return sameRestoreFilters(...)`,
+    // so this is the answer it hands Control: not exact, do not restore as if
+    // nothing moved.
+    var storage: [8]u8 align(8) = @splat(0);
+    const inputs: *agent.SkillRestoreInputs = @ptrCast(&storage);
+    var capabilities: RestoreCapabilities = .{
+        .original = .{
+            .agent = agent.RuntimePort.testUnreachableBorrow(),
+            .skill = inputs,
+            .mcp = null,
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
+            .permission_interaction = .interactive,
+        },
+        .skill = inputs,
+        .mcp = null,
+        .mcp_catalog_generation = null,
+    };
+    const current: Runtime.RestoreFilters = .{
+        .skill = inputs,
+        .mcp = null,
+        .mcp_catalog_generation = null,
+    };
+
+    // The failure a default would have produced: two empty id lists have
+    // equal length and compare equal element by element, so it would have
+    // reached `return true`.
+    try std.testing.expect(!Runtime.sameRestoreFilters(&capabilities, current));
 }

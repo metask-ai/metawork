@@ -135,6 +135,61 @@ pub const RunControl = struct {
         if (!vtable.try_retain(self.context)) return null;
         return .{ .control = self };
     }
+
+    /// A control handle whose far side cannot be reached, so that the branch
+    /// each caller writes for that case actually runs.
+    ///
+    /// Its answers are the declared ones rather than hand-picked: the
+    /// termination result is `TerminationRequestResult.link_unreachable` and
+    /// the submission is `InputSubmission`'s, so this fixture and the port
+    /// guard in `src/agent/link/unreachability.zig` cannot drift apart.
+    pub fn testUnreachable(run_id: u64, generation: u64) RunControl {
+        std.debug.assert(@import("builtin").is_test);
+        return .{
+            .context = null,
+            .vtable = &unreachable_vtable,
+            .run_id = run_id,
+            .generation = generation,
+        };
+    }
+
+    const unreachable_vtable: VTable = .{
+        // Retaining succeeds. A caller that could not take the lease stops one
+        // line earlier and never reaches the answers below, and those answers
+        // are the point of this fixture.
+        .try_retain = struct {
+            fn call(_: ?*anyopaque) bool {
+                return true;
+            }
+        }.call,
+        .release = struct {
+            fn call(_: ?*anyopaque) void {}
+        }.call,
+        .submit_input = struct {
+            fn call(_: ?*anyopaque, _: u64, _: u64, _: u64, _: []const u8) session_control.InputSubmission {
+                return @unionInit(
+                    session_control.InputSubmission,
+                    @tagName(session_control.InputSubmission.link_unreachable),
+                    {},
+                );
+            }
+        }.call,
+        .input_observation = struct {
+            fn call(_: ?*anyopaque, _: u64, _: u64) ?session_control.InputObservation {
+                return null;
+            }
+        }.call,
+        .request_termination = struct {
+            fn call(
+                _: ?*anyopaque,
+                _: u64,
+                _: u64,
+                _: session_control.TerminationSignal,
+            ) session_control.TerminationRequestResult {
+                return session_control.TerminationRequestResult.link_unreachable;
+            }
+        }.call,
+    };
 };
 
 /// A retained Agent control reference. This is a linear value: callers must
@@ -448,6 +503,23 @@ pub const RuntimePort = struct {
     /// a Control test that drives only projection, a Host that has not
     /// attached one yet -- bind this.
     pub const quiet: RuntimePort = .{ .context = null, .vtable = &quiet_vtable };
+
+    /// `quiet`, except that the skill-restore borrow cannot be made, so that
+    /// each caller's answer to an unreachable half actually runs.
+    pub fn testUnreachableBorrow() RuntimePort {
+        std.debug.assert(@import("builtin").is_test);
+        return .{ .context = null, .vtable = &unreachable_borrow_vtable };
+    }
+
+    const unreachable_borrow_vtable: VTable = vtable: {
+        var copy = quiet_vtable;
+        copy.borrow_skill_restore_inputs = struct {
+            fn call(_: ?*anyopaque, _: *const SkillRestoreInputs) ?SkillRestoreBorrow {
+                return null;
+            }
+        }.call;
+        break :vtable copy;
+    };
 
     const quiet_vtable: VTable = .{
         .create_session_route = struct {

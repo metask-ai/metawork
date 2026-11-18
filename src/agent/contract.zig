@@ -138,6 +138,7 @@ pub const StopReason = sdk.StopReason;
 pub const TerminalReceipts = control.TerminalReceipts;
 pub const TerminalResult = control.TerminalResult;
 pub const TerminationSignal = control.TerminationSignal;
+pub const TerminationRequestResult = control.TerminationRequestResult;
 pub const VideoGenerationOutput = generate_video.Output;
 pub const VideoGenerationRunInput = generate_video.Input;
 pub const core_manifest_sha256 = core_identity.manifest_sha256;

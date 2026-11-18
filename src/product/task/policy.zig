@@ -190,6 +190,28 @@ pub const CompactTerminalDecision = struct {
     cause: ?task_state.CompactCause,
 };
 
+/// Whether a termination result says the RunControl was already stale the
+/// moment it was published, which is the one thing either panic path treats as
+/// a defect of ours.
+///
+/// Named rather than compared in place, because a comparison is not a switch:
+/// adding a value to `TerminationRequestResult` makes the compiler point at
+/// every exhaustive switch and at neither of those two sites. An undelivered
+/// request in particular must answer false here -- the other half dying is not
+/// a stale control, and crashing over it is the behaviour process isolation
+/// exists to remove.
+pub fn publishedControlStale(result: agent.TerminationRequestResult) bool {
+    return result == .stale_run;
+}
+
+/// The same question asked of a dispatch the caller has already mapped. Two
+/// spellings because the two sites hold different types, one definition each
+/// because a bare `==` in the middle of a long function is where the next
+/// value will be forgotten.
+pub fn dispatchedControlStale(dispatch: task_state.RunTerminationDispatch) bool {
+    return dispatch == .stale_run;
+}
+
 pub fn pendingInterruption(
     interruption: agent.ExternalInterruption,
 ) task_state.PendingInterruption {
