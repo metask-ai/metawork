@@ -70,7 +70,21 @@ pub fn Wire(comptime T: type) type {
         if (T == port.SessionPort) return handle_table.Id;
 
         // Byte callbacks: the far side performs the I/O against a descriptor.
-        if (T == checkpoint.Sink) return shapes.CheckpointDestination;
+        //
+        // The export sink is the one that does not travel at all, and
+        // working out what its descriptor had to contain is what showed why.
+        // Of the four facts the staged record needs from the caller,
+        // `task_id` and `binding_epoch` are on the Session now, `hard_bytes`
+        // is in the `limits` the same call already carries, and the terminal
+        // anchor is needed only for a record the execution half writes
+        // *unasked* -- where its kind is the Run or compact it just executed
+        // and its id is the `last_run_id`/`last_compact_id` already in the
+        // call. An export the caller asked for has the caller building the
+        // record, so nothing about the destination is left to send.
+        //
+        // `call_frame.BlobDestination` is therefore composed over there from
+        // the Session it was called on, not decoded from the wire.
+        if (T == checkpoint.Sink) return void;
         if (T == contract.McpInstallationInput) return shapes.McpInstallationTarget;
         if (T == ?contract.McpInstallationInput) return ?shapes.McpInstallationTarget;
         if (T == contract.FileDeliveryInput) return shapes.FileDeliveryEnabled;
@@ -209,19 +223,28 @@ test "a borrowed handle becomes an id, not a pointer" {
     try testing.expectEqual(contract.SkillPolicyInput, fields[1].type);
 }
 
-test "a byte sink becomes a descriptor and the bytes stay put" {
+test "a byte sink contributes no field at all, and the bytes stay put" {
     const Export = @typeInfo(@FieldType(port.SessionPort.VTable, "export_checkpoint")).pointer.child;
     const fields = @typeInfo(Request(Export)).@"struct".fields;
-    var saw_destination = false;
+
+    // Five parameters after the context, and the sink is not one of the
+    // fields: `Wire(checkpoint.Sink)` is `void`, so it is dropped the way an
+    // allocator is. Every fact its descriptor used to carry is either on the
+    // Session or in `limits`, which this request does carry.
+    try testing.expectEqual(@as(usize, 4), fields.len);
+    try testing.expectEqual(void, Wire(checkpoint.Sink));
     inline for (fields) |field| {
-        if (field.type == shapes.CheckpointDestination) saw_destination = true;
         // Nothing in the request is a callback or a pointer into the caller.
         try testing.expectEqual(
             payload.Classification.structural,
             payload.classify(field.type),
         );
     }
-    try testing.expect(saw_destination);
+    var saw_limits = false;
+    inline for (fields) |field| {
+        if (field.type == contract.CheckpointLimits) saw_limits = true;
+    }
+    try testing.expect(saw_limits);
 }
 
 test "an error union never reaches the payload" {

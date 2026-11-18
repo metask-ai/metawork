@@ -111,7 +111,13 @@ pub const InvokeError = error{
 /// Whether this build can answer a method end to end.
 pub fn dispatchable(comptime owner: method.Owner, comptime name: []const u8) bool {
     comptime {
-        if (!adapters.argumentsRebuildable(owner, name)) return false;
+        // A method with a prong does not go through the generic argument
+        // chain at all: the prong is what builds its capability, and
+        // `invokeOne` reaches it before the generic path. Asking
+        // `argumentsRebuildable` about it would report "no" about a method
+        // this half answers, which is the kind of understatement that makes
+        // a count useless in the other direction.
+        if (!hasProng(name) and !adapters.argumentsRebuildable(owner, name)) return false;
         const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
         const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
         if (Returned == void) return true;
@@ -264,8 +270,20 @@ fn exportCheckpoint(
     const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
     const session = receiver.session.port;
 
-    // The wire carries the destination where the method takes a sink.
-    const destination = wired[1];
+    // Composed here, not decoded: the sink has no wire form. The Task comes
+    // from the Session this call names and the bound from the call's own
+    // limits, which is the whole of what opening a blob needs.
+    //
+    // An identity that was never filled in refuses the export rather than
+    // opening a blob under Task 0, and it is filled in by the route creation
+    // that puts a Session in this table -- which `not_forwarded` records as
+    // still owed, so today this path refuses and says why.
+    const identity = receiver.session.identity;
+    if (!identity.valid()) return failureResponse(arena, error.CheckpointIncompatible);
+    const destination: call_frame.BlobDestination = .{
+        .task_id = identity.task_id,
+        .hard_bytes = wired[0].hard_bytes,
+    };
     const inner = bindings.store.open_sink_fn(bindings.store.context, destination) orelse {
         // The export path's own vocabulary says this, so it is an outcome
         // rather than a transport error: nothing was written, the Session is
@@ -289,20 +307,50 @@ fn exportCheckpoint(
     // outlive what it writes through.
     defer backing.retire();
 
+    // The sink dropped out of the request, so what used to be fields 2..4 are
+    // fields 1..3: limits, then the two ids and the model.
     var outcome = session.vtable.export_checkpoint(
         session.context,
         wired[0],
         call_frame.ExportSink.sink(&backing),
+        wired[1],
         wired[2],
         wired[3],
-        wired[4],
     ) catch |err| return failureResponse(arena, err);
     defer outcome.deinit();
+
+    // The Session answered `caller_sink`, which is all it can see. This half
+    // is the one that knows what that sink was: its own area, outside the
+    // store the caller reads records from. Replacing the arm here is what
+    // keeps each answer with the half that can establish it.
+    if (outcome == .success) {
+        outcome.success.placement = .{ .own_area = stagedName(destination, outcome.success.checkpoint) };
+    }
 
     const encoded = try (comptime adapters.resultAdapter(contract.CheckpointOutcome).?)
         .apply(bindings, outcome);
     _ = entry;
     return successResponse(arena, @TypeOf(encoded), encoded);
+}
+
+/// What this half calls the blob it just wrote.
+///
+/// Derived from the same two facts a store names a blob by, so the caller can
+/// find it -- but produced *here*, by the half that wrote it, rather than
+/// recomputed over there from the export's facts. A naming scheme agreed
+/// between two processes by both implementing it is a scheme that will
+/// disagree in one of them.
+fn stagedName(
+    destination: call_frame.BlobDestination,
+    written: checkpoint.Export,
+) checkpoint.StagedBlob {
+    var storage: [checkpoint.StagedBlob.max_name_bytes]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &storage,
+        "{d}/{d}-{s}.ckpt",
+        .{ destination.task_id, written.generation, std.fmt.bytesToHex(written.digest, .lower) },
+    ) catch unreachable;
+    return checkpoint.StagedBlob.from(text) catch unreachable;
 }
 
 fn isErrorUnion(comptime Fn: type) bool {
@@ -696,7 +744,7 @@ const Blobs = struct {
         return value;
     }
 
-    fn openSink(context: ?*anyopaque, _: shapes.CheckpointDestination) ?checkpoint.Sink {
+    fn openSink(context: ?*anyopaque, _: call_frame.BlobDestination) ?checkpoint.Sink {
         const self: *Blobs = @ptrCast(@alignCast(context.?));
         self.opened += 1;
         return .{ .context = self, .write_fn = write };
@@ -759,7 +807,6 @@ fn exportRequest(arena: std.mem.Allocator, receiver: handle_table.Id) ![]u8 {
             .max_blocks_per_message = 4,
             .chunk_bytes = 16,
         },
-        .{ .task_id = 3, .generation = 5, .hard_bytes = 32 },
         7,
         8,
         "model",
@@ -782,7 +829,10 @@ test "an export writes its bytes into the store and answers in its own vocabular
     var blobs: Blobs = .{};
     var exporter: Exporter = .{ .bytes = "checkpoint-bytes" };
     var vtable: port.SessionPort.VTable = undefined;
-    var held = run_tools.HeldSession.init(exporter.port(&vtable));
+    var held = run_tools.HeldSession.initFor(
+        exporter.port(&vtable),
+        .{ .task_id = 3, .binding_epoch = 1 },
+    );
     const id = try harness.sessions.insert(&held);
 
     var bindings = harness.bindings();
@@ -820,7 +870,10 @@ test "a store that cannot open the blob is an export failure, not a link failure
     defer harness.deinit();
     var exporter: Exporter = .{ .bytes = "unreached" };
     var vtable: port.SessionPort.VTable = undefined;
-    var held = run_tools.HeldSession.init(exporter.port(&vtable));
+    var held = run_tools.HeldSession.initFor(
+        exporter.port(&vtable),
+        .{ .task_id = 3, .binding_epoch = 1 },
+    );
     const id = try harness.sessions.insert(&held);
 
     // `empty` refuses to open. The Session is untouched and still usable, so
@@ -852,5 +905,12 @@ test "how much of the surface this build answers is counted, not claimed" {
     // number kept here: arguments still owed, results still owed.
     try testing.expect(answered < callable);
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 37), answered);
+    try testing.expectEqual(@as(usize, 38), answered);
+
+    // One of the 38 is answered by a prong rather than by the generic chain,
+    // and `dispatchable` says so: `export_checkpoint`'s capability is built
+    // here, so asking `argumentsRebuildable` about it would report "no"
+    // about a method this half does answer.
+    try testing.expect(comptime !adapters.argumentsRebuildable(.session, "export_checkpoint"));
+    try testing.expect(comptime dispatchable(.session, "export_checkpoint"));
 }

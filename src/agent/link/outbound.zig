@@ -394,20 +394,18 @@ test "the argument direction is counted on its own" {
     // because what the far side needs to know is in the closure and not in
     // the type.
     //
-    //   * `export_checkpoint`'s sink and `restore_session_route`'s source
-    //     need a *destination* -- which Task, which generation, which blob.
-    //     Product's call site has those (`approval_job.CheckpointWork` holds
-    //     `task_id`, and `store.begin` assigns the generation) and conveys
-    //     them by composing the sink. Across the link they have to be said.
-    //     The execution half is already built for it:
-    //     `call_frame.BlobStore.open_sink_fn` takes a destination and opens
-    //     the blob itself. What is missing is on the caller's side, and it
-    //     is a change to the port's own shape rather than to this file, so
-    //     it is a proposal and not an edit.
+    //   * `restore_session_route`'s source needs a *descriptor* -- which
+    //     generation, which digest, how many bytes -- and those are facts
+    //     only the caller has about a blob that already exists, so they have
+    //     to be said. `export_checkpoint`'s sink was in this list for the
+    //     same reason and is not any more: an export names a blob that does
+    //     *not* exist yet, and every fact needed to open one turned out to
+    //     be on the Session or in the call's own limits, so its wire form is
+    //     nothing at all.
     //   * `prepare_run_with_tools`' MCP install input is a reverse call --
     //     `shapes.McpInstallationTarget` records why -- and belongs to the
     //     MCP step with the rest of it.
-    try testing.expectEqual(@as(usize, 3), owed.len);
+    try testing.expectEqual(@as(usize, 2), owed.len);
 
     // What that leaves: 47 of the 50 callable methods can put every argument
     // they are given on the wire. Counted rather than claimed, same as the
@@ -417,7 +415,7 @@ test "the argument direction is counted on its own" {
         if (entry.transport == .stream) continue;
         if (comptime sendable(entry.owner, entry.name)) count += 1;
     }
-    try testing.expectEqual(@as(usize, 47), count);
+    try testing.expectEqual(@as(usize, 48), count);
 }
 
 fn testClient(count: usize) !*client.Client {

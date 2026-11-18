@@ -205,7 +205,7 @@ test "a frame answers while its call is running and refuses afterwards" {
     var sink_state: Recorder = .{ .buffer = &sink_scratch };
     var backing = ExportSink.Backing.init(.{
         .inner = sink_state.sink(),
-        .destination = .{ .task_id = 7, .generation = 3, .hard_bytes = 64 },
+        .destination = .{ .task_id = 7, .hard_bytes = 64 },
     });
     const sink = ExportSink.sink(&backing);
 
@@ -230,7 +230,7 @@ test "a retired frame is not merely zeroed, because zero can look valid" {
     var sink_state: Recorder = .{ .buffer = &sink_scratch };
     var backing = ExportSink.Backing.init(.{
         .inner = sink_state.sink(),
-        .destination = .{ .task_id = 1, .generation = 1, .hard_bytes = 8 },
+        .destination = .{ .task_id = 1, .hard_bytes = 8 },
     });
     try testing.expect(backing.live());
     backing.retire();
@@ -264,8 +264,7 @@ test "a frame is retired on the failing path too, which is the path that matters
     };
 
     var sink_state: Recorder = .{ .buffer = &sink_scratch };
-    const destination: shapes.CheckpointDestination =
-        .{ .task_id = 4, .generation = 2, .hard_bytes = 64 };
+    const destination: BlobDestination = .{ .task_id = 4, .hard_bytes = 64 };
 
     var good = ExportSink.Backing.init(.{ .inner = sink_state.sink(), .destination = destination });
     const written = try overFrame(ExportSink, anyerror!u64, &good, {}, Work.succeed);
@@ -305,11 +304,28 @@ test "a frame is retired on the failing path too, which is the path that matters
 /// hands out the shapes the port already speaks -- a `checkpoint.Sink` and a
 /// `checkpoint_restore.Source` -- so nothing here reshapes bytes, and takes
 /// them back when the call that used one has returned.
+/// Which blob to open, and the bound on it.
+///
+/// Not a wire shape, and it used to be one. Every field of it is either on
+/// the Session the call was made on or in the call's own `limits`, so the
+/// descriptor is composed here rather than sent -- and the field that *was*
+/// sent, `generation`, had to come out: it is assigned by the export, so a
+/// caller filling it in was asserting something it could not know.
+///
+/// `shapes.CheckpointSourceDescriptor` is still a wire shape, and the
+/// asymmetry is real: a restore names a blob that already exists, by facts
+/// only the caller has (which generation, which digest, how many bytes),
+/// while an export names one that does not exist yet.
+pub const BlobDestination = struct {
+    task_id: u64,
+    hard_bytes: u64,
+};
+
 pub const BlobStore = struct {
     context: ?*anyopaque,
     /// A sink for the blob this destination names, or `null` when one cannot
     /// be opened. The export path has an answer for that already.
-    open_sink_fn: *const fn (?*anyopaque, shapes.CheckpointDestination) ?checkpoint.Sink,
+    open_sink_fn: *const fn (?*anyopaque, BlobDestination) ?checkpoint.Sink,
     /// A source for the blob this descriptor names, or `null` when it is not
     /// there -- which the restore path also already answers.
     open_source_fn: *const fn (?*anyopaque, shapes.CheckpointSourceDescriptor) ?Source,
@@ -325,7 +341,7 @@ pub const BlobStore = struct {
     pub const empty: BlobStore = .{
         .context = null,
         .open_sink_fn = struct {
-            fn call(_: ?*anyopaque, _: shapes.CheckpointDestination) ?checkpoint.Sink {
+            fn call(_: ?*anyopaque, _: BlobDestination) ?checkpoint.Sink {
                 return null;
             }
         }.call,
@@ -354,7 +370,7 @@ pub const BlobStore = struct {
 pub const ExportSink = struct {
     /// Where the bytes really go.
     inner: checkpoint.Sink,
-    destination: shapes.CheckpointDestination,
+    destination: BlobDestination,
     written: u64 = 0,
 
     pub const Backing = Frame(ExportSink);
@@ -409,7 +425,7 @@ test "an export sink writes through to the store and stops at the bound" {
     var sink_state: Recorder = .{ .buffer = &recorded };
     var backing = ExportSink.Backing.init(.{
         .inner = sink_state.sink(),
-        .destination = .{ .task_id = 1, .generation = 2, .hard_bytes = 8 },
+        .destination = .{ .task_id = 1, .hard_bytes = 8 },
     });
     const handed = ExportSink.sink(&backing);
 
@@ -439,7 +455,6 @@ test "a store refusal is an answer the export path already has" {
     const store = BlobStore.empty;
     try testing.expect(store.open_sink_fn(store.context, .{
         .task_id = 1,
-        .generation = 1,
         .hard_bytes = 16,
     }) == null);
     try testing.expect(store.open_source_fn(store.context, .{

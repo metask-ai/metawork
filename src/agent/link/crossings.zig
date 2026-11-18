@@ -81,6 +81,33 @@ fn composed(
     }
 }
 
+/// For a capability the far side composes from facts it already has, so that
+/// nothing crosses for it as part of this call.
+///
+/// Distinct from `composed` on purpose. `composed` checks that each input is
+/// itself carriable, which is what stops "the other side builds it" from
+/// hiding the obstruction one level down. When nothing crosses there is no
+/// input to check, and the thing that must not be hidden is *where the facts
+/// come from* -- so each one is named, and the list may not be empty. "It
+/// needs nothing" is never an accepted answer for a capability; "it needs
+/// these, and they arrive here" is.
+fn composedLocally(
+    comptime T: type,
+    comptime expected: Classification,
+    comptime shape: []const u8,
+    comptime sources: []const []const u8,
+) Crossing {
+    comptime {
+        if (sources.len == 0) @compileError(
+            "a capability composed with nothing crossing still says what it is composed " ++
+                "from and where those facts arrive: " ++ @typeName(T),
+        );
+        var names: []const u8 = "composed from";
+        for (sources) |source| names = names ++ " " ++ source ++ ";";
+        return crossingWith(T, expected, shape, names);
+    }
+}
+
 /// The same, for a type whose mirror now exists. `Mirror` is checked to be
 /// something the wire can carry, so a mirror cannot be recorded as done while
 /// still holding an obstruction of its own.
@@ -200,11 +227,14 @@ pub const crossings = [_]Crossing{
 
     // A context pointer or a byte callback: the far side performs the effect,
     // and the wire carries only what it needs in order to.
-    composed(
+    composedLocally(
         contract.CheckpointSink,
         .{ .substituted = .untyped_pointer },
-        "destination descriptor; the execution half writes the file",
-        &.{shapes.CheckpointDestination},
+        "nothing: the sink has no wire form at all",
+        &.{
+            "the Task id, from the Session's own identity (surface.SessionOpenOptions)",
+            "the byte bound, from the `limits` this same call already carries",
+        },
     ),
     shaped(
         contract.CatalogProjection,

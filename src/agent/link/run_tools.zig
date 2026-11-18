@@ -107,13 +107,35 @@ pub const RunTools = struct {
 };
 
 /// What the execution half keeps for one Session.
+/// What Product said this Session belongs to, kept from the options it was
+/// created with.
+///
+/// The execution half needs it to name a blob, and later to write a staged
+/// record nobody asked for. Zero is not a Task, so an identity that was never
+/// filled in cannot pass for one -- `valid` is what the export path checks
+/// before composing a destination, and a build where Sessions are not created
+/// through the link refuses the export instead of writing a blob under Task 0.
+pub const SessionIdentity = struct {
+    task_id: u64 = 0,
+    binding_epoch: u64 = 0,
+
+    pub fn valid(self: SessionIdentity) bool {
+        return self.task_id != 0 and self.binding_epoch != 0;
+    }
+};
+
 pub const HeldSession = struct {
     port: port.SessionPort,
+    identity: SessionIdentity = .{},
     tools: [2]RunTools = .{ .{}, .{} },
     live: u1 = 0,
 
     pub fn init(value: port.SessionPort) HeldSession {
         return .{ .port = value };
+    }
+
+    pub fn initFor(value: port.SessionPort, identity: SessionIdentity) HeldSession {
+        return .{ .port = value, .identity = identity };
     }
 
     /// The set the Session is using now, if any.

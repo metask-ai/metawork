@@ -677,3 +677,42 @@ test "checkpoint store is immutable, exclusive, and cleans only unreferenced blo
     foreign_artifact.close(std.testing.io);
     foreign_artifact_dir.close(std.testing.io);
 }
+
+test "committing a writer nothing was written into is refused, which is the net under Placement" {
+    // `checkpoint.Placement` is what tells a caller whether the bytes went
+    // into the writer it opened. This is what happens if a caller ignores it:
+    // `expected_bytes` comes from the export's own report and
+    // `bytes_written` from this writer, so a blob written somewhere else
+    // leaves them unequal and the commit refuses.
+    //
+    // Named here because it is a real net and it was not put there for this.
+    // Being caught by an unrelated invariant is not the same as having said
+    // which case you are in -- the switch at the call site is that -- but it
+    // does mean the failure is a refusal rather than a record pointing at a
+    // blob this store does not have.
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_storage);
+
+    var store = try FileStore.init(io, root_storage[0..root_len]);
+    defer store.deinit();
+
+    var writer = try store.begin(7, 1024);
+    defer writer.deinit();
+
+    // Nothing written, and the export says it wrote sixteen bytes.
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        writer.commit(3, @splat(0xAB), 16),
+    );
+
+    // And the same writer still refuses once something *is* written, when
+    // the count disagrees: the check is on the bytes, not on emptiness.
+    try writer.write("0123456789abcdef");
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        writer.commit(3, @splat(0xAB), 15),
+    );
+}

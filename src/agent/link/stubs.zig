@@ -192,18 +192,16 @@ const not_forwarded = [_]NotForwarded{
         .owner = .runtime,
         .name = "restore_session_route",
         .why = "its options carry a byte callback for the checkpoint source, whose wire " ++
-            "form is a descriptor the caller has to state; see `outbound.owedArguments`",
+            "form is a descriptor the caller has to state: a restore names a blob that " ++
+            "already exists, by facts only the caller has. `export_checkpoint` was here " ++
+            "for what looked like the same reason and is not, because an export names a " ++
+            "blob that does not exist yet",
     },
     .{
         .owner = .session,
         .name = "prepare_run_with_tools",
         .why = "the MCP installation input is a reverse call; see " ++
             "`shapes.McpInstallationTarget` and the MCP step",
-    },
-    .{
-        .owner = .session,
-        .name = "export_checkpoint",
-        .why = "its sink is a byte callback, same as the restore source above",
     },
 
     // The entries below are the execution half's side, and they are here
@@ -1426,7 +1424,7 @@ test "how much of the surface this build answers end to end, counted across both
     // the 50 callable methods are end_to_end by both halves. "46" was the
     // caller's half counted on its own, which is a different thing and not a
     // claim about what works.
-    try testing.expectEqual(@as(usize, 37), end_to_end);
+    try testing.expectEqual(@as(usize, 38), end_to_end);
     try testing.expectEqual(not_forwarded.len, 50 - end_to_end);
 
     // And the execution half is the binding constraint: every method the
@@ -1436,7 +1434,7 @@ test "how much of the surface this build answers end to end, counted across both
     // have diverged and the shorter one would start looking like the answer.
     try testing.expectEqual(exec_gap, 50 - end_to_end);
     try testing.expect(caller_gap <= exec_gap);
-    try testing.expectEqual(@as(usize, 37), comptime dispatch.dispatchableCount());
+    try testing.expectEqual(@as(usize, 38), comptime dispatch.dispatchableCount());
 }
 
 test "the list says how many of its entries belong to which half" {
@@ -1450,7 +1448,7 @@ test "the list says how many of its entries belong to which half" {
 
     // The rest are ones this half cannot send or read either, which is the
     // only other way to be on the list.
-    try testing.expectEqual(@as(usize, 13), not_forwarded.len);
+    try testing.expectEqual(@as(usize, 12), not_forwarded.len);
     try testing.expectEqual(@as(usize, 9), exec_only);
-    try testing.expectEqual(@as(usize, 4), not_forwarded.len - exec_only);
+    try testing.expectEqual(@as(usize, 3), not_forwarded.len - exec_only);
 }

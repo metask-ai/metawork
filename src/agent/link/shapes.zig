@@ -459,6 +459,11 @@ pub const CheckpointDescription = struct {
 pub const CheckpointOutcome = union(enum) {
     success: struct {
         checkpoint: checkpoint.Export,
+        /// Where the bytes are. Plain data already -- a tag and a bounded
+        /// name -- and it has to cross, because it is the one thing the
+        /// caller cannot work out for itself: the execution half wrote into
+        /// its own stage area, and nothing in the export's own facts says so.
+        placement: checkpoint.Placement,
         description: CheckpointDescription,
     },
     failure: checkpoint.Failure,
@@ -470,6 +475,7 @@ pub const CheckpointOutcome = union(enum) {
         return switch (self) {
             .success => |success| .{ .success = .{
                 .checkpoint = success.checkpoint,
+                .placement = success.placement,
                 .description = try success.description.into(allocator),
             } },
             .failure => |failure| .{ .failure = failure },
@@ -514,27 +520,19 @@ pub const PendingUiRequest = struct {
 // A capability the far side composes, and the inputs it needs to
 // ---------------------------------------------------------------------------
 
-/// Where an exported checkpoint's bytes go. The sink itself is a byte callback
-/// and never crosses: the execution half composes its own against this
-/// destination and writes the blob, so the bytes stay on one side of the pipe
-/// and only the identity of the blob comes back in the outcome.
-pub const CheckpointDestination = struct {
-    task_id: u64,
-    /// The generation this export belongs to. It travels because the caller's
-    /// admission compares it against the Task's current checkpoint, so it is a
-    /// correlation fact, not a defence: the store already makes an overwrite
-    /// structurally impossible, since a blob is named by its generation and
-    /// its digest and the commit refuses a name that exists.
-    ///
-    /// It deliberately does not promise an early refusal of a stale export.
-    /// Claiming that would need a result the caller can tell apart from any
-    /// other contract failure, and `SinkWriteResult` has no such value; folding
-    /// it into `contract_failed` would make a diagnostic name the wrong cause.
-    /// Adding one for an optimisation is not worth changing the sink contract
-    /// the Core writes through.
-    generation: u64,
-    hard_bytes: u64,
-};
+/// Nothing crosses for an export's destination.
+///
+/// This used to be `CheckpointDestination`, carrying `task_id`, `generation`
+/// and `hard_bytes`. Working out what it actually had to contain emptied it:
+/// `task_id` is on the Session, `hard_bytes` is in the call's own `limits`,
+/// and `generation` was the wrong kind of field altogether -- the export
+/// assigns it, so a caller filling it in asserted something it could not
+/// know. What the execution half needs is composed over there, as
+/// `call_frame.BlobDestination`.
+///
+/// Kept as a comment rather than deleted silently, because
+/// `crossings.zig` records this type as owing a shape, and "its shape is
+/// nothing" is an answer that has to be readable somewhere.
 
 /// That a Run may deliver files, and nothing else.
 ///
@@ -852,7 +850,6 @@ comptime {
     payload.requireStructural(CheckpointDescription);
     payload.requireStructural(CheckpointOutcome);
     payload.requireStructural(PendingUiRequest);
-    payload.requireStructural(CheckpointDestination);
     payload.requireStructural(FileDeliveryEnabled);
     payload.requireStructural(CatalogProjection);
     payload.requireStructural(CatalogQuery);

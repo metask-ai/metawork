@@ -882,6 +882,11 @@ pub fn resultAdapter(comptime T: type) ?ResultAdapter(T) {
             return switch (value) {
                 .success => |success| .{ .success = .{
                     .checkpoint = success.checkpoint,
+                    // As the Session answered it. `dispatch.exportCheckpoint`
+                    // is what replaces `caller_sink` with its own area,
+                    // because it is the half that opened the blob -- this
+                    // encoder only carries what it was given.
+                    .placement = success.placement,
                     .description = try (comptime resultAdapter(checkpoint.Description).?)
                         .apply(bindings, success.description),
                 } },
