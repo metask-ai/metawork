@@ -321,6 +321,33 @@ pub const BlobDestination = struct {
     hard_bytes: u64,
 };
 
+/// What the export produced, handed to the store so it can finish the blob.
+///
+/// Both byte counts are here on purpose. `exported.total_bytes` is what the
+/// Session says it wrote; `observed_bytes` is what actually passed through
+/// this call's wrapper. The store is the only party that also knows what
+/// reached its own storage, so it is the one that can tell all three apart --
+/// and a record pointing at bytes nobody wrote is the failure this
+/// comparison exists to stop. Product's `Writer.commit` makes the same
+/// comparison on its side, for the same reason.
+pub const BlobCommit = struct {
+    destination: BlobDestination,
+    exported: checkpoint.Export,
+    observed_bytes: u64,
+};
+
+/// Why a blob could not be finished.
+pub const CommitError = error{
+    /// The bytes could not be made durable, or could not be named: a rename,
+    /// a sync, a name longer than `checkpoint.StagedBlob` allows. Nothing is
+    /// kept.
+    CommitFailed,
+    /// What the export said it produced and what arrived disagree. Nothing is
+    /// kept. Not an I/O fault, and worth telling apart from one: an I/O
+    /// fault is the machine, this is the contract.
+    ExportMismatch,
+};
+
 pub const BlobStore = struct {
     context: ?*anyopaque,
     /// A sink for the blob this destination names, or `null` when one cannot
@@ -329,7 +356,24 @@ pub const BlobStore = struct {
     /// A source for the blob this descriptor names, or `null` when it is not
     /// there -- which the restore path also already answers.
     open_source_fn: *const fn (?*anyopaque, shapes.CheckpointSourceDescriptor) ?Source,
-    close_sink_fn: *const fn (?*anyopaque, checkpoint.Sink) void,
+    /// Finishes the blob the sink was writing and says what the store calls
+    /// it.
+    ///
+    /// Fallible, and that is the whole of why it exists. A `void` close on a
+    /// defer could not report a commit failure, could not tell the success
+    /// path from the failure path -- it ran on both -- and could not name the
+    /// blob, so the name was being invented by the half that did *not* write
+    /// the bytes. One naming rule in two places is a rule that will disagree
+    /// in one of them.
+    commit_sink_fn: *const fn (
+        ?*anyopaque,
+        checkpoint.Sink,
+        BlobCommit,
+    ) CommitError!checkpoint.StagedBlob,
+    /// Gives the sink back and keeps nothing. For every path that is not a
+    /// committed export: a refusal from the Session, a failure in between, a
+    /// commit that itself failed.
+    abandon_sink_fn: *const fn (?*anyopaque, checkpoint.Sink) void,
     close_source_fn: *const fn (?*anyopaque, Source) void,
 
     pub const Source = checkpoint_restore.Source;
@@ -350,7 +394,20 @@ pub const BlobStore = struct {
                 return null;
             }
         }.call,
-        .close_sink_fn = struct {
+        // Unreachable through `empty`, because nothing opens. Refusing rather
+        // than returning a name keeps that true if something ever does: a
+        // store with nowhere to put bytes must not hand back a name for
+        // them.
+        .commit_sink_fn = struct {
+            fn call(
+                _: ?*anyopaque,
+                _: checkpoint.Sink,
+                _: BlobCommit,
+            ) CommitError!checkpoint.StagedBlob {
+                return error.CommitFailed;
+            }
+        }.call,
+        .abandon_sink_fn = struct {
             fn call(_: ?*anyopaque, _: checkpoint.Sink) void {}
         }.call,
         .close_source_fn = struct {

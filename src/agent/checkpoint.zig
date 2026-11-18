@@ -134,10 +134,12 @@ pub const Expectation = struct {
 
 /// A checkpoint blob written into the exporting half's own area.
 ///
-/// Named by the half that wrote it rather than derived by the half that
-/// reads this. Deriving it would mean the naming scheme is stated in two
-/// places, and the two places are in different processes once the execution
-/// half is split out.
+/// Named by the store that wrote the bytes, and returned from the commit
+/// that finished them -- not derived by the half that reads this, and not
+/// formatted by the dispatcher either. Both of those would state the naming
+/// scheme somewhere other than where the bytes are, and a scheme stated
+/// twice is one that will disagree in one of its places; once the execution
+/// half is split out, those places are in different processes.
 pub const StagedBlob = struct {
     pub const max_name_bytes = 128;
 
