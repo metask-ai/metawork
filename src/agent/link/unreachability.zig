@@ -31,9 +31,13 @@
 //! demanded an answer at all. Two consequences worth stating rather than
 //! discovering later:
 //!
-//! - An error union counts as expressible even though its error set may not
-//!   yet have a member that names a gone link. Which error names it belongs
-//!   to `error_code.zig`, not here.
+//! - An error union counts as expressible because the call site is forced to
+//!   handle a failure. *Which* error names a gone link was left to
+//!   `error_code.zig`, and it now has an answer: `DependencyUnreachable`,
+//!   added because no other member means it. Reusing one would assert
+//!   something false -- `SessionClosing` that the Session is winding down,
+//!   `CoreCallFailed` that Core was reached -- and a caller acting on either
+//!   would act on a fact nobody established.
 //! - A comparison is not a switch. `if (result == .stale_run)` keeps
 //!   compiling when a variant is added, so a new answer can land nowhere.
 //!   Two sites in the surface this change touches compare that way, both of

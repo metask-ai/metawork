@@ -277,6 +277,15 @@ pub const Error = error{
     PermissionModeUpdateFailed,
     PermissionModeBudgetRequired,
     RewindFailed,
+    /// The half that performs this call cannot be reached.
+    ///
+    /// No other member means it. Reusing one would assert something false --
+    /// `SessionClosing` would tell the caller its Session is winding down,
+    /// `CoreCallFailed` that Core was reached and failed -- and a caller
+    /// acting on either would be acting on a fact nobody established. The
+    /// execution link numbers this in `error_code.zig`; in process nothing
+    /// produces it, because in process there is no other half to lose.
+    DependencyUnreachable,
     QueueFull,
     SessionNotIdle,
     SessionPoisoned,
