@@ -35,7 +35,14 @@
 
 const std = @import("std");
 const contract = @import("agent_contract");
+const adapters = @import("adapters.zig");
+const call_frame = @import("call_frame.zig");
+const channel = @import("channel.zig");
 const client = @import("client.zig");
+const dispatch = @import("dispatch.zig");
+const frame = @import("frame.zig");
+const pending = @import("pending.zig");
+const run_tools = @import("run_tools.zig");
 const error_code = @import("error_code.zig");
 const handle_table = @import("handle_table.zig");
 const inbound = @import("inbound.zig");
@@ -940,6 +947,213 @@ pub const vtables: client.Vtables = .{
 };
 
 const testing = std.testing;
+
+// ---------------------------------------------------------------------------
+// One call, both halves, nothing faked in between
+// ---------------------------------------------------------------------------
+//
+// Everything above is checked by the compiler or by counting. This is the
+// test that runs a stub: Product's own `SessionPort.setModel` on one side, a
+// real `Outbound` and a real frame on the wire, a real `Inbound` reassembling
+// it, the real dispatcher resolving a real handle table, and the answer read
+// back through the real inbound chain.
+//
+// The one thing it does not do is send the response over a second channel --
+// it deposits it in the correlation table the way this half's own pump will.
+// The reverse-path tests already cover that hop, and the response travelling
+// as frames is the one piece this test would duplicate rather than add.
+
+/// A Session that records what it was told, on the execution side.
+const Recorder = struct {
+    model: [64]u8 = undefined,
+    model_len: usize = 0,
+    calls: usize = 0,
+
+    fn setModel(context: ?*anyopaque, model: []const u8) surface.Error!void {
+        const self: *Recorder = @ptrCast(@alignCast(context.?));
+        if (model.len > self.model.len) return error.CoreCallFailed;
+        @memcpy(self.model[0..model.len], model);
+        self.model_len = model.len;
+        self.calls += 1;
+    }
+
+    fn told(self: *const Recorder) []const u8 {
+        return self.model[0..self.model_len];
+    }
+
+    fn sessionPortFor(self: *Recorder, vtable: *port.SessionPort.VTable) port.SessionPort {
+        vtable.set_model = setModel;
+        return .{ .context = self, .vtable = vtable };
+    }
+};
+
+/// The execution half, as far as one call needs it.
+const Peer = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+    slots: *pending.Table,
+    sessions: *handle_table.Table(run_tools.HeldSession),
+    answered: usize = 0,
+
+    const limits: channel.MessageLimits = .{
+        .event = 1 << 20,
+        .request = 1 << 20,
+        .response = 1 << 20,
+        .ui_request = 1 << 16,
+        .ui_response = 1 << 16,
+    };
+
+    fn run(self: *Peer) void {
+        // Polls rather than assuming an order. The stub opens its
+        // correlation before it submits, so a peer that acted on the first
+        // live slot could close the channel under a request that had not
+        // been written yet -- and the test would then be exercising the
+        // closed-link path while claiming to exercise this one.
+        var attempts: usize = 0;
+        while (attempts < 10_000) : (attempts += 1) {
+            if (self.tryOnce()) return;
+        }
+    }
+
+    fn tryOnce(self: *Peer) bool {
+        const file = self.dir.openFile(self.io, "link", .{}) catch return false;
+        defer file.close(self.io);
+        var buffer: [8192]u8 = undefined;
+        var reader = file.readerStreaming(self.io, &buffer);
+
+        var header_bytes: [frame.header_bytes]u8 = undefined;
+        reader.interface.readSliceAll(&header_bytes) catch return false;
+        const header = frame.decode(&header_bytes) catch return false;
+        if (header.kind != .request or !header.final) return false;
+
+        const payload = testing.allocator.alloc(u8, header.payload_len) catch return false;
+        defer testing.allocator.free(payload);
+        reader.interface.readSliceAll(payload) catch return false;
+
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const request = dispatch.classify(payload) catch return false;
+        const response = dispatch.invoke(arena, self.bindings(), request) catch return false;
+
+        // Owned by the table's allocator, because `claim` frees it there.
+        const owned = self.slots.allocator.alloc(u8, response.len) catch return false;
+        @memcpy(owned, response);
+        self.slots.deposit(header.correlation, owned);
+        self.answered += 1;
+        return true;
+    }
+
+    fn bindings(self: *Peer) adapters.Bindings {
+        return .{
+            .allocator = testing.allocator,
+            .runtime = port.RuntimePort.quiet,
+            .store = call_frame.BlobStore.empty,
+            .sessions = self.sessions,
+            .runs = undefined,
+            .leases = undefined,
+            .skill_restore = undefined,
+            .session_restore = undefined,
+            .selections = undefined,
+        };
+    }
+};
+
+test "a call through the port Product already uses reaches a real Session" {
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    // The caller's half.
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    // The execution half: a Session in a real table.
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    defer sessions.deinit();
+    var recorder: Recorder = .{};
+    var session_vtable: port.SessionPort.VTable = undefined;
+    var held = run_tools.HeldSession.init(recorder.sessionPortFor(&session_vtable));
+    const id = try sessions.insert(&held);
+
+    // The handle, named over here.
+    const box = try half.boxes.open(id);
+    const session: port.SessionPort = .{ .context = box, .vtable = half.vtables.session };
+
+    var peer: Peer = .{ .io = io, .dir = tmp.dir, .slots = &slots, .sessions = &sessions };
+    var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+
+    // Product's own call, unchanged: this is the whole point of the boundary.
+    try session.setModel("a-model");
+    thread.join();
+
+    try testing.expectEqual(@as(usize, 1), peer.answered);
+    try testing.expectEqual(@as(usize, 1), recorder.calls);
+    try testing.expectEqualStrings("a-model", recorder.told());
+
+    // Nothing is owed afterwards: the correlation settled and the box is
+    // still the box, because `set_model` names no new handle.
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+    try testing.expectEqual(@as(usize, 1), half.boxes.liveCount());
+    _ = sessions.take(id);
+}
+
+test "a method the far side refuses comes back as that method's own error" {
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    defer sessions.deinit();
+    var recorder: Recorder = .{};
+    var session_vtable: port.SessionPort.VTable = undefined;
+    var held = run_tools.HeldSession.init(recorder.sessionPortFor(&session_vtable));
+    const id = try sessions.insert(&held);
+    const box = try half.boxes.open(id);
+    const session: port.SessionPort = .{ .context = box, .vtable = half.vtables.session };
+
+    var peer: Peer = .{ .io = io, .dir = tmp.dir, .slots = &slots, .sessions = &sessions };
+    var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+
+    // Longer than the recorder will take, so the Session itself refuses --
+    // and what comes back has to be that refusal and not a link failure,
+    // which is the split `client.Failure` exists to keep.
+    const too_long = "m" ** 100;
+    try testing.expectError(error.CoreCallFailed, session.setModel(too_long));
+    thread.join();
+
+    // The peer did answer: without that the stub would have returned
+    // `DependencyUnreachable`, so the error arriving is also the proof that
+    // the far side was reached and said no.
+    try testing.expectEqual(@as(usize, 1), peer.answered);
+    try testing.expectEqual(@as(usize, 0), recorder.calls);
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+    _ = sessions.take(id);
+}
 
 test "all four vtables are filled, with a real function behind every field" {
     // This test is also what makes the stubs above get compiled at all. Zig
