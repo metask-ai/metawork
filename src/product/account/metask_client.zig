@@ -3,6 +3,7 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
+const mechanics = @import("metawork_oauth_mechanics");
 const summary = @import("account_summary");
 const transport_api = @import("metask_transport");
 
@@ -249,17 +250,12 @@ fn transportFailure(transport_error: TransportError) ClientError {
 }
 
 fn oauthError(response: Response) ?[]const u8 {
-    // Return only known static codes; the bounded parser and its storage die here.
-    if (response.body.len == 0 or response.body.len > oauth.Limits.token_body_bytes) return null;
-    var scratch: [oauth.Limits.token_body_bytes * 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &scratch);
-    var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    var parsed = std.json.parseFromSlice(struct { @"error": []const u8 }, fba.allocator(), response.body, .{ .ignore_unknown_fields = true }) catch return null;
-    defer parsed.deinit();
-    inline for (.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found" }) |code| {
-        if (std.mem.eql(u8, parsed.value.@"error", code)) return code;
-    }
-    return null;
+    // Return only known static codes; the bounded parser and its storage die there.
+    return mechanics.errorCode(
+        .{ .body_bytes = oauth.Limits.token_body_bytes },
+        response.body,
+        &.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found" },
+    );
 }
 
 fn classifyRefreshFailure(response: Response) ClientError {
@@ -517,4 +513,8 @@ test "refresh and identity invalidate only exact endpoint error pairs" {
     try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 403, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"user_not_found\"}" }));
+}
+
+test {
+    _ = @import("oauth_wire_test.zig");
 }

@@ -1,7 +1,7 @@
 //! Product Account OAuth policy and value types.
 const std = @import("std");
 const contract = @import("metawork_account_contract");
-const mechanics = @import("oauth_mechanics");
+const mechanics = @import("metawork_oauth_mechanics");
 
 pub const authority = "https://www.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
@@ -38,43 +38,7 @@ pub const ProtocolError = error{
     MissingRefreshToken,
 };
 
-pub const Secret = struct {
-    allocator: std.mem.Allocator = undefined,
-    bytes: []u8 = &.{},
-    owned: bool = false,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        value: []const u8,
-    ) (ProtocolError || std.mem.Allocator.Error)!Secret {
-        if (value.len == 0 or value.len > Limits.secret_bytes)
-            return error.FieldTooLarge;
-        return .{
-            .allocator = allocator,
-            .bytes = try allocator.dupe(u8, value),
-            .owned = true,
-        };
-    }
-
-    pub fn view(self: *const Secret) []const u8 {
-        std.debug.assert(self.owned);
-        return self.bytes;
-    }
-
-    pub fn take(self: *Secret) Secret {
-        std.debug.assert(self.owned);
-        const result = self.*;
-        self.* = .{};
-        return result;
-    }
-
-    pub fn deinit(self: *Secret) void {
-        if (!self.owned) return;
-        std.crypto.secureZero(u8, self.bytes);
-        self.allocator.free(self.bytes);
-        self.* = .{};
-    }
-};
+pub const Secret = mechanics.Secret(.{ .max_bytes = Limits.secret_bytes });
 
 pub const AttemptMaterial = mechanics.AttemptMaterial;
 
@@ -94,22 +58,11 @@ pub fn buildAuthorizeUrl(
     const callback_uri = redirect_writer.buffered();
 
     var writer = std.Io.Writer.fixed(output);
-    writer.writeAll(authorize_url) catch return error.BufferTooSmall;
-    writer.writeByte('?') catch return error.BufferTooSmall;
-    writePair(&writer, "response_type", "code") catch return error.BufferTooSmall;
-    writer.writeByte('&') catch return error.BufferTooSmall;
-    writePair(&writer, "client_id", client_id) catch return error.BufferTooSmall;
-    writer.writeByte('&') catch return error.BufferTooSmall;
-    writePair(&writer, "redirect_uri", callback_uri) catch return error.BufferTooSmall;
-    writer.writeByte('&') catch return error.BufferTooSmall;
-    writePair(&writer, "scope", scope) catch return error.BufferTooSmall;
-    writer.writeByte('&') catch return error.BufferTooSmall;
-    writePair(&writer, "state", &material.state) catch return error.BufferTooSmall;
-    writer.writeByte('&') catch return error.BufferTooSmall;
-    writePair(&writer, "code_challenge", &material.challenge) catch
-        return error.BufferTooSmall;
-    writer.writeAll("&code_challenge_method=S256") catch
-        return error.BufferTooSmall;
+    mechanics.writeAuthorizationUrl(&writer, authorize_url, material, .{
+        .client_id = client_id,
+        .redirect_uri = callback_uri,
+        .scope = scope,
+    }) catch return error.BufferTooSmall;
     return writer.buffered();
 }
 
@@ -250,55 +203,48 @@ pub const TokenSet = struct {
     }
 };
 
-const TokenResponse = struct {
-    access_token: []const u8,
-    refresh_token: []const u8,
-    token_type: []const u8,
-    expires_in: u64,
-    scope: []const u8 = scope,
-};
+const TokenResponse = mechanics.TokenResponse(.{
+    .body_bytes = Limits.token_body_bytes,
+    .scope = .decoded,
+});
 
 pub fn parseTokenResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     now_unix_seconds: i64,
 ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
-    if (body.len == 0 or body.len > Limits.token_body_bytes)
+    var response: TokenResponse = .{};
+    defer response.deinit();
+    try response.decode(body);
+    // Account requires both a refresh token and a lifetime it can store.
+    const refresh_token = response.refresh_token orelse
         return error.InvalidTokenResponse;
-    var scratch: [Limits.token_body_bytes * 2]u8 = undefined;
-    defer std.crypto.secureZero(u8, &scratch);
-    var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    var parsed = std.json.parseFromSlice(
-        TokenResponse,
-        fba.allocator(),
-        body,
-        .{ .ignore_unknown_fields = true },
-    ) catch return error.InvalidTokenResponse;
-    defer parsed.deinit();
-    const raw = parsed.value;
-    if (raw.access_token.len == 0 or
-        !std.ascii.eqlIgnoreCase(raw.token_type, "bearer") or
-        raw.expires_in == 0 or
-        raw.expires_in > std.math.maxInt(i64))
+    const expires_in = response.expires_in orelse
+        return error.InvalidTokenResponse;
+    if (expires_in > std.math.maxInt(i64))
         return error.InvalidTokenResponse;
     const expires_at = std.math.add(
         i64,
         now_unix_seconds,
-        @intCast(raw.expires_in),
+        @intCast(expires_in),
     ) catch return error.ExpiryOverflow;
     if (expires_at < 0) return error.ExpiryOverflow;
 
     var result: TokenSet = .{
-        .access_token = try Secret.init(allocator, raw.access_token),
+        .access_token = try Secret.init(allocator, response.access_token),
         .refresh_token = undefined,
         .expires_at = expires_at,
     };
     errdefer result.access_token.deinit();
-    if (raw.refresh_token.len == 0) return error.MissingRefreshToken;
-    result.refresh_token = try Secret.init(allocator, raw.refresh_token);
+    if (refresh_token.len == 0) return error.MissingRefreshToken;
+    result.refresh_token = try Secret.init(allocator, refresh_token);
     errdefer result.refresh_token.deinit();
 
-    if (!hasRequestedScope(raw.scope)) return error.InvalidTokenResponse;
+    switch (response.scope) {
+        .absent => {},
+        .text => |granted| if (!hasRequestedScope(granted))
+            return error.InvalidTokenResponse,
+    }
     return result;
 }
 
@@ -466,59 +412,26 @@ pub fn buildAuthorizationCodeBody(
     var redirect_storage: [128]u8 = undefined;
     var redirect_writer = std.Io.Writer.fixed(&redirect_storage);
     writeRedirectUri(&redirect_writer, port) catch return error.InvalidCallback;
-    return writeForm(output, &.{
-        .{ "grant_type", "authorization_code" },
-        .{ "client_id", client_id },
-        .{ "code", code.view() },
-        .{ "code_verifier", verifier },
-        .{ "redirect_uri", redirect_writer.buffered() },
-    });
+    var writer = std.Io.Writer.fixed(output);
+    mechanics.writeAuthorizationCodeGrant(&writer, .{
+        .client_id = client_id,
+        .code = code.view(),
+        .code_verifier = verifier,
+        .redirect_uri = redirect_writer.buffered(),
+    }) catch return error.BufferTooSmall;
+    return writer.buffered();
 }
 
 pub fn buildRefreshBody(
     output: []u8,
     refresh_token: *const Secret,
 ) ProtocolError![]const u8 {
-    return writeForm(output, &.{
-        .{ "grant_type", "refresh_token" },
-        .{ "client_id", client_id },
-        .{ "refresh_token", refresh_token.view() },
-    });
-}
-
-fn writeForm(
-    output: []u8,
-    pairs: []const struct { []const u8, []const u8 },
-) ProtocolError![]const u8 {
     var writer = std.Io.Writer.fixed(output);
-    for (pairs, 0..) |pair, index| {
-        if (index != 0) writer.writeByte('&') catch return error.BufferTooSmall;
-        writePair(&writer, pair[0], pair[1]) catch return error.BufferTooSmall;
-    }
+    mechanics.writeRefreshTokenGrant(&writer, .{
+        .client_id = client_id,
+        .refresh_token = refresh_token.view(),
+    }) catch return error.BufferTooSmall;
     return writer.buffered();
-}
-
-fn writePair(writer: *std.Io.Writer, key: []const u8, value: []const u8) !void {
-    try percentEncode(writer, key);
-    try writer.writeByte('=');
-    try percentEncode(writer, value);
-}
-
-fn percentEncode(writer: *std.Io.Writer, input: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (input) |byte| {
-        if (std.ascii.isAlphanumeric(byte) or
-            byte == '-' or byte == '.' or byte == '_' or byte == '~')
-        {
-            try writer.writeByte(byte);
-        } else {
-            try writer.writeAll(&.{
-                '%',
-                hex[byte >> 4],
-                hex[byte & 0x0f],
-            });
-        }
-    }
 }
 
 test "PKCE authorize URL carries the dynamically assigned loopback port" {

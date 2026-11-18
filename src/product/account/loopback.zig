@@ -1,7 +1,7 @@
 //! Product Account OAuth callback policy and loopback endpoint contract.
 const std = @import("std");
 const oauth = @import("account_oauth");
-const mechanics = @import("oauth_loopback");
+const mechanics = @import("metawork_oauth_loopback");
 
 pub const Limits = struct {
     pub const invalid_requests: usize = 4;
