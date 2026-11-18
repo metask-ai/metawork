@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const http_execution = @import("metawork_http_transport");
-const select_start = @import("app_select_start");
+const select_start = @import("metawork_select_start");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");

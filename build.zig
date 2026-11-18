@@ -259,8 +259,8 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         root_module: *std.Build.Module,
     }{
-        .{ .name = "metawork-oauth-mechanics", .root_module = test_modules.oauth_mechanics },
-        .{ .name = "metawork-oauth-loopback", .root_module = test_modules.oauth_loopback },
+        .{ .name = "metawork-oauth-mechanics", .root_module = test_modules.metawork_oauth_mechanics },
+        .{ .name = "metawork-oauth-loopback", .root_module = test_modules.metawork_oauth_loopback },
         .{ .name = "metawork-product-models-contract", .root_module = test_modules.models_contract },
         .{ .name = "metawork-product-agent-protocol-adapter", .root_module = test_modules.product_agent_protocol_adapter },
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
@@ -274,8 +274,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-models", .root_module = test_modules.models },
         .{ .name = "metawork-account-ports", .root_module = test_modules.account_ports },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
-        .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
-        .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.oauth_loopback_transport, "app_select_start") },
+        .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.metawork_oauth_loopback_transport },
+        .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.metawork_oauth_loopback_transport, "metawork_select_start") },
         .{ .name = "metawork-http-memory", .root_module = existingImport(test_modules.app, "metawork_http_memory") },
         .{ .name = "metawork-http-transport", .root_module = existingImport(test_modules.app, "metawork_http_transport") },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
@@ -386,9 +386,9 @@ pub fn build(b: *std.Build) void {
             product_control_step.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
-        if (spec.root_module == test_modules.oauth_loopback_transport)
+        if (spec.root_module == test_modules.metawork_oauth_loopback_transport)
             b.step("test-oauth-loopback-transport", "Run real OAuth callback concurrency and cancellation tests").dependOn(&b.addRunArtifact(tests).step);
-        if (spec.root_module == existingImport(test_modules.oauth_loopback_transport, "app_select_start"))
+        if (spec.root_module == existingImport(test_modules.metawork_oauth_loopback_transport, "metawork_select_start"))
             b.step("test-select-start", "Run partial Select registration cleanup tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == existingImport(test_modules.app, "metawork_http_transport"))
             b.step("test-http-transport", "Run shared HTTP execution and resource tests").dependOn(&b.addRunArtifact(tests).step);
@@ -837,7 +837,7 @@ fn addRendererWireGenerator(b: *std.Build) void {
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
     const update = b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host });
-    update.addImport("metawork_http_contract", b.createModule(.{ .root_source_file = b.path("src/foundation/http_contract.zig"), .target = b.graph.host }));
+    update.addImport("metawork_http_contract", b.createModule(.{ .root_source_file = b.path("src/foundation/http/contract.zig"), .target = b.graph.host }));
     module.addImport("product_update", update);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
@@ -918,8 +918,8 @@ const WiredModules = struct {
     storage: *std.Build.Module,
     storage_sql: *std.Build.Module,
     product_control_history_schema: *std.Build.Module,
-    oauth_mechanics: *std.Build.Module,
-    oauth_loopback: *std.Build.Module,
+    metawork_oauth_mechanics: *std.Build.Module,
+    metawork_oauth_loopback: *std.Build.Module,
     models_contract: *std.Build.Module,
     product_agent_protocol_adapter: *std.Build.Module,
     account: *std.Build.Module,
@@ -934,7 +934,7 @@ const WiredModules = struct {
     account_summary: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
-    oauth_loopback_transport: *std.Build.Module,
+    metawork_oauth_loopback_transport: *std.Build.Module,
     account_login_attempt: *std.Build.Module,
     account_network_attempt: *std.Build.Module,
     account_oauth: *std.Build.Module,
@@ -1791,13 +1791,13 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     account_state.addImport("metawork_account_contract", account_contract);
-    const oauth_mechanics = b.createModule(.{
-        .root_source_file = b.path("src/oauth/mechanics.zig"),
+    const metawork_oauth_mechanics = b.createModule(.{
+        .root_source_file = b.path("src/foundation/oauth/mechanics.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    const oauth_loopback = b.createModule(.{
-        .root_source_file = b.path("src/oauth/loopback.zig"),
+    const metawork_oauth_loopback = b.createModule(.{
+        .root_source_file = b.path("src/foundation/oauth/loopback.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1807,21 +1807,21 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     account_oauth.addImport("metawork_account_contract", account_contract);
-    account_oauth.addImport("oauth_mechanics", oauth_mechanics);
+    account_oauth.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     const account_loopback = b.createModule(.{
         .root_source_file = b.path("src/product/account/loopback.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_loopback.addImport("account_oauth", account_oauth);
-    account_loopback.addImport("oauth_loopback", oauth_loopback);
-    const oauth_loopback_transport = b.createModule(.{
-        .root_source_file = b.path("src/app/oauth_loopback_transport.zig"),
+    account_loopback.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
+    const metawork_oauth_loopback_transport = b.createModule(.{
+        .root_source_file = b.path("src/foundation/oauth/loopback_transport.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    const app_select_start = b.createModule(.{
-        .root_source_file = b.path("src/app/select_start.zig"),
+    const metawork_select_start = b.createModule(.{
+        .root_source_file = b.path("src/foundation/select_start.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1834,17 +1834,17 @@ fn wireAgentCore(
         .link_libc = bundle.link_libc,
     });
     const metawork_http_memory = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http_memory.zig"),
+        .root_source_file = b.path("src/foundation/http/memory.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const metawork_http_contract = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http_contract.zig"),
+        .root_source_file = b.path("src/foundation/http/contract.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const metawork_http_transport = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http_transport.zig"),
+        .root_source_file = b.path("src/foundation/http/transport.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1853,8 +1853,8 @@ fn wireAgentCore(
     // Update publishes the engine's typed failure facts; the engine itself
     // stays Application-only.
     product_update.addImport("metawork_http_contract", metawork_http_contract);
-    oauth_loopback_transport.addImport("app_select_start", app_select_start);
-    oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
+    metawork_oauth_loopback_transport.addImport("metawork_select_start", metawork_select_start);
+    metawork_oauth_loopback_transport.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
     const metask_transport = b.createModule(.{
         .root_source_file = b.path("src/product/metask_transport.zig"),
         .target = target,
@@ -1875,6 +1875,7 @@ fn wireAgentCore(
     metask_client.addImport("metawork_account_contract", account_contract);
     metask_client.addImport("account_state", account_state);
     metask_client.addImport("account_oauth", account_oauth);
+    metask_client.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     metask_client.addImport("account_summary", account_summary);
     const account_login_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/login_attempt.zig"),
@@ -2569,7 +2570,7 @@ fn wireAgentCore(
     video_output.addImport("app_output_file", output_file);
     product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
-    image_output.addImport("app_select_start", app_select_start);
+    image_output.addImport("metawork_select_start", metawork_select_start);
     image_output.addImport("metawork_product_workspace", product_workspace);
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
@@ -2710,7 +2711,7 @@ fn wireAgentCore(
     });
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
-    mcp_platform.addImport("app_select_start", app_select_start);
+    mcp_platform.addImport("metawork_select_start", metawork_select_start);
     mcp_platform.addImport("metawork_http_transport", metawork_http_transport);
     const mcp_process_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/mcp_process.zig"),
@@ -2735,10 +2736,10 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    mcp_oauth.addImport("oauth_mechanics", oauth_mechanics);
+    mcp_oauth.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     mcp_oauth.addImport("metawork_http_transport", metawork_http_transport);
-    mcp_oauth.addImport("oauth_loopback", oauth_loopback);
-    mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
+    mcp_oauth.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
+    mcp_oauth.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
     const models_coordinator = b.createModule(.{
@@ -2804,8 +2805,8 @@ fn wireAgentCore(
     app.addImport("metawork_account", account);
     app.addImport("account_oauth", account_oauth);
     app.addImport("account_loopback", account_loopback);
-    app.addImport("oauth_loopback_transport", oauth_loopback_transport);
-    app.addImport("app_select_start", app_select_start);
+    app.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);
+    app.addImport("metawork_select_start", metawork_select_start);
     app.addImport("app_fault", app_fault);
     app.addImport("metawork_http_memory", metawork_http_memory);
     app.addImport("metawork_http_transport", metawork_http_transport);
@@ -2830,8 +2831,8 @@ fn wireAgentCore(
         .storage = storage,
         .storage_sql = storage_sql,
         .product_control_history_schema = product_control_history_schema,
-        .oauth_mechanics = oauth_mechanics,
-        .oauth_loopback = oauth_loopback,
+        .metawork_oauth_mechanics = metawork_oauth_mechanics,
+        .metawork_oauth_loopback = metawork_oauth_loopback,
         .models_contract = models_contract,
         .product_agent_protocol_adapter = product_agent_protocol_adapter,
         .account = account,
@@ -2846,7 +2847,7 @@ fn wireAgentCore(
         .account_summary = account_summary,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,
-        .oauth_loopback_transport = oauth_loopback_transport,
+        .metawork_oauth_loopback_transport = metawork_oauth_loopback_transport,
         .account_login_attempt = account_login_attempt,
         .account_network_attempt = account_network_attempt,
         .account_oauth = account_oauth,

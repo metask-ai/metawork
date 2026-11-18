@@ -40,6 +40,8 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件的 SHA-256 与体积。
 
+安装包通过 Renderer 资源携带仓库根目录的 [MetaWork MIT 许可证](../LICENSE)。
+
 编译安装器前，runtime stage 必须通过主包资源检查，不混入展开的 Office 资源树、Python、Node 或文档库。完整 Skill/helper/必要 XSD 以压缩内嵌资源随主包发布，解包前接受固定摘要、大小及路径检查；不以压缩规避内容边界。发布失败不阻止应用启动。整包体积不设上限，也不记录基线：打包成功日志输出最终安装器的体积与 SHA-256，不与任何历史版本比较。应用自身代码的合理增长可以接受，主包不携带解释器、文档库和展开资源树才是边界，由 [`scripts/main-package-contents.mjs`](../scripts/main-package-contents.mjs) 的主包资源检查强制执行：命中即抛出，不接受任何体积数字替代，也不以单个 executable 或资源压缩量代替整包测量。已发布产物的权威体积在下载主机上，每个文件的 `content-length` 都可直接查询，仓库不维护副本。
 
 ## 发布顺序

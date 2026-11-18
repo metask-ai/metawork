@@ -1,7 +1,7 @@
 //! Application file effect bound to frozen Product Workspace authority.
 //! Agent callbacks consume only the bounded output port on their worker thread.
 const std = @import("std");
-const select_start = @import("app_select_start");
+const select_start = @import("metawork_select_start");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const workspace = @import("metawork_product_workspace");
