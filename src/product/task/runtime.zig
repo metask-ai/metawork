@@ -3676,9 +3676,17 @@ pub const Runtime = struct {
             task.durable.recent_order = self.takeRecentOrder();
             return true;
         }
+        // A request that did not take cannot put the Task into stopping:
+        // every value that means "not taken" is already on this side, and an
+        // undelivered request is one of them.
         const stopping = switch (dispatch) {
             .pending, .requested, .already_requested => true,
-            .already_finishing, .already_terminal, .stale_run, .session_closing => false,
+            .already_finishing,
+            .already_terminal,
+            .stale_run,
+            .session_closing,
+            .dependency_contract,
+            => false,
         };
         if (!stopping) return continuation_cancelled;
         task.runtime.permission_review.invalidate();
@@ -4171,6 +4179,10 @@ pub const Runtime = struct {
             if (effects.executor.cancel(run_record)) {
                 run_record.terminal_observed = true;
             } else if (dispatch == .stale_run) {
+                // A comparison rather than a switch, so `dependency_contract`
+                // deliberately lands nowhere: an undelivered request is not a
+                // stale RunControl, and crashing because the other half died
+                // is the behaviour this whole change exists to remove.
                 std.debug.panic(
                     "active Task Run {d} published a stale RunControl",
                     .{run_record.id},
@@ -7471,6 +7483,7 @@ pub const Runtime = struct {
                 .already_terminal,
                 .stale_run,
                 .session_closing,
+                .dependency_contract,
                 => false,
             };
             if (!stopping) continue;
@@ -10199,6 +10212,7 @@ fn requestRunTermination(
         .already_terminal => .already_terminal,
         .stale_run => .stale_run,
         .session_closing => .session_closing,
+        .dependency_contract => .dependency_contract,
     };
 }
 
@@ -10220,6 +10234,7 @@ fn requestPermissionTermination(
         .already_terminal => .already_terminal,
         .stale_run => .stale_run,
         .session_closing => .session_closing,
+        .dependency_contract => .dependency_contract,
     };
 }
 

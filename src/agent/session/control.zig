@@ -377,6 +377,18 @@ pub const TerminationRequestResult = enum {
     already_terminal,
     stale_run,
     session_closing,
+    /// The request could not be put to the Session at all.
+    ///
+    /// Deliberately asserts nothing about the Run. Each of the five above is
+    /// a fact observed on the far side -- it was taken, it was already taken,
+    /// the Run had already ended, the Run had moved on, the Session was
+    /// closing -- and none of them is true of a request that never arrived.
+    /// Reporting one of them instead would be a wrong answer shaped exactly
+    /// like a right one.
+    dependency_contract,
+
+    /// An unreachable dependency is what the value above is for.
+    pub const link_unreachable: @This() = .dependency_contract;
 };
 
 pub const EventReadyNotification = enum {

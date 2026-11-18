@@ -245,15 +245,6 @@ pub const Pending = struct {
 
 pub const pending = [_]Pending{
     .{
-        .owner = .run_control,
-        .name = "request_termination",
-        .lands = "All five TerminationRequestResult variants assert a concrete fact about " ++
-            "the far side -- requested, already_requested, already_terminal, stale_run, " ++
-            "session_closing. None of them is true of a link that is gone, so any of them " ++
-            "is a wrong answer that looks like a right one.",
-        .step = "this change",
-    },
-    .{
         .owner = .runtime,
         .name = "pending_event_count",
         .lands = "Zero reads as fully drained by both consumers of EventDrainStatus -- " ++
@@ -415,28 +406,27 @@ test "the surface divides into expressible, exempt and pending, with nothing lef
     // The numbers themselves, so a method moving between buckets is visible
     // in the suite and not only in a build that happened to succeed.
     try testing.expectEqual(@as(usize, 52), tally.total);
-    try testing.expectEqual(@as(usize, 41), tally.expressible);
+    try testing.expectEqual(@as(usize, 42), tally.expressible);
     try testing.expectEqual(@as(usize, 9), tally.exempt);
-    try testing.expectEqual(@as(usize, 2), tally.owed);
+    try testing.expectEqual(@as(usize, 1), tally.owed);
 }
 
 test "the pending list is the rule's output, named one by one" {
     // Written out rather than counted: this is the list the change works
-    // from. `input_observation` and `borrow_skill_restore_inputs` have left
-    // it: both answers are now optionals, which is what put the choice at
-    // each of their call sites.
+    // from, and it is down to the one entry this step does not own.
+    // `input_observation` and `borrow_skill_restore_inputs` left it as
+    // optionals and `request_termination` by naming its own answer, which is
+    // what put the choice at each of their call sites.
     const expected = [_][]const u8{
-        "request_termination",
         "pending_event_count",
     };
     try testing.expectEqual(expected.len, pending.len);
     for (pending, expected) |entry, name| try testing.expectEqualStrings(name, entry.name);
 
-    var this_step: usize = 0;
-    for (pending) |entry| {
-        if (std.mem.eql(u8, entry.step, "this change")) this_step += 1;
-    }
-    try testing.expectEqual(@as(usize, 1), this_step);
+    // Nothing is owed by this step any more: the one entry left is deferred
+    // to the step that owns the event stream's end, and `pending.len == 0` is
+    // reached when that step states it.
+    for (pending) |entry| try testing.expect(!std.mem.eql(u8, entry.step, "this change"));
 }
 
 test "each way of expressing it is recognised, and nothing else is" {
@@ -478,7 +468,10 @@ test "each way of expressing it is recognised, and nothing else is" {
         Expressibility.optional,
         expressibility(ReturnType(.run_control, "input_observation")).?,
     );
-    try testing.expect(expressibility(contract.control.TerminationRequestResult) == null);
+    try testing.expectEqual(
+        Expressibility.declared_answer,
+        expressibility(contract.control.TerminationRequestResult).?,
+    );
     try testing.expect(expressibility(port.SkillRestoreBorrow) == null);
     try testing.expectEqual(
         Expressibility.optional,

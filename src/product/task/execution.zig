@@ -292,6 +292,13 @@ pub fn executeRun(context: *anyopaque) void {
             var lease = lease_value;
             const result = lease.requestTermination(policy.pendingTerminationSignal(run));
             lease.deinit();
+            // A comparison, not a switch, so the compiler will not point at
+            // this line when a value is added to the result -- and that is
+            // intended here. `dependency_contract` must land nowhere: the
+            // request not arriving says nothing about the RunControl just
+            // published, and the Run reaches its own terminal with that same
+            // failure a moment later. Do not turn this into an exhaustive
+            // switch that panics on it.
             if (result == .stale_run) std.debug.panic(
                 "newly published RunControl for Run {d} was already stale",
                 .{run.id},
