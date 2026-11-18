@@ -215,12 +215,14 @@ const foundationContracts = [
   "metawork_http_contract",
   "metawork_oauth_loopback",
   "metawork_oauth_mechanics",
+  "metawork_storage_sql",
 ];
 const foundationEngines = [
   "metawork_http_memory",
   "metawork_http_transport",
   "metawork_oauth_loopback_transport",
   "metawork_select_start",
+  "metawork_storage_sqlite",
 ];
 
 /** The directory a Foundation file belongs to: its family, or the top level. */
@@ -858,7 +860,6 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/agent.zig",
     "src/product/control.zig",
     "src/bridge.zig",
-    "src/storage.zig",
   ]) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
   }
@@ -2908,13 +2909,13 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
 });
 
 test("Product history schema consumes only the unique Storage SQL contract", () => {
-  const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
-  const storageContract = read("src/storage/sql.zig");
+  const storageFiles = zigFiles("src/foundation/storage/");
+  const storageContract = read("src/foundation/storage/sql.zig");
   const build = read("build.zig");
   const packageManifest = read("build.zig.zon");
   const appManifest = read("app.zon");
   const nonStorageFiles = zigFiles("src/").filter(
-    (file) => file !== "src/storage.zig" && !file.startsWith("src/storage/"),
+    (file) => !file.startsWith("src/foundation/storage/"),
   );
 
   assertNoImports(storageFiles, [
@@ -2926,19 +2927,22 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
     "metask_agentcore",
     "native_sdk",
   ]);
-  assert.doesNotMatch(storageContract, /@cImport|sqlite3|storage\/sqlite\.zig/);
+  assert.doesNotMatch(
+    storageContract,
+    /@cImport|sqlite3|foundation\/storage\/sqlite\.zig/,
+  );
   assert.deepEqual(
     storageFiles.filter((file) => /@cImport|sqlite3/.test(read(file))),
     [
-      "src/storage/sqlite/connection.zig",
-      "src/storage/sqlite/migrations.zig",
-      "src/storage/sqlite.zig",
+      "src/foundation/storage/sqlite/connection.zig",
+      "src/foundation/storage/sqlite/migrations.zig",
+      "src/foundation/storage/sqlite.zig",
     ],
   );
   for (const file of nonStorageFiles) {
     assert.doesNotMatch(
       read(file),
-      /@import\("(?:metawork[_-]storage|storage\/sqlite\.zig)"\)|@cInclude\("sqlite3\.h"\)|\bsqlite3_/,
+      /@import\("(?:metawork[_-]storage|foundation\/storage\/sqlite\.zig)"\)|@cInclude\("sqlite3\.h"\)|\bsqlite3_/,
       `${file} bypasses the Storage SQL contract`,
     );
   }
@@ -2947,12 +2951,12 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
     nonStorageFiles.filter((file) =>
       /@import\("metawork_storage_sql"\)/.test(read(file)),
     ),
-    [schemaFile],
+    ["src/app/history_store.zig", schemaFile],
   );
   assertNoImports(
     [schemaFile],
     [
-      "storage",
+      "metawork_storage_sqlite",
       "metawork_storage",
       "metawork_app",
       "metawork_agent",
@@ -2971,16 +2975,20 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
   );
   const contractTargets = [
     ...build.matchAll(
-      /\b([A-Za-z_]\w*)\.addImport\("([^"]+)",\s*(?:test_modules\.)?storage_sql\)/g,
+      /\b([A-Za-z_]\w*)\.addImport\("([^"]+)",\s*(?:test_modules\.)?metawork_storage_sql\)/g,
     ),
   ];
   assert.deepEqual(
     contractTargets.map((match) => [match[1], match[2]]).sort(),
     [
+      ["app", "metawork_storage_sql"],
       ["history_schema_fixture_module", "metawork_storage_sql"],
       ["history_schema_tests_module", "metawork_storage_sql"],
+      ["metawork_storage_sqlite", "metawork_storage_sql"],
       ["product_control_history_schema", "metawork_storage_sql"],
-      ["storage", "metawork_storage_sql"],
+      ["sqlite_a_module", "metawork_storage_sql"],
+      ["sqlite_a_sql_module", "metawork_storage_sql"],
+      ["storage_crash_fixture_module", "metawork_storage_sql"],
     ],
   );
   const contractReceivers = [
@@ -2989,20 +2997,24 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
     ),
   ];
   assert.deepEqual(contractReceivers.map((match) => match[1]).sort(), [
+    "app",
     "history_schema_fixture_module",
     "history_schema_tests_module",
+    "metawork_storage_sqlite",
     "product_control_history_schema",
-    "storage",
+    "sqlite_a_module",
+    "sqlite_a_sql_module",
+    "storage_crash_fixture_module",
   ]);
   assert.ok(
     contractReceivers.every((match) =>
-      /^(?:test_modules\.)?storage_sql$/.test(match[2].trim()),
+      /^(?:test_modules\.)?metawork_storage_sql$/.test(match[2].trim()),
     ),
   );
   assert.equal(
     (
       build.match(
-        /\.root_source_file = b\.path\("src\/storage\/sql\.zig"\)/g,
+        /\.root_source_file = b\.path\("src\/foundation\/storage\/sql\.zig"\)/g,
       ) ?? []
     ).length,
     1,
@@ -3028,8 +3040,11 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
   );
 
   assert.match(build, /const sqlite = b\.dependency\("sqlite", \.\{\}\);/);
-  assert.match(build, /storage\.addIncludePath\(sqlite\.path\("\."\)\);/);
-  assert.match(build, /storage\.addCSourceFile\(/);
+  assert.match(
+    build,
+    /metawork_storage_sqlite\.addIncludePath\(sqlite\.path\("\."\)\);/,
+  );
+  assert.match(build, /metawork_storage_sqlite\.addCSourceFile\(/);
   assert.doesNotMatch(
     build,
     /(?:app|account|agent|workbench|bridge)\.add(?:IncludePath|CSourceFile)\([\s\S]{0,120}sqlite/,

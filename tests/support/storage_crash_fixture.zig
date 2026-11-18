@@ -1,7 +1,8 @@
 const std = @import("std");
-const storage = @import("storage");
+const sql = @import("metawork_storage_sql");
+const sqlite = @import("metawork_storage_sqlite");
 
-const migrations = [_]storage.sql.Migration{.{
+const migrations = [_]sql.Migration{.{
     .version = 1,
     .name = "create storage conformance table",
     .sql =
@@ -19,7 +20,7 @@ const migrations = [_]storage.sql.Migration{.{
 pub fn main(init: std.process.Init) !void {
     const path = init.environ_map.get("METAWORK_STORAGE_CRASH_DB") orelse
         return error.MissingDatabasePath;
-    const database = try storage.sqlite.Database.create(
+    const database = try sqlite.Database.create(
         init.io,
         init.gpa,
         .{ .file = path },

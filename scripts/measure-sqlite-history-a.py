@@ -52,8 +52,8 @@ def main():
     rows = []
     probes = list((ROOT/"tests/probes").glob("sqlite_history_a*"))
     inputs = probes + [Path(__file__).resolve(), ROOT/"build.zig", ROOT/"build.zig.zon",
-                      ROOT/"src/storage/sql.zig", ROOT/"src/storage/sqlite.zig",
-                      ROOT/"src/storage/sqlite/connection.zig", ROOT/"src/product/task/state.zig",
+                      ROOT/"src/foundation/storage/sql.zig", ROOT/"src/foundation/storage/sqlite.zig",
+                      ROOT/"src/foundation/storage/sqlite/connection.zig", ROOT/"src/product/task/state.zig",
                       ROOT/"src/product/task/persistence.zig"]
     result = {"source_revision": git("rev-parse", "HEAD"), "started_utc": stamp,
               "branch": git("branch", "--show-current"), "git_status": git("status", "--short"),

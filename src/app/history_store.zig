@@ -2,7 +2,8 @@
 //! row reconciliation and witness; the old store is only an import source/lock.
 const std = @import("std");
 const builtin = @import("builtin");
-const storage = @import("storage");
+const sql = @import("metawork_storage_sql");
+const sqlite = @import("metawork_storage_sqlite");
 const product = @import("metawork_product_control");
 const wire = @import("metawork_product_task").history;
 pub const file_name = "workbench-history.sqlite";
@@ -104,7 +105,7 @@ pub const Store = struct {
     path: []u8,
     limits: wire.Limits,
     mutex: std.Io.Mutex = .init,
-    database: ?*storage.sqlite.Database = null,
+    database: ?*sqlite.Database = null,
     repository: ?product.HistoryRepository = null,
     pending: ?product.PreparedHistoryCommit = null,
     pending_publication: ?[32]u8 = null,
@@ -151,7 +152,7 @@ pub const Store = struct {
     }
 
     fn open(self: *Store) !void {
-        const database = storage.sqlite.Database.create(self.io, self.allocator, .{ .file = self.path }, product.history_migrations) catch |err| {
+        const database = sqlite.Database.create(self.io, self.allocator, .{ .file = self.path }, product.history_migrations) catch |err| {
             if (err == error.VersionUnknown) self.incompatible = true;
             return err;
         };
@@ -274,7 +275,7 @@ pub const Store = struct {
         });
         private_file.close(self.io);
         errdefer if (!recovering) self.removeImport() catch {};
-        const candidate = try storage.sqlite.Database.create(self.io, self.allocator, .{ .file = temporary }, product.history_migrations);
+        const candidate = try sqlite.Database.create(self.io, self.allocator, .{ .file = temporary }, product.history_migrations);
         var candidate_open = true;
         defer if (candidate_open) candidate.destroy() catch unreachable;
         var repository = product.HistoryRepository.init(self.allocator, candidate.capability(), self.limits);
@@ -870,7 +871,6 @@ fn testHistory(a: std.mem.Allocator, task_count: usize, run_count: usize, body: 
 }
 
 test "SQLite history typed load owns its data and retries partial oversized pages without duplicate adoption" {
-    const sql = storage.sql;
     const Counted = struct {
         database: sql.Database,
         run_queries: usize = 0,
@@ -1147,7 +1147,7 @@ test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive re
         if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
         var prepared = try store.repository.?.prepare(state, .{}, @splat(1));
         defer prepared.deinit();
-        try std.testing.expectEqual(storage.sql.MutationOutcome.committed, store.repository.?.commit(&prepared));
+        try std.testing.expectEqual(sql.MutationOutcome.committed, store.repository.?.commit(&prepared));
         try std.testing.expectEqual(@as(usize, 25_702), prepared.changed_rows);
         // Exercise the real Application commit entry with a frozen candidate
         // larger than the entire former 16MiB canonical store limit.
@@ -1156,7 +1156,7 @@ test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive re
         defer a.free(bytes);
         try std.testing.expect(bytes.len > wire.max_store_bytes);
         try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
-        try std.testing.expectEqual(storage.sql.QueryOutcome.ok, store.database.?.capability().maintain(.purge));
+        try std.testing.expectEqual(sql.QueryOutcome.ok, store.database.?.capability().maintain(.purge));
     }
     {
         var store = try Store.init(std.testing.io, a, directory);
@@ -1186,8 +1186,8 @@ test "SQLite history newer schema cannot be replaced through recovery" {
             defer store.deinit();
             if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
         }
-        const newer = product.history_migrations[0..product.history_migrations.len].* ++ [_]storage.sql.Migration{.{ .version = product.history_migrations.len + 1, .name = "future_history", .sql = if (json_marker) "-- Typed JSON acceptance changed, no DDL required.\nSELECT 1;" else "CREATE TABLE future_history(value INTEGER NOT NULL) STRICT;" }};
-        const database = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
+        const newer = product.history_migrations[0..product.history_migrations.len].* ++ [_]sql.Migration{.{ .version = product.history_migrations.len + 1, .name = "future_history", .sql = if (json_marker) "-- Typed JSON acceptance changed, no DDL required.\nSELECT 1;" else "CREATE TABLE future_history(value INTEGER NOT NULL) STRICT;" }};
+        const database = try sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
         try database.destroy();
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();
@@ -1195,7 +1195,7 @@ test "SQLite history newer schema cannot be replaced through recovery" {
         try std.testing.expect(store.incompatible);
         try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, "not a candidate", false));
         try std.testing.expectEqual(wire.Commit.failed, recoverFixture(&store, "not a candidate"));
-        const reopened = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
+        const reopened = try sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
         try reopened.destroy();
     }
 }

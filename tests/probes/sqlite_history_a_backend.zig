@@ -1,7 +1,7 @@
 //! Isolated Stage A measurement of the existing public backend, not a history adapter.
 const std = @import("std");
-const storage = @import("storage");
-const sql = storage.sql;
+const sqlite = @import("metawork_storage_sqlite");
+const sql = @import("metawork_storage_sql");
 const migrations = [_]sql.Migration{.{ .version = 1, .name = "stage_a_sample", .sql = "CREATE TABLE sample_root(id INTEGER PRIMARY KEY,witness INTEGER);" ++
     "INSERT INTO sample_root VALUES(1,0);" ++
     "CREATE TABLE sample_tasks(id INTEGER PRIMARY KEY,seen INTEGER);" ++
@@ -41,7 +41,7 @@ const Rows = struct {
 
 test "stage A public backend latency and limits" {
     const path = std.mem.span(std.c.getenv("METAWORK_SQLITE_A_DB") orelse return error.MissingPath);
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
     defer database.destroy() catch unreachable;
     const db = database.capability();
     try std.testing.expectEqual(sql.MutationOutcome.committed, db.mutate(&.{
