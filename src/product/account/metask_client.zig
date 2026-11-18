@@ -518,3 +518,7 @@ test "refresh and identity invalidate only exact endpoint error pairs" {
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"user_not_found\"}" }));
 }
+
+test {
+    _ = @import("oauth_wire_test.zig");
+}

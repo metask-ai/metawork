@@ -3343,3 +3343,7 @@ test "MCP installation JSON Pointer supports root escaped keys and bounded nesti
     @memset(deep[68..], ']');
     try std.testing.expectError(error.InvalidCredentialResponse, parseInstallationCredential(std.testing.allocator, &deep, "/0", 2560));
 }
+
+test {
+    _ = @import("mcp_oauth_wire_test.zig");
+}
