@@ -59,6 +59,7 @@ pub const UiResponse = runtime.UiResponse;
 pub const FailureRecord = runtime.FailureRecord;
 pub const FileReference = runtime.FileReference;
 pub const OutputFileReference = runtime.OutputFileReference;
+pub const OutputRegistrationReference = runtime.OutputRegistrationReference;
 pub const FileChangeDiffAdmission = runtime.FileChangeDiffAdmission;
 pub const ProjectionAuthorityQuery = runtime.ProjectionAuthorityQuery;
 pub const ProjectionAuthority = runtime.ProjectionAuthority;

@@ -219,6 +219,7 @@ pub const Input = struct {
     session_close_retry_available: bool = false,
     compact_blocker: ?ActionBlocker,
     text: TextProjection,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
     /// A consumer page is an explicit slice of this Task's stable Run order.
@@ -566,6 +567,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
             resendAdmitted(task, input.shutting_down),
             editAdmitted(task, run, input.shutting_down),
             input.now_ms,
+            input.output_path_validator,
         );
     }
     writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
@@ -590,7 +592,9 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
 fn writeFileChanges(
     writer: *std.Io.Writer,
     text: TextProjection,
+    task: *const task_state.Task,
     run: *const task_state.RunRecord,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void,
 ) Error!void {
     const observation = run.file_change_observation orelse {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -616,13 +620,20 @@ fn writeFileChanges(
             try text.writeJson(writer, path)
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"beforeBytes\":\"{d}\",\"afterBytes\":\"{d}\",\"diffAvailable\":{},\"diffComplete\":{},\"redacted\":{}}}", .{
+        writer.print(",\"beforeBytes\":\"{d}\",\"afterBytes\":\"{d}\",\"diffAvailable\":{},\"diffComplete\":{},\"redacted\":{}", .{
             change.before_bytes,
             change.after_bytes,
             change.artifact != null,
             change.diff_complete,
             change.redacted,
         }) catch return error.SnapshotTooLarge;
+        if (output_path_validator) |validate| eligibility: {
+            if (!task_policy.outputRegistrationCandidate(task, run, change) or
+                text.containsSensitive(change.display_path)) break :eligibility;
+            validate(change.display_path) catch break :eligibility;
+            writer.writeAll(",\"outputRegistrationAdmitted\":true") catch return error.SnapshotTooLarge;
+        }
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
@@ -848,6 +859,7 @@ pub fn writeRun(
     resend_admitted: bool,
     edit_admitted: bool,
     now_ms: ?u64,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void,
 ) Error!void {
     const terminal = projection.terminal;
     writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"editAdmitted\":{},\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
@@ -935,7 +947,7 @@ pub fn writeRun(
         } else try writeToolProjection(writer, text_projection, tool);
     }
     writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
-    try writeFileChanges(writer, text_projection, run);
+    try writeFileChanges(writer, text_projection, task, run, output_path_validator);
     writer.writeAll(",\"outputs\":") catch return error.SnapshotTooLarge;
     try writeRunOutputs(writer, text_projection, task, run);
     writer.writeByte('}') catch return error.SnapshotTooLarge;

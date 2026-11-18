@@ -113,7 +113,8 @@ pub const OutputAction = struct {
     operationId: WireId,
     taskId: WireId,
     runId: WireId,
-    outputId: WireText,
+    outputId: ?WireText = null,
+    changeId: ?WireText = null,
     action: struct {
         value: product_control.OutputCheckKind,
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
@@ -121,6 +122,16 @@ pub const OutputAction = struct {
             return .{ .value = std.meta.stringToEnum(product_control.OutputCheckKind, name.value) orelse return error.UnexpectedToken };
         }
     },
+
+    pub fn target(self: OutputAction) !union(enum) { output: [16]u8, change: []const u8 } {
+        if (self.action.value == .register) {
+            const change = (self.changeId orelse return error.InvalidBridgeId).value;
+            if (self.outputId != null or change.len == 0 or change.len > 128) return error.InvalidBridgeId;
+            return .{ .change = change };
+        }
+        if (self.changeId != null) return error.InvalidBridgeId;
+        return .{ .output = try parseOutputId((self.outputId orelse return error.InvalidBridgeId).value) };
+    }
 };
 pub const OutputActionCancel = struct { generation: WireId, operationId: WireId };
 pub fn parseOutputId(value: []const u8) ![16]u8 {
@@ -1426,7 +1437,14 @@ test "Output action strict payload accepts only scoped identities and known acti
     const valid = "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\"}";
     var parsed = try parsePayload(OutputAction, valid);
     defer parsed.deinit();
-    _ = try parseOutputId(parsed.value.outputId.value);
+    try std.testing.expectEqual(@as([16]u8, @splat(3)), (try parsed.value.target()).output);
+    var registration = try parsePayload(OutputAction, "{\"generation\":\"1\",\"operationId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"changeId\":\"change-3-1-1\",\"action\":\"register\"}");
+    defer registration.deinit();
+    try std.testing.expectEqualStrings("change-3-1-1", (try registration.value.target()).change);
+    registration.value.outputId = parsed.value.outputId;
+    try std.testing.expectError(error.InvalidBridgeId, registration.value.target());
+    parsed.value.changeId = registration.value.changeId;
+    try std.testing.expectError(error.InvalidBridgeId, parsed.value.target());
     for ([_][]const u8{ "", "00000000000000000000000000000000", "ABCDEFABCDEFABCDEFABCDEFABCDEFAB", "030303" }) |id|
         try std.testing.expectError(error.InvalidBridgeId, parseOutputId(id));
     for ([_][]const u8{

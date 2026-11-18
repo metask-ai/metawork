@@ -1187,6 +1187,8 @@ export const enUS = {
     "The selected destination changed. Choose it again.",
   "outputs.state.cleanup_failed": "Temporary file cleanup was incomplete",
   "outputs.edit": "Continue editing",
+  "outputs.register": "Add to outputs",
+  "outputs.state.registered": "Added to outputs",
   "outputs.edit_reference": "Continue editing the Workspace file {path}:",
   "outputs.state.edit_prepared":
     "File reference added. Enter your requested changes.",

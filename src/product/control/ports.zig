@@ -166,6 +166,7 @@ pub const VideoRunPreparation = struct {
 pub const FileDeliveryPreparation = struct {
     context: *anyopaque,
     prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedFileDelivery,
+    validate_path_fn: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
 
     pub fn prepare(self: FileDeliveryPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         return self.prepare_fn(self.context, authority);

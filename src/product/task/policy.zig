@@ -880,13 +880,23 @@ pub fn runProjected(task: *const task_state.Task, run: *const task_state.RunReco
 /// supplies the identity of the file in the conversation.
 pub fn conversationOutput(task: *const task_state.Task, delivered: *const task_state.OutputRecord) *const task_state.OutputRecord {
     if (delivered.redacted or delivered.locator.len == 0) return delivered;
+    return outputAtLocator(task, delivered.locator) orelse delivered;
+}
+
+pub fn outputAtLocator(task: *const task_state.Task, locator: []const u8) ?*const task_state.OutputRecord {
     for (task.durable.runs) |*entry| if (entry.*) |*run| {
         if (!runProjected(task, run)) continue;
         for (&run.outputs) |*slot| if (slot.*) |*output| {
-            if (!output.redacted and std.mem.eql(u8, output.locator, delivered.locator)) return output;
+            if (!output.redacted and std.mem.eql(u8, output.locator, locator)) return output;
         };
     };
-    return delivered;
+    return null;
+}
+
+pub fn outputRegistrationCandidate(task: *const task_state.Task, run: *const task_state.RunRecord, change: *const task_state.FileChangeView) bool {
+    return task.deletion == .idle and task.read_only_history == null and runProjected(task, run) and
+        task_state.productTerminalPayload(run) != null and !change.redacted and
+        change.status == .applied and (change.kind == .created or change.kind == .modified);
 }
 
 pub const EditUnavailable = enum {

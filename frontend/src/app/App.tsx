@@ -5411,6 +5411,7 @@ export default function App() {
               />
             ) : panelTarget.kind === "review" && reviewMatchesTarget ? (
               <FileChangesView
+                key={`${fileChanges.taskId}:${fileChanges.runId}`}
                 observation={fileChanges.observation}
                 changes={fileChanges.changes}
                 diffs={fileChanges.diffs}
@@ -5441,6 +5442,18 @@ export default function App() {
                     );
                 }}
                 onLoad={loadFileChangeDiff}
+                onRegister={
+                  client
+                    ? (changeId, signal) =>
+                        client.outputAction(
+                          fileChanges.taskId,
+                          fileChanges.runId,
+                          changeId,
+                          "register",
+                          signal,
+                        )
+                    : undefined
+                }
               />
             ) : null}
           </TaskPanel>

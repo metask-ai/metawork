@@ -355,7 +355,7 @@ const App = struct {
         control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
         control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
         models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
-        control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
+        control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         control_storage.setOutputFileSave(self.platform.outputFileSave());
         models_management.setProbeNotifier(.{

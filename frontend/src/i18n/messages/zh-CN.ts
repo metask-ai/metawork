@@ -1019,6 +1019,8 @@ export const zhCN: Record<MessageId, string> = {
   "outputs.state.target_changed": "所选目标已变化，请重新选择",
   "outputs.state.cleanup_failed": "临时文件清理未完成",
   "outputs.edit": "继续修改",
+  "outputs.register": "加入交付成果",
+  "outputs.state.registered": "已加入交付成果",
   "outputs.edit_reference": "继续修改工作区文件 {path}：",
   "outputs.state.edit_prepared": "文件引用已加入输入框，请补充修改要求。",
   "outputs.state.edit_draft_busy": "已保留技能草稿，请先处理当前输入。",

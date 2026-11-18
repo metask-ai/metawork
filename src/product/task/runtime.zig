@@ -75,6 +75,13 @@ pub const OutputFileReference = struct {
     redacted: bool,
 };
 
+pub const OutputRegistrationReference = struct {
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    locator: []const u8,
+};
+
 pub const FileChangeArtifactReference = struct {
     artifact: task_state.FileChangeArtifact,
     diff_complete: bool,
@@ -1229,6 +1236,7 @@ pub const ProjectionEffects = struct {
     context: *anyopaque,
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
     text: task_view.TextProjection,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
     catalog: task_view.CatalogProjection,
     max_pending_ui_json_bytes: usize,
 
@@ -4825,6 +4833,47 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn outputRegistrationReference(self: *const Runtime, task_id: u64, run_id: u64, change_id: []const u8) ?OutputRegistrationReference {
+        const task = self.findConst(task_id) orelse return null;
+        const run = task_state.findRunConst(task.durable.runs, run_id) orelse return null;
+        for (run.file_changes) |*entry| if (entry.*) |*change| {
+            if (!std.mem.eql(u8, change.id, change_id)) continue;
+            if (!task_policy.outputRegistrationCandidate(task, run, change)) return null;
+            return .{
+                .workspace_id = task.durable.workspace_id,
+                .workspace_epoch = task.durable.workspace_epoch,
+                .workspace_root = task.durable.workspace_root,
+                .locator = change.display_path,
+            };
+        };
+        return null;
+    }
+
+    /// The Control owner first verifies the file and the current authority.
+    /// A repeated registration has no history mutation, even at capacity.
+    pub fn addUserOutput(self: *Runtime, task_id: u64, run_id: u64, receipt: *const agent.FileDeliveryReceipt, effects: EventEffects) !bool {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return error.NoSuchRun;
+        if (task_policy.outputAtLocator(task, receipt.pathView()) != null) return false;
+        var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
+        try recordEventOutput(&context, run, receipt);
+        run.noteProjectionChange();
+        return true;
+    }
+
+    pub fn discardUserOutput(self: *Runtime, task_id: u64, run_id: u64, id: [16]u8) void {
+        const task = self.find(task_id) orelse unreachable;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse unreachable;
+        for (&run.outputs) |*entry| if (entry.*) |*output| {
+            if (!std.mem.eql(u8, &output.id, &id)) continue;
+            self.allocator.free(output.locator);
+            entry.* = null;
+            run.noteProjectionChange();
+            return;
+        };
+        unreachable;
+    }
+
     /// Which message owns an accepted attachment: a Run input, or a message
     /// that is still waiting for its turn.
     pub const AttachmentMessage = union(enum) { run: u64, submission: []const u8 };
@@ -6726,6 +6775,7 @@ pub const Runtime = struct {
                 .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
+                .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
                 .catalog = effects.catalog,
                 .pending_ui = .{
                     .context = &pending_ui_context,
@@ -6884,7 +6934,7 @@ pub const Runtime = struct {
             return;
         };
         const bounds = try runBounds(task, before_run_id, limit);
-        const shutting_down = effects.authority(projectionAuthorityQuery(task)).shutting_down;
+        const external = effects.authority(projectionAuthorityQuery(task));
         writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
         if (bounds.next_before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
@@ -6900,9 +6950,10 @@ pub const Runtime = struct {
                 task,
                 run,
                 task_state.runProjectionFacts(run),
-                task_view.resendAdmitted(task, shutting_down),
-                task_view.editAdmitted(task, run, shutting_down),
+                task_view.resendAdmitted(task, external.shutting_down),
+                task_view.editAdmitted(task, run, external.shutting_down),
                 effects.now_ms,
+                if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
             );
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -6947,6 +6998,7 @@ pub const Runtime = struct {
             .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
+            .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,

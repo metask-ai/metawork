@@ -3018,6 +3018,9 @@ function decodeRunFileChanges(
     `${path}.changes`,
     (value, itemPath) => {
       const change = object(value, itemPath, [
+        ...(Object.hasOwn(record(value, itemPath), "outputRegistrationAdmitted")
+          ? ["outputRegistrationAdmitted"]
+          : []),
         "id",
         "order",
         "kind",
@@ -3042,7 +3045,18 @@ function decodeRunFileChanges(
           : stringValue(change.fromDisplayPath, `${itemPath}.fromDisplayPath`);
       if ((kind === "moved") !== (fromDisplayPath !== null))
         fail(itemPath, "moved changes alone require a source path");
+      if (
+        Object.hasOwn(change, "outputRegistrationAdmitted") &&
+        (change.outputRegistrationAdmitted !== true ||
+          change.redacted !== false ||
+          change.status !== "applied" ||
+          (kind !== "created" && kind !== "modified"))
+      )
+        fail(itemPath, "invalid output registration eligibility");
       return {
+        ...(change.outputRegistrationAdmitted === true
+          ? { outputRegistrationAdmitted: true as const }
+          : {}),
         id: stringValue(change.id, `${itemPath}.id`),
         order: positiveWireId(change.order, `${itemPath}.order`),
         kind,

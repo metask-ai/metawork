@@ -418,6 +418,7 @@ export type FileChangeView = {
   diffAvailable: boolean;
   diffComplete: boolean;
   redacted: boolean;
+  outputRegistrationAdmitted?: true;
 };
 export type RunFileChanges = {
   observation: "collecting" | "complete" | "incomplete";
@@ -892,6 +893,7 @@ export const outputActionStates = [
   "ready",
   "revealed",
   "saved",
+  "registered",
   "save_failed",
   "target_changed",
   "cleanup_failed",

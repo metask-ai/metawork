@@ -67,6 +67,8 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 File Changes 是一次 Run 内由 AgentCore typed `file_changes` observation 记录的文件副作用审查事实，归属 Run 而不是单个 Tool。产品接纳 `created | modified | deleted | moved` 的 `applied | partial` 记录，包括嵌套 Agent 产生的记录；同一路径的多次修改在事实层保持多条稳定顺序，在 Review 呈现层聚合为一个文件区块。它不从 Tool 文本、Bash 输出、Git、Workspace 当前状态或 File Preview 反推，也不表示用户已经接受修改或文件仍保持当时内容。
 
+用户可以从已结束且回执已处理完的轮次，将 File Changes 中已应用的新增或修改文件加入交付成果。Host 验证当前工作区文件。同一会话内同一工作区路径复用已有成果。
+
 ### Approval / UI Request
 
 代表 Agent 继续工作前仍缺少的授权决定；由用户回答，或在用户选择自动评审后由 Host 接纳审核器的本次建议。它不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
