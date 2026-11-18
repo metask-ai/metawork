@@ -257,14 +257,65 @@ pub const Owed = struct {
     owner: method.Owner,
     name: []const u8,
     parameter: []const u8,
+    /// Which half performs the effect behind this parameter. Decided here so
+    /// the dispatcher inherits it instead of deciding again, one call at a
+    /// time, with a reason that sounded fine at the time.
+    disposition: Disposition,
 };
 
-/// Every method still owed an argument adapter, in registry order.
+/// Why a parameter is still owed, which is never "nobody got to it yet".
+pub const Disposition = enum {
+    /// The execution half performs the effect. The dispatcher builds the
+    /// capability from the descriptor when it invokes the method, and nothing
+    /// may keep its backing object past the call -- a per-call allocation the
+    /// far side still points at is a cross-process use-after-free, the worst
+    /// failure available here. That has to be checked where the dispatcher
+    /// is, not promised here.
+    execution_side_effect,
+    /// The caller performs the effect, so it is a reverse call and lives in
+    /// `reverse.zig` under its rules.
+    reverse_call,
+    /// Deferred to the MCP step with the rest of the MCP handle surface.
+    mcp_step,
+};
+
+/// The disposition of each parameter type still owed, closed both ways: a type
+/// the chain cannot rebuild must appear here, and a type that gains an adapter
+/// must leave. A list that outlives its reason teaches the wrong rule.
+const dispositions = [_]struct { name: []const u8, disposition: Disposition }{
+    .{ .name = @typeName(checkpoint.Sink), .disposition = .execution_side_effect },
+    .{
+        .name = @typeName(surface.SessionRestoreOptions),
+        .disposition = .execution_side_effect,
+    },
+    .{
+        .name = @typeName(?surface.ImageGenerationRunInput),
+        .disposition = .execution_side_effect,
+    },
+    .{ .name = @typeName(?contract.FileDeliveryInput), .disposition = .reverse_call },
+    .{ .name = @typeName(?contract.McpInstallationInput), .disposition = .reverse_call },
+    .{ .name = @typeName(?contract.VideoGenerationRunInput), .disposition = .execution_side_effect },
+    .{ .name = @typeName(*const mcp_catalog.Activation), .disposition = .mcp_step },
+    .{ .name = @typeName(*const mcp_catalog.RestoreSelection), .disposition = .mcp_step },
+};
+
+fn dispositionOf(comptime name: []const u8) ?Disposition {
+    comptime {
+        for (dispositions) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry.disposition;
+        }
+        return null;
+    }
+}
+
+/// Every parameter still owed an adapter, one entry each, in registry order.
 ///
-/// This is the forwarding step's remaining work, counted by the compiler. It
-/// reaches empty when the execution half can rebuild every argument, which is
-/// the only honest definition of the dispatcher being finished.
-pub fn owedMethods() []const Owed {
+/// Per parameter rather than per method, because the work is a type and
+/// because a method can be blocked by more than one: `prepare_run_with_tools`
+/// takes four capabilities and they do not all belong to the same half.
+/// Reporting only the first would have hidden the one that turned out to be
+/// the caller's.
+pub fn owedParameters() []const Owed {
     comptime {
         @setEvalBranchQuota(1_000_000);
         var list: []const Owed = &.{};
@@ -273,24 +324,49 @@ pub fn owedMethods() []const Owed {
             const blocked = switch (entry.owner) {
                 inline else => |owner| blocking(owner, entry.name),
             };
-            if (blocked) |parameter| list = list ++ [_]Owed{.{
+            for (blocked) |parameter| list = list ++ [_]Owed{.{
                 .owner = entry.owner,
                 .name = entry.name,
                 .parameter = parameter,
+                .disposition = dispositionOf(parameter) orelse @compileError(
+                    "nothing says which half performs the effect behind " ++ parameter ++
+                        ", which blocks " ++ entry.name ++ ". Add it to `dispositions` in " ++
+                        "src/agent/link/adapters.zig, or give the type an adapter; a " ++
+                        "parameter nobody has decided about is how a capability ends up " ++
+                        "rebuilt on the wrong side of the link",
+                ),
             }};
         }
         return list;
     }
 }
 
-fn blocking(comptime owner: method.Owner, comptime name: []const u8) ?[]const u8 {
+/// Methods with at least one parameter still owed.
+pub fn blockedMethodCount() usize {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var count: usize = 0;
+        for (method.entries) |entry| {
+            if (entry.transport == .stream) continue;
+            const blocked = switch (entry.owner) {
+                inline else => |owner| blocking(owner, entry.name),
+            };
+            if (blocked.len != 0) count += 1;
+        }
+        return count;
+    }
+}
+
+fn blocking(comptime owner: method.Owner, comptime name: []const u8) []const []const u8 {
     comptime {
         const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+        var list: []const []const u8 = &.{};
         for (@typeInfo(Fn).@"fn".params, 0..) |param, position| {
             if (position == 0) continue;
-            if (parameterAdapter(param.type.?) == null) return @typeName(param.type.?);
+            if (parameterAdapter(param.type.?) == null)
+                list = list ++ [_][]const u8{@typeName(param.type.?)};
         }
-        return null;
+        return list;
     }
 }
 
@@ -304,7 +380,7 @@ pub fn rebuildableCount() usize {
             const blocked = switch (entry.owner) {
                 inline else => |owner| blocking(owner, entry.name),
             };
-            if (blocked == null) count += 1;
+            if (blocked.len == 0) count += 1;
         }
         return count;
     }
@@ -386,20 +462,25 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
 }
 
 test "the worklist is what the step still owes, counted by the compiler" {
-    const owed = comptime owedMethods();
+    const owed = comptime owedParameters();
     const rebuildable = comptime rebuildableCount();
+    const blocked = comptime blockedMethodCount();
     const callable = comptime callableCount();
 
-    // Every call either has its arguments or appears in the list, with no
-    // third state and no method counted twice.
-    try testing.expectEqual(callable, rebuildable + owed.len);
+    // Every call either has its arguments or is blocked, with no third state
+    // and none counted twice. The parameter list is longer than the blocked
+    // count, which is the point of counting both: one method is blocked by
+    // three separate capabilities.
+    try testing.expectEqual(callable, rebuildable + blocked);
+    try testing.expect(owed.len >= blocked);
 
     // The numbers, so that a method moving between them is visible here
     // rather than only in a build that happened to succeed. They are a
     // worklist, not an invariant: the end state is `owed.len == 0`.
     try testing.expectEqual(@as(usize, 50), callable);
     try testing.expectEqual(@as(usize, 45), rebuildable);
-    try testing.expectEqual(@as(usize, 5), owed.len);
+    try testing.expectEqual(@as(usize, 5), blocked);
+    try testing.expectEqual(@as(usize, 9), owed.len);
 
     // Named one by one, because this is the work and a count is not a
     // worklist. Two belong to the MCP step and three rebuild a capability
@@ -410,6 +491,10 @@ test "the worklist is what the step still owes, counted by the compiler" {
         "restore_session_route",
         "create_mcp_admission_selection",
         "prepare_mcp_restore_selection",
+        "prepare_mcp_restore_selection",
+        "prepare_run_with_tools",
+        "prepare_run_with_tools",
+        "prepare_run_with_tools",
         "prepare_run_with_tools",
         "export_checkpoint",
     };
@@ -422,6 +507,24 @@ test "the worklist is what the step still owes, counted by the compiler" {
         try testing.expect(entry.name.len > 0);
         try testing.expect(entry.parameter.len > 0);
     }
+
+    // And each is owed for a decided reason. Two are the caller's effects and
+    // live in `reverse.zig`; the rest are this half's own, where the question
+    // is not where to put a capability but that nothing keeps its backing
+    // object past the call.
+    var reverse: usize = 0;
+    var ours: usize = 0;
+    var mcp: usize = 0;
+    for (owed) |entry| switch (entry.disposition) {
+        .reverse_call => reverse += 1,
+        .execution_side_effect => ours += 1,
+        .mcp_step => mcp += 1,
+    };
+    // The delivery inspection and the MCP installation are the caller's; the
+    // checkpoint pair and the image and video bindings are this half's.
+    try testing.expectEqual(@as(usize, 2), reverse);
+    try testing.expectEqual(@as(usize, 4), ours);
+    try testing.expectEqual(@as(usize, 3), mcp);
 }
 
 test "a type absent from the chain is owed, not assumed trivial" {
