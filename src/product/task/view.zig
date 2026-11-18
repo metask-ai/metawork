@@ -219,6 +219,9 @@ pub const Input = struct {
     session_close_retry_available: bool = false,
     compact_blocker: ?ActionBlocker,
     text: TextProjection,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
+    office_outputs_open: bool = false,
+    browser_outputs_open: bool = false,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
     /// A consumer page is an explicit slice of this Task's stable Run order.
@@ -542,6 +545,9 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"context\":") catch return error.SnapshotTooLarge;
     try writeConversationContext(writer, task.conversation_observation);
+    try writeConversationOutputs(writer, input.text, task);
+    if (input.office_outputs_open) writer.writeAll(",\"officeOutputsOpen\":true") catch return error.SnapshotTooLarge;
+    if (input.browser_outputs_open) writer.writeAll(",\"browserOutputsOpen\":true") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
     var run_count: usize = 0;
     for (task.durable.runs, 0..) |*entry, run_index| {
@@ -560,11 +566,13 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try writeRun(
             writer,
             input.text,
+            task,
             run,
             projection,
             resendAdmitted(task, input.shutting_down),
             editAdmitted(task, run, input.shutting_down),
             input.now_ms,
+            input.output_path_validator,
         );
     }
     writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
@@ -589,7 +597,9 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
 fn writeFileChanges(
     writer: *std.Io.Writer,
     text: TextProjection,
+    task: *const task_state.Task,
     run: *const task_state.RunRecord,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void,
 ) Error!void {
     const observation = run.file_change_observation orelse {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -615,13 +625,20 @@ fn writeFileChanges(
             try text.writeJson(writer, path)
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"beforeBytes\":\"{d}\",\"afterBytes\":\"{d}\",\"diffAvailable\":{},\"diffComplete\":{},\"redacted\":{}}}", .{
+        writer.print(",\"beforeBytes\":\"{d}\",\"afterBytes\":\"{d}\",\"diffAvailable\":{},\"diffComplete\":{},\"redacted\":{}", .{
             change.before_bytes,
             change.after_bytes,
             change.artifact != null,
             change.diff_complete,
             change.redacted,
         }) catch return error.SnapshotTooLarge;
+        if (output_path_validator) |validate| eligibility: {
+            if (!task_policy.outputRegistrationCandidate(task, run, change) or
+                text.containsSensitive(change.display_path)) break :eligibility;
+            validate(change.display_path) catch break :eligibility;
+            writer.writeAll(",\"outputRegistrationAdmitted\":true") catch return error.SnapshotTooLarge;
+        }
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
@@ -844,11 +861,13 @@ pub fn editAdmitted(
 pub fn writeRun(
     writer: *std.Io.Writer,
     text_projection: TextProjection,
+    task: *const task_state.Task,
     run: *const task_state.RunRecord,
     projection: task_state.RunProjectionFacts,
     resend_admitted: bool,
     edit_admitted: bool,
     now_ms: ?u64,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void,
 ) Error!void {
     const terminal = projection.terminal;
     writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"editAdmitted\":{},\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
@@ -936,19 +955,74 @@ pub fn writeRun(
         } else try writeToolProjection(writer, text_projection, tool);
     }
     writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
-    try writeFileChanges(writer, text_projection, run);
-    writer.writeAll(",\"outputs\":[") catch return error.SnapshotTooLarge;
-    var first_output = true;
-    for (run.outputs) |entry| if (entry) |output| {
-        if (!first_output) writer.writeByte(',') catch return error.SnapshotTooLarge;
-        first_output = false;
-        const hidden = output.redacted or text_projection.containsSensitive(output.locator);
-        writer.print("{{\"id\":\"{s}\",\"displayPath\":", .{std.fmt.bytesToHex(output.id, .lower)}) catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, if (hidden) "" else output.locator);
-        writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{ output.size_bytes, hidden }) catch return error.SnapshotTooLarge;
-    };
-    writer.writeByte(']') catch return error.SnapshotTooLarge;
+    try writeFileChanges(writer, text_projection, task, run, output_path_validator);
+    writer.writeAll(",\"outputs\":") catch return error.SnapshotTooLarge;
+    try writeRunOutputs(writer, text_projection, task, run);
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task, run: *const task_state.RunRecord) Error!void {
+    writer.writeByte('[') catch return error.SnapshotTooLarge;
+    var visible_ids: [agent.max_file_deliveries_per_run][16]u8 = undefined;
+    var output_count: usize = 0;
+    for (&run.outputs) |*entry| {
+        const delivered = &(entry.* orelse continue);
+        const output = task_policy.conversationOutput(task, delivered);
+        for (visible_ids[0..output_count]) |id| {
+            if (std.mem.eql(u8, &id, &output.id)) break;
+        } else {
+            if (output_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            const hex = std.fmt.bytesToHex(output.id, .lower);
+            const updated = for (run.updated_output_ids) |id| {
+                if (std.mem.eql(u8, &id, &hex)) break true;
+            } else false;
+            try writeDeliveredOutput(writer, text, output, null, updated);
+            visible_ids[output_count] = output.id;
+            output_count += 1;
+        }
+    }
+    var first_observation = output_count == 0;
+    for (run.updated_output_ids, 0..) |hex, index| {
+        var id: [16]u8 = undefined;
+        _ = std.fmt.hexToBytes(&id, &hex) catch continue;
+        for (visible_ids[0..output_count]) |visible_id| {
+            if (std.mem.eql(u8, &id, &visible_id)) break;
+        } else {
+            for (run.updated_output_ids[0..index]) |previous| {
+                if (std.mem.eql(u8, &previous, &hex)) break;
+            } else {
+                const output = task_policy.outputByIdentity(task, id) orelse continue;
+                if (!first_observation) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                try writeDeliveredOutput(writer, text, output, null, true);
+                first_observation = false;
+            }
+        }
+    }
+    writer.writeByte(']') catch return error.SnapshotTooLarge;
+}
+
+fn writeConversationOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {
+    var started = false;
+    for (task.durable.runs) |*entry| if (entry.*) |*run| {
+        if (!task_policy.runProjected(task, run)) continue;
+        for (&run.outputs) |*slot| if (slot.*) |*output| {
+            if (task_policy.conversationOutput(task, output) != output) continue;
+            writer.writeAll(if (started) "," else ",\"conversationOutputs\":[") catch return error.SnapshotTooLarge;
+            started = true;
+            try writeDeliveredOutput(writer, text, output, run.id, false);
+        };
+    };
+    if (started) writer.writeByte(']') catch return error.SnapshotTooLarge;
+}
+
+fn writeDeliveredOutput(writer: *std.Io.Writer, text: TextProjection, output: *const task_state.OutputRecord, run_id: ?u64, updated: bool) Error!void {
+    const hidden = output.redacted or text.containsSensitive(output.locator);
+    writer.print("{{\"id\":\"{s}\"", .{std.fmt.bytesToHex(output.id, .lower)}) catch return error.SnapshotTooLarge;
+    if (run_id) |id| writer.print(",\"runId\":\"{d}\"", .{id}) catch return error.SnapshotTooLarge;
+    if (updated) writer.writeAll(",\"updated\":true") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, if (hidden) "" else output.locator);
+    writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{ output.size_bytes, hidden }) catch return error.SnapshotTooLarge;
 }
 
 /// Callback-scoped immutable Tool facts; no Session or execution capability.

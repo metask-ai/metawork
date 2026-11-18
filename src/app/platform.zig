@@ -5,6 +5,8 @@ const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
 const automation_api = @import("metawork_automation");
 const app_window = @import("window.zig");
+const output_file = @import("app_output_file");
+const output_browser_handoff = @import("metawork_output_browser_handoff");
 
 pub const TrayCommandResult = enum {
     handled,
@@ -196,6 +198,76 @@ pub const Adapter = struct {
         const path = try @import("app_output_file").absolutePath(std.heap.c_allocator, root, relative);
         defer std.heap.c_allocator.free(path);
         try (self.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
+    }
+
+    pub fn outputFileOpen(self: *Adapter) control_ports.OutputFileOpen {
+        return .{
+            .context = self,
+            // macOS Office support awaits opening and saving with a registered handler.
+            .office = builtin.os.tag == .windows,
+            .browser = output_browser_handoff.supported,
+            .prepare_fn = prepareOutputOpen,
+        };
+    }
+
+    const OutputOpen = struct {
+        adapter: *Adapter,
+        root: []u8,
+        relative: []u8,
+        proof: ?output_file.OpenProof = null,
+
+        fn request(self: *const OutputOpen) output_file.Request {
+            return .{ .workspace_root = self.root, .relative_path = self.relative, .main_thread_id = self.adapter.main_thread_id };
+        }
+
+        fn inspect(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
+            const self: *OutputOpen = @ptrCast(@alignCast(context));
+            self.proof = try output_file.inspectOpen(self.adapter.io, self.request(), cancelled);
+        }
+
+        fn open(context: *anyopaque) !void {
+            const self: *OutputOpen = @ptrCast(@alignCast(context));
+            const allocator = std.heap.c_allocator;
+            if (std.Thread.getCurrentId() != self.adapter.main_thread_id) return error.InvalidThread;
+            const proof = self.proof orelse return error.RestrictedOutput;
+            try output_file.revalidateOpenName(self.adapter.io, self.request(), proof);
+            const absolute = try output_file.absolutePath(allocator, self.root, self.relative);
+            defer allocator.free(absolute);
+            var buffer: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
+            const url = try directoryFileUrl(if (builtin.os.tag == .windows) .windows else .posix, absolute, &buffer);
+            if (output_file.htmlCandidate(self.relative)) return output_browser_handoff.openHtml(url);
+            const services_value = self.adapter.platform_services orelse return error.RuntimeUnavailable;
+            try services_value.openExternalUrl(url);
+        }
+
+        fn release(context: *anyopaque) void {
+            const self: *OutputOpen = @ptrCast(@alignCast(context));
+            std.debug.assert(std.Thread.getCurrentId() == self.adapter.main_thread_id);
+            const allocator = std.heap.c_allocator;
+            allocator.free(self.root);
+            allocator.free(self.relative);
+            allocator.destroy(self);
+        }
+    };
+
+    fn prepareOutputOpen(context: *anyopaque, root: []const u8, relative: []const u8) !control_ports.OwnedOutputOpen {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
+        try output_file.validatePath(relative);
+        if (output_file.officeCandidate(relative)) {
+            if (!self.outputFileOpen().office) return error.UnsupportedService;
+            const services_value = self.platform_services orelse return error.RuntimeUnavailable;
+            if (services_value.open_external_url_fn == null) return error.UnsupportedService;
+        } else if (output_file.htmlCandidate(relative)) {
+            if (!self.outputFileOpen().browser) return error.UnsupportedService;
+        } else return error.RestrictedOutput;
+        const allocator = std.heap.c_allocator;
+        const job = try allocator.create(OutputOpen);
+        errdefer allocator.destroy(job);
+        const root_copy = try allocator.dupe(u8, root);
+        errdefer allocator.free(root_copy);
+        job.* = .{ .adapter = self, .root = root_copy, .relative = try allocator.dupe(u8, relative) };
+        return .{ .context = job, .inspect_fn = OutputOpen.inspect, .open_fn = OutputOpen.open, .release_fn = OutputOpen.release };
     }
 
     pub fn services(self: *const Adapter) ?native_sdk.platform.PlatformServices {

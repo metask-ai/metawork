@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedExecutable,
     [Parameter(Mandatory = $true)][string]$WorkspaceRoot,
     [Parameter(Mandatory = $true)][string]$SourcePath,
-    [Parameter(Mandatory = $true)][ValidateSet('save', 'cancel', 'reveal')][string]$Mode,
+    [Parameter(Mandatory = $true)][ValidateSet('save', 'cancel', 'reveal', 'office', 'office-view')][string]$Mode,
     [string]$Destination
 )
 
@@ -127,6 +127,13 @@ function Assert-Target {
     if ($process.HasExited) { throw 'Test application exited before the native action' }
 }
 
+function Get-FixtureHash([string]$path) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try { return [Convert]::ToBase64String($hash.ComputeHash($stream)) }
+    finally { $stream.Dispose(); $hash.Dispose() }
+}
+
 $dialogCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $ProcessId)),
@@ -174,8 +181,75 @@ function Invoke-Control($dialog, [string]$id) {
 
 $success = $false
 $overwriteConfirmed = $false
-$deadline = [DateTime]::UtcNow.AddSeconds(25)
+$deadline = [DateTime]::UtcNow.AddSeconds($(if ($Mode -eq 'office-view') { 55 } else { 25 }))
 try {
+    if ($Mode -in @('office', 'office-view')) {
+        $expectedTitle = [IO.Path]::GetFileNameWithoutExtension($source)
+        $fixtureName = [IO.Path]::GetFileName($source)
+        $officeProcesses = switch ([IO.Path]::GetExtension($source).ToLowerInvariant()) {
+            '.docx' { 'wps'; 'winword' }
+            '.xlsx' { 'et'; 'excel'; 'wps' }
+            '.pptx' { 'wpp'; 'powerpnt'; 'wps' }
+            default { throw 'Unexpected Office fixture extension' }
+        }
+        $originalHash = Get-FixtureHash $source
+        @{ phase='ready'; mode=$Mode } | ConvertTo-Json -Compress
+        $visible = $false
+        while ([DateTime]::UtcNow -lt $deadline) {
+            Assert-Target
+            $shown = @((Get-Process -Name $officeProcesses -ErrorAction SilentlyContinue) | Where-Object {
+                $_.MainWindowTitle.IndexOf($expectedTitle, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            })
+            $visible = $shown.Count -gt 0
+            if ($visible -and $Mode -eq 'office-view') {
+                # WPS groups tabs in one top-level window. Close only the
+                # document window whose title identifies this unique fixture.
+                $condition = [System.Windows.Automation.PropertyCondition]::new(
+                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [System.Windows.Automation.ControlType]::Window)
+                foreach ($owner in $shown) {
+                    $window = [System.Windows.Automation.AutomationElement]::FromHandle($owner.MainWindowHandle)
+                    $documents = @($window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition) | Where-Object {
+                        $_.Current.Name.StartsWith($fixtureName + ' - ', [StringComparison]::OrdinalIgnoreCase) -and
+                        $_.GetSupportedPatterns().ProgrammaticName -contains 'WindowPatternIdentifiers.Pattern'
+                    })
+                    if ($documents.Count -ne 1) { continue }
+                    $documents[0].GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
+                    $success = $true
+                    @{ mode=$Mode; openedOriginal=$true } | ConvertTo-Json -Compress
+                    return
+                }
+                $visible = $false
+            }
+            if ($visible) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not $visible) { throw 'The default Office application did not display the private fixture' }
+        # Office registers some running automation objects after losing focus.
+        # Use only the isolated MetaWork window for the focus handoff.
+        [MetaWorkOutputNativeProbe]::SetForegroundWindow($mainWindow) | Out-Null
+        $savedOriginal = $false
+        $saveDeadline = [DateTime]::UtcNow.AddSeconds(25)
+        do {
+            foreach ($progId in @('KWPS.Application', 'WPS.Application', 'Word.Application')) {
+                try { $office = [Runtime.InteropServices.Marshal]::GetActiveObject($progId) } catch { continue }
+                foreach ($document in $office.Documents) {
+                    if (-not [string]::Equals($document.FullName, $source, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    $document.Content.InsertAfter(' Saved by MetaWork Office acceptance.')
+                    $document.Save()
+                    $savedOriginal = (Get-FixtureHash $source) -ne $originalHash
+                    $document.Close()
+                    if (-not $savedOriginal) { throw 'Saving did not change the original fixture' }
+                    break
+                }
+                if ($savedOriginal) { break }
+            }
+            if (-not $savedOriginal) { Start-Sleep -Milliseconds 250 }
+        } while (-not $savedOriginal -and [DateTime]::UtcNow -lt $saveDeadline)
+        $success = $true
+        @{ mode=$Mode; openedOriginal=$visible; savedOriginal=$savedOriginal } | ConvertTo-Json -Compress
+        return
+    }
     if ($Mode -eq 'reveal') {
         # Observe only the exact generated directory and selected fixture.
         # Never close a pre-existing Explorer window or terminate Explorer.

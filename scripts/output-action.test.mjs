@@ -24,6 +24,39 @@ const connect = (generation = "1") => ({
   attachmentInput: { mode: "native_paths", maxChunkBytes: "131072" },
 });
 const bridge = (invoke) => ({ invoke, on: () => () => {} });
+
+test("Output registration sends only its recorded change identity", async () => {
+  const changeId = "change-3-1-2";
+  let state = "registered";
+  const client = new BridgeClient({
+    bridge: bridge(async (command, payload) => {
+      if (command === "metawork.events.connect") return connect();
+      assert.equal(command, "metawork.outputs.action");
+      assert.deepEqual(payload, {
+        generation: "1",
+        operationId: payload.operationId,
+        taskId: "3",
+        runId: "7",
+        action: "register",
+        changeId,
+      });
+      return { generation: "1", operationId: payload.operationId, state };
+    }),
+  });
+  await client.connect();
+  const register = () =>
+    client.outputAction(
+      "3",
+      "7",
+      changeId,
+      "register",
+      new AbortController().signal,
+    );
+  assert.equal(await register(), "registered");
+  state = "ready";
+  await assert.rejects(register);
+});
+
 test("Output action shared Host fixture is exact and malformed or authoritative extras fail", () => {
   assert.deepEqual(decodeOutputActionResult(fixture.result), fixture.result);
   for (const change of [

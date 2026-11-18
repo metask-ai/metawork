@@ -75,6 +75,13 @@ pub const OutputFileReference = struct {
     redacted: bool,
 };
 
+pub const OutputRegistrationReference = struct {
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    locator: []const u8,
+};
+
 pub const FileChangeArtifactReference = struct {
     artifact: task_state.FileChangeArtifact,
     diff_complete: bool,
@@ -1229,6 +1236,9 @@ pub const ProjectionEffects = struct {
     context: *anyopaque,
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
     text: task_view.TextProjection,
+    output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
+    office_outputs_open: bool = false,
+    browser_outputs_open: bool = false,
     catalog: task_view.CatalogProjection,
     max_pending_ui_json_bytes: usize,
 
@@ -3616,6 +3626,9 @@ pub const Runtime = struct {
         if (effects.file_delivery) |owned| {
             run_record.file_delivery = owned.*;
             owned.* = null;
+            if (run_record.file_delivery != null) {
+                run_record.execution.?.tracked_outputs = captureTrackedOutputs(self.allocator, task) catch &.{};
+            }
         }
 
         var run_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
@@ -4807,22 +4820,70 @@ pub const Runtime = struct {
         if (std.mem.allEqual(u8, &output_id, 0)) return null;
         const task = self.findConst(task_id) orelse return null;
         if (task.deletion != .idle) return null;
-        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
-        for (run.outputs) |entry| {
-            const output = entry orelse continue;
-            if (!std.mem.eql(u8, &output.id, &output_id)) continue;
+        const run = task_state.findRunConst(task.durable.runs, run_id) orelse return null;
+        if (!task_policy.runProjected(task, run)) return null;
+        const output = for (&run.outputs) |*entry| {
+            const delivered = &(entry.* orelse continue);
+            const canonical = task_policy.conversationOutput(task, delivered);
+            if (std.mem.eql(u8, &canonical.id, &output_id)) break canonical;
+        } else observed: {
+            const hex = std.fmt.bytesToHex(output_id, .lower);
+            for (run.updated_output_ids) |id| {
+                if (std.mem.eql(u8, &id, &hex)) break :observed task_policy.outputByIdentity(task, output_id) orelse return null;
+            }
+            return null;
+        };
+        return .{
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .workspace_root = task.durable.workspace_root,
+            .id = output.id,
+            .locator = output.locator,
+            .size_bytes = output.size_bytes,
+            .sha256 = output.sha256,
+            .redacted = output.redacted,
+        };
+    }
+
+    pub fn outputRegistrationReference(self: *const Runtime, task_id: u64, run_id: u64, change_id: []const u8) ?OutputRegistrationReference {
+        const task = self.findConst(task_id) orelse return null;
+        const run = task_state.findRunConst(task.durable.runs, run_id) orelse return null;
+        for (run.file_changes) |*entry| if (entry.*) |*change| {
+            if (!std.mem.eql(u8, change.id, change_id)) continue;
+            if (!task_policy.outputRegistrationCandidate(task, run, change)) return null;
             return .{
                 .workspace_id = task.durable.workspace_id,
                 .workspace_epoch = task.durable.workspace_epoch,
                 .workspace_root = task.durable.workspace_root,
-                .id = output.id,
-                .locator = output.locator,
-                .size_bytes = output.size_bytes,
-                .sha256 = output.sha256,
-                .redacted = output.redacted,
+                .locator = change.display_path,
             };
-        }
+        };
         return null;
+    }
+
+    /// The Control owner first verifies the file and the current authority.
+    /// A repeated registration has no history mutation, even at capacity.
+    pub fn addUserOutput(self: *Runtime, task_id: u64, run_id: u64, receipt: *const agent.FileDeliveryReceipt, effects: EventEffects) !bool {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return error.NoSuchRun;
+        if (task_policy.outputAtLocator(task, receipt.pathView()) != null) return false;
+        var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
+        try recordEventOutput(&context, run, receipt);
+        run.noteProjectionChange();
+        return true;
+    }
+
+    pub fn discardUserOutput(self: *Runtime, task_id: u64, run_id: u64, id: [16]u8) void {
+        const task = self.find(task_id) orelse unreachable;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse unreachable;
+        for (&run.outputs) |*entry| if (entry.*) |*output| {
+            if (!std.mem.eql(u8, &output.id, &id)) continue;
+            self.allocator.free(output.locator);
+            entry.* = null;
+            run.noteProjectionChange();
+            return;
+        };
+        unreachable;
     }
 
     /// Which message owns an accepted attachment: a Run input, or a message
@@ -5720,6 +5781,22 @@ pub const Runtime = struct {
         var context = EventContext{ .runtime = self, .effects = effects, .credential_views = run.redactionSecrets() };
         var changed = false;
         defer if (changed) run.noteProjectionChange();
+        if (run.updated_output_ids.len == 0) {
+            var count: usize = 0;
+            for (execution.tracked_outputs) |output| if (output.changed) {
+                count += 1;
+            };
+            if (count != 0) {
+                const ids = try self.allocator.alloc([32]u8, count);
+                var index: usize = 0;
+                for (execution.tracked_outputs) |output| if (output.changed) {
+                    ids[index] = output.id;
+                    index += 1;
+                };
+                run.updated_output_ids = ids;
+                changed = true;
+            }
+        }
         for (&execution.terminal_receipts.delivered_files) |*entry| if (entry.*) |*receipt| {
             try recordEventOutput(&context, run, receipt);
             entry.* = null;
@@ -5945,7 +6022,7 @@ pub const Runtime = struct {
                     self.recordTerminalOutputFailure(route_id, run.id, err, effects);
                 };
                 const execution = run.execution orelse continue;
-                if (execution.terminal_receipts.isEmpty()) continue;
+                if (execution.terminal_receipts.isEmpty() and execution.tracked_outputs.len == 0) continue;
                 const changed = self.adoptTerminalReceipts(route_id, run.id, effects.event) catch |err| failed: {
                     self.recordTerminalOutputFailure(route_id, run.id, err, effects);
                     // No borrowed receipt outlives this fact.
@@ -6085,6 +6162,7 @@ pub const Runtime = struct {
                 if (run.video_execution) |video| if (!prepareMediaCredentialRelease(effects, &video.candidate, &video.authorization)) continue;
                 releaseRunEffects(self, run, effects);
                 releaseAutomaticTitle(&execution.automatic_title);
+                freeTrackedOutputs(self.allocator, execution.tracked_outputs);
                 self.allocator.destroy(execution);
                 run.execution = null;
                 trimHistoryEntries(task_state.AdditionalInput, self.allocator, &run.additional_inputs);
@@ -6726,6 +6804,9 @@ pub const Runtime = struct {
                 .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
+                .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
+                .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+                .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
                 .catalog = effects.catalog,
                 .pending_ui = .{
                     .context = &pending_ui_context,
@@ -6884,7 +6965,7 @@ pub const Runtime = struct {
             return;
         };
         const bounds = try runBounds(task, before_run_id, limit);
-        const shutting_down = effects.authority(projectionAuthorityQuery(task)).shutting_down;
+        const external = effects.authority(projectionAuthorityQuery(task));
         writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
         if (bounds.next_before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
@@ -6897,11 +6978,13 @@ pub const Runtime = struct {
             try task_view.writeRun(
                 writer,
                 effects.text,
+                task,
                 run,
                 task_state.runProjectionFacts(run),
-                task_view.resendAdmitted(task, shutting_down),
-                task_view.editAdmitted(task, run, shutting_down),
+                task_view.resendAdmitted(task, external.shutting_down),
+                task_view.editAdmitted(task, run, external.shutting_down),
                 effects.now_ms,
+                if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
             );
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -6946,6 +7029,9 @@ pub const Runtime = struct {
             .session_close_retry_available = !external.shutting_down and canRetryFailedSessionClose(task),
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
+            .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
+            .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+            .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,
@@ -9013,6 +9099,29 @@ fn findOrCreateEventTool(
         .redacted = owned_name.redacted or owned_input.redacted,
     };
     return &run_record.tools[slot].?;
+}
+
+fn captureTrackedOutputs(allocator: std.mem.Allocator, task: *const task_state.Task) ![]task_state.TrackedOutput {
+    var tracked: std.ArrayList(task_state.TrackedOutput) = .empty;
+    errdefer {
+        for (tracked.items) |output| allocator.free(output.locator);
+        tracked.deinit(allocator);
+    }
+    for (task.durable.runs) |*entry| if (entry.*) |*run| {
+        if (!task_policy.runProjected(task, run)) continue;
+        for (&run.outputs) |*slot| if (slot.*) |*output| {
+            if (output.redacted or output.locator.len == 0 or task_policy.conversationOutput(task, output) != output) continue;
+            const locator = try allocator.dupe(u8, output.locator);
+            errdefer allocator.free(locator);
+            try tracked.append(allocator, .{ .id = std.fmt.bytesToHex(output.id, .lower), .locator = locator });
+        };
+    };
+    return tracked.toOwnedSlice(allocator);
+}
+
+fn freeTrackedOutputs(allocator: std.mem.Allocator, tracked: []task_state.TrackedOutput) void {
+    for (tracked) |output| allocator.free(output.locator);
+    allocator.free(tracked);
 }
 
 fn recordEventOutput(
@@ -11382,6 +11491,7 @@ fn deinitRun(
     releaseRunEffects(self, run, effects);
     if (run.execution) |execution| {
         releaseAutomaticTitle(&execution.automatic_title);
+        freeTrackedOutputs(self.allocator, execution.tracked_outputs);
         self.allocator.destroy(execution);
         run.execution = null;
     }
@@ -11393,6 +11503,7 @@ fn deinitRun(
     if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
     for (run.outputs) |entry| if (entry) |output|
         self.allocator.free(output.locator);
+    self.allocator.free(run.updated_output_ids);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     self.discardInputPayloads(run);

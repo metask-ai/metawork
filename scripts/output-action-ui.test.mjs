@@ -224,7 +224,12 @@ test("Continue editing waits for the scoped Host check before preparing a draft 
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  assert.deepEqual(checks[0].slice(0, 4), ["3", "7", output.id, "check"]);
+  assert.deepEqual(checks[0].slice(0, 4), [
+    "3",
+    "7",
+    output.id,
+    "check_current",
+  ]);
   assert.deepEqual(prepared, []);
   complete("ready");
   await screen.findByText(

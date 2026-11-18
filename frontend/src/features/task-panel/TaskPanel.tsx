@@ -25,7 +25,7 @@ function revealTaskPanelTab(list: HTMLElement, tab: HTMLElement): void {
 
 export function taskPanelTabLabels(tabs: TaskPanelTab[]): Map<string, string> {
   const labels = new Map<string, string>();
-  const previews = tabs.filter((tab) => tab.kind !== "review");
+  const previews = tabs.filter((tab) => "displayPath" in tab);
   for (const tab of previews) {
     const fallback = pathSegments(tab.displayPath).at(-1) ?? tab.displayPath;
     const base = tab.title || fallback;
@@ -122,6 +122,7 @@ export function TaskPanel({
   }, [activeTabId]);
 
   function labelFor(tab: TaskPanelTab): string {
+    if (tab.kind === "outputs") return t("outputs.title");
     return tab.kind === "review"
       ? t("file_changes.review")
       : (labels.get(tab.tabId) ?? tab.displayPath);
@@ -185,7 +186,7 @@ export function TaskPanel({
                     tabIndex={
                       tab.tabId === (focusedTabId ?? activeTabId) ? 0 : -1
                     }
-                    title={tab.kind !== "review" ? tab.displayPath : label}
+                    title={"displayPath" in tab ? tab.displayPath : label}
                     onFocus={() => setFocusedTabId(tab.tabId)}
                     onClick={() => onSelectTab(tab.tabId)}
                     onKeyDown={(event) => {

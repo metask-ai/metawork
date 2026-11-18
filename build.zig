@@ -1469,6 +1469,16 @@ fn wireAgentCore(
     });
     if (target.result.os.tag == .macos)
         app_single_instance_compat.linkFramework("CoreFoundation", .{});
+    const output_browser_handoff = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/output_browser_handoff.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    if (target.result.os.tag == .macos) {
+        output_browser_handoff.linkFramework("CoreFoundation", .{});
+        output_browser_handoff.linkFramework("CoreServices", .{});
+    }
     const office_resource_publish_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/office_resource_publish.zig"),
         .target = target,
@@ -2819,6 +2829,7 @@ fn wireAgentCore(
     app.addImport("metask_client", metask_client);
     app.addImport("metawork_product_identity", product_identity);
     app.addImport("metawork_office_resource_publish_compat", office_resource_publish_compat);
+    app.addImport("metawork_output_browser_handoff", output_browser_handoff);
     app.addImport(
         "metawork_app_single_instance_compat",
         app_single_instance_compat,

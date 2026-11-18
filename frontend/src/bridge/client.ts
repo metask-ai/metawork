@@ -308,8 +308,8 @@ export class BridgeClient {
   async outputAction(
     taskId: string,
     runId: string,
-    outputId: string,
-    action: OutputAction,
+    targetId: string,
+    action: OutputAction | "register",
     signal: AbortSignal,
   ): Promise<OutputActionState> {
     const connection = this.attachmentConnection;
@@ -347,7 +347,15 @@ export class BridgeClient {
       const result = decodeOutputActionResult(
         await this.invoke(
           commands.outputAction,
-          { ...key, taskId, runId, outputId, action },
+          {
+            ...key,
+            taskId,
+            runId,
+            action,
+            ...(action === "register"
+              ? { changeId: targetId }
+              : { outputId: targetId }),
+          },
           action === "save" || this.commandTimeoutMs <= 0
             ? 0
             : Math.max(35000, this.commandTimeoutMs),
@@ -360,7 +368,14 @@ export class BridgeClient {
       )
         throw new DOMException("Output action cancelled", "AbortError");
       if (
-        (action === "check" && result.state === "revealed") ||
+        (action === "open" &&
+          (result.state === "ready" || result.state === "revealed")) ||
+        (action !== "open" && result.state === "opened") ||
+        (action === "register" &&
+          (result.state === "ready" || result.state === "revealed")) ||
+        (action !== "register" && result.state === "registered") ||
+        ((action === "check" || action === "check_current") &&
+          result.state === "revealed") ||
         (action === "reveal" && result.state === "ready") ||
         (action === "save" &&
           (result.state === "ready" || result.state === "revealed")) ||

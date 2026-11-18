@@ -16,7 +16,12 @@ export type OutputEditHandler = (
   runId: string,
   outputId: string,
 ) => OutputEditResult;
-type RowAction = OutputAction | "edit";
+type RowAction = Exclude<OutputAction, "check_current"> | "edit" | "preview";
+type OutputPreview = (
+  taskId: string,
+  path: string,
+  opener: HTMLButtonElement,
+) => void;
 export function RunOutputs({
   outputs,
   taskId,
@@ -24,15 +29,21 @@ export function RunOutputs({
   disabled = false,
   onAction,
   onPrepareEdit,
+  onPreview,
+  officeOpen = false,
+  browserOpen = false,
   layout = "outputs",
 }: {
-  outputs: readonly DeliveredOutputView[];
+  outputs: readonly (DeliveredOutputView & { runId?: string })[];
   taskId?: string;
   runId?: string;
   disabled?: boolean;
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
-  layout?: "outputs" | "file-actions";
+  onPreview?: OutputPreview;
+  officeOpen?: boolean;
+  browserOpen?: boolean;
+  layout?: "outputs" | "file-actions" | "conversation";
 }) {
   const { t } = useI18n();
   if (outputs.length === 0) return null;
@@ -44,16 +55,19 @@ export function RunOutputs({
           key={output.id}
           output={output}
           taskId={taskId}
-          runId={runId}
+          runId={output.runId ?? runId}
           disabled={disabled}
           onAction={onAction}
           onPrepareEdit={onPrepareEdit}
+          onPreview={onPreview}
+          officeOpen={officeOpen}
+          browserOpen={browserOpen}
           actionsOnly={actionsOnly}
         />
       ))}
     </ul>
   );
-  if (actionsOnly) return rows;
+  if (layout !== "outputs") return rows;
   return (
     <section className="run-outputs" aria-label={t("outputs.title")}>
       <h3 className="run-outputs-title">{t("outputs.title")}</h3>
@@ -68,6 +82,9 @@ function OutputRow({
   disabled,
   onAction,
   onPrepareEdit,
+  onPreview,
+  officeOpen,
+  browserOpen,
   actionsOnly,
 }: {
   output: DeliveredOutputView;
@@ -76,9 +93,13 @@ function OutputRow({
   disabled: boolean;
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
+  onPreview?: OutputPreview;
+  officeOpen: boolean;
+  browserOpen: boolean;
   actionsOnly: boolean;
 }) {
   const { locale, t } = useI18n();
+  const html = /\.html?$/i.test(output.displayPath);
   const nameId = useId();
   const [pending, setPending] = useState<RowAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -104,7 +125,7 @@ function OutputRow({
     output.sizeBytes,
     disabled,
   ]);
-  const perform = async (action: RowAction) => {
+  const perform = async (action: RowAction, opener?: HTMLButtonElement) => {
     if (
       !onAction ||
       !taskId ||
@@ -124,9 +145,19 @@ function OutputRow({
         taskId,
         runId,
         output.id,
-        action === "edit" ? "check" : action,
+        action === "edit" || action === "preview" ? "check_current" : action,
         controller.signal,
       );
+      if (
+        action === "preview" &&
+        result === "ready" &&
+        opener?.isConnected &&
+        !controller.signal.aborted &&
+        active.current === controller
+      ) {
+        onPreview?.(taskId, output.displayPath, opener);
+        return;
+      }
       if (
         action === "edit" &&
         result === "ready" &&
@@ -181,13 +212,44 @@ function OutputRow({
           )}
         {!actionsOnly && (
           <p className="run-output-meta">
-            {t("outputs.delivered_size", {
-              bytes: formatInteger(locale, BigInt(output.sizeBytes)),
-            })}
+            {output.updated
+              ? t("outputs.updated")
+              : t("outputs.delivered_size", {
+                  bytes: formatInteger(locale, BigInt(output.sizeBytes)),
+                })}
           </p>
         )}
         {onAction && taskId && runId && (
           <div className="run-output-actions">
+            {!actionsOnly &&
+              ((officeOpen &&
+                /\.(?:docx|xlsx|pptx)$/i.test(output.displayPath)) ||
+                (browserOpen && html)) && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  aria-describedby={nameId}
+                  disabled={disabled || pending !== null || output.redacted}
+                  onClick={() => void perform("open")}
+                >
+                  {t(html ? "outputs.open_browser" : "outputs.open")}
+                </Button>
+              )}
+            {!actionsOnly && onPreview && html && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || pending !== null || output.redacted}
+                onClick={(event) =>
+                  void perform("preview", event.currentTarget)
+                }
+              >
+                {t("outputs.view_source")}
+              </Button>
+            )}
             {!actionsOnly && (
               <Button
                 variant="ghost"

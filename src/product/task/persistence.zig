@@ -876,6 +876,7 @@ pub const RunWire = struct {
     file_change_observation: ?[]const u8 = null,
     file_changes: ?[]FileChangeWire = null,
     outputs: []OutputWire = &.{},
+    updated_output_ids: []const [32]u8 = &.{},
     diagnostic: []const u8,
     diagnostic_truncated: bool,
     diagnostic_redacted: bool,
@@ -945,6 +946,13 @@ fn validateOutputs(outputs: []const OutputWire) error{Invalid}!void {
         }
         for (outputs[0..index]) |previous|
             if (std.mem.eql(u8, previous.id, output.id)) return error.Invalid;
+    }
+}
+
+fn validateUpdatedOutputIds(ids: []const [32]u8) error{Invalid}!void {
+    for (ids) |id| {
+        const bytes = try outputIdentity(16, &id);
+        if (std.mem.allEqual(u8, &bytes, 0)) return error.Invalid;
     }
 }
 
@@ -1740,6 +1748,7 @@ fn projectRun(
             null,
         .file_changes = file_changes,
         .outputs = outputs,
+        .updated_output_ids = run.updated_output_ids,
         .diagnostic = if (terminal_payload) |payload|
             run.terminal_diagnostic[0..payload.diagnostic_len]
         else
@@ -2267,6 +2276,9 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         }
     }
     validateOutputs(wire.outputs) catch return error.TaskStoreCorrupt;
+    validateUpdatedOutputIds(wire.updated_output_ids) catch return error.TaskStoreCorrupt;
+    const updated_output_ids = try projection.allocator.dupe([32]u8, wire.updated_output_ids);
+    errdefer projection.allocator.free(updated_output_ids);
     var outputs: [agent.max_file_deliveries_per_run]?task_state.OutputRecord = @splat(null);
     errdefer for (outputs) |entry| if (entry) |output| projection.allocator.free(output.locator);
     for (wire.outputs, 0..) |output, index| {
@@ -2349,6 +2361,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             null,
         .file_changes = file_changes,
         .outputs = outputs,
+        .updated_output_ids = updated_output_ids,
         .file_changes_known_loss = interrupted or
             (wire.file_change_observation != null and
                 std.mem.eql(u8, wire.file_change_observation.?, "incomplete")),
@@ -2861,6 +2874,7 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
     }
     projection.allocator.free(run.file_changes);
     for (run.outputs) |entry| if (entry) |output| projection.allocator.free(output.locator);
+    projection.allocator.free(run.updated_output_ids);
     projection.allocator.free(run.commentary_ends);
     deinitRestoredRunInput(projection, &run.input);
     for (run.additional_inputs) |entry| if (entry) |record| {
@@ -3955,6 +3969,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                     return error.Invalid;
         }
         try validateOutputs(run.outputs);
+        try validateUpdatedOutputIds(run.updated_output_ids);
         if ((run.file_change_observation == null) != (run.file_changes == null))
             return error.Invalid;
         if (run.file_change_observation) |observation| {
