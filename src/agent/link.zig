@@ -36,6 +36,7 @@ pub const reverse = @import("link/reverse.zig");
 pub const channel = @import("link/channel.zig");
 pub const unreachability = @import("link/unreachability.zig");
 pub const adapters = @import("link/adapters.zig");
+pub const handle_repr = @import("link/handle_repr.zig");
 pub const call_frame = @import("link/call_frame.zig");
 pub const run_tools = @import("link/run_tools.zig");
 pub const dispatch = @import("link/dispatch.zig");
@@ -181,6 +182,7 @@ test {
     _ = channel;
     _ = unreachability;
     _ = adapters;
+    _ = handle_repr;
     _ = call_frame;
     _ = run_tools;
     _ = dispatch;
