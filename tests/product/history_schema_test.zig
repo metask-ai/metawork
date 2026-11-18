@@ -53,6 +53,56 @@ fn temporaryPath(allocator: std.mem.Allocator, dir: std.Io.Dir) ![]const u8 {
     return std.fs.path.join(allocator, &.{ bytes[0..len], "history.db" });
 }
 
+/// Columns a migration added, by the version that added them. Writing
+/// today's rows into a store stopped at an earlier version has to leave them
+/// out, exactly as the build that wrote that store would have. A migration
+/// that only changes a constraint adds nothing here.
+const added_columns = [_]struct { column: []const u8, version: usize }{
+    .{ .column = "model_error_json", .version = 2 },
+    .{ .column = "conversation_position", .version = 10 },
+    .{ .column = "superseded_by_run_id", .version = 10 },
+    .{ .column = "compact_boundary", .version = 10 },
+};
+
+/// Writes today's rows into a store migrated only through `version`, which is
+/// what a store written by an older build looks like.
+fn insertAtVersion(
+    a: std.mem.Allocator,
+    database: sql.Database,
+    state: history.wire.StateWire,
+    version: usize,
+) !void {
+    const rows = try schema.codec.rowsFor(a, state, .{}, history.limits);
+    var mutations: std.ArrayList(sql.Mutation) = .empty;
+    for (rows) |row| {
+        var columns: std.ArrayList(u8) = .empty;
+        var markers: std.ArrayList(u8) = .empty;
+        var params: std.ArrayList(sql.Value) = .empty;
+        for (row.columns, row.values) |column, value| {
+            // Version 1 had this one and migration 3 dropped it, so no
+            // store this writes to has it.
+            if (std.mem.eql(u8, column, "project_removed")) continue;
+            var later = false;
+            for (added_columns) |added| {
+                if (std.mem.eql(u8, column, added.column) and added.version > version) later = true;
+            }
+            if (later) continue;
+            if (params.items.len != 0) {
+                try columns.append(a, ',');
+                try markers.append(a, ',');
+            }
+            try columns.appendSlice(a, column);
+            try params.append(a, value);
+            try markers.appendSlice(a, try std.fmt.allocPrint(a, "?{d}", .{params.items.len}));
+        }
+        try mutations.append(a, .{ .statement = .{
+            .sql = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) VALUES({s})", .{ row.table, columns.items, markers.items }),
+            .params = params.items,
+        } });
+    }
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.mutate(mutations.items));
+}
+
 fn modelErrorFixture() history.wire.ModelErrorWire {
     return .{
         .run_id = std.math.maxInt(u64),
@@ -83,28 +133,7 @@ test "model error migration upgrades published v1 records to null and rejects th
     {
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]);
         defer database.destroy() catch unreachable;
-        const rows = try schema.codec.rowsFor(a, state, .{}, history.limits);
-        var mutations: std.ArrayList(sql.Mutation) = .empty;
-        for (rows) |row| {
-            var columns: std.ArrayList(u8) = .empty;
-            var markers: std.ArrayList(u8) = .empty;
-            var params: std.ArrayList(sql.Value) = .empty;
-            for (row.columns, row.values) |column, value| {
-                if (std.mem.eql(u8, column, "model_error_json") or std.mem.eql(u8, column, "project_removed")) continue;
-                if (params.items.len != 0) {
-                    try columns.append(a, ',');
-                    try markers.append(a, ',');
-                }
-                try columns.appendSlice(a, column);
-                try params.append(a, value);
-                try markers.appendSlice(a, try std.fmt.allocPrint(a, "?{d}", .{params.items.len}));
-            }
-            try mutations.append(a, .{ .statement = .{
-                .sql = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) VALUES({s})", .{ row.table, columns.items, markers.items }),
-                .params = params.items,
-            } });
-        }
-        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(mutations.items));
+        try insertAtVersion(a, database.capability(), state, 1);
     }
     {
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
@@ -128,7 +157,7 @@ test "run cause domain upgrade accepts an approval mode change stop in an existi
         // A store written before the Product cause existed rejects it.
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..7]);
         defer database.destroy() catch unreachable;
-        _ = try save(a, database.capability(), state);
+        try insertAtVersion(a, database.capability(), state, 1);
         try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
     }
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
@@ -155,7 +184,7 @@ test "a store written before the attachment media identity keeps its plain chips
         // Written at the version before the identity existed.
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..8]);
         defer database.destroy() catch unreachable;
-        _ = try save(a, database.capability(), state);
+        try insertAtVersion(a, database.capability(), state, 8);
     }
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
@@ -1109,6 +1138,16 @@ test "history schema deferred parent rebuild preserves every child and value" {
     const end = std.mem.indexOfPos(u8, ddl, start, "\n);").? + 3;
     try script.appendSlice(allocator, "DROP TABLE tasks;");
     try script.appendSlice(allocator, ddl[start..end]);
+    // Version 1's DDL is only the start of today's table: every column a
+    // later migration added has to come back in the same order, or the copy
+    // no longer fits what it was taken from.
+    for (schema.migrations[1..]) |migration| {
+        var statements = std.mem.splitScalar(u8, migration.sql, '\n');
+        while (statements.next()) |line| {
+            if (std.mem.startsWith(u8, line, "ALTER TABLE tasks ADD COLUMN"))
+                try script.appendSlice(allocator, line);
+        }
+    }
     try script.appendSlice(allocator, "INSERT INTO tasks SELECT * FROM copy_tasks;");
     var lines = std.mem.splitScalar(u8, ddl, '\n');
     while (lines.next()) |line| {
@@ -1403,7 +1442,7 @@ test "history SQL upgrade keeps valid failed input reasons and removes old runti
     {
         const previous = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
         defer previous.destroy() catch unreachable;
-        _ = try save(allocator, previous.capability(), state);
+        try insertAtVersion(allocator, previous.capability(), state, previous_migrations.len);
         try std.testing.expectEqual(sql.MutationOutcome.committed, previous.capability().mutate(&.{.{
             .statement = .{ .sql = "UPDATE task_input_submissions SET payload=json_set(payload, '$.failure_reason', 'models_catalog_loading') WHERE ordinal=1" },
             .expected_changes = .{ .exactly = 1 },
@@ -1479,7 +1518,7 @@ test "history schema upgrades legacy video references and fences out the previou
     {
         const previous = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
         defer previous.destroy() catch unreachable;
-        _ = try save(allocator, previous.capability(), state);
+        try insertAtVersion(allocator, previous.capability(), state, previous_migrations.len);
         const json = try std.json.Stringify.valueAlloc(allocator, &.{legacy}, .{ .emit_null_optional_fields = false });
         try std.testing.expectEqual(sql.MutationOutcome.committed, previous.capability().mutate(&.{.{
             .statement = .{ .sql = update, .params = &.{.{ .text = json }} },

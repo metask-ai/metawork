@@ -26,6 +26,8 @@ const ModelBinding = model_binding.ModelBinding;
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
 const session_runtime = @import("session/runtime.zig");
+const session_prompt = @import("session/prompt.zig");
+const session_guidance = @import("session/guidance.zig");
 const image_generation = contract.image_generation;
 const generate_image = contract.generate_image;
 const generate_video = contract.generate_video;
@@ -38,6 +40,9 @@ pub const stream_retry_budget = surface.stream_retry_budget;
 pub const max_submitted_inputs = surface.max_submitted_inputs;
 pub const max_submitted_input_bytes = surface.max_submitted_input_bytes;
 pub const PermissionModeUpdate = surface.PermissionModeUpdate;
+pub const ConversationBounds = surface.ConversationBounds;
+pub const RewindRefusal = surface.RewindRefusal;
+pub const RewindOutcome = surface.RewindOutcome;
 pub const PermissionInteraction = surface.PermissionInteraction;
 pub const McpActivationUnavailableReason = surface.McpActivationUnavailableReason;
 pub const McpActivationOutcome = surface.McpActivationOutcome;
@@ -1228,6 +1233,149 @@ pub const Session = struct {
         return .{ .changed = changed, .policy_generation = after.policy_generation };
     }
 
+    /// Reads the Conversation numbering a rewind position is expressed in.
+    /// A caller submitting a Run input records `message_count + 1` as that
+    /// input's position; Product owns persisting it.
+    /// Idle-only, like the rewind it feeds: a count read while a Run or a
+    /// compaction is in flight would be recorded against a Conversation that
+    /// is still moving.
+    pub fn conversationBounds(self: *Session) Error!ConversationBounds {
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            else => return error.SessionNotIdle,
+        }
+        return self.conversationBoundsLocked();
+    }
+
+    /// Drops the user message at `position` and everything after it, so the
+    /// next Run's input takes its place after exactly the context before it.
+    /// Idle-only, like `updatePermissionMode`, and that is all the two share:
+    /// a rewind starts no generation and moves no operation id, which leaves
+    /// Product's own history as the only record that one happened.
+    ///
+    /// The position is checked against a fresh `describe` before Core is
+    /// called, so out-of-range and compacted positions are refused here. What
+    /// remains from Core is `NOT_USER_MESSAGE`, which can only mean the
+    /// caller's position mapping is wrong -- never a limitation to show the
+    /// user. Nothing in Core records that a rewind happened.
+    pub fn rewindToUserMessage(self: *Session, position: u64) Error!RewindOutcome {
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            else => return error.SessionNotIdle,
+        }
+        if (self.core_call_in_progress or self.active_callback_refs != 0 or
+            self.abort_calls_in_progress != 0 or self.credential_updates_in_progress != 0)
+            return error.SessionNotIdle;
+        if (position == 0) return refusedRewind(.invalid_position, .host);
+        const before = try self.conversationBoundsLocked();
+        // The input recorded at this position never reached Core, so the
+        // Conversation already ends where the rerun needs it to.
+        if (position == before.message_count + 1) return .unchanged;
+        if (position > before.message_count) return refusedRewind(.out_of_range, .host);
+        if (position <= before.compact_boundary) return refusedRewind(.compacted, .host);
+        var diagnostic = emptyOwnedBytes();
+        const code = self.agent_runtime.api.sessionControl().rewindToUserMessage()(self.raw, position, &diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        const status = sdk.Status.fromCode(code) catch return self.failRewindContract();
+        switch (status) {
+            .ok => {},
+            .busy => return error.SessionNotIdle,
+            // Core refused a position this Session's own describe admitted.
+            // Both readings cover the same history, so one of them is wrong.
+            .message_position_out_of_range => return refusedRewind(.out_of_range, .core),
+            .message_position_compacted => return refusedRewind(.compacted, .core),
+            .not_user_message => return refusedRewind(.not_user_message, .core),
+            .invalid_argument, .resource_limit, .out_of_memory => return error.RewindFailed,
+            .invalid_state, .core_error => return self.poisonRewind(),
+            else => return self.failRewindContract(),
+        }
+        // A rewind that reported OK must show up as a shorter Conversation.
+        const after = self.conversationBoundsLocked() catch return self.poisonRewind();
+        if (after.message_count != position - 1 or after.compact_boundary != before.compact_boundary)
+            return self.failRewindContract();
+        return .rewound;
+    }
+
+    fn refusedRewind(refusal: surface.RewindRefusal, source: @FieldType(@FieldType(RewindOutcome, "refused"), "source")) RewindOutcome {
+        return .{ .refused = .{ .refusal = refusal, .source = source } };
+    }
+
+    fn poisonRewind(self: *Session) Error {
+        self.state = .poisoned;
+        self.broadcast();
+        return error.RewindFailed;
+    }
+
+    fn failRewindContract(self: *Session) Error {
+        self.dependency_contract_failure = true;
+        return self.poisonRewind();
+    }
+
+    /// Deliberate read-only use of describe: it invokes no Host callback, and
+    /// the Session mutex is held across the describe and the call that reads
+    /// its numbers, so no Run can start between them.
+    fn conversationBoundsLocked(self: *Session) Error!ConversationBounds {
+        var encoded = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &encoded);
+        var diagnostic = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &diagnostic);
+        const code = self.agent_runtime.api.sessionControl().describe()(self.raw, &encoded, &diagnostic);
+        const status = sdk.Status.fromCode(code) catch return self.failRewindContract();
+        if (status != .ok) {
+            if (encoded.ptr != null or encoded.len != 0) return self.failRewindContract();
+            return switch (status) {
+                .busy => error.SessionNotIdle,
+                .invalid_argument, .resource_limit => error.RewindFailed,
+                .out_of_memory, .core_error, .invalid_state => self.poisonRewind(),
+                else => self.failRewindContract(),
+            };
+        }
+        const bytes = sdk.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }) catch return self.failRewindContract();
+        var parsed = sdk.decodeSessionDescription(self.agent_runtime.allocator, bytes) catch |err| {
+            if (err == error.OutOfMemory) return error.RewindFailed;
+            return self.failRewindContract();
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        if (value.lifecycle != .idle or !value.registered) return self.failRewindContract();
+        if (!self.bindDescribedIdentityLocked(value.session_id)) return self.failRewindContract();
+        return .{
+            .message_count = value.conversation.message_count,
+            .compact_boundary = value.conversation.compact_boundary,
+        };
+    }
+
+    /// Admits the session id a describe reported, binding it on the first
+    /// one. Every describe-backed read decides this the same way, so it is
+    /// decided here once; the caller turns a false into its own contract
+    /// failure.
+    fn bindDescribedIdentityLocked(self: *Session, session_id: []const u8) bool {
+        if (session_id.len == 0 or session_id.len > max_core_session_id_bytes) return false;
+        switch (self.core_session_identity) {
+            .unbound => {
+                var identity = CoreSessionIdentity{ .bound = .{
+                    .len = session_id.len,
+                    .bytes = [_]u8{0} ** max_core_session_id_bytes,
+                } };
+                @memcpy(identity.bound.bytes[0..session_id.len], session_id);
+                self.core_session_identity = identity;
+                return true;
+            },
+            .bound => |identity| return std.mem.eql(u8, identity.bytes[0..identity.len], session_id),
+            .failed => return false,
+        }
+    }
+
     const PermissionObservation = struct { mode: PermissionMode, policy_generation: u64 };
 
     fn permissionObservationLocked(self: *Session) Error!PermissionObservation {
@@ -1253,17 +1401,10 @@ pub const Session = struct {
         };
         defer parsed.deinit();
         const value = parsed.value;
-        if (value.lifecycle != .idle or !value.registered or value.session_id.len == 0 or value.session_id.len > max_core_session_id_bytes)
+        if (value.lifecycle != .idle or !value.registered)
             return self.failPermissionModeContract();
-        switch (self.core_session_identity) {
-            .unbound => {
-                var identity = CoreSessionIdentity{ .bound = .{ .len = value.session_id.len, .bytes = [_]u8{0} ** max_core_session_id_bytes } };
-                @memcpy(identity.bound.bytes[0..value.session_id.len], value.session_id);
-                self.core_session_identity = identity;
-            },
-            .bound => |identity| if (!std.mem.eql(u8, identity.bytes[0..identity.len], value.session_id)) return self.failPermissionModeContract(),
-            .failed => return self.failPermissionModeContract(),
-        }
+        if (!self.bindDescribedIdentityLocked(value.session_id))
+            return self.failPermissionModeContract();
         return .{ .mode = switch (value.permission_mode) {
             .default => .default,
             .accept_edits => .accept_edits,
@@ -3951,6 +4092,8 @@ test {
     _ = session_model_error;
     _ = session_binding;
     _ = session_runtime;
+    _ = session_prompt;
+    _ = session_guidance;
 }
 
 test "generated image attestation requires one matching committed Host receipt" {

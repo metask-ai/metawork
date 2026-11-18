@@ -111,6 +111,7 @@
             .{ .name = "metawork.tasks.run", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.sendInput", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.retryInput", .origins = .{"zero://app"} },
+            .{ .name = "metawork.tasks.editInput", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.discardInputRetry", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.stop", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.setApprovalMode", .origins = .{"zero://app"} },

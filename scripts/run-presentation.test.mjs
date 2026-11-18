@@ -58,6 +58,7 @@ function run(overrides = {}) {
   return {
     id: "7",
     conversationCoverage: "included",
+    editAdmitted: false,
     phase: "running",
     permissionProfile: "approval_required",
     permissionInteraction: "interactive",

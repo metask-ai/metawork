@@ -2800,6 +2800,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "finishedAtUnixMs",
     "id",
     "conversationCoverage",
+    "editAdmitted",
     "phase",
     "permissionProfile",
     "permissionInteraction",
@@ -2916,6 +2917,7 @@ function decodeRun(value: unknown, path: string): RunView {
       `${path}.conversationCoverage`,
       ["included", "excluded"] as const,
     ),
+    editAdmitted: booleanValue(item.editAdmitted, `${path}.editAdmitted`),
     phase,
     permissionProfile: enumValue(
       item.permissionProfile,

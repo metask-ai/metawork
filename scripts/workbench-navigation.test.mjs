@@ -38,6 +38,7 @@ function run(id, text, assistant, outcome, toolContent = "", cause = null) {
   return {
     id,
     conversationCoverage: "included",
+    editAdmitted: false,
     phase:
       outcome === null
         ? "running"

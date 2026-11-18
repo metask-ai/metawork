@@ -82,6 +82,7 @@ const input = {
 const base = {
   id: "9",
   conversationCoverage: "included",
+  editAdmitted: false,
   phase: "running",
   execution: {
     generation: "7",

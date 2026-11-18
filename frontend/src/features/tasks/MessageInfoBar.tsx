@@ -9,22 +9,36 @@ export function MessageInfoBar({
   model,
   latest = false,
   onCopy,
+  onEdit,
 }: {
   role: "user" | "assistant";
   time?: RunTimestamp | null;
   model?: string;
   latest?: boolean;
   onCopy: () => void | Promise<unknown>;
+  /** Opens this message for editing, which reruns the conversation from it. */
+  onEdit?: () => void;
 }) {
   const { t } = useI18n();
   const copy = (
-    <CopyButton
-      className="message-info-copy"
-      copyLabel={t(role === "user" ? "copy.input" : "copy.response")}
-      copiedLabel={t("copy.copied")}
-      failedLabel={t("copy.failed")}
-      onCopy={onCopy}
-    />
+    <>
+      <CopyButton
+        className="message-info-copy"
+        copyLabel={t(role === "user" ? "copy.input" : "copy.response")}
+        copiedLabel={t("copy.copied")}
+        failedLabel={t("copy.failed")}
+        onCopy={onCopy}
+      />
+      {onEdit && (
+        <button
+          type="button"
+          className="message-info-edit focus-ring"
+          onClick={onEdit}
+        >
+          {t("input.edit")}
+        </button>
+      )}
+    </>
   );
   const metadata =
     time || model ? (

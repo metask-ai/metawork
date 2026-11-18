@@ -167,6 +167,9 @@ pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
         error.SkillUnavailable => .skill_unavailable,
         error.InvalidSkillArguments => .invalid_skill_arguments,
         error.MissingInstruction => .missing_instruction,
+        error.RewindCompacted => .rewind_compacted,
+        error.RewindPositionRejected => .rewind_position_rejected,
+        error.RewindFailed => .rewind_failed,
         error.RunCapacity, error.RunGenerationExhausted, error.QueueFull, error.ProjectionCapacity, error.OutOfMemory => .capacity_reached,
         error.ExecutorShuttingDown => .shutting_down,
         else => .admission_failed,
@@ -4460,6 +4463,73 @@ pub const Runtime = struct {
         self.commitTaskStateNoFail();
         self.bumpRevision();
         return result;
+    }
+
+    /// Accepts an edited earlier message and reruns the conversation from it.
+    ///
+    /// The message is admitted through the same path as any other, so a Run
+    /// still in flight only has to be stopped: the edited message waits in
+    /// the queue, and the Task reaching idle is what starts its Run, with the
+    /// rewind in front of it. Stopping goes through the ordinary Run
+    /// cancellation rather than `stopTask`, which would retire the message
+    /// that was just accepted along with the rest of the batch.
+    pub fn editTaskInput(
+        self: *Runtime,
+        operation_id: []const u8,
+        task_id: u64,
+        run_id: u64,
+        input: TaskRunInput,
+    ) Error!SendInputResult {
+        if (self.containsKnownCredential(operation_id) or operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        var result: SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(operation_id.len) };
+        self.reapTaskInputResources();
+        @memcpy(result.operation_id[0..operation_id.len], operation_id);
+        self.receiveEditedTaskInput(task_id, operation_id, run_id, input) catch |err| {
+            result.reason = sendInputRejection(err);
+            return result;
+        };
+        result.outcome = .accepted;
+        // Only a Run is in the way. A compaction or a restore the user asked
+        // for finishes on its own, and the edited message waits behind it.
+        if (self.task_runtime.activeRunId(task_id)) |run| {
+            _ = self.task_runtime.cancelRun(task_id, run, .edit_and_rerun, self.taskRuntimeOperationEffects()) catch false;
+        }
+        self.reapTaskInputResources();
+        self.advanceTaskInputs();
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+        return result;
+    }
+
+    /// The position an edit entry may be offered for, or why there is none.
+    pub fn taskEditablePosition(self: *Runtime, task_id: u64, run_id: u64) task_runtime.EditError!u64 {
+        self.syncLifecycle();
+        return self.task_runtime.editablePosition(task_id, run_id);
+    }
+
+    fn receiveEditedTaskInput(
+        self: *Runtime,
+        task_id: u64,
+        operation_id: []const u8,
+        run_id: u64,
+        input: TaskRunInput,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse return error.UnknownTask;
+        const workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id).?;
+        _ = try self.workspace.taskRunAuthority(workspace_id, workspace_epoch);
+        var staged: StagedTaskInput = .{};
+        defer if (staged.borrow) |*borrow| borrow.rollback();
+        const task_input = try self.borrowTaskInput(task_id, input, &staged, false);
+        var effects = self.taskRuntimeOperationEffects();
+        effects.input_catalog = try self.workspaceCatalog(workspace_id);
+        _ = try self.task_runtime.receiveEditedInput(task_id, operation_id, run_id, task_input, effects);
+        if (staged.borrow) |*borrow| {
+            borrow.retainForTask();
+            staged.external.accept();
+        }
     }
 
     pub fn retryTaskInput(self: *Runtime, task_id: u64, original: []const u8, operation_id: []const u8) Error!SendInputResult {

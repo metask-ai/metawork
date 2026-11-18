@@ -491,6 +491,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.send_input, .function = sendInput },
             .{ .name = commands.retry_input, .function = retryInput },
+            .{ .name = commands.edit_input, .function = editInput },
             .{ .name = commands.discard_input_retry, .function = discardInputRetry },
             .{ .name = commands.stop, .function = stopTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
@@ -3840,6 +3841,83 @@ pub const Dispatcher = struct {
         };
         const control = try self.requireProductControl();
         const result = control.sendInput(parsed.value.operationId, task_id, workbench_input) catch |err| {
+            if (err == error.InvalidInput) return error.InvalidBridgePayload;
+            if (err == error.UnknownTask) {
+                var rejected: product_control.SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(parsed.value.operationId.len), .reason = .task_unavailable };
+                @memcpy(rejected.operation_id[0..rejected.operation_id_len], parsed.value.operationId);
+                return encodeSendInputResult(output, control, rejected);
+            }
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeSendInputResult(output, control, result);
+    }
+
+    /// Replaces one earlier message and reruns the conversation from it. The
+    /// text comes from Product's own record of that input, edited by the user:
+    /// Core stores a user message wrapped in the Host context block, so what
+    /// sits at a Conversation position is not what MetaWork sent, and nothing
+    /// here reads it back.
+    fn editInput(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.TaskEditInput,
+            invocation.request.payload,
+            native_sdk.bridge.max_message_bytes,
+        );
+        defer parsed.deinit();
+        try handlers.validateInputOperationId(parsed.value.operationId);
+        var input = try handlers.parseTaskRunInput(parsed.value.input);
+        defer input.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        if (task_id == 0 or run_id == 0) return error.InvalidBridgePayload;
+        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        var attachment_ids: [attachment_grant.max_batch_files]u64 = undefined;
+        var attachment_acceptance: AttachmentGrantAcceptance = undefined;
+        const workbench_input: product_control.TaskRunInput = switch (input.value) {
+            .text => |text| text_input: {
+                if (text.len == 0) return error.EmptyPrompt;
+                break :text_input .{ .text = text };
+            },
+            // A Skill invocation is not free text, so there is nothing to edit
+            // in it; the entry is never offered for one.
+            .skill => return error.InvalidBridgePayload,
+            .multimodal => |multimodal| multimodal_input: {
+                if (multimodal.text.len > (product_control.Limits{}).max_user_message_bytes)
+                    return error.InvalidBridgePayload;
+                const ids = self.attachment_grants.resolve(
+                    multimodal.attachment_tokens,
+                    generation,
+                    invocation.source.window_id,
+                    &attachment_ids,
+                ) catch return error.InvalidBridgePayload;
+                attachment_acceptance = .{
+                    .dispatcher = self,
+                    .tokens = multimodal.attachment_tokens,
+                    .generation = generation,
+                    .window_id = invocation.source.window_id,
+                };
+                break :multimodal_input .{ .multimodal = .{
+                    .text = multimodal.text,
+                    .attachment_ids = ids,
+                    .acceptance = .{
+                        .context = &attachment_acceptance,
+                        .accept_fn = acceptAttachmentGrants,
+                    },
+                } };
+            },
+        };
+        const control = try self.requireProductControl();
+        const result = control.editTaskInput(
+            parsed.value.operationId,
+            task_id,
+            run_id,
+            workbench_input,
+        ) catch |err| {
             if (err == error.InvalidInput) return error.InvalidBridgePayload;
             if (err == error.UnknownTask) {
                 var rejected: product_control.SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(parsed.value.operationId.len), .reason = .task_unavailable };

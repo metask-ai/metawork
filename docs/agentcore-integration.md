@@ -154,6 +154,8 @@ Agent Session 的公开回答入口只有 choice-only `respondPermission`。调�
 
 当前同步 request 是外部执行层的 compatibility surface，不等于 MetaWork 已拥有完整的 effect 或风险语义。`tool_name`、display text、命令字符串和 `exact_arguments` candidate 都不能单独证明操作的真实文件、进程、网络或系统 effect；Product Control 不得据此编译第二套 Bash allowlist、建立确定的“安全命令”分类或承诺跨 Session 的持久权限。用户选择自动评审后，Host 可以接纳有界、非确定的 LLM 本次建议；它不是 effect 证明或安全保证，主 Agent 与审核器使用相同模型可能发生相关错误。审批权、严格 once-only 映射与失败转人工由[Product 架构](product-architecture.md#22-workspace-与-task-admission)定义，不要求 AgentCore 提供审核器。
 
+编辑重跑使用官方 `rewind_to_user_message`（revision 27 起），语义以对真实 Core 的实测为准，不靠推断：position 为 1 基、覆盖含压缩前缀的整段历史，与 `describe` 的 `conversation.message_count` 同一套编号；一次压缩只抬高 `compact_boundary`、不改变 `message_count`，所以提交时记录一次的位置不会漂移；成功回退后 `message_count` 等于 position − 1，`checkpoint_generation`、`policy_generation` 与 `last_run_id` 都不动——Core 侧没有任何记录说明发生过一次 rewind，产品历史是唯一记录。调用与 `update_permission_mode` 只共享 idle-only：Agent 在互斥区间内验证 idle、无 callback/Core call/abort/凭据更新引用，先取一次 describe 完成本机自查（position ≤ `message_count`、position > `compact_boundary`），再调用 Core，成功后复查 describe 是否确实变短。四个拒绝码分型保留：越界与压缩在本机自查就被挡掉，剩下的 `NOT_USER_MESSAGE` 只能意味着 Host 的位置映射错了，必须作为缺陷可识别地上报，不能翻译成用户面的不支持该操作；Core 在自查通过之后仍然拒绝，说明两次对同一段历史的读取互相矛盾，分量与 `NOT_USER_MESSAGE` 相同，outcome 因此同时说明拒绝是在哪一侧决定的。回退不自带持久性：它只在覆盖执行它的那个 Run 的 checkpoint 提交后才落到磁盘，所以产品侧的取代标记归属于那个 Run，并随它的 coverage 一同生效或失效；回退成功而该 Run 连准备都失败时，attachment 置为 poisoned，由既有恢复路径从回退前的 checkpoint 重建，两侧重新一致。另有两条实测事实约束产品形态：system prompt 不计入 message_count；Core 存的用户消息被 Host context block 包起来（21 字节输入存成 378 字节），position 上的那条消息不等于 Host 发出的内容，编辑入口只能编辑产品自己记录的输入。
+
 当前 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Product Control 保存新 Task 默认审批模式，Task 捕获其 effective profile 与自动评审事实，每个 Run 保存 provenance。人工审批与自动评审都映射 `approval_required → accept_edits + unrestricted`，完全访问映射 `full_access → full_access + unrestricted`；自动评审仅改变 Host 回答当前 callback 的方式，`auto` 和 `dont_ask` 等其他 Core mode 不是 MetaWork 产品档位。Agent 接受 fresh create、按已提交 profile 的 restore，以及 Product 在同一 attachment 静止后明确请求的官方 Session mode mutation；它不拥有默认值、产品模式选择、持久化或 UI。人工与自动评审之间只改变 Host 委托，不调用 Core mutator；跨 profile 使用官方 SDK `update_permission_mode`，不能以规则、Session shadow 或目标 profile restore 模拟。Agent 在互斥区间验证 idle、无 callback/Core call/abort 引用与完整 Session identity，并比较前后 typed description 的 mode 和 policy generation：真正改变必须推进 generation，相同 mode 必须保持 generation；Core 明确拒绝、预算拒绝与 poisoned/未知状态分别返回 typed disposition，不推断成功或静默降级。变更撤销 Session grants，不允许以反向 mutation 假装恢复原授权；Product 的 checkpoint/metadata 事务与旧基线恢复由[Product 架构](product-architecture.md#22-workspace-与-task-admission)拥有。`full_access` callback 不进入 Host 自动评审，保留核心保护的原处理方式。
 
 Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer required wake 已关闭而不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
@@ -199,6 +201,18 @@ Agent 内部固定替换官方 `metacodes:identity` 与 `metacodes:subagent` sec
 fresh create 同步传入该 profile。checkpoint restore 完成原有 report、逻辑身份、模型、generation 与 idle 校验后，Agent 在发布候选 route 前调用官方 idle-only profile setter；相同 profile 由 SDK 处理为 no-op。恢复 reservation 与 in-flight fence 覆盖 setter 及失败清理，mutation 不持有 sessions mutex。更新失败不发布可用候选，沿既有恢复错误返回；销毁失败时保留 poisoned candidate，由 Runtime shutdown 继续拥有清理责任。不得清空 profile、增加预算、compaction 或无限重试来伪造成功。
 
 profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码均由官方 SDK 拥有。旧 checkpoint 先恢复再应用当前身份；下一次正常导出持久化该 profile，不改写历史或批量迁移。带 profile 的官方 checkpoint 不能通过删除 profile 或降级依赖来兼容早期 SDK。`describe.prompt` 与 Run `prompt_manifest` 仅有界消费和验证，不成为上层投影。
+
+### Session 行为指引
+
+除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
+
+- 只用 `PROMPT_OP_ADD`，不替换也不移除 AgentCore 的内核段。替换内核段会让 MetaWork 永久跟踪上游对那段文字的改动，而行为约束不需要改写内核规则；
+- `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
+- 平台条件由 Host 侧决定，不写进段文字。`interpolate` 能替换 `{{platform}}` 却不能据此分支，所以按平台选段发生在组合处，非目标平台不携带该平台专有的建议；
+- 这类注入改变的是模型倾向，不构成保证，也不是能力或权限控制的替代品。必须被阻止的事情由 built-in tool 选择与 Task-owned `PermissionProfile` 决定，不靠提示段；
+- 段文字进入每个 Session 的 system prompt，长度有真实成本：写成约束，不写成教程。
+
+首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
 
 ## 6. Session 与 Runtime 生命周期
 
@@ -543,6 +557,7 @@ Workspace 选择、一次性授权和 registry 事务由 [Product 架构](produc
 - Product 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力只构成外部上限；
 - unknown name、未验证名称和空集合使 Agent 初始化失败，不得静默编码为 `allowed_tools = null`；
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
+- `WebFetch` 按设计只产出文本，不是下载路径：参数只有 `url` 与 `prompt`，没有落盘路径，额外加的路径参数被静默忽略而不报 schema 错；非 ASCII 字节在交给模型之前被替换成 U+FFFD，结果过大时投影到的 artifact blob 里同样已被替换，字节在任何可观察点都不再存在。“把 URL 字节按调用方指定路径存成文件”是 MetaWork 当前没有的能力，提示段不得把 `WebFetch` 写成下载手段；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
 - Session 使用 Task-owned PermissionProfile，映射及 mutation 规则见 [UI request callback](#ui-request-callback)；

@@ -465,6 +465,8 @@ pub const RunError = agent.Error || std.mem.Allocator.Error || error{
     UnsupportedInput,
     InvalidInput,
     RunNotReady,
+    RewindCompacted,
+    RewindPositionRejected,
     ProjectionCapacity,
     UnknownTask,
     BindingEpochMismatch,
@@ -484,6 +486,18 @@ pub const RunError = agent.Error || std.mem.Allocator.Error || error{
     TaskPersistenceOutcomeUnknown,
     ExecutorShuttingDown,
     QueueFull,
+};
+
+pub const EditError = error{
+    UnknownTask,
+    NoSuchRun,
+    RunChanged,
+    TaskClosing,
+    /// There is no recorded position for this Run, so nothing can name it.
+    RewindUnavailable,
+    /// The position was summarized away: the turn is gone from the
+    /// Conversation for good.
+    RewindCompacted,
 };
 
 pub const CompactError = agent.Error || std.mem.Allocator.Error || error{
@@ -841,7 +855,7 @@ pub const PreparedRun = struct {
             task_execution.publishAutomaticTitleFallback(run_record);
             task_execution.cancelPreparedRunOrPanic(self.job.sessionAccess(), self.run_id);
             self.job.destroy();
-            run_record.coverage = .excluded;
+            task_state.excludeRunFromConversation(self.task, run_record);
             _ = task_execution.commitRunTerminal(
                 self.effects.worker.projector,
                 run_record,
@@ -2534,6 +2548,66 @@ pub const Runtime = struct {
         return submission;
     }
 
+    /// The Conversation position an edit-and-rerun would name, or why there
+    /// is none. The position itself was recorded when that Run's input was
+    /// submitted; nothing here recomputes it.
+    pub fn editablePosition(self: *const Runtime, task_id: u64, run_id: u64) EditError!u64 {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
+        const run = task_state.findRunConst(task.durable.runs, run_id) orelse return error.NoSuchRun;
+        return switch (task_policy.editablePosition(task, run)) {
+            .position => |position| position,
+            .unavailable => |reason| switch (reason) {
+                // A turn a previous rewind already took out of the
+                // Conversation is not there to be replaced a second time.
+                .superseded => error.RunChanged,
+                .no_position => error.RewindUnavailable,
+                .compacted => error.RewindCompacted,
+            },
+        };
+    }
+
+    /// Accepts an edited earlier message. The message is admitted through the
+    /// ordinary input path and carries the position to rewind to, so the
+    /// existing queue drives it: it waits while a Run is still in flight and
+    /// starts its own Run once the Task is idle, rewinding first.
+    ///
+    /// This is deliberately not the resend of #115/#149. That one is a new
+    /// submission appended to the Conversation; this one replaces a turn
+    /// inside it.
+    pub fn receiveEditedInput(
+        self: *Runtime,
+        task_id: u64,
+        operation_id: []const u8,
+        run_id: u64,
+        input: RunInput,
+        effects: OperationEffects,
+    ) RunError!Submission {
+        const position = self.editablePosition(task_id, run_id) catch |err| return switch (err) {
+            error.RewindCompacted => error.RewindCompacted,
+            error.RewindUnavailable => error.RewindPositionRejected,
+            else => |other| other,
+        };
+        const submission = try self.receiveInput(task_id, operation_id, input, effects);
+        const task = self.find(task_id) orelse unreachable;
+        const index = task.input_submissions.items.len - 1;
+        const record = &task.input_submissions.items[index];
+        std.debug.assert(std.mem.eql(u8, record.submission.operationId(), submission.operationId()));
+        record.rewind_to_position = position;
+        // Never joins a Run already in flight: adoption would put the edited
+        // text into the very turn the rewind is about to drop.
+        record.force_new_run = true;
+        // The declared impact of this mutation, applied to the half of the
+        // queue Core already adopted: those messages went into the turn this
+        // rewind removes, and their text comes back for an explicit resend
+        // while the turn is still shown, which it is until the rewind lands.
+        self.applyMutationImpact(task_id, .rewind);
+        // The other half never reached Core and never will. It leaves the
+        // record with the turns it was written to follow.
+        self.dropWaitingInputsExcept(task_id, index, effects.release);
+        return submission;
+    }
+
     pub fn inputAction(self: *Runtime, task_id: u64) InputAction {
         const task = self.find(task_id) orelse return .none;
         if (task.durable.archived or task.deletion != .idle) return .none;
@@ -2556,6 +2630,14 @@ pub const Runtime = struct {
             .compact, .restore => return .wait,
             .none => {
                 if (task.runtime.worker_leases.hasLive()) return .wait;
+                // An edited message has to rewind the Conversation, and that
+                // is idle-only at the Core boundary -- which is stricter than
+                // having no active operation. Its declared impact says
+                // `core_quiescence = .required`, and an unfinalized terminal
+                // event means Core has not quiesced yet, so wait exactly as a
+                // manual compaction waits.
+                if (task.input_submissions.items[index].rewind_to_position != null and
+                    task_state.hasUnfinalizedTerminalEvents(task)) return .wait;
                 return .{ .start = index };
             },
             .run => |id| {
@@ -2638,7 +2720,7 @@ pub const Runtime = struct {
             const task = entry orelse continue;
             const id = task.durable.id;
             if (shutting_down) {
-                _ = self.cancelWaitingInputs(id, .shutting_down);
+                _ = self.cancelWaitingInputs(id, .shutting_down, .all);
                 _ = self.cancelInputContinuation(id, null, .shutting_down);
                 continue;
             }
@@ -2871,16 +2953,29 @@ pub const Runtime = struct {
 
     pub fn cancelWaitingInputsForShutdown(self: *Runtime) void {
         for (self.tasks) |entry| if (entry) |task| {
-            _ = self.cancelWaitingInputs(task.durable.id, .shutting_down);
+            _ = self.cancelWaitingInputs(task.durable.id, .shutting_down, .all);
         };
     }
 
+    /// Which of the waiting batch a retirement leaves alone.
+    pub const WaitingInputScope = union(enum) {
+        all,
+        /// Edited messages waiting for their own rewind. One of them is the
+        /// reason the Run that just ended was stopped, so it waits for its
+        /// turn instead of failing with it.
+        except_rewinds,
+    };
+
     /// Freeze the current batch by changing its records, never a sticky Task flag.
-    pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
+    pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason, scope: WaitingInputScope) bool {
         const task = self.find(task_id) orelse return false;
         task.skill_preparation = null;
         var changed = false;
         for (task.input_submissions.items) |*record| {
+            switch (scope) {
+                .all => {},
+                .except_rewinds => if (record.rewind_to_position != null) continue,
+            }
             if (record.state != .waiting) continue;
             record.state = if (reason == .continuation_cancelled) .cancelled else .failed;
             record.reason = reason;
@@ -2890,9 +2985,34 @@ pub const Runtime = struct {
         return changed;
     }
 
+    /// An edited message takes the place of every turn after it, so the
+    /// messages the user had queued behind those turns were written for a
+    /// Conversation that is about to go away. They leave the record outright
+    /// instead of being retired in place: a retired message would keep
+    /// standing in a conversation nothing shows any more, and it would hold
+    /// the Task's pending-input budget for a batch that can never run. The
+    /// Renderer hands their text back to the composer as a draft before it
+    /// sends the edit, so nothing the user wrote disappears silently. `keep`
+    /// is the edited message itself, which is driving this.
+    fn dropWaitingInputsExcept(self: *Runtime, task_id: u64, keep: usize, effects: ReleaseEffects) void {
+        const task = self.find(task_id) orelse return;
+        task.skill_preparation = null;
+        var index = task.input_submissions.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (index == keep) continue;
+            if (task.input_submissions.items[index].state != .waiting) continue;
+            var record = task.input_submissions.orderedRemove(index);
+            self.releaseSubmissionPayload(&record);
+            self.releaseRetryInput(task_id, &record, effects);
+            deinitRunInput(self, effects, &record.input);
+            effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
+        }
+    }
+
     pub fn stopInputs(self: *Runtime, task_id: u64) bool {
         const task = self.find(task_id) orelse return false;
-        const changed = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+        const changed = self.cancelWaitingInputs(task_id, .continuation_cancelled, .all);
         const continuation_changed = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         if (task.runtime.active_operation == .run) {
             if (task_state.findRun(task.durable.runs, task.runtime.active_operation.run)) |run|
@@ -3406,6 +3526,64 @@ pub const Runtime = struct {
         const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
         var mcp_installation = effects.mcp_installation;
         if (mcp_installation) |*value| value.task_id = task.durable.id;
+        // The Session is idle here and stays so until the Run is prepared, so
+        // this is the one place where the Conversation this input is about to
+        // enter can be named. Both numbers come from one read.
+        const bounds: ?agent.ConversationBounds = access.conversationBounds() catch null;
+        if (bounds) |observed| if (observed.compact_boundary > task.durable.compact_boundary) {
+            task.durable.compact_boundary = observed.compact_boundary;
+        };
+        const rewind = if (origin == .queued)
+            task.input_submissions.items[origin.queued].rewind_to_position
+        else
+            null;
+        var rewound = false;
+        if (rewind) |position| {
+            const outcome = access.rewindToUserMessage(position) catch |err| switch (err) {
+                // Core quiescence is the one condition Product cannot observe
+                // perfectly from its own facts. Being told to wait is not a
+                // reason to destroy the user's edited message: the queue
+                // treats this as busy and comes back.
+                error.SessionNotIdle => return error.TaskBusy,
+                else => |other| return other,
+            };
+            switch (outcome) {
+                // `unchanged` is the Conversation already ending where the
+                // rerun needs it to: the edited Run's input never reached
+                // Core. Its turns still leave Product history below.
+                .rewound, .unchanged => rewound = true,
+                .refused => |refusal| return switch (refusal.refusal) {
+                    .compacted => error.RewindCompacted,
+                    .invalid_position, .out_of_range, .not_user_message => {
+                        // Product recorded this position itself, from a
+                        // describe taken when the input was submitted. Being
+                        // refused means that record and Core's history
+                        // disagree, so say so with the numbers rather than
+                        // telling the user the edit is unsupported.
+                        std.log.err(
+                            "task.rewind_position_rejected task_id={d} position={d} refusal={s} source={s} message_count={?d} compact_boundary={?d}",
+                            .{
+                                task.durable.id,
+                                position,
+                                @tagName(refusal.refusal),
+                                @tagName(refusal.source),
+                                if (bounds) |observed| observed.message_count else null,
+                                if (bounds) |observed| observed.compact_boundary else null,
+                            },
+                        );
+                        return error.RewindPositionRejected;
+                    },
+                },
+            }
+        }
+        // A rewind is only as durable as the Run that performs it, and from
+        // here on any failure leaves no such Run. Poisoning the attachment
+        // closes this Session so the next operation restores the committed
+        // checkpoint, which predates the rewind and puts the dropped turns
+        // back. Product history recorded nothing, so the two agree again.
+        errdefer if (rewound) if (task.runtime.attached()) |attached| {
+            attached.health = .session_poisoned;
+        };
         const run_id = try access.prepareRunWithTools(agent_input, image, delivery, mcp_installation, video);
         var prepared = true;
         errdefer if (prepared)
@@ -3417,6 +3595,15 @@ pub const Runtime = struct {
         errdefer if (record_owned) discardRun(self, task, slot, effects.release);
         const run_record = &task.durable.runs[slot].?;
         run_record.id = run_id;
+        // A rewind leaves the Conversation ending just below the position it
+        // named, so the input takes that position exactly. Everything from
+        // there on is out of the Conversation, and attributing it to this Run
+        // is what makes the two durable together.
+        run_record.conversation_position = if (rewind) |position| position else if (bounds) |observed|
+            observed.message_count + 1
+        else
+            null;
+        if (rewound) supersedeFrom(self, task, rewind.?, run_id);
         if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
         if (effects.image_execution) |owned| {
             run_record.image_execution = owned.*;
@@ -3599,6 +3786,17 @@ pub const Runtime = struct {
             .previous_active_operation = previous_active_operation,
             .previous_recent_order = previous_recent_order,
             .previous_next_recent_order = previous_next_recent_order,
+        };
+    }
+
+    /// The Run this Task is executing, if it is executing one. A caller that
+    /// only needs the Run stopped reads this instead of `stopOperation`,
+    /// which would also cancel a compaction or a restore the user asked for.
+    pub fn activeRunId(self: *const Runtime, task_id: u64) ?u64 {
+        const task = self.findConst(task_id) orelse return null;
+        return switch (task.runtime.active_operation) {
+            .run => |id| id,
+            .compact, .restore, .none => null,
         };
     }
 
@@ -4903,7 +5101,7 @@ pub const Runtime = struct {
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
         if (archived) {
-            _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+            _ = self.cancelWaitingInputs(task_id, .continuation_cancelled, .all);
             _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
             task.runtime.permission_review.invalidate();
             acknowledgeLatestCompletion(task);
@@ -4944,7 +5142,7 @@ pub const Runtime = struct {
         if (run_id == 0) return false;
         const task = self.find(task_id) orelse return false;
         if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting) return false;
-        const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return false;
+        const latest = task_policy.latestTerminalRun(task) orelse return false;
         const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
         if (latest.id != run_id or terminal.outcome != .completed or
             task.durable.completion_seen_run_id == run_id)
@@ -5018,7 +5216,7 @@ pub const Runtime = struct {
     fn announceableTerminal(
         task: *const task_state.Task,
     ) ?struct { run_id: u64, kind: RunNotificationKind } {
-        const run = task_policy.latestTerminalRun(task.durable.runs) orelse return null;
+        const run = task_policy.latestTerminalRun(task) orelse return null;
         return .{
             .run_id = run.id,
             .kind = switch (task_state.productTerminalFacts(run).?.outcome) {
@@ -5081,7 +5279,7 @@ pub const Runtime = struct {
         };
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
-        _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+        _ = self.cancelWaitingInputs(task_id, .continuation_cancelled, .all);
         _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         return true;
     }
@@ -5184,7 +5382,7 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id) continue;
-            _ = self.cancelWaitingInputs(task.durable.id, .workspace_removing);
+            _ = self.cancelWaitingInputs(task.durable.id, .workspace_removing, .all);
             _ = self.cancelInputContinuation(task.durable.id, null, .workspace_removing);
             if (!task.runtime.hasAttachedSession()) continue;
             if (effect.release(task.durable.id) == .failed) return false;
@@ -6646,7 +6844,11 @@ pub const Runtime = struct {
 
     /// Missing Task is explicit null. A history cursor must name a retained
     /// Run belonging to this Task; it cannot silently become another page.
-    const RunBounds = struct { start: usize, end: usize, older: bool };
+    /// `next_before_run_id` is the oldest Run this page shows, which the next
+    /// request pages before, and null once nothing older is left. A Run a
+    /// rewind replaced is counted nowhere here: it is projected nowhere, so a
+    /// page that counted it would come back short of its limit.
+    const RunBounds = struct { start: usize, end: usize, next_before_run_id: ?u64 };
 
     fn runBounds(task: *const task_state.Task, before_run_id: ?u64, limit: u8) error{InvalidViewRequest}!RunBounds {
         if (limit == 0 or limit > 4) return error.InvalidViewRequest;
@@ -6663,12 +6865,17 @@ pub const Runtime = struct {
         var count: usize = 0;
         while (start > 0 and count < limit) {
             start -= 1;
-            if (task.durable.runs[start] != null) count += 1;
+            if (task.durable.runs[start]) |*run| {
+                if (task_policy.runProjected(task, run)) count += 1;
+            }
         }
-        const older = for (task.durable.runs[0..start]) |entry| {
-            if (entry != null) break true;
+        const older = for (task.durable.runs[0..start]) |*entry| {
+            if (entry.*) |*run| if (task_policy.runProjected(task, run)) break true;
         } else false;
-        return .{ .start = start, .end = end, .older = older };
+        const oldest_shown = for (task.durable.runs[start..end]) |*entry| {
+            if (entry.*) |*run| if (task_policy.runProjected(task, run)) break run.id;
+        } else null;
+        return .{ .start = start, .end = end, .next_before_run_id = if (older) oldest_shown else null };
     }
 
     pub fn writeHistoryPage(self: *const Runtime, writer: *std.Io.Writer, effects: ProjectionEffects, task_id: u64, before_run_id: u64, limit: u8) (task_view.Error || error{InvalidViewRequest})!void {
@@ -6677,12 +6884,14 @@ pub const Runtime = struct {
             return;
         };
         const bounds = try runBounds(task, before_run_id, limit);
+        const shutting_down = effects.authority(projectionAuthorityQuery(task)).shutting_down;
         writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
-        if (bounds.older) writer.print("\"{d}\"", .{task.durable.runs[bounds.start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (bounds.next_before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
         var count: usize = 0;
         for (task.durable.runs[bounds.start..bounds.end]) |*entry| {
             const run = &(entry.* orelse continue);
+            if (!task_policy.runProjected(task, run)) continue;
             if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             count += 1;
             try task_view.writeRun(
@@ -6690,7 +6899,8 @@ pub const Runtime = struct {
                 effects.text,
                 run,
                 task_state.runProjectionFacts(run),
-                task_view.resendAdmitted(task, effects.authority(projectionAuthorityQuery(task)).shutting_down),
+                task_view.resendAdmitted(task, shutting_down),
+                task_view.editAdmitted(task, run, shutting_down),
                 effects.now_ms,
             );
         }
@@ -6713,7 +6923,6 @@ pub const Runtime = struct {
         const bounds = try runBounds(task, before_run_id, limit);
         const start = bounds.start;
         const end = bounds.end;
-        const older = bounds.older;
         var pending_ui_context = PendingUiContext{ .runtime = self, .max_json_bytes = effects.max_pending_ui_json_bytes };
         const external = effects.authority(projectionAuthorityQuery(task));
         const recovery = self.recoveryProjectionWithAuthority(task, external);
@@ -6721,7 +6930,7 @@ pub const Runtime = struct {
         writer.writeAll("{\"beforeRunId\":") catch return error.SnapshotTooLarge;
         if (before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"nextBeforeRunId\":") catch return error.SnapshotTooLarge;
-        if (older) writer.print("\"{d}\"", .{task.durable.runs[start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (bounds.next_before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runManifest\":") catch return error.SnapshotTooLarge;
         try task_view.writeRunManifest(writer, effects.text, task);
         writer.writeAll(",\"task\":") catch return error.SnapshotTooLarge;
@@ -7398,7 +7607,10 @@ pub const Runtime = struct {
         if (!run.terminal_observed) {
             const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
             if (terminal.outcome != .completed and !stopped_batch) {
-                _ = self.cancelWaitingInputs(task.durable.id, .admission_failed);
+                // A Run this Task stopped to make room for an edited message
+                // does not retire that message: it is the reason the Run
+                // stopped, and it is still waiting for the rewind it carries.
+                _ = self.cancelWaitingInputs(task.durable.id, .admission_failed, .except_rewinds);
             }
             for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state != .adopted and record.state != .transferred) {
@@ -9945,6 +10157,27 @@ fn copyRunInput(
     };
 }
 
+/// Takes every turn from `position` on out of the Conversation, attributing
+/// each to the Run that rewound it. The turns stay in Product history, and so
+/// do the files and other effects they produced: only the Conversation lost
+/// them. A Run with no recorded position cannot be placed against the
+/// position, so it is left alone rather than guessed at.
+fn supersedeFrom(self: *Runtime, task: *task_state.Task, position: u64, by_run_id: u64) void {
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.id == by_run_id or run.superseded_by_run_id != null) continue;
+        const recorded = run.conversation_position orelse continue;
+        if (recorded < position) continue;
+        run.superseded_by_run_id = by_run_id;
+        run.noteProjectionChange();
+        // The one explicit resend a retired message gets is offered in its own
+        // turn's card, and this turn no longer has one. Nothing can reach that
+        // text again, so it is released here instead of being held for a
+        // resend that can never be offered.
+        for (run.additional_inputs) |*input| if (input.*) |*record| self.releaseAdditionalRetryText(record);
+    }
+}
+
 fn reserveRun(
     self: *Runtime,
     task: *task_state.Task,
@@ -10157,7 +10390,7 @@ fn cancelTaskAutomaticTitles(task: *task_state.Task) void {
 }
 
 fn acknowledgeLatestCompletion(task: *task_state.Task) void {
-    const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return;
+    const latest = task_policy.latestTerminalRun(task) orelse return;
     const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
     if (terminal.outcome == .completed)
         task.durable.completion_seen_run_id = latest.id;

@@ -47,6 +47,7 @@ pub const OwnedImageExecution = state.OwnedImageExecution;
 pub const OwnedVideoExecution = state.OwnedVideoExecution;
 pub const OwnedFileDelivery = state.OwnedFileDelivery;
 pub const RunError = runtime.RunError;
+pub const EditError = runtime.EditError;
 pub const EventRejection = state.EventRejection;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const AttachmentMedia = runtime.AttachmentMedia;
