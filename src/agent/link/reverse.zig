@@ -555,10 +555,14 @@ test "a call whose effect refuses the main thread cannot be answered without the
     try testing.expect(!captured.?.holds());
 }
 
-test "the one registered reverse call has an inspectable handler" {
+test "a reverse call's handler is a type the link can look inside" {
     // Compiles only because the context is a type the link can look inside
     // and it reaches no caller; a context that did would fail the build with
     // the reason, which is the point of putting the check in `Handler`.
+    //
+    // Only the installation is spelled out here: the inspection's signature
+    // carries the off-main-thread witness, so it is checked by the test that
+    // owns that rule rather than by a second copy of this one.
     const Context = struct { task_id: u64 };
     const Expected = *const fn (*Context, McpInstallationRequest) McpInstallationResponse;
     try testing.expectEqual(Expected, Handler(.mcp_installation, Context));
