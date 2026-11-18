@@ -36,6 +36,7 @@ pub const reverse = @import("link/reverse.zig");
 pub const channel = @import("link/channel.zig");
 pub const unreachability = @import("link/unreachability.zig");
 pub const adapters = @import("link/adapters.zig");
+pub const dispatch = @import("link/dispatch.zig");
 
 pub const revision = handshake.revision;
 pub const Role = handshake.Role;
@@ -178,6 +179,7 @@ test {
     _ = channel;
     _ = unreachability;
     _ = adapters;
+    _ = dispatch;
 }
 
 test "the two halves of one build accept each other" {

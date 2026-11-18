@@ -264,6 +264,60 @@ pub fn Handler(comptime call: Call, comptime Context: type) type {
     }
 }
 
+/// Whether answering a call is a file effect, which the Host refuses to
+/// perform on its main thread.
+///
+/// Exhaustive, because the answer is a property of the effect and a call added
+/// later must state it rather than inherit "anywhere is fine".
+pub fn requiresOffMainThread(comptime call: Call) bool {
+    return switch (call) {
+        // `output_file` returns `MainThreadFileEffect` outright
+        // (src/app/output_file.zig), so answering this on the main thread
+        // turns every delivery into `restricted`.
+        .file_delivery_inspection => true,
+        // An install request is admitted against Product's own records and
+        // performs no file effect, so it has no thread of its own to insist
+        // on beyond the first rule above.
+        .mcp_installation => false,
+    };
+}
+
+/// Proof that the holder is not running on the Host's main thread.
+///
+/// A witness rather than a convention. `answer` below cannot be called for a
+/// call that needs one without producing it first, and it cannot be produced
+/// on the main thread -- so "we know not to answer this there" stops being
+/// something to remember. The runtime check is kept as well, because a
+/// witness can outlive the thread that made it if someone passes it along.
+pub const OffMainThread = struct {
+    main_thread_id: std.Thread.Id,
+
+    pub fn capture(main_thread_id: std.Thread.Id) ?OffMainThread {
+        if (std.Thread.getCurrentId() == main_thread_id) return null;
+        return .{ .main_thread_id = main_thread_id };
+    }
+
+    pub fn holds(self: OffMainThread) bool {
+        return std.Thread.getCurrentId() != self.main_thread_id;
+    }
+};
+
+/// What answering one reverse call needs from its answerer: the witness, for
+/// the calls whose effect refuses the main thread, and nothing for the rest.
+///
+/// A type rather than a comment, so the obligation is in the signature.
+pub fn Answerer(comptime call: Call, comptime Context: type) type {
+    comptime {
+        if (reachesForwardCaller(Context)) @compileError(
+            "a reverse call's handler cannot reach a forward caller: " ++ @typeName(Context),
+        );
+        return if (requiresOffMainThread(call))
+            *const fn (*Context, OffMainThread, Request(call)) Response(call)
+        else
+            *const fn (*Context, Request(call)) Response(call);
+    }
+}
+
 /// The answer when the caller cannot be reached at all. A reverse call must
 /// have one, or the execution half would have to wait for a peer that is gone.
 pub fn unreachableAnswer(comptime call: Call) Response(call) {
@@ -359,6 +413,44 @@ test "a reverse handler cannot be handed the forward caller, however it is wrapp
     // And type-erased, which is how a rule like this normally gets around.
     const Erased = struct { context: ?*anyopaque };
     try testing.expect(reachesForwardCaller(Erased));
+}
+
+test "a call whose effect refuses the main thread cannot be answered without the witness" {
+    const Context = struct { task_id: u64 };
+
+    // The obligation is in the signature: the delivery inspection's answerer
+    // takes a witness, the installation's does not. Nothing has to remember.
+    try testing.expectEqual(
+        *const fn (*Context, OffMainThread, FileDeliveryInspectionRequest) FileDeliveryInspectionResponse,
+        Answerer(.file_delivery_inspection, Context),
+    );
+    try testing.expectEqual(
+        *const fn (*Context, McpInstallationRequest) McpInstallationResponse,
+        Answerer(.mcp_installation, Context),
+    );
+
+    // And the witness cannot be made on the main thread, which is the half
+    // of this a type cannot carry.
+    const main = std.Thread.getCurrentId();
+    try testing.expect(OffMainThread.capture(main) == null);
+
+    const Elsewhere = struct {
+        fn run(main_thread_id: std.Thread.Id, out: *?OffMainThread, held: *bool) void {
+            out.* = OffMainThread.capture(main_thread_id);
+            held.* = if (out.*) |witness| witness.holds() else false;
+        }
+    };
+    var captured: ?OffMainThread = null;
+    var held_there = false;
+    var thread = try std.Thread.spawn(.{}, Elsewhere.run, .{ main, &captured, &held_there });
+    thread.join();
+    try testing.expect(captured != null);
+    try testing.expect(held_there);
+
+    // And this is why the runtime check is kept: the witness is a value, so
+    // it can be carried back to the thread it was proving something about,
+    // where it no longer holds.
+    try testing.expect(!captured.?.holds());
 }
 
 test "the one registered reverse call has an inspectable handler" {
